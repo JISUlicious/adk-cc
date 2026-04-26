@@ -1,0 +1,9 @@
+[project]
+name = "adk-cc"
+version = "0.1.0"
+description = "Minimal Claude-Code-style gather/act/verify agent loop on Google ADK"
+requires-python = ">=3.12"
+dependencies = [
+    "google-adk==1.31.1",
+    "litellm>=1.50",
+]
