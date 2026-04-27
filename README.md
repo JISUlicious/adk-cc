@@ -2,7 +2,7 @@
 
 A minimal Claude-Code-style **gather → act → verify** agent loop, implemented as a single ADK agent module loadable by `adk web` / `adk run`.
 
-Mirrors the architecture documented in [`../analysis/05-context-action-verification-loop.md`](../analysis/05-context-action-verification-loop.md):
+Detailed docs live in [`docs/`](./docs/): [specification](./docs/01-specification.md), [architecture](./docs/02-architecture.md), [prompts](./docs/03-prompts.md). The TL;DR:
 
 - One **coordinator** ("main agent") is the ONLY agent that talks to the user. Acts directly with `read_file`, `glob_files`, `grep`, `write_file`, `edit_file`, `run_bash`.
 - Three specialists wired as ADK `sub_agents`: `Explore` (gather), `Plan`, `verification`. Delegation is `transfer_to_agent` — and because sub-agents share the parent's invocation context, all their tool calls and responses stream into `adk web` (not buried inside an opaque tool result like `AgentTool` would do).
