@@ -7,6 +7,8 @@ arg names without importing each tool.
 
 from __future__ import annotations
 
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -78,3 +80,47 @@ class AskUserQuestionArgs(BaseModel):
     questions: list[AskQuestion] = Field(
         description="1-4 questions to ask the user.", min_length=1, max_length=4
     )
+
+
+class TaskCreateArgs(BaseModel):
+    title: str = Field(description="Short imperative title (e.g. 'Run test suite').")
+    description: str = Field(
+        default="", description="Optional detail about what the task does or why."
+    )
+    command: Optional[str] = Field(
+        default=None,
+        description=(
+            "Shell command to run in the background. If unset, the task is "
+            "a passive checkpoint (status updated manually)."
+        ),
+    )
+    blocked_by: list[str] = Field(
+        default_factory=list,
+        description="Task IDs that must complete before this one is meaningful.",
+    )
+
+
+class TaskGetArgs(BaseModel):
+    task_id: str = Field(description="The task ID returned by task.create.")
+
+
+class TaskListArgs(BaseModel):
+    status: Optional[str] = Field(
+        default=None,
+        description="Optional filter: pending|in_progress|completed|failed|stopped.",
+    )
+
+
+class TaskUpdateArgs(BaseModel):
+    task_id: str = Field(description="The task to update.")
+    status: Optional[str] = Field(
+        default=None,
+        description="New status: pending|in_progress|completed|failed|stopped.",
+    )
+    description: Optional[str] = Field(
+        default=None, description="Replace the description."
+    )
+
+
+class TaskStopArgs(BaseModel):
+    task_id: str = Field(description="The task to cancel.")

@@ -60,6 +60,11 @@ from .tools import (
     GlobFilesTool,
     GrepTool,
     ReadFileTool,
+    TaskCreateTool,
+    TaskGetTool,
+    TaskListTool,
+    TaskStopTool,
+    TaskUpdateTool,
     WebFetchTool,
     WriteFileTool,
     make_skill_toolset,
@@ -114,6 +119,11 @@ _edit_file = EditFileTool()
 _run_bash = BashTool()
 _web_fetch = WebFetchTool()
 _ask_user = AskUserQuestionTool()
+_task_create = TaskCreateTool()
+_task_get = TaskGetTool()
+_task_list = TaskListTool()
+_task_update = TaskUpdateTool()
+_task_stop = TaskStopTool()
 _skills = make_skill_toolset()  # None unless ADK_CC_SKILLS_DIR / skills/ has content
 
 
@@ -178,6 +188,11 @@ _coordinator_tools: list = [
     _run_bash,
     _web_fetch,
     _ask_user,
+    _task_create,
+    _task_get,
+    _task_list,
+    _task_update,
+    _task_stop,
 ]
 if _skills is not None:
     _coordinator_tools.append(_skills)

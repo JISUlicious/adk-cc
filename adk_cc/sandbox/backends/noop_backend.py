@@ -8,8 +8,8 @@ multi-tenant deployment must use docker/e2b/etc.
 
 from __future__ import annotations
 
+import asyncio
 import os
-import subprocess
 from pathlib import Path
 
 from ..config import (
@@ -34,26 +34,32 @@ class NoopBackend(SandboxBackend):
         timeout_s: int,
         cwd: str,
     ) -> ExecResult:
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
         try:
-            r = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-                timeout=timeout_s,
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_s
             )
-        except subprocess.TimeoutExpired as e:
+        except asyncio.TimeoutError:
+            proc.kill()
+            try:
+                stdout_b, stderr_b = await proc.communicate()
+            except Exception:
+                stdout_b, stderr_b = b"", b""
             return ExecResult(
                 exit_code=-1,
-                stdout=e.stdout or "",
-                stderr=e.stderr or "",
+                stdout=stdout_b.decode("utf-8", errors="replace"),
+                stderr=stderr_b.decode("utf-8", errors="replace"),
                 timed_out=True,
             )
         return ExecResult(
-            exit_code=r.returncode,
-            stdout=r.stdout,
-            stderr=r.stderr,
+            exit_code=proc.returncode if proc.returncode is not None else -1,
+            stdout=stdout_b.decode("utf-8", errors="replace"),
+            stderr=stderr_b.decode("utf-8", errors="replace"),
         )
 
     async def read_text(self, path: str, *, fs_read: FsReadConfig) -> str:

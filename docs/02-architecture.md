@@ -24,7 +24,13 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
     │   ├── web_fetch.py         # preapproved-hosts URL fetcher (Stage E)
     │   ├── ask_user_question.py # long-running multi-choice HITL (Stage E)
     │   ├── mcp.py               # make_mcp_toolset() factory (Stage E)
-    │   └── skills.py            # SkillToolset auto-loader (Stage E)
+    │   ├── skills.py            # SkillToolset auto-loader (Stage E)
+    │   └── task/                # 5 task tools (Stage F)
+    │       ├── create.py
+    │       ├── get.py
+    │       ├── list.py
+    │       ├── update.py
+    │       └── stop.py
     ├── skills/                  # optional: skill folders here are auto-loaded
     ├── permissions/             # rule engine (Stage B)
     │   ├── modes.py             # PermissionMode enum
@@ -36,9 +42,13 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
     │   ├── workspace.py         # WorkspaceRoot — per-(tenant,session) FS root
     │   └── backends/
     │       ├── base.py          # SandboxBackend ABC
-    │       ├── noop_backend.py  # host execution (dev only); honors configs in Python
+    │       ├── noop_backend.py  # host execution (dev only); async via asyncio.subprocess
     │       ├── docker_backend.py # stub for self-host
     │       └── e2b_backend.py   # stub for hosted production
+    ├── tasks/                   # background task system (Stage F)
+    │   ├── model.py             # Task, TaskStatus, blocks/blocked_by edges
+    │   ├── storage.py           # TaskStorage ABC + InMemoryTaskStorage
+    │   └── runner.py            # TaskRunner — asyncio.Task pool worker
     └── plugins/                 # ADK BasePlugin integrations
         ├── permissions.py       # PermissionPlugin (Stage B)
         └── audit.py             # AuditPlugin (Stage D) — JSONL or callable sink

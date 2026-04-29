@@ -16,6 +16,13 @@ from .grep import GrepTool
 from .mcp import make_mcp_toolset
 from .read_file import ReadFileTool
 from .skills import make_skill_toolset
+from .task import (
+    TaskCreateTool,
+    TaskGetTool,
+    TaskListTool,
+    TaskStopTool,
+    TaskUpdateTool,
+)
 from .web_fetch import WebFetchTool
 from .write_file import WriteFileTool
 
@@ -28,6 +35,11 @@ __all__ = [
     "GlobFilesTool",
     "GrepTool",
     "ReadFileTool",
+    "TaskCreateTool",
+    "TaskGetTool",
+    "TaskListTool",
+    "TaskStopTool",
+    "TaskUpdateTool",
     "WebFetchTool",
     "WriteFileTool",
     "make_mcp_toolset",
