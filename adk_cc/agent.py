@@ -49,7 +49,15 @@ from google.adk.agents.context import Context
 from google.adk.models.lite_llm import LiteLlm
 from google.genai import types
 
-from . import prompts, tools
+from . import prompts
+from .tools import (
+    BashTool,
+    EditFileTool,
+    GlobFilesTool,
+    GrepTool,
+    ReadFileTool,
+    WriteFileTool,
+)
 
 
 def _force_coordinator_continuation(callback_context: Context) -> types.Content:
@@ -90,6 +98,16 @@ MODEL = LiteLlm(
 )
 
 
+# ---------- shared tool instances ----------
+# Tools are stateless; one instance per tool, reused across agents.
+_read_file = ReadFileTool()
+_glob_files = GlobFilesTool()
+_grep = GrepTool()
+_write_file = WriteFileTool()
+_edit_file = EditFileTool()
+_run_bash = BashTool()
+
+
 # ---------- specialist agents (read-only) ----------
 
 explore_agent = LlmAgent(
@@ -101,7 +119,7 @@ explore_agent = LlmAgent(
         "Returns a written report; does not modify files."
     ),
     instruction=prompts.EXPLORE_INSTRUCTION,
-    tools=[tools.read_file, tools.glob_files, tools.grep],
+    tools=[_read_file, _glob_files, _grep],
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
     after_agent_callback=_force_coordinator_continuation,
@@ -116,7 +134,7 @@ plan_agent = LlmAgent(
         "Use when designing the approach for a non-trivial change."
     ),
     instruction=prompts.PLAN_INSTRUCTION,
-    tools=[tools.read_file, tools.glob_files, tools.grep],
+    tools=[_read_file, _glob_files, _grep],
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
     after_agent_callback=_force_coordinator_continuation,
@@ -133,7 +151,7 @@ verify_agent = LlmAgent(
         "implementation (3+ file edits, backend/API, or infra changes)."
     ),
     instruction=prompts.VERIFY_INSTRUCTION,
-    tools=[tools.read_file, tools.glob_files, tools.grep, tools.run_bash],
+    tools=[_read_file, _glob_files, _grep, _run_bash],
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
     after_agent_callback=_force_coordinator_continuation,
@@ -147,13 +165,6 @@ root_agent = LlmAgent(
     model=MODEL,
     description="Coordinator agent: handles user requests with a gather → act → verify loop.",
     instruction=prompts.COORDINATOR_INSTRUCTION,
-    tools=[
-        tools.read_file,
-        tools.glob_files,
-        tools.grep,
-        tools.write_file,
-        tools.edit_file,
-        tools.run_bash,
-    ],
+    tools=[_read_file, _glob_files, _grep, _write_file, _edit_file, _run_bash],
     sub_agents=[explore_agent, plan_agent, verify_agent],
 )
