@@ -26,6 +26,14 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
     │   ├── rules.py             # PermissionRule + per-tool fnmatch matchers
     │   ├── settings.py          # SettingsHierarchy (policy/user/project/session)
     │   └── engine.py            # decide() — 4-step flow
+    ├── sandbox/                 # isolation backend (Stage C)
+    │   ├── config.py            # FsRead/Write/NetworkConfig + ExecResult
+    │   ├── workspace.py         # WorkspaceRoot — per-(tenant,session) FS root
+    │   └── backends/
+    │       ├── base.py          # SandboxBackend ABC
+    │       ├── noop_backend.py  # host execution (dev only); honors configs in Python
+    │       ├── docker_backend.py # stub for self-host
+    │       └── e2b_backend.py   # stub for hosted production
     └── plugins/                 # ADK BasePlugin integrations
         └── permissions.py       # PermissionPlugin (Stage B)
 ```

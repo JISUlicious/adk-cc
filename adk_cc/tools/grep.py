@@ -11,6 +11,12 @@ from .schemas import GrepArgs
 
 
 class GrepTool(AdkCcTool):
+    """Regex search across files under a workspace-anchored path.
+
+    Same caveat as GlobFilesTool: walks the host FS directly for now;
+    workspace-root anchoring is the cross-tenant boundary at this level.
+    """
+
     meta = ToolMeta(
         name="grep",
         is_read_only=True,
@@ -20,7 +26,7 @@ class GrepTool(AdkCcTool):
     description = "Search for a regex pattern across files under path."
 
     async def _execute(self, args: GrepArgs, ctx: ToolContext) -> dict[str, Any]:
-        base = resolve(args.path)
+        base = resolve(args.path, ctx)
         try:
             rx = re.compile(args.pattern)
         except re.error as e:
