@@ -9,10 +9,28 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
 ├── docs/                        # this directory
 └── adk_cc/                      # the agent module ADK discovers
     ├── __init__.py              # `from . import agent`
-    ├── agent.py                 # exposes root_agent + 3 sub-agents + LiteLlm wiring
+    ├── agent.py                 # exposes `app` (preferred) and `root_agent`
     ├── prompts.py               # per-agent system prompts
-    └── tools.py                 # function tools (read/glob/grep/write/edit/bash)
+    ├── tools/                   # AdkCcTool subclasses (Stage A)
+    │   ├── base.py              # AdkCcTool, ToolMeta
+    │   ├── schemas.py           # Pydantic input models
+    │   ├── _fs.py               # workspace-aware path resolver (Stage C)
+    │   ├── read_file.py
+    │   ├── glob_files.py
+    │   ├── grep.py
+    │   ├── write_file.py
+    │   ├── edit_file.py
+    │   └── bash/{tool,prompt}.py
+    ├── permissions/             # rule engine (Stage B)
+    │   ├── modes.py             # PermissionMode enum
+    │   ├── rules.py             # PermissionRule + per-tool fnmatch matchers
+    │   ├── settings.py          # SettingsHierarchy (policy/user/project/session)
+    │   └── engine.py            # decide() — 4-step flow
+    └── plugins/                 # ADK BasePlugin integrations
+        └── permissions.py       # PermissionPlugin (Stage B)
 ```
+
+`adk web` / `adk run` look for `app` first, then `root_agent`. Stage B adds `app = App(name=..., root_agent=root_agent, plugins=[PermissionPlugin(...)])` so the plugin chain is wired automatically; direct imports of `root_agent` (e.g. for tests) keep working unchanged.
 
 ADK's `adk web` / `adk run` looks for an immediate child directory of the AGENTS_DIR with `__init__.py` and `agent.py`. The module-level name `root_agent` in `agent.py` is the entry agent.
 

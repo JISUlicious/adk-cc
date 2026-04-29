@@ -46,10 +46,13 @@ import os
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.context import Context
+from google.adk.apps.app import App
 from google.adk.models.lite_llm import LiteLlm
 from google.genai import types
 
 from . import prompts
+from .permissions import PermissionMode, SettingsHierarchy
+from .plugins import PermissionPlugin
 from .tools import (
     BashTool,
     EditFileTool,
@@ -167,4 +170,25 @@ root_agent = LlmAgent(
     instruction=prompts.COORDINATOR_INSTRUCTION,
     tools=[_read_file, _glob_files, _grep, _write_file, _edit_file, _run_bash],
     sub_agents=[explore_agent, plan_agent, verify_agent],
+)
+
+
+# ---------- App with permission plugin ----------
+# `adk web` / `adk run` look for `app` first, then `root_agent`. Exposing
+# both keeps direct-test imports of `root_agent` working while letting the
+# CLI wire the plugin chain automatically.
+#
+# Default mode is `bypassPermissions` to preserve the dev experience: the
+# plugin is always loaded (so Stage D/G can layer audit/quotas on top),
+# but it only enforces deny rules. Flip to `default`/`plan`/`acceptEdits`/
+# `dontAsk` via env to exercise the engine.
+PERMISSION_MODE = PermissionMode(
+    os.environ.get("ADK_CC_PERMISSION_MODE", PermissionMode.BYPASS_PERMISSIONS.value)
+)
+SETTINGS = SettingsHierarchy.empty()  # rules added by operators / Stage G loader
+
+app = App(
+    name="adk_cc",
+    root_agent=root_agent,
+    plugins=[PermissionPlugin(SETTINGS, default_mode=PERMISSION_MODE)],
 )
