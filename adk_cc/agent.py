@@ -52,7 +52,7 @@ from google.genai import types
 
 from . import prompts
 from .permissions import PermissionMode, SettingsHierarchy
-from .plugins import PermissionPlugin
+from .plugins import AuditPlugin, PermissionPlugin
 from .tools import (
     BashTool,
     EditFileTool,
@@ -190,5 +190,12 @@ SETTINGS = SettingsHierarchy.empty()  # rules added by operators / Stage G loade
 app = App(
     name="adk_cc",
     root_agent=root_agent,
-    plugins=[PermissionPlugin(SETTINGS, default_mode=PERMISSION_MODE)],
+    # Order matters. Audit goes first so before_tool_callback records every
+    # attempt — including ones the permission plugin denies. Permission's
+    # short-circuit only stops the *chain*, but audit's row is already
+    # written by then.
+    plugins=[
+        AuditPlugin(),
+        PermissionPlugin(SETTINGS, default_mode=PERMISSION_MODE),
+    ],
 )

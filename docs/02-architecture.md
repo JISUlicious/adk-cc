@@ -35,7 +35,8 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
     │       ├── docker_backend.py # stub for self-host
     │       └── e2b_backend.py   # stub for hosted production
     └── plugins/                 # ADK BasePlugin integrations
-        └── permissions.py       # PermissionPlugin (Stage B)
+        ├── permissions.py       # PermissionPlugin (Stage B)
+        └── audit.py             # AuditPlugin (Stage D) — JSONL or callable sink
 ```
 
 `adk web` / `adk run` look for `app` first, then `root_agent`. Stage B adds `app = App(name=..., root_agent=root_agent, plugins=[PermissionPlugin(...)])` so the plugin chain is wired automatically; direct imports of `root_agent` (e.g. for tests) keep working unchanged.
