@@ -41,3 +41,40 @@ class RunBashArgs(BaseModel):
     timeout_seconds: int = Field(
         default=30, description="Max wall time before the process is killed."
     )
+
+
+class WebFetchArgs(BaseModel):
+    url: str = Field(description="The URL to fetch (http or https).")
+    max_bytes: int = Field(
+        default=200_000,
+        description="Cap on returned body size; the rest is truncated.",
+    )
+
+
+class AskOption(BaseModel):
+    label: str = Field(description="Short display text the user will pick (1-5 words).")
+    description: str = Field(
+        description="What this option means or what happens if chosen."
+    )
+
+
+class AskQuestion(BaseModel):
+    question: str = Field(description="The question, ending in a question mark.")
+    header: str = Field(
+        description="Short label/chip for the question (max 12 chars).",
+        max_length=12,
+    )
+    options: list[AskOption] = Field(
+        description="2-4 distinct choices. The user can also pick 'Other' (provided automatically).",
+        min_length=2,
+        max_length=4,
+    )
+    multi_select: bool = Field(
+        default=False, description="Allow multiple options to be selected."
+    )
+
+
+class AskUserQuestionArgs(BaseModel):
+    questions: list[AskQuestion] = Field(
+        description="1-4 questions to ask the user.", min_length=1, max_length=4
+    )

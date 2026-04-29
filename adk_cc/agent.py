@@ -54,12 +54,15 @@ from . import prompts
 from .permissions import PermissionMode, SettingsHierarchy
 from .plugins import AuditPlugin, PermissionPlugin
 from .tools import (
+    AskUserQuestionTool,
     BashTool,
     EditFileTool,
     GlobFilesTool,
     GrepTool,
     ReadFileTool,
+    WebFetchTool,
     WriteFileTool,
+    make_skill_toolset,
 )
 
 
@@ -109,6 +112,9 @@ _grep = GrepTool()
 _write_file = WriteFileTool()
 _edit_file = EditFileTool()
 _run_bash = BashTool()
+_web_fetch = WebFetchTool()
+_ask_user = AskUserQuestionTool()
+_skills = make_skill_toolset()  # None unless ADK_CC_SKILLS_DIR / skills/ has content
 
 
 # ---------- specialist agents (read-only) ----------
@@ -122,7 +128,7 @@ explore_agent = LlmAgent(
         "Returns a written report; does not modify files."
     ),
     instruction=prompts.EXPLORE_INSTRUCTION,
-    tools=[_read_file, _glob_files, _grep],
+    tools=[_read_file, _glob_files, _grep, _web_fetch],
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
     after_agent_callback=_force_coordinator_continuation,
@@ -137,7 +143,7 @@ plan_agent = LlmAgent(
         "Use when designing the approach for a non-trivial change."
     ),
     instruction=prompts.PLAN_INSTRUCTION,
-    tools=[_read_file, _glob_files, _grep],
+    tools=[_read_file, _glob_files, _grep, _web_fetch],
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
     after_agent_callback=_force_coordinator_continuation,
@@ -154,7 +160,7 @@ verify_agent = LlmAgent(
         "implementation (3+ file edits, backend/API, or infra changes)."
     ),
     instruction=prompts.VERIFY_INSTRUCTION,
-    tools=[_read_file, _glob_files, _grep, _run_bash],
+    tools=[_read_file, _glob_files, _grep, _run_bash, _web_fetch],
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
     after_agent_callback=_force_coordinator_continuation,
@@ -163,12 +169,25 @@ verify_agent = LlmAgent(
 
 # ---------- coordinator (the "main agent") ----------
 
+_coordinator_tools: list = [
+    _read_file,
+    _glob_files,
+    _grep,
+    _write_file,
+    _edit_file,
+    _run_bash,
+    _web_fetch,
+    _ask_user,
+]
+if _skills is not None:
+    _coordinator_tools.append(_skills)
+
 root_agent = LlmAgent(
     name="coordinator",
     model=MODEL,
     description="Coordinator agent: handles user requests with a gather → act → verify loop.",
     instruction=prompts.COORDINATOR_INSTRUCTION,
-    tools=[_read_file, _glob_files, _grep, _write_file, _edit_file, _run_bash],
+    tools=_coordinator_tools,
     sub_agents=[explore_agent, plan_agent, verify_agent],
 )
 

@@ -11,7 +11,7 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
     ├── __init__.py              # `from . import agent`
     ├── agent.py                 # exposes `app` (preferred) and `root_agent`
     ├── prompts.py               # per-agent system prompts
-    ├── tools/                   # AdkCcTool subclasses (Stage A)
+    ├── tools/                   # AdkCcTool subclasses (Stage A) + integrations (Stage E)
     │   ├── base.py              # AdkCcTool, ToolMeta
     │   ├── schemas.py           # Pydantic input models
     │   ├── _fs.py               # workspace-aware path resolver (Stage C)
@@ -20,7 +20,12 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
     │   ├── grep.py
     │   ├── write_file.py
     │   ├── edit_file.py
-    │   └── bash/{tool,prompt}.py
+    │   ├── bash/{tool,prompt}.py
+    │   ├── web_fetch.py         # preapproved-hosts URL fetcher (Stage E)
+    │   ├── ask_user_question.py # long-running multi-choice HITL (Stage E)
+    │   ├── mcp.py               # make_mcp_toolset() factory (Stage E)
+    │   └── skills.py            # SkillToolset auto-loader (Stage E)
+    ├── skills/                  # optional: skill folders here are auto-loaded
     ├── permissions/             # rule engine (Stage B)
     │   ├── modes.py             # PermissionMode enum
     │   ├── rules.py             # PermissionRule + per-tool fnmatch matchers
