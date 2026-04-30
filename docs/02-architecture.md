@@ -49,9 +49,16 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
     │   ├── model.py             # Task, TaskStatus, blocks/blocked_by edges
     │   ├── storage.py           # TaskStorage ABC + InMemoryTaskStorage
     │   └── runner.py            # TaskRunner — asyncio.Task pool worker
-    └── plugins/                 # ADK BasePlugin integrations
-        ├── permissions.py       # PermissionPlugin (Stage B)
-        └── audit.py             # AuditPlugin (Stage D) — JSONL or callable sink
+    ├── plugins/                 # ADK BasePlugin integrations
+    │   ├── permissions.py       # PermissionPlugin (Stage B)
+    │   ├── audit.py             # AuditPlugin (Stage D) — JSONL or callable sink
+    │   └── quotas.py            # QuotaPlugin (Stage G) — per-tenant rate cap
+    ├── service/                 # web-service deployment (Stage G)
+    │   ├── tenancy.py           # TenantContext + TenancyPlugin (state seeder)
+    │   ├── auth.py              # AuthExtractor protocol + BearerTokenExtractor
+    │   └── server.py            # build_fastapi_app() + make_app() factory
+    └── config/
+        └── settings_loader.py   # YAML → SettingsHierarchy (Stage G)
 ```
 
 `adk web` / `adk run` look for `app` first, then `root_agent`. Stage B adds `app = App(name=..., root_agent=root_agent, plugins=[PermissionPlugin(...)])` so the plugin chain is wired automatically; direct imports of `root_agent` (e.g. for tests) keep working unchanged.

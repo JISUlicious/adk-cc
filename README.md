@@ -64,3 +64,22 @@ ADK_CC_API_KEY=<token>
 ```
 
 Pick a model with **function-calling support** — this loop relies on tool use. Qwen 2.5+, Llama 3.1/3.2, and Mistral families all work. Small (1B–3B) models often handle tool calls poorly.
+
+## Production deployment
+
+`adk web .` is fine for dev. For multi-tenant deployment, use the FastAPI factory in `adk_cc.service`:
+
+```bash
+export ADK_CC_AGENTS_DIR=/path/to/parent/of/adk_cc
+export ADK_CC_SESSION_DSN=postgresql://user:pass@host/db
+export ADK_CC_PERMISSIONS_YAML=/etc/adk-cc/permissions.yaml
+export ADK_CC_PERMISSION_MODE=default     # plan|acceptEdits|bypassPermissions|dontAsk
+export ADK_CC_QUOTA_PER_MINUTE=120
+export ADK_CC_SANDBOX_BACKEND=docker      # or e2b (operator implements)
+export ADK_CC_AUTH_TOKENS="tok=user:tenant"  # dev only; replace with real JWT validator
+export ADK_CC_API_KEY=...                  # for the model server
+
+uvicorn adk_cc.service.server:make_app --factory --host 0.0.0.0 --port 8000
+```
+
+The factory wires the full plugin chain (`[Audit, Tenancy, Permission, Quota]`), the configured session backend, and an auth middleware. See `docs/02-architecture.md` for the topology.
