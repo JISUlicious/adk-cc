@@ -27,7 +27,12 @@ from pathlib import Path
 from typing import Optional
 
 from ..permissions import PermissionMode, SettingsHierarchy
-from ..plugins import AuditPlugin, PermissionPlugin, QuotaPlugin
+from ..plugins import (
+    AuditPlugin,
+    PermissionPlugin,
+    PlanModeReminderPlugin,
+    QuotaPlugin,
+)
 from .tenancy import TenancyPlugin
 
 
@@ -55,6 +60,9 @@ def build_plugins(
             default_mode=permission_mode,
         ),
         QuotaPlugin(calls_per_minute=quota_per_minute),
+        # Plan-mode reminder runs at before_model_callback; sits beside the
+        # before_tool chain rather than inside it.
+        PlanModeReminderPlugin(),
     ]
 
 

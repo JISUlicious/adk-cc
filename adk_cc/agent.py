@@ -52,11 +52,12 @@ from google.genai import types
 
 from . import prompts
 from .permissions import PermissionMode, SettingsHierarchy
-from .plugins import AuditPlugin, PermissionPlugin
+from .plugins import AuditPlugin, PermissionPlugin, PlanModeReminderPlugin
 from .tools import (
     AskUserQuestionTool,
     BashTool,
     EditFileTool,
+    ExitPlanModeTool,
     GlobFilesTool,
     GrepTool,
     ReadFileTool,
@@ -124,6 +125,7 @@ _task_get = TaskGetTool()
 _task_list = TaskListTool()
 _task_update = TaskUpdateTool()
 _task_stop = TaskStopTool()
+_exit_plan_mode = ExitPlanModeTool()
 _skills = make_skill_toolset()  # None unless ADK_CC_SKILLS_DIR / skills/ has content
 
 
@@ -193,6 +195,7 @@ _coordinator_tools: list = [
     _task_list,
     _task_update,
     _task_stop,
+    _exit_plan_mode,
 ]
 if _skills is not None:
     _coordinator_tools.append(_skills)
@@ -231,5 +234,8 @@ app = App(
     plugins=[
         AuditPlugin(),
         PermissionPlugin(SETTINGS, default_mode=PERMISSION_MODE),
+        # Reminder runs on before_model_callback, lifecycle independent of
+        # the before_tool chain — order relative to others doesn't matter.
+        PlanModeReminderPlugin(),
     ],
 )

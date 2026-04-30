@@ -11,6 +11,7 @@ from .ask_user_question import AskUserQuestionTool
 from .bash import BashTool
 from .base import AdkCcTool, ToolMeta
 from .edit_file import EditFileTool
+from .exit_plan_mode import ExitPlanModeTool
 from .glob_files import GlobFilesTool
 from .grep import GrepTool
 from .mcp import make_mcp_toolset
@@ -32,6 +33,7 @@ __all__ = [
     "AskUserQuestionTool",
     "BashTool",
     "EditFileTool",
+    "ExitPlanModeTool",
     "GlobFilesTool",
     "GrepTool",
     "ReadFileTool",
