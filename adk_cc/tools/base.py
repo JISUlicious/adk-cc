@@ -41,6 +41,9 @@ class ToolMeta(BaseModel):
         execution must go through `SandboxBackend`.
       - The audit plugin (Stage D) — `is_read_only` decides log verbosity.
       - ADK itself — `long_running` maps to `BaseTool.is_long_running`.
+      - `AdkCcTool.run_async` — `requires_user_approval` triggers a
+        request_confirmation gate before _execute runs. Mirrors upstream
+        Claude Code's `checkPermissions: 'ask'` semantic.
     """
 
     name: str
@@ -49,6 +52,7 @@ class ToolMeta(BaseModel):
     is_destructive: bool = False
     needs_sandbox: bool = False
     long_running: bool = False
+    requires_user_approval: bool = False
 
 
 class AdkCcTool(BaseTool):
@@ -94,6 +98,29 @@ class AdkCcTool(BaseTool):
             validated = self.input_model.model_validate(args)
         except ValidationError as e:
             return {"status": "input_validation_error", "errors": e.errors()}
+
+        # Approval gate — opted in by ToolMeta.requires_user_approval.
+        # Two-call pattern (mirrors google/adk/tools/bash_tool.py:163-174):
+        # first call requests, ADK pauses, user responds, ADK re-invokes
+        # with tool_confirmation populated.
+        if self.meta.requires_user_approval:
+            confirmation = getattr(tool_context, "tool_confirmation", None)
+            if confirmation is None:
+                try:
+                    tool_context.request_confirmation(
+                        hint=self._approval_hint(validated),
+                        payload=self._approval_payload(validated),
+                    )
+                    tool_context.actions.skip_summarization = True
+                except Exception as e:
+                    return {
+                        "status": "error",
+                        "error": f"could not request confirmation: {e}",
+                    }
+                return {"status": "awaiting_user_confirmation"}
+            if not getattr(confirmation, "confirmed", False):
+                return {"status": "denied", "reason": "user did not approve"}
+
         result = self._execute(validated, tool_context)
         if inspect.isawaitable(result):
             result = await result
@@ -103,3 +130,13 @@ class AdkCcTool(BaseTool):
         self, args: BaseModel, ctx: ToolContext
     ) -> dict[str, Any]:
         raise NotImplementedError(f"{type(self).__name__}._execute")
+
+    # --- Approval-gate hooks (override in subclasses with requires_user_approval=True) ---
+
+    def _approval_hint(self, args: BaseModel) -> str:
+        """User-facing prompt shown in the confirmation dialog."""
+        return f"Approve {self.meta.name}?"
+
+    def _approval_payload(self, args: BaseModel) -> Any:
+        """Structured data the frontend can render alongside the prompt."""
+        return None
