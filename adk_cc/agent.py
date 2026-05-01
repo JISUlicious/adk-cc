@@ -71,7 +71,6 @@ from .tools import (
     TaskCreateTool,
     TaskGetTool,
     TaskListTool,
-    TaskStopTool,
     TaskUpdateTool,
     WebFetchTool,
     WriteFileTool,
@@ -132,7 +131,6 @@ _task_create = TaskCreateTool()
 _task_get = TaskGetTool()
 _task_list = TaskListTool()
 _task_update = TaskUpdateTool()
-_task_stop = TaskStopTool()
 _exit_plan_mode = ExitPlanModeTool()
 _enter_plan_mode = EnterPlanModeTool()
 _write_plan = WritePlanTool()
@@ -205,7 +203,6 @@ _coordinator_tools: list = [
     _task_get,
     _task_list,
     _task_update,
-    _task_stop,
     _exit_plan_mode,
     _enter_plan_mode,
     _read_current_plan,

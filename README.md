@@ -86,7 +86,7 @@ The factory wires the full plugin chain (`[Audit, Tenancy, Permission, Quota, Pl
 
 ## Tasks
 
-The five `task_*` tools (`task_create` / `task_get` / `task_list` / `task_update` / `task_stop`) persist tasks as JSON files under `~/.adk-cc/tasks/<tenant_id>/<session_id>/<task_id>.json` (override the root via `ADK_CC_TASKS_DIR`). Tasks survive process restarts; multi-worker deployments are safe via `filelock` writes. Layout mirrors upstream Claude Code's per-task JSON layout (`src/utils/tasks.ts`).
+Four `task_*` tools (`task_create` / `task_get` / `task_list` / `task_update`) for pure tracking — no execution semantics. Tasks persist as JSON files at `~/.adk-cc/tasks/<tenant_id>/<session_id>/<task_id>.json` (override the root via `ADK_CC_TASKS_DIR`). Tasks survive process restarts; multi-worker deployments are safe via `filelock` writes. Layout and shape mirror upstream Claude Code's v2 task family (`src/utils/tasks.ts`).
 
 A `TaskReminderPlugin` injects the active task list into the model's context periodically — fires when the model has gone too many turns without using `task_create`/`task_update` (default 10) and at least that many turns have passed since the last reminder (default 10). Override either threshold via env:
 

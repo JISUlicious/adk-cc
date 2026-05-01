@@ -23,7 +23,6 @@ from .task import (
     TaskCreateTool,
     TaskGetTool,
     TaskListTool,
-    TaskStopTool,
     TaskUpdateTool,
 )
 from .web_fetch import WebFetchTool
@@ -45,7 +44,6 @@ __all__ = [
     "TaskCreateTool",
     "TaskGetTool",
     "TaskListTool",
-    "TaskStopTool",
     "TaskUpdateTool",
     "WebFetchTool",
     "WriteFileTool",

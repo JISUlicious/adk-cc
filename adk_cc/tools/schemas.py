@@ -87,13 +87,6 @@ class TaskCreateArgs(BaseModel):
     description: str = Field(
         default="", description="Optional detail about what the task does or why."
     )
-    command: Optional[str] = Field(
-        default=None,
-        description=(
-            "Shell command to run in the background. If unset, the task is "
-            "a passive checkpoint (status updated manually)."
-        ),
-    )
     blocked_by: list[str] = Field(
         default_factory=list,
         description="Task IDs that must complete before this one is meaningful.",
@@ -107,7 +100,7 @@ class TaskGetArgs(BaseModel):
 class TaskListArgs(BaseModel):
     status: Optional[str] = Field(
         default=None,
-        description="Optional filter: pending|in_progress|completed|failed|stopped.",
+        description="Optional filter: pending|in_progress|completed.",
     )
 
 
@@ -115,15 +108,11 @@ class TaskUpdateArgs(BaseModel):
     task_id: str = Field(description="The task to update.")
     status: Optional[str] = Field(
         default=None,
-        description="New status: pending|in_progress|completed|failed|stopped.",
+        description="New status: pending|in_progress|completed.",
     )
     description: Optional[str] = Field(
         default=None, description="Replace the description."
     )
-
-
-class TaskStopArgs(BaseModel):
-    task_id: str = Field(description="The task to cancel.")
 
 
 class WritePlanArgs(BaseModel):

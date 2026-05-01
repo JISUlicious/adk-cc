@@ -25,12 +25,11 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
     │   ├── ask_user_question.py # long-running multi-choice HITL (Stage E)
     │   ├── mcp.py               # make_mcp_toolset() factory (Stage E)
     │   ├── skills.py            # SkillToolset auto-loader (Stage E)
-    │   └── task/                # 5 task tools (Stage F)
+    │   └── task/                # 4 task tools (Stage F — tracking only)
     │       ├── create.py
     │       ├── get.py
     │       ├── list.py
-    │       ├── update.py
-    │       └── stop.py
+    │       └── update.py
     ├── skills/                  # optional: skill folders here are auto-loaded
     ├── permissions/             # rule engine (Stage B)
     │   ├── modes.py             # PermissionMode enum
@@ -45,10 +44,10 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
     │       ├── noop_backend.py  # host execution (dev only); async via asyncio.subprocess
     │       ├── docker_backend.py # stub for self-host
     │       └── e2b_backend.py   # stub for hosted production
-    ├── tasks/                   # background task system (Stage F)
-    │   ├── model.py             # Task, TaskStatus, blocks/blocked_by edges
+    ├── tasks/                   # task tracking (Stage F — pure tracking, no execution)
+    │   ├── model.py             # Task, TaskStatus (3 statuses), blocks/blocked_by
     │   ├── storage.py           # TaskStorage ABC + InMemoryTaskStorage + JsonFileTaskStorage
-    │   └── runner.py            # TaskRunner — asyncio.Task pool worker (default storage: JsonFileTaskStorage)
+    │   └── runner.py            # TaskRunner — thin storage facade (default: JsonFileTaskStorage)
     ├── plugins/                 # ADK BasePlugin integrations
     │   ├── permissions.py       # PermissionPlugin (Stage B)
     │   ├── audit.py             # AuditPlugin (Stage D) — JSONL or callable sink
@@ -198,17 +197,30 @@ MODEL = LiteLlm(
 
 The model id uses the `openai/` prefix because the target server is OpenAI-compatible. Any LiteLLM-supported backend will work via env-var override (`ollama_chat/...`, `anthropic/...`, etc.) — no code changes needed.
 
-## 6.5. Tasks (Stage F)
+## 6.5. Tasks (Stage F — pure tracking)
 
-Two surfaces:
+Tracking-only after the refactor: no `command`/`output` fields, no
+asyncio worker, no `task_stop` tool. The model uses `run_bash`
+directly when it wants to run a command; tasks are just records of
+"what work exists and where it stands." Three surfaces.
 
-**Storage (`tasks/storage.py`).** Default is `JsonFileTaskStorage`: one
-JSON file per task at `<root>/<tenant_id>/<session_id>/<task_id>.json`.
-Root is `~/.adk-cc/tasks/` (override via `ADK_CC_TASKS_DIR`). Writes go
-through `filelock.FileLock` for multi-worker uvicorn safety, wrapped in
-`asyncio.to_thread` so they don't block the event loop. Mirrors
-upstream Claude Code's per-task JSON layout (`src/utils/tasks.ts:229`).
-`InMemoryTaskStorage` remains for tests.
+**Tools (`tools/task/`).** Four tools — `task_create`, `task_get`,
+`task_list`, `task_update`. All non-destructive (state-mutating, but
+not project-mutating), so they don't trigger the permission engine's
+ask-on-destructive flow in DEFAULT mode. Schema mirrors upstream
+Claude Code v2's `Task` (`src/utils/tasks.ts:76-89`): `id`, `title`,
+`description`, `status` (one of `pending`/`in_progress`/`completed`),
+`blocks`/`blocked_by`, `created_at`/`updated_at`, plus adk-cc-specific
+`tenant_id`/`session_id`.
+
+**Storage (`tasks/storage.py`).** Default is `JsonFileTaskStorage`:
+one JSON file per task at `<root>/<tenant_id>/<session_id>/<task_id>.json`.
+Root is `~/.adk-cc/tasks/` (override via `ADK_CC_TASKS_DIR`). Writes
+go through `filelock.FileLock` for multi-worker uvicorn safety,
+wrapped in `asyncio.to_thread` so they don't block the event loop.
+Mirrors upstream's per-task JSON layout (`src/utils/tasks.ts:229`).
+`InMemoryTaskStorage` remains for tests. `TaskRunner` is now a thin
+storage facade (no asyncio worker pool).
 
 **Reminder injection (`plugins/task_reminder.py`).** Upstream emits a
 periodic `task_reminder` attachment listing the active tasks
