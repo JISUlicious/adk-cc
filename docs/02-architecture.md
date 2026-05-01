@@ -47,11 +47,13 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
     │       └── e2b_backend.py   # stub for hosted production
     ├── tasks/                   # background task system (Stage F)
     │   ├── model.py             # Task, TaskStatus, blocks/blocked_by edges
-    │   ├── storage.py           # TaskStorage ABC + InMemoryTaskStorage
-    │   └── runner.py            # TaskRunner — asyncio.Task pool worker
+    │   ├── storage.py           # TaskStorage ABC + InMemoryTaskStorage + JsonFileTaskStorage
+    │   └── runner.py            # TaskRunner — asyncio.Task pool worker (default storage: JsonFileTaskStorage)
     ├── plugins/                 # ADK BasePlugin integrations
     │   ├── permissions.py       # PermissionPlugin (Stage B)
     │   ├── audit.py             # AuditPlugin (Stage D) — JSONL or callable sink
+    │   ├── plan_mode.py         # PlanModeReminderPlugin
+    │   ├── task_reminder.py     # TaskReminderPlugin — periodic task-list system reminder
     │   └── quotas.py            # QuotaPlugin (Stage G) — per-tenant rate cap
     ├── service/                 # web-service deployment (Stage G)
     │   ├── tenancy.py           # TenantContext + TenancyPlugin (state seeder)
@@ -195,6 +197,40 @@ MODEL = LiteLlm(
 ```
 
 The model id uses the `openai/` prefix because the target server is OpenAI-compatible. Any LiteLLM-supported backend will work via env-var override (`ollama_chat/...`, `anthropic/...`, etc.) — no code changes needed.
+
+## 6.5. Tasks (Stage F)
+
+Two surfaces:
+
+**Storage (`tasks/storage.py`).** Default is `JsonFileTaskStorage`: one
+JSON file per task at `<root>/<tenant_id>/<session_id>/<task_id>.json`.
+Root is `~/.adk-cc/tasks/` (override via `ADK_CC_TASKS_DIR`). Writes go
+through `filelock.FileLock` for multi-worker uvicorn safety, wrapped in
+`asyncio.to_thread` so they don't block the event loop. Mirrors
+upstream Claude Code's per-task JSON layout (`src/utils/tasks.ts:229`).
+`InMemoryTaskStorage` remains for tests.
+
+**Reminder injection (`plugins/task_reminder.py`).** Upstream emits a
+periodic `task_reminder` attachment listing the active tasks
+(`src/utils/attachments.ts:3395-3432` + `messages.ts:3680-3699`).
+adk-cc ports this as `TaskReminderPlugin.before_model_callback`. Fires
+when both:
+
+- Assistant turns since last `task_create`/`task_update` ≥
+  `ADK_CC_TASK_REMINDER_TURNS_SINCE_WRITE` (default 10)
+- Assistant turns since last reminder ≥
+  `ADK_CC_TASK_REMINDER_TURNS_BETWEEN` (default 10)
+
+When triggered, reads the active task list from disk and appends a
+`<system-reminder>` block to `llm_request.config.system_instruction`.
+Reminder text mirrors upstream verbatim with tool names rewritten to
+`task_create`/`task_update`. Skips read-only specialists. Last firing
+tracked in `state["task_reminder_last_invocation_id"]` so the cooldown
+counter can locate it on subsequent turns.
+
+The plugin is registered in both `agent.py`'s `App.plugins` and
+`service/server.py:build_plugins()`. Final production order:
+`[Audit, Tenancy, Permission, Quota, PlanModeReminder, TaskReminder]`.
 
 ## 7. What ADK does for us
 

@@ -82,4 +82,17 @@ export ADK_CC_API_KEY=...                  # for the model server
 uvicorn adk_cc.service.server:make_app --factory --host 0.0.0.0 --port 8000
 ```
 
-The factory wires the full plugin chain (`[Audit, Tenancy, Permission, Quota]`), the configured session backend, and an auth middleware. See `docs/02-architecture.md` for the topology.
+The factory wires the full plugin chain (`[Audit, Tenancy, Permission, Quota, PlanModeReminder, TaskReminder]`), the configured session backend, and an auth middleware. See `docs/02-architecture.md` for the topology.
+
+## Tasks
+
+The five `task_*` tools (`task_create` / `task_get` / `task_list` / `task_update` / `task_stop`) persist tasks as JSON files under `~/.adk-cc/tasks/<tenant_id>/<session_id>/<task_id>.json` (override the root via `ADK_CC_TASKS_DIR`). Tasks survive process restarts; multi-worker deployments are safe via `filelock` writes. Layout mirrors upstream Claude Code's per-task JSON layout (`src/utils/tasks.ts`).
+
+A `TaskReminderPlugin` injects the active task list into the model's context periodically — fires when the model has gone too many turns without using `task_create`/`task_update` (default 10) and at least that many turns have passed since the last reminder (default 10). Override either threshold via env:
+
+```bash
+ADK_CC_TASK_REMINDER_TURNS_SINCE_WRITE=10
+ADK_CC_TASK_REMINDER_TURNS_BETWEEN=10
+```
+
+Mirrors upstream's `task_reminder` attachment pattern (`attachments.ts:3395-3432` + `messages.ts:3680-3699`); the reminder text is identical, scoped to adk-cc's snake_case tool names.
