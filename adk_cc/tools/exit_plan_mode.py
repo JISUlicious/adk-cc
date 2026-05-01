@@ -58,6 +58,17 @@ class ExitPlanModeTool(AdkCcTool):
             previous = ctx.state.get("permission_mode")
         except Exception:
             previous = None
+        # Defensive idempotency — exiting from non-plan mode is meaningless;
+        # don't pretend it happened.
+        if previous != "plan":
+            return {
+                "status": "noop",
+                "current_mode": previous or "default",
+                "message": (
+                    f"Not in plan mode (current: {previous!r}); nothing to exit. "
+                    "Use the regular tools to proceed."
+                ),
+            }
         try:
             ctx.state["permission_mode"] = "default"
         except Exception as e:

@@ -33,17 +33,25 @@ _SPECIALIST_AGENTS = frozenset({"Plan", "Explore", "verification"})
 
 PLAN_MODE_REMINDER = (
     "<system-reminder>\n"
-    "Plan mode is active. The user has asked you to plan rather than execute.\n"
-    "You MUST NOT make any edits, run any non-readonly tools (including changing\n"
-    "configs, running commits, or starting background tasks), or otherwise mutate\n"
-    "the system. Read tools (read_file, glob_files, grep, web_fetch) and the\n"
-    "Explore/Plan sub-agents are still available.\n"
+    "YOU ARE CURRENTLY IN PLAN MODE. Do not call `enter_plan_mode` — you are\n"
+    "already in it. The user has asked you to plan rather than execute.\n"
+    "\n"
+    "You MUST NOT make any edits, run any non-readonly tools (no write_file,\n"
+    "edit_file, run_bash, task_create, etc.), or otherwise mutate the system.\n"
+    "\n"
+    "Available actions in plan mode:\n"
+    "  - Use read_file, glob_files, grep, web_fetch to gather context.\n"
+    "  - Transfer to the `Plan` sub-agent for design work — it will call\n"
+    "    `write_plan` to persist a Markdown plan under the workspace.\n"
+    "  - Or call `write_plan` yourself if the plan is short and you've\n"
+    "    already gathered the context.\n"
+    "  - Call `read_current_plan` to see existing plans this session.\n"
     "\n"
     "When your plan is ready, call `exit_plan_mode` with a clear plan_summary.\n"
-    "The user is shown your summary and must explicitly approve. The tool returns\n"
-    "with status='approved' (mode flipped — proceed) or status='denied' (stay in\n"
-    "plan mode — refine and re-request) or status='awaiting_user_confirmation'\n"
-    "(the runtime is waiting on the user — do not retry or assume approval).\n"
+    "The user is shown your summary and must explicitly approve. The tool\n"
+    "returns status='approved' (mode flipped — proceed), status='denied'\n"
+    "(stay and refine), or status='awaiting_user_confirmation' (wait — do\n"
+    "not retry or assume approval).\n"
     "This supersedes any other instructions you have received.\n"
     "</system-reminder>"
 )
@@ -72,13 +80,19 @@ class PlanModeReminderPlugin(BasePlugin):
             return None
 
         # Tool visibility: hide enter/exit_plan_mode unless the matching
-        # mode is active. Mutating tools_dict before the request leaves
-        # ADK's downstream config-building to drop the tool from the
-        # function-declaration list automatically.
-        if mode == "plan":
-            llm_request.tools_dict.pop("enter_plan_mode", None)
-        else:
-            llm_request.tools_dict.pop("exit_plan_mode", None)
+        # mode is active. By the time before_model_callback runs,
+        # llm_request.config.tools has already been built from
+        # tools_dict — so we have to filter BOTH places to actually
+        # remove the tool from the LLM's view.
+        hide_name = "enter_plan_mode" if mode == "plan" else "exit_plan_mode"
+        llm_request.tools_dict.pop(hide_name, None)
+        for tool_obj in llm_request.config.tools or []:
+            decls = getattr(tool_obj, "function_declarations", None)
+            if decls is None:
+                continue
+            tool_obj.function_declarations = [
+                d for d in decls if getattr(d, "name", None) != hide_name
+            ]
 
         if mode != "plan":
             return None

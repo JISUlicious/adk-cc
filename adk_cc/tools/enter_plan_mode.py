@@ -64,6 +64,19 @@ class EnterPlanModeTool(AdkCcTool):
             previous = ctx.state.get("permission_mode")
         except Exception:
             previous = None
+        # Defensive idempotency — if we're already in plan mode, don't
+        # require a second approval round trip. (The base class's gate
+        # already ran for this call; we just short-circuit the outcome.)
+        if previous == "plan":
+            return {
+                "status": "noop",
+                "current_mode": "plan",
+                "message": (
+                    "Already in plan mode. Use the Plan sub-agent or "
+                    "write_plan / read_current_plan; call exit_plan_mode "
+                    "when ready to execute."
+                ),
+            }
         try:
             ctx.state["permission_mode"] = "plan"
         except Exception as e:
