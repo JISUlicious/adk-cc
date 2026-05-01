@@ -1,13 +1,15 @@
-"""Read the current session's plan file from session state.
+"""Read the current session's plan from state, with history visibility.
 
-Companion to `write_plan`. Looks up `state["current_plan_path"]` and
-returns the file's contents along with the recorded title. Useful for:
+Companion to `write_plan`. Looks up `state["current_plan_path"]` for the
+latest plan and `state["plan_history"]` for the full session history,
+then reads and returns the latest plan's contents. Useful for:
 
   - Coordinator picking up where Plan sub-agent left off
   - Verification reading the success criteria the plan committed to
   - A second invocation of Plan refining the previous plan
 
-Returns `status: no_plan` when no plan exists yet.
+Returns `status: no_plan` when nothing has been written yet. The
+`history` field is always present (empty list when no plans exist).
 """
 
 from __future__ import annotations
@@ -40,21 +42,30 @@ class ReadCurrentPlanTool(AdkCcTool):
         try:
             path = ctx.state.get("current_plan_path")
             title = ctx.state.get("current_plan_title")
+            history = ctx.state.get("plan_history") or []
         except Exception:
-            path, title = None, None
+            path, title, history = None, None, []
+
+        # Strip content from history entries — keep payloads small; the
+        # caller can read older plans via read_file with the listed paths.
+        history_summary = [
+            {k: v for k, v in entry.items() if k != "content"}
+            for entry in history
+        ]
 
         if not path:
-            return {"status": "no_plan"}
+            return {"status": "no_plan", "history": history_summary}
 
         ws = get_workspace(ctx)
         backend = get_backend(ctx)
         try:
             content = await backend.read_text(path, fs_read=ws.fs_read_config())
         except SandboxViolation as e:
-            return {"status": "sandbox_denied", "error": str(e)}
+            return {"status": "sandbox_denied", "error": str(e), "history": history_summary}
         except FileNotFoundError:
             return {
                 "status": "no_plan",
+                "history": history_summary,
                 "warning": (
                     f"current_plan_path was set to {path!r} but the file no "
                     "longer exists; ask Plan to write a fresh plan."
@@ -66,4 +77,5 @@ class ReadCurrentPlanTool(AdkCcTool):
             "path": path,
             "title": title,
             "content": content,
+            "history": history_summary,
         }

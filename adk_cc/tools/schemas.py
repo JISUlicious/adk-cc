@@ -130,8 +130,18 @@ class WritePlanArgs(BaseModel):
     content: str = Field(
         description=(
             "The full plan in Markdown. Should start with a `# <title>` "
-            "heading. Replaces any previous plan for this session."
+            "heading. Each call creates a new plan file; previous plans "
+            "remain in the workspace under `.adk-cc/plans/`."
         )
+    )
+    slug: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional short kebab-case label for the plan thread "
+            "(e.g. 'auth-refactor', 'bug-x-fix'). If omitted, derived "
+            "from the title heading. Used in the filename for human "
+            "readability."
+        ),
     )
 
 
