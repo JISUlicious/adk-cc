@@ -124,3 +124,16 @@ class TaskUpdateArgs(BaseModel):
 
 class TaskStopArgs(BaseModel):
     task_id: str = Field(description="The task to cancel.")
+
+
+class WritePlanArgs(BaseModel):
+    content: str = Field(
+        description=(
+            "The full plan in Markdown. Should start with a `# <title>` "
+            "heading. Replaces any previous plan for this session."
+        )
+    )
+
+
+class ReadCurrentPlanArgs(BaseModel):
+    pass  # no args; reads from session state

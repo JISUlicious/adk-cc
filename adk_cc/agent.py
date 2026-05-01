@@ -57,9 +57,11 @@ from .tools import (
     AskUserQuestionTool,
     BashTool,
     EditFileTool,
+    EnterPlanModeTool,
     ExitPlanModeTool,
     GlobFilesTool,
     GrepTool,
+    ReadCurrentPlanTool,
     ReadFileTool,
     TaskCreateTool,
     TaskGetTool,
@@ -68,6 +70,7 @@ from .tools import (
     TaskUpdateTool,
     WebFetchTool,
     WriteFileTool,
+    WritePlanTool,
     make_skill_toolset,
 )
 
@@ -126,6 +129,9 @@ _task_list = TaskListTool()
 _task_update = TaskUpdateTool()
 _task_stop = TaskStopTool()
 _exit_plan_mode = ExitPlanModeTool()
+_enter_plan_mode = EnterPlanModeTool()
+_write_plan = WritePlanTool()
+_read_current_plan = ReadCurrentPlanTool()
 _skills = make_skill_toolset()  # None unless ADK_CC_SKILLS_DIR / skills/ has content
 
 
@@ -155,7 +161,7 @@ plan_agent = LlmAgent(
         "Use when designing the approach for a non-trivial change."
     ),
     instruction=prompts.PLAN_INSTRUCTION,
-    tools=[_read_file, _glob_files, _grep, _web_fetch],
+    tools=[_read_file, _glob_files, _grep, _web_fetch, _write_plan, _read_current_plan],
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
     after_agent_callback=_force_coordinator_continuation,
@@ -172,7 +178,7 @@ verify_agent = LlmAgent(
         "implementation (3+ file edits, backend/API, or infra changes)."
     ),
     instruction=prompts.VERIFY_INSTRUCTION,
-    tools=[_read_file, _glob_files, _grep, _run_bash, _web_fetch],
+    tools=[_read_file, _glob_files, _grep, _run_bash, _web_fetch, _read_current_plan],
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
     after_agent_callback=_force_coordinator_continuation,
@@ -196,6 +202,8 @@ _coordinator_tools: list = [
     _task_update,
     _task_stop,
     _exit_plan_mode,
+    _enter_plan_mode,
+    _read_current_plan,
 ]
 if _skills is not None:
     _coordinator_tools.append(_skills)
