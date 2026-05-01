@@ -26,6 +26,12 @@ ENV/
 .coverage
 htmlcov/
 
+# Runtime artifacts (audit logs, e2e test workspaces)
+.audit/
+audit.jsonl
+.e2e-test-workspace/
+.e2e-test-driver.py
+
 # Editor / OS
 .idea/
 .vscode/

@@ -32,6 +32,7 @@ from ..plugins import (
     PermissionPlugin,
     PlanModeReminderPlugin,
     QuotaPlugin,
+    TaskReminderPlugin,
 )
 from .tenancy import TenancyPlugin
 
@@ -60,9 +61,10 @@ def build_plugins(
             default_mode=permission_mode,
         ),
         QuotaPlugin(calls_per_minute=quota_per_minute),
-        # Plan-mode reminder runs at before_model_callback; sits beside the
+        # Reminders run at before_model_callback; sit beside the
         # before_tool chain rather than inside it.
         PlanModeReminderPlugin(),
+        TaskReminderPlugin(),
     ]
 
 

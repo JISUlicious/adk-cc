@@ -1,7 +1,8 @@
 """Background task runner.
 
 Owns:
-  - A `TaskStorage` instance (default: `InMemoryTaskStorage`).
+  - A `TaskStorage` instance (default: `JsonFileTaskStorage` — tasks
+    persist to disk under `~/.adk-cc/tasks/` so they survive restarts).
   - A pool of asyncio Tasks executing jobs whose `command` is set.
 
 Lifecycle:
@@ -26,7 +27,7 @@ from typing import Any, Optional
 from ..sandbox import SandboxBackend
 from ..sandbox.config import FsWriteConfig, NetworkConfig
 from .model import Task, TaskStatus
-from .storage import InMemoryTaskStorage, TaskStorage
+from .storage import JsonFileTaskStorage, TaskStorage
 
 
 def _now() -> datetime:
@@ -41,7 +42,7 @@ class TaskRunner:
         backend: Optional[SandboxBackend] = None,
         cwd: Optional[str] = None,
     ) -> None:
-        self.storage: TaskStorage = storage or InMemoryTaskStorage()
+        self.storage: TaskStorage = storage or JsonFileTaskStorage()
         self._backend = backend
         self._cwd = cwd
         self._asyncio_tasks: dict[str, asyncio.Task] = {}

@@ -52,7 +52,12 @@ from google.genai import types
 
 from . import prompts
 from .permissions import PermissionMode, SettingsHierarchy
-from .plugins import AuditPlugin, PermissionPlugin, PlanModeReminderPlugin
+from .plugins import (
+    AuditPlugin,
+    PermissionPlugin,
+    PlanModeReminderPlugin,
+    TaskReminderPlugin,
+)
 from .tools import (
     AskUserQuestionTool,
     BashTool,
@@ -242,8 +247,9 @@ app = App(
     plugins=[
         AuditPlugin(),
         PermissionPlugin(SETTINGS, default_mode=PERMISSION_MODE),
-        # Reminder runs on before_model_callback, lifecycle independent of
+        # Reminders run on before_model_callback, lifecycle independent of
         # the before_tool chain — order relative to others doesn't matter.
         PlanModeReminderPlugin(),
+        TaskReminderPlugin(),
     ],
 )

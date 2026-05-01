@@ -6,4 +6,8 @@ requires-python = ">=3.12"
 dependencies = [
     "google-adk==1.31.1",
     "litellm>=1.50",
+    "filelock>=3.13",
 ]
+
+[tool.setuptools.packages.find]
+include = ["adk_cc*"]
