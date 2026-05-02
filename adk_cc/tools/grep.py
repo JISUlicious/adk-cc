@@ -1,20 +1,27 @@
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Any
 
 from google.adk.tools.tool_context import ToolContext
 
-from ._fs import resolve
+from ..sandbox import get_backend, get_workspace
+from ..sandbox.config import NetworkConfig
 from .base import AdkCcTool, ToolMeta
 from .schemas import GrepArgs
+
+_MAX_HITS = 200
 
 
 class GrepTool(AdkCcTool):
     """Regex search across files under a workspace-anchored path.
 
-    Same caveat as GlobFilesTool: walks the host FS directly for now;
-    workspace-root anchoring is the cross-tenant boundary at this level.
+    Routes through the sandbox backend (`backend.exec("grep -rn ...")`)
+    so results reflect the workspace as the sandbox sees it. With
+    NoopBackend this is host execution; with DockerBackend it runs
+    `grep` inside the per-session container against the bind-mounted
+    workspace.
     """
 
     meta = ToolMeta(
@@ -26,23 +33,63 @@ class GrepTool(AdkCcTool):
     description = "Search for a regex pattern across files under path."
 
     async def _execute(self, args: GrepArgs, ctx: ToolContext) -> dict[str, Any]:
-        base = resolve(args.path, ctx)
+        # Validate the regex client-side too — gives a clean error before
+        # we burn a backend call on a bad pattern.
         try:
-            rx = re.compile(args.pattern)
+            re.compile(args.pattern)
         except re.error as e:
             return {"status": "error", "error": f"bad regex: {e}"}
+
+        ws = get_workspace(ctx)
+        backend = get_backend(ctx)
+
+        path = args.path or "."
+        if not path.startswith("/"):
+            path = f"{ws.abs_path.rstrip('/')}/{path}".rstrip("/") or ws.abs_path
+
+        # Use grep -rn -E on the path, filtering by --include for the
+        # glob (basename match — we don't translate the full glob).
+        include_flag = ""
+        if args.glob and args.glob != "**/*":
+            # Take the last component of the glob as a basename pattern.
+            tail = args.glob.split("/")[-1]
+            if tail and tail != "**":
+                include_flag = f"--include={shlex.quote(tail)}"
+
+        cmd = (
+            f"grep -rn -E -I {include_flag} -- {shlex.quote(args.pattern)} "
+            f"{shlex.quote(path)} 2>/dev/null | head -n {_MAX_HITS + 1}"
+        )
+
+        result = await backend.exec(
+            cmd,
+            fs_write=ws.fs_write_config(),
+            network=NetworkConfig(),
+            timeout_s=30,
+            cwd=ws.abs_path,
+        )
+        # grep exit 0 = matches, 1 = no matches, 2 = error.
+        if result.exit_code == 1:
+            return {"status": "ok", "hits": [], "truncated": False}
+        if result.exit_code not in (0, 124):
+            return {
+                "status": "error",
+                "error": f"grep exit {result.exit_code}: {result.stderr.strip()[:300]}",
+            }
+
         hits: list[dict] = []
-        for p in base.glob(args.glob):
-            if not p.is_file():
+        for line in result.stdout.splitlines():
+            if not line:
+                continue
+            # Format: "<file>:<line>:<text>"
+            parts = line.split(":", 2)
+            if len(parts) < 3:
                 continue
             try:
-                for i, line in enumerate(
-                    p.read_text(encoding="utf-8").splitlines(), 1
-                ):
-                    if rx.search(line):
-                        hits.append({"file": str(p), "line": i, "text": line[:300]})
-                        if len(hits) >= 200:
-                            return {"status": "ok", "hits": hits, "truncated": True}
-            except (UnicodeDecodeError, OSError):
+                lineno = int(parts[1])
+            except ValueError:
                 continue
-        return {"status": "ok", "hits": hits, "truncated": False}
+            hits.append({"file": parts[0], "line": lineno, "text": parts[2][:300]})
+
+        truncated = len(hits) > _MAX_HITS
+        return {"status": "ok", "hits": hits[:_MAX_HITS], "truncated": truncated}

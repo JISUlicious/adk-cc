@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..config import (
     ExecResult,
@@ -21,9 +22,15 @@ from ..config import (
 )
 from .base import SandboxBackend
 
+if TYPE_CHECKING:
+    from ..workspace import WorkspaceRoot
+
 
 class NoopBackend(SandboxBackend):
     name = "noop"
+
+    async def ensure_workspace(self, ws: "WorkspaceRoot") -> None:
+        Path(ws.abs_path).mkdir(parents=True, exist_ok=True)
 
     async def exec(
         self,

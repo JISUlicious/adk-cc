@@ -183,6 +183,96 @@ The coordinator's prompt instructs it to:
 
 There is **no code-level parser** for the verdict. The contract is a prompt rule pair: the verifier produces the line, the coordinator acts on it. The architectural choice mirrors Claude Code's upstream pattern (see [03-prompts.md](./03-prompts.md) for the lineage).
 
+## 5.5. Sandbox layer (Stage C — DockerBackend lands here)
+
+The sandbox layer (`adk_cc/sandbox/`) is the security boundary.
+`SandboxBackend` is an abstract contract with five operations:
+`exec`, `read_text`, `write_text`, `ensure_workspace`, `close`.
+All host-touching tools (`run_bash`, `read_file`, `write_file`,
+`edit_file`, `glob_files`, `grep`, `write_plan`, `read_current_plan`)
+route through this contract — they never touch host FS / subprocess
+directly.
+
+**Implementations:**
+
+- **`NoopBackend`** — host execution; honors path / network configs
+  via Python checks. Dev-only; not a security boundary.
+- **`DockerBackend`** — connects to a (typically remote) Docker
+  daemon and runs each session in its own container. Real isolation
+  via Linux namespaces + cgroups + read-only rootfs + bind-mounted
+  workspace + dropped capabilities. **Workspaces live on the sandbox
+  host's filesystem**, not the agent pod's; the agent never opens
+  workspace files via Python `Path`.
+- **`E2BBackend`** — stub. Hosted Firecracker microVMs. Future.
+- (future) `KubernetesBackend`, `ModalBackend`, `NsjailBackend`
+  remain pluggable through the same ABC.
+
+**Topology for production deployments:**
+
+```
+┌───────────────────────────┐         ┌─────────────────────────────┐
+│  K8s cluster              │         │  Sandbox host (Linux VM)    │
+│                           │         │                             │
+│  ┌────────────────────┐   │ Docker  │  • Docker daemon            │
+│  │ adk-cc agent pod   │───┼─TCP API─┤    (port 2375 plain or      │
+│  │  - DockerBackend   │   │         │     2376 mTLS)              │
+│  │    (remote client) │   │         │  • adk-cc-sandbox image     │
+│  └────────────────────┘   │         │  • per-session containers   │
+│                           │         │  • workspaces on local NVMe │
+└───────────────────────────┘         │    /var/lib/adk-cc/wks/...  │
+                                      └─────────────────────────────┘
+```
+
+**Connection modes** (picked by env vars at backend init):
+
+| Mode | When | `ADK_CC_DOCKER_HOST` | TLS env vars |
+|---|---|---|---|
+| Unix socket | Agent + Docker on same host | `unix:///var/run/docker.sock` | unset |
+| Plain TCP | Trusted internal network, single tenant | `tcp://host:2375` | unset |
+| mTLS TCP | Untrusted segment, corporate policy | `tcp://host:2376` | all three set |
+
+**Per-session container** (one per ADK session, lazy-spawn on first
+tool call, torn down on session end):
+
+```python
+client.containers.run(
+    image="adk-cc-sandbox:latest",        # configurable via ADK_CC_SANDBOX_IMAGE
+    name=f"adk-cc-{session_id}",
+    network_mode="none",                  # default deny
+    mem_limit="4g",
+    cpu_quota=100_000,                    # 1 CPU
+    pids_limit=256,
+    read_only=True,                       # rootfs immutable
+    tmpfs={"/tmp": "size=1g,mode=1777"},
+    volumes={ws.abs_path: {"bind": "/workspace", "mode": "rw"}},
+    user="1000:1000",
+    cap_drop=["ALL"],
+    security_opt=["no-new-privileges"],
+)
+```
+
+**Path translation.** Tools pass sandbox-host paths
+(`<ws.abs_path>/foo`); the backend strips the workspace prefix and
+prepends `/workspace`. The agent never sees the sandbox host's
+filesystem otherwise — the backend is the only seam.
+
+**Lifecycle.** `TenancyPlugin.before_tool_callback` calls
+`backend.ensure_workspace(ws)` on first tool of a session; for
+`DockerBackend` this runs a one-shot helper container to `mkdir -p`
+the workspace dir on the sandbox VM. `TenancyPlugin.after_run_callback`
+calls `backend.close()` on session end, which stops + removes the
+per-session container.
+
+### Hardware sizing (sandbox VM, single host)
+
+For 100 users × tabular workloads (50K rows × ~1K cols, pandas /
+numpy / sklearn): 16 physical cores, 96 GB RAM, 1 TB NVMe SSD.
+~10 concurrent sessions × 4 GB sandbox = 40 GB peak. Linux host
+running only the Docker daemon and adk-cc workload — no other tenants.
+
+Scale past ~500 users by adding sandbox VMs and routing sessions via
+consistent hashing on `session_id`.
+
 ## 6. Local model wiring
 
 ADK's `LiteLlm` wrapper (`google.adk.models.lite_llm.LiteLlm`) forwards kwargs to LiteLLM's completion API. The `MODEL` is constructed once and shared across all four agents:

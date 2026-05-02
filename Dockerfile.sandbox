@@ -1,0 +1,37 @@
+# adk-cc per-session sandbox image.
+#
+# Built once on the sandbox host:
+#   docker build -t adk-cc-sandbox:latest -f Dockerfile.sandbox .
+#
+# Operators can swap a custom image via ADK_CC_SANDBOX_IMAGE.
+
+FROM python:3.12-slim
+
+# Common shell + search tools the agent reaches for. ripgrep / fd are
+# fast alternatives the model often prefers; build-essential lets pip
+# compile any C extensions if a notebook installs something extra.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        bash coreutils findutils grep sed gawk \
+        git curl ripgrep fd-find \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Data-analysis stack covering the typical 50K rows × ~1K columns
+# pandas / numpy / sklearn workloads, plus polars + duckdb for the
+# faster columnar paths.
+RUN pip install --no-cache-dir \
+        pandas numpy scipy scikit-learn \
+        matplotlib seaborn \
+        polars pyarrow duckdb \
+        requests httpx
+
+# Unprivileged runtime user (matches the user= setting in the spawn
+# config so workspace writes get the right ownership).
+RUN useradd -u 1000 -m -s /bin/bash sandbox
+
+WORKDIR /workspace
+USER 1000:1000
+
+# The container is started with `command=["sleep", "infinity"]` from
+# DockerBackend; this CMD is just the default if started by hand.
+CMD ["sleep", "infinity"]

@@ -103,10 +103,39 @@ class TenancyPlugin(BasePlugin):
 
                 session = getattr(tool_context, "session", None)
                 session_id = getattr(session, "id", None) or "local"
-                set_workspace(tool_context, tenant.workspace(session_id))
-                set_backend(tool_context, self._backend_factory(tenant))
+                ws = tenant.workspace(session_id)
+                backend = self._backend_factory(tenant)
+                set_workspace(tool_context, ws)
+                set_backend(tool_context, backend)
+
+                # Best-effort workspace creation. Backends with no remote
+                # surface (Noop) mkdir locally; DockerBackend creates the
+                # dir on the sandbox VM via a one-shot helper container.
+                try:
+                    await backend.ensure_workspace(ws)
+                except Exception:
+                    pass
         except Exception:
             # Never crash the tool chain; missing tenancy degrades to
             # the default workspace + backend.
             pass
         return None
+
+    async def after_run_callback(
+        self,
+        *,
+        invocation_context,  # noqa: ANN001 — typed by ADK
+    ) -> None:
+        """Tear down per-session backend state when the run ends.
+
+        Best-effort; failures are swallowed so a stuck cleanup doesn't
+        block the next session.
+        """
+        try:
+            session = getattr(invocation_context, "session", None)
+            state = getattr(session, "state", None) or {}
+            backend = state.get("sandbox_backend")
+            if backend is not None:
+                await backend.close()
+        except Exception:
+            pass
