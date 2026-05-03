@@ -46,7 +46,8 @@ Planning is **not** a sub-agent. The coordinator handles planning itself by ente
 
 ## Out of scope (deferred or pluggable, not implemented)
 
-- A custom CLI or web UI (uses `adk web` / `adk run` for dev; FastAPI factory for prod).
+- A custom CLI or web UI (uses `adk web` / `adk run` for dev; `uvicorn ... make_app --factory` for prod).
 - E2B / Kubernetes / Modal / nsjail sandbox backends (the `SandboxBackend` ABC is the seam; only `NoopBackend` and `DockerBackend` are implemented today, plus a stub for `E2BBackend`).
 - Per-host outbound network filtering inside `run_bash` (today: all-or-nothing; per-domain filtering needs a sidecar proxy).
 - A real `transfer_to_agent` handler for the synthetic `_handback_to_coordinator` call (it's a control signal only — see [02-architecture.md §3.2](./02-architecture.md#32-same-turn-after_agent_callback)).
+- Production-readiness gaps tracked in [05-production-deployment.md](./05-production-deployment.md) — health endpoint, Prometheus metrics, Helm chart, container reaper, LLM cost ceiling, storage quotas, tenant lifecycle, CI / regression suite. Operators close the ones their threat model and SLO require.

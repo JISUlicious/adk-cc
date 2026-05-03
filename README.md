@@ -81,21 +81,18 @@ See [`.env.example`](./.env.example) for the full configuration surface (sandbox
 `adk web .` is fine for dev. For multi-tenant deployment, use the FastAPI factory in `adk_cc.service`:
 
 ```bash
-export ADK_CC_AGENTS_DIR=/path/to/parent/of/adk_cc
-export ADK_CC_SESSION_DSN=postgresql://user:pass@host/db
-export ADK_CC_PERMISSIONS_YAML=/etc/adk-cc/permissions.yaml
-export ADK_CC_PERMISSION_MODE=default     # plan|acceptEdits|bypassPermissions|dontAsk
-export ADK_CC_QUOTA_PER_MINUTE=120
-export ADK_CC_SANDBOX_BACKEND=docker      # see docs/04-deployment-sandbox.md
-export ADK_CC_AUTH_TOKENS="tok=user:tenant"  # dev only; replace with real JWT validator
-export ADK_CC_API_KEY=...                  # for the model server
-
 uvicorn adk_cc.service.server:make_app --factory --host 0.0.0.0 --port 8000
 ```
 
-The factory wires the full plugin chain (`[Audit, Tenancy, Permission, Quota, PlanModeReminder, TaskReminder, ToolCallValidator]`), the configured session backend, and an auth middleware. See [`docs/02-architecture.md`](./docs/02-architecture.md) for the topology and [`docs/04-deployment-sandbox.md`](./docs/04-deployment-sandbox.md) for the sandbox host setup.
+`make_app` reads everything from env (see [`.env.example`](./.env.example)) and wires the full plugin chain — `[Audit, Tenancy, Permission, Quota, PlanModeReminder, TaskReminder, ToolCallValidator]` — plus an auth middleware. It **fails closed on auth**: refuses to start unless one of `ADK_CC_JWT_JWKS_URL` (production), `ADK_CC_AUTH_TOKENS` (dev), or `ADK_CC_ALLOW_NO_AUTH=1` (explicit dev escape) is set.
 
-`make_app()` **fails closed on auth**: if neither `ADK_CC_AUTH_TOKENS` (the dev `BearerTokenExtractor`) nor `ADK_CC_ALLOW_NO_AUTH=1` (explicit dev escape) is set, it refuses to start. Real production deployments should implement an `AuthExtractor` and call `build_fastapi_app(auth_extractor=...)` from a custom factory rather than going through `make_app()`.
+For tenant self-serve over HTTP (credential / MCP / skill upload), `make_app` does NOT mount admin routes by default. Operators write a thin wrapper factory that calls `mount_tenant_admin(...)` — see [`docs/05-production-deployment.md`](./docs/05-production-deployment.md) §7.
+
+Operators with bespoke auth (mTLS, session DB, OAuth introspection) implement the `AuthExtractor` protocol and call `build_fastapi_app(auth_extractor=...)` from a custom factory rather than going through `make_app`.
+
+**Status: alpha.** Functional and exercised end-to-end (`tests/e2e_features.py`) but has known operational gaps. See [`docs/05-production-deployment.md`](./docs/05-production-deployment.md) for the deployment runbook and the readiness checklist (security, reliability, observability, ops, multi-tenancy, config validation, tests/CI). Close the ✗ items appropriate to your threat model and SLO before serving real users.
+
+Topology and component roles in [`docs/02-architecture.md`](./docs/02-architecture.md). Sandbox VM provisioning in [`docs/04-deployment-sandbox.md`](./docs/04-deployment-sandbox.md).
 
 ## Plan mode
 
