@@ -23,6 +23,10 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
     │   ├── bash/{tool,prompt}.py
     │   ├── web_fetch.py         # preapproved-hosts URL fetcher (Stage E)
     │   ├── ask_user_question.py # long-running multi-choice HITL (Stage E)
+    │   ├── enter_plan_mode.py   # flips permission_mode to "plan"
+    │   ├── exit_plan_mode.py    # gated on user approval; flips back to default
+    │   ├── write_plan.py        # persist plan as Markdown artifact
+    │   ├── read_current_plan.py # read latest plan from session state
     │   ├── mcp.py               # make_mcp_toolset() factory (Stage E)
     │   ├── skills.py            # SkillToolset auto-loader (Stage E)
     │   └── task/                # 4 task tools (Stage F — tracking only)
@@ -42,8 +46,8 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
     │   └── backends/
     │       ├── base.py          # SandboxBackend ABC
     │       ├── noop_backend.py  # host execution (dev only); async via asyncio.subprocess
-    │       ├── docker_backend.py # stub for self-host
-    │       └── e2b_backend.py   # stub for hosted production
+    │       ├── docker_backend.py # remote-Docker per-session containers (Stage C)
+    │       └── e2b_backend.py   # stub for hosted Firecracker microVMs (future)
     ├── tasks/                   # task tracking (Stage F — pure tracking, no execution)
     │   ├── model.py             # Task, TaskStatus (3 statuses), blocks/blocked_by
     │   ├── storage.py           # TaskStorage ABC + InMemoryTaskStorage + JsonFileTaskStorage
@@ -51,9 +55,10 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
     ├── plugins/                 # ADK BasePlugin integrations
     │   ├── permissions.py       # PermissionPlugin (Stage B)
     │   ├── audit.py             # AuditPlugin (Stage D) — JSONL or callable sink
-    │   ├── plan_mode.py         # PlanModeReminderPlugin
+    │   ├── plan_mode.py         # PlanModeReminderPlugin — dynamic tool filter + planning instruction
     │   ├── task_reminder.py     # TaskReminderPlugin — periodic task-list system reminder
-    │   └── quotas.py            # QuotaPlugin (Stage G) — per-tenant rate cap
+    │   ├── quotas.py            # QuotaPlugin (Stage G) — per-tenant rate cap
+    │   └── tool_call_validator.py # converts "tool not found" into corrective tool responses
     ├── service/                 # web-service deployment (Stage G)
     │   ├── tenancy.py           # TenantContext + TenancyPlugin (state seeder)
     │   ├── auth.py              # AuthExtractor protocol + BearerTokenExtractor
@@ -70,14 +75,17 @@ ADK's `adk web` / `adk run` looks for an immediate child directory of the AGENTS
 
 ```
 coordinator (LlmAgent, root)
-│   tools: read_file, glob_files, grep, write_file, edit_file, run_bash
+│   tools: read/write/exec + task tools + plan-mode tools
+│          + ask_user_question + web_fetch + read_current_plan + write_plan
+│          + (auto-loaded) skills, MCP toolsets
 └── sub_agents:
-    ├── Explore         (LlmAgent, read-only)  tools: read_file, glob_files, grep
-    ├── Plan            (LlmAgent, read-only)  tools: read_file, glob_files, grep
-    └── verification    (LlmAgent, /tmp-only)  tools: read_file, glob_files, grep, run_bash
+    ├── Explore         (LlmAgent, read-only)  tools: read_file, glob_files, grep, web_fetch
+    └── verification    (LlmAgent, /tmp-only)  tools: read_file, glob_files, grep, run_bash, web_fetch, read_current_plan
 ```
 
-Hub-and-spoke. The coordinator is the only agent that talks to the user; specialists are leaves. Each specialist has:
+Hub-and-spoke. The coordinator is the only agent that talks to the user; specialists are leaves. Planning is **not** a specialist — when the coordinator calls `enter_plan_mode`, the `PlanModeReminderPlugin` dynamically filters write/exec/task tools out of the LLM's tool surface and injects a planning instruction. The coordinator becomes a planning agent in-place; no transfer ceremony. See [§3.5](#35-plan-mode-as-coordinator-posture).
+
+Each specialist has:
 
 - `disallow_transfer_to_parent=True`
 - `disallow_transfer_to_peers=True`
@@ -149,16 +157,32 @@ The synthetic call name (`_handback_to_coordinator`) has no handler. It's a cont
 - Without §3.1 (cross-turn), the next user message could land on a specialist if the specialist was the last non-user event author and was transferable.
 - Without §3.2 (same-turn), the specialist's text-only final message would be shown to the user as the visible reply for the current turn, with the coordinator never getting a chance to synthesize.
 
+## 3.5 Plan mode as coordinator posture
+
+Plan mode is a session-wide flag (`state["permission_mode"] == "plan"`) flipped by `enter_plan_mode` and back by `exit_plan_mode` (the latter gated on user approval via `ToolMeta.requires_user_approval=True`).
+
+While the flag is set, `PlanModeReminderPlugin.before_model_callback` does two things on every coordinator LLM call:
+
+1. **Tool surface filtering.** Removes `write_file`, `edit_file`, `run_bash`, `task_create`, `task_update`, `enter_plan_mode` from BOTH `llm_request.tools_dict` AND each `tool_obj.function_declarations`. (Both surfaces feed the model, so filtering only one leaks the tool.) `exit_plan_mode` is filtered out when NOT in plan mode (nothing to exit).
+2. **Instruction injection.** Appends a planning `<system-reminder>` to `llm_request.config.system_instruction`: 4-step process (understand / explore / design / detail), required `write_plan` output format, and the `exit_plan_mode` approval contract.
+
+The coordinator's tool list itself is unchanged — `agent.py` registers the same 16 tools regardless of mode. The plugin is the only mechanism that narrows what the LLM sees per-turn. This means:
+
+- No agent rewiring per session, no separate "planning agent" instance.
+- The model can't call what it can't see.
+- If the model hallucinates a hidden tool name anyway, `ToolCallValidatorPlugin` catches the resulting "tool not found" error (see §7) and returns a corrective tool response — the loop continues, the model self-corrects.
+
+History note: an earlier design routed planning through a `Plan` sub-agent invoked via `transfer_to_agent`. That mechanism overlapped with `enter_plan_mode` (both produced "plan, then act with user approval"); the redundancy caused the model to do both. The unification collapses planning into a single posture.
+
 ## 4. Tool denylist via tool surface
 
 There is no plugin or hook that says "the verifier cannot edit files." Each agent's `LlmAgent.tools=[...]` simply lists the functions it has access to:
 
 | Agent | `tools=[...]` |
 |---|---|
-| coordinator | `read_file, glob_files, grep, write_file, edit_file, run_bash` |
-| Explore | `read_file, glob_files, grep` |
-| Plan | `read_file, glob_files, grep` |
-| verification | `read_file, glob_files, grep, run_bash` |
+| coordinator | full surface — read tools, `write_file`, `edit_file`, `run_bash`, task tools, plan-mode tools (`enter_plan_mode`, `exit_plan_mode`, `write_plan`, `read_current_plan`), `ask_user_question`, `web_fetch`, plus auto-loaded skills/MCP. `PlanModeReminderPlugin` narrows this dynamically when `permission_mode == "plan"`. |
+| Explore | `read_file, glob_files, grep, web_fetch` |
+| verification | `read_file, glob_files, grep, run_bash, web_fetch, read_current_plan` |
 
 `AgentTool` is **not** in any `tools` list. Combined with `disallow_transfer_to_peers=True`, this means specialists cannot delegate or recurse.
 
@@ -275,7 +299,7 @@ consistent hashing on `session_id`.
 
 ## 6. Local model wiring
 
-ADK's `LiteLlm` wrapper (`google.adk.models.lite_llm.LiteLlm`) forwards kwargs to LiteLLM's completion API. The `MODEL` is constructed once and shared across all four agents:
+ADK's `LiteLlm` wrapper (`google.adk.models.lite_llm.LiteLlm`) forwards kwargs to LiteLLM's completion API. The `MODEL` is constructed once and shared across all three agents (coordinator, Explore, verification):
 
 ```python
 MODEL = LiteLlm(
@@ -326,15 +350,25 @@ when both:
 When triggered, reads the active task list from disk and appends a
 `<system-reminder>` block to `llm_request.config.system_instruction`.
 Reminder text mirrors upstream verbatim with tool names rewritten to
-`task_create`/`task_update`. Skips read-only specialists. Last firing
-tracked in `state["task_reminder_last_invocation_id"]` so the cooldown
-counter can locate it on subsequent turns.
+`task_create`/`task_update`. Skips read-only specialists AND skips when
+`permission_mode == "plan"` (task tools are filtered out there, so
+reminding about them would just waste context). Last firing tracked in
+`state["task_reminder_last_invocation_id"]` so the cooldown counter can
+locate it on subsequent turns.
 
 The plugin is registered in both `agent.py`'s `App.plugins` and
 `service/server.py:build_plugins()`. Final production order:
-`[Audit, Tenancy, Permission, Quota, PlanModeReminder, TaskReminder]`.
+`[Audit, Tenancy, Permission, Quota, PlanModeReminder, TaskReminder, ToolCallValidator]`.
 
-## 7. What ADK does for us
+## 7. Tool-call validator (runtime safety net)
+
+ADK's tool-dispatch flow (`google/adk/flows/llm_flows/functions.py:489-504`) raises `ValueError` when a function_call names a tool not in the agent's `tools_dict`. That error is offered to plugins via `on_tool_error_callback`; if no plugin intervenes, ADK re-raises and the run aborts.
+
+`ToolCallValidatorPlugin` intervenes for that specific error: it returns a structured `function_response` listing the bad tool name, the args that were attempted, the actually-available tools, and a `<system-reminder>` hint. The hint distinguishes "tool absent from this agent" from "tool filtered by plan-mode policy" — in the latter case it points the model to `exit_plan_mode` rather than a futile transfer.
+
+The motivating failure: prompt drift causes the model to call a tool the agent doesn't have (e.g. `run_bash` from `Explore`, or `write_file` while in plan mode). Without the plugin the run aborts with a stack trace; with the plugin the model receives a corrective tool result and self-corrects on the next iteration. The plugin is registered in both `agent.py`'s `App.plugins` and `service/server.py:build_plugins()`.
+
+## 8. What ADK does for us
 
 We rely on ADK 1.31.1 for:
 
