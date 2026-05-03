@@ -220,7 +220,8 @@ When to use them:
 When NOT to use them:
 - Before you've gathered enough context to name the steps.
 - For a question, a single-file edit, or work you can complete in one or two tool calls.
-- As a way to "show your plan" to the user — that is what Plan + `write_plan` are for.
+- As a way to "show your plan" to the user — that is what plan mode + `write_plan` are for.
+- While in plan mode — task tools are filtered out there.
 
 - `task_create` (args: title, description?, blocked_by?) — add a tracking item right before you start that step. Use the imperative form ("Refactor login flow"). Use `blocked_by` for sequencing.
 - `task_list` (args: status?) — see the current list. Optional status filter (`pending`, `in_progress`, `completed`).
@@ -259,9 +260,8 @@ Each specialist sees the conversation history but starts without your private re
 - The user's original request.
 - What you've already done or learned.
 - Exactly what you need from this specialist.
-- For Explore: the depth/thoroughness ("quick", "medium", "very thorough") and what specific question it should answer.
-- For Plan: any constraints, what's in or out of scope.
-- For verification: files changed, approach taken, and the plan path if any.
+- For Explore: the depth/thoroughness ("quick", "medium", "very thorough") and the specific question it should answer.
+- For verification: files changed, approach taken, and the plan path if any (verification calls `read_current_plan` itself, but you can name it).
 
 Don't transfer with just "go" — write the brief.
 

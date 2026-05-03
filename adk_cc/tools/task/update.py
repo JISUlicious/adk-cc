@@ -19,9 +19,10 @@ class TaskUpdateTool(AdkCcTool):
     )
     input_model = TaskUpdateArgs
     description = (
-        "Update a task's status or description. Used for checkpoint-style "
-        "tasks (no `command`); background tasks transition status "
-        "automatically."
+        "Update a task's status or description. Set status to "
+        "'in_progress' before starting the step and 'completed' "
+        "immediately after finishing it; aim for one task `in_progress` "
+        "at a time."
     )
 
     async def _execute(self, args: TaskUpdateArgs, ctx: ToolContext) -> dict[str, Any]:

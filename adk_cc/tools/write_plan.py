@@ -1,9 +1,10 @@
-"""Persist the Plan sub-agent's plan as an artifact.
+"""Persist a plan as an artifact under the workspace.
 
-Mirrors upstream Claude Code's plan-file pattern (`utils/plans.ts`):
-the plan lives on disk, its path is recorded in session state, and
-other agents (coordinator, verification, future iterations of Plan
-itself) discover it via state.
+Called by the coordinator while in plan mode (and available outside
+plan mode too). Mirrors upstream Claude Code's plan-file pattern
+(`utils/plans.ts`): the plan lives on disk, its path is recorded in
+session state, and verification reads it back via `read_current_plan`
+to use as success criteria.
 
 Filenames are time-ordered + slug-named so multiple plans across a
 session don't overwrite each other:

@@ -29,7 +29,12 @@ class GlobFilesTool(AdkCcTool):
         is_concurrency_safe=True,
     )
     input_model = GlobFilesArgs
-    description = "Find files matching a glob pattern under root."
+    description = (
+        "Find files matching a glob pattern under `root`. Supports basename "
+        "patterns ('*.py'), recursive patterns ('**/*.py'), and prefixed "
+        "patterns ('src/**/*.ts'). Returns up to 200 matches; sets "
+        "`truncated=true` when more exist."
+    )
 
     async def _execute(self, args: GlobFilesArgs, ctx: ToolContext) -> dict[str, Any]:
         ws = get_workspace(ctx)

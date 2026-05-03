@@ -30,7 +30,12 @@ class GrepTool(AdkCcTool):
         is_concurrency_safe=True,
     )
     input_model = GrepArgs
-    description = "Search for a regex pattern across files under path."
+    description = (
+        "Search for an extended regex (POSIX ERE) across files under "
+        "`path`. Returns up to 200 hits as `{file, line, text}`; sets "
+        "`truncated=true` when more exist. Optional `glob` filters by "
+        "basename (e.g. '**/*.py' restricts to `.py` files)."
+    )
 
     async def _execute(self, args: GrepArgs, ctx: ToolContext) -> dict[str, Any]:
         # Validate the regex client-side too — gives a clean error before

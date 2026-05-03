@@ -51,18 +51,29 @@ class ToolCallValidatorPlugin(BasePlugin):
         available = self._extract_available(message)
         agent_name = self._current_agent_name(tool_context)
 
-        hint = (
-            f"<system-reminder>\n"
+        # The tool may be genuinely missing from this agent OR filtered
+        # out by a runtime policy (e.g. plan mode hides write tools).
+        # The model can't tell the difference from the error alone, so
+        # the hint covers both cases without prescribing the wrong fix.
+        in_plan_mode = self._in_plan_mode(tool_context)
+        hint_lines = [
+            "<system-reminder>",
             f"You called `{tool.name}`, which is NOT available in "
-            f"{f'agent `{agent_name}`' if agent_name else 'this agent'}. "
-            f"Available tools here: {', '.join(available) or '(none)'}.\n\n"
-            f"Decide:\n"
-            f"  - If one of the available tools fits, retry with that.\n"
-            f"  - If you need a tool that lives on a different agent, "
-            f"`transfer_to_agent(agent_name=...)` to that agent.\n"
-            f"  - Do NOT retry `{tool.name}` here — it will fail again.\n"
-            f"</system-reminder>"
-        )
+            f"{f'agent `{agent_name}`' if agent_name else 'this agent'}"
+            f"{' (currently in plan mode)' if in_plan_mode else ''}.",
+            f"Available tools here: {', '.join(available) or '(none)'}.",
+            "",
+            "Pick an available tool that fits. Do NOT retry "
+            f"`{tool.name}` — it will fail again.",
+        ]
+        if in_plan_mode:
+            hint_lines.append(
+                "If your goal requires a write/exec tool that's hidden in "
+                "plan mode, finish the plan with `write_plan` and call "
+                "`exit_plan_mode` to request approval."
+            )
+        hint_lines.append("</system-reminder>")
+        hint = "\n".join(hint_lines)
         return {
             "status": "tool_unavailable",
             "tool_name": tool.name,
@@ -87,3 +98,10 @@ class ToolCallValidatorPlugin(BasePlugin):
             return tool_context._invocation_context.agent.name
         except Exception:
             return None
+
+    @staticmethod
+    def _in_plan_mode(tool_context: ToolContext) -> bool:
+        try:
+            return tool_context.state.get("permission_mode") == "plan"
+        except Exception:
+            return False

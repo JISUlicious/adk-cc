@@ -19,7 +19,7 @@ class TaskListTool(AdkCcTool):
     input_model = TaskListArgs
     description = (
         "List tasks for the current session. Optional `status` filter "
-        "(pending|in_progress|completed|failed|stopped)."
+        "(pending|in_progress|completed)."
     )
 
     async def _execute(self, args: TaskListArgs, ctx: ToolContext) -> dict[str, Any]:

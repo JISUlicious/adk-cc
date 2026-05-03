@@ -4,9 +4,11 @@ Companion to `write_plan`. Looks up `state["current_plan_path"]` for the
 latest plan and `state["plan_history"]` for the full session history,
 then reads and returns the latest plan's contents. Useful for:
 
-  - Coordinator picking up where Plan sub-agent left off
-  - Verification reading the success criteria the plan committed to
-  - A second invocation of Plan refining the previous plan
+  - The coordinator resuming work against a plan it wrote earlier in
+    the session (e.g. across plan-mode → execute transitions).
+  - Verification reading the success criteria the plan committed to.
+  - The coordinator refining an existing plan thread on re-entry to
+    plan mode.
 
 Returns `status: no_plan` when nothing has been written yet. The
 `history` field is always present (empty list when no plans exist).
@@ -68,7 +70,8 @@ class ReadCurrentPlanTool(AdkCcTool):
                 "history": history_summary,
                 "warning": (
                     f"current_plan_path was set to {path!r} but the file no "
-                    "longer exists; ask Plan to write a fresh plan."
+                    "longer exists; enter plan mode and call `write_plan` "
+                    "to produce a fresh one."
                 ),
             }
 

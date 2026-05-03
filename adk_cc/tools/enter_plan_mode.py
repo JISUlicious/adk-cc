@@ -42,11 +42,12 @@ class EnterPlanModeTool(AdkCcTool):
     )
     input_model = EnterPlanModeArgs
     description = (
-        "Switch the session into plan mode. While in plan mode, write "
-        "and execute tools are blocked; only read tools and the Plan / "
-        "Explore sub-agents remain available. Use when the next steps "
-        "need careful design before any change is made. The user will "
-        "approve the plan via `exit_plan_mode` when you're ready to act."
+        "Switch the session into plan mode. Your tool surface narrows to "
+        "read tools plus `write_plan`, `read_current_plan`, "
+        "`ask_user_question`, the `Explore` sub-agent, and `exit_plan_mode`. "
+        "Write/exec tools are filtered out. Use when the work needs a "
+        "written plan with user approval before any change is made; the "
+        "user approves via `exit_plan_mode` when you're ready to act."
     )
 
     async def _execute(
@@ -61,9 +62,8 @@ class EnterPlanModeTool(AdkCcTool):
                 "status": "noop",
                 "current_mode": "plan",
                 "message": (
-                    "Already in plan mode. Use the Plan sub-agent or "
-                    "write_plan / read_current_plan; call exit_plan_mode "
-                    "when ready to execute."
+                    "Already in plan mode. Use `write_plan` to persist the "
+                    "plan and `exit_plan_mode` when ready to execute."
                 ),
             }
         try:

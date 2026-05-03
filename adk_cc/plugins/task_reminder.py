@@ -15,8 +15,9 @@ and appends a `<system-reminder>` block to
 `llm_request.config.system_instruction`. The reminder text mirrors
 upstream verbatim, with tool names rewritten to adk-cc snake_case.
 
-Skipped for read-only specialists (Plan, Explore, verification) since
-they don't manage tasks.
+Skipped for read-only specialists (Explore, verification) since they
+don't manage tasks. Also skipped while the coordinator is in plan
+mode — task tools are filtered out there.
 
 Last-reminder tracking: stores the firing invocation_id in
 `tool_context.state["task_reminder_last_invocation_id"]`. The next
@@ -38,7 +39,7 @@ from google.genai import types
 
 from ..tasks import TaskStatus, get_runner
 
-_SPECIALIST_AGENTS = frozenset({"Plan", "Explore", "verification"})
+_SPECIALIST_AGENTS = frozenset({"Explore", "verification"})
 
 _TASK_TOOL_NAMES = {"task_create", "task_update"}
 
@@ -175,6 +176,13 @@ class TaskReminderPlugin(BasePlugin):
         agent_name = getattr(callback_context, "agent_name", None)
         if agent_name in _SPECIALIST_AGENTS:
             return None
+        # Task tools are filtered out in plan mode; reminding the model
+        # about tools it can't see just wastes context.
+        try:
+            if callback_context.state.get("permission_mode") == "plan":
+                return None
+        except Exception:
+            pass
 
         events = list(getattr(callback_context.session, "events", []) or [])
 

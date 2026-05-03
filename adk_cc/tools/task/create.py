@@ -18,10 +18,11 @@ class TaskCreateTool(AdkCcTool):
     )
     input_model = TaskCreateArgs
     description = (
-        "Create a tracking task with status 'pending'. Use to track a "
-        "step in a multi-step plan; transition the status with task_update "
-        "as you work. Tasks persist as JSON files under the workspace and "
-        "survive across the coordinator's turns."
+        "Add a tracking checkpoint for a concrete next step you are about "
+        "to start. Tasks are a progress checklist (no execution semantics) "
+        "and persist across turns within the session. Use only after "
+        "GATHER (and PLAN, when needed) have produced concrete, "
+        "sequenceable steps — never as a substitute for planning."
     )
 
     async def _execute(

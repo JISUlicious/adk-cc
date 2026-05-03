@@ -17,7 +17,7 @@ class TaskGetTool(AdkCcTool):
         is_concurrency_safe=True,
     )
     input_model = TaskGetArgs
-    description = "Look up a task by id. Use to poll a background task's status and output."
+    description = "Look up a single task by id. Returns title, status, description, and timestamps."
 
     async def _execute(self, args: TaskGetArgs, ctx: ToolContext) -> dict[str, Any]:
         runner = get_runner()

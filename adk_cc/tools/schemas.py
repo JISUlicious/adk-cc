@@ -22,9 +22,12 @@ class GlobFilesArgs(BaseModel):
 
 
 class GrepArgs(BaseModel):
-    pattern: str = Field(description="Python regex.")
-    path: str = Field(default=".", description="Root directory to search.")
-    glob: str = Field(default="**/*", description="File glob to filter, e.g. '**/*.py'.")
+    pattern: str = Field(description="Extended regex (POSIX ERE; same flavor as `grep -E`).")
+    path: str = Field(default=".", description="Root directory to search, anchored under the workspace.")
+    glob: str = Field(
+        default="**/*",
+        description="File glob to filter (basename match — e.g. '**/*.py' filters by '*.py').",
+    )
 
 
 class WriteFileArgs(BaseModel):
@@ -94,7 +97,7 @@ class TaskCreateArgs(BaseModel):
 
 
 class TaskGetArgs(BaseModel):
-    task_id: str = Field(description="The task ID returned by task.create.")
+    task_id: str = Field(description="The task ID returned by `task_create`.")
 
 
 class TaskListArgs(BaseModel):
