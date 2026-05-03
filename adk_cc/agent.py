@@ -2,7 +2,9 @@
 
 Mirrors Claude Code's pattern from src/tools/AgentTool/built-in/:
   - One coordinator (the "main agent") owns user I/O.
-  - Three specialists (Explore, Plan, verification) wired as `sub_agents`.
+  - Two specialists (Explore, verification) wired as `sub_agents`.
+    Planning is NOT a sub-agent — it's a posture the coordinator takes
+    when `permission_mode == "plan"` (see plugins/plan_mode.py).
     Delegation is an LLM-driven `transfer_to_agent` call — and because
     sub-agents share the parent's invocation context, all their tool
     calls and responses stream into the parent event log (visible in
@@ -57,6 +59,7 @@ from .plugins import (
     PermissionPlugin,
     PlanModeReminderPlugin,
     TaskReminderPlugin,
+    ToolCallValidatorPlugin,
 )
 from .tools import (
     AskUserQuestionTool,
@@ -155,21 +158,6 @@ explore_agent = LlmAgent(
     after_agent_callback=_force_coordinator_continuation,
 )
 
-plan_agent = LlmAgent(
-    name="Plan",
-    model=MODEL,
-    description=(
-        "Read-only software architect. Explores the codebase and returns a "
-        "step-by-step implementation plan plus a list of critical files. "
-        "Use when designing the approach for a non-trivial change."
-    ),
-    instruction=prompts.PLAN_INSTRUCTION,
-    tools=[_read_file, _glob_files, _grep, _web_fetch, _write_plan, _read_current_plan],
-    disallow_transfer_to_parent=True,
-    disallow_transfer_to_peers=True,
-    after_agent_callback=_force_coordinator_continuation,
-)
-
 verify_agent = LlmAgent(
     name="verification",
     model=MODEL,
@@ -205,6 +193,7 @@ _coordinator_tools: list = [
     _task_update,
     _exit_plan_mode,
     _enter_plan_mode,
+    _write_plan,
     _read_current_plan,
 ]
 if _skills is not None:
@@ -216,7 +205,7 @@ root_agent = LlmAgent(
     description="Coordinator agent: handles user requests with a gather → act → verify loop.",
     instruction=prompts.COORDINATOR_INSTRUCTION,
     tools=_coordinator_tools,
-    sub_agents=[explore_agent, plan_agent, verify_agent],
+    sub_agents=[explore_agent, verify_agent],
 )
 
 
@@ -248,5 +237,9 @@ app = App(
         # the before_tool chain — order relative to others doesn't matter.
         PlanModeReminderPlugin(),
         TaskReminderPlugin(),
+        # Catches "tool not found" errors from ADK's tool dispatch and
+        # turns them into corrective tool responses so the model can
+        # self-correct on the next iteration instead of aborting the run.
+        ToolCallValidatorPlugin(),
     ],
 )
