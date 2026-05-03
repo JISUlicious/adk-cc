@@ -140,22 +140,39 @@ def make_app():
       ADK_CC_AUDIT_LOG         (optional)
       ADK_CC_QUOTA_PER_MINUTE  (optional)
       ADK_CC_WORKSPACE_ROOT    (optional)
-      ADK_CC_AUTH_TOKENS       (optional, see auth.BearerTokenExtractor)
+      ADK_CC_JWT_JWKS_URL      (optional; selects JwtAuthExtractor)
+      ADK_CC_JWT_ISSUER        (optional, used with JWKS_URL)
+      ADK_CC_JWT_AUDIENCE      (optional, used with JWKS_URL)
+      ADK_CC_JWT_USER_CLAIM    (optional, default "sub")
+      ADK_CC_JWT_TENANT_CLAIM  (optional, default "tenant")
+      ADK_CC_AUTH_TOKENS       (optional fallback, see auth.BearerTokenExtractor)
       ADK_CC_ALLOW_NO_AUTH     (optional dev escape — see below)
 
-    Fails closed on auth: if `ADK_CC_AUTH_TOKENS` is unset and
-    `ADK_CC_ALLOW_NO_AUTH=1` is also unset, the factory refuses to start.
-    Forgetting to wire auth in production was easy to do silently — this
-    forces a deliberate choice. Operators with a real JWT validator should
-    use `build_fastapi_app(auth_extractor=...)` directly and bypass this
-    factory entirely.
+    Auth extractor selection (first match wins):
+      1. ADK_CC_JWT_JWKS_URL set → JwtAuthExtractor (production).
+      2. ADK_CC_AUTH_TOKENS set → BearerTokenExtractor (dev).
+      3. Otherwise fail-closed unless ADK_CC_ALLOW_NO_AUTH=1.
+
+    Operators with bespoke auth (session DB, mTLS, custom IdP integration)
+    should implement an `AuthExtractor` and call `build_fastapi_app(
+    auth_extractor=...)` from their own factory rather than `make_app`.
     """
     agents_dir = os.environ.get("ADK_CC_AGENTS_DIR")
     if not agents_dir:
         raise RuntimeError("ADK_CC_AGENTS_DIR must be set for make_app()")
 
     extractor = None
-    if os.environ.get("ADK_CC_AUTH_TOKENS"):
+    if os.environ.get("ADK_CC_JWT_JWKS_URL"):
+        from .auth import JwtAuthExtractor
+
+        extractor = JwtAuthExtractor(
+            jwks_url=os.environ["ADK_CC_JWT_JWKS_URL"],
+            issuer=os.environ.get("ADK_CC_JWT_ISSUER"),
+            audience=os.environ.get("ADK_CC_JWT_AUDIENCE"),
+            user_claim=os.environ.get("ADK_CC_JWT_USER_CLAIM", "sub"),
+            tenant_claim=os.environ.get("ADK_CC_JWT_TENANT_CLAIM", "tenant"),
+        )
+    elif os.environ.get("ADK_CC_AUTH_TOKENS"):
         from .auth import BearerTokenExtractor
 
         extractor = BearerTokenExtractor()
@@ -163,6 +180,8 @@ def make_app():
     if extractor is None and os.environ.get("ADK_CC_ALLOW_NO_AUTH") != "1":
         raise RuntimeError(
             "make_app(): no auth extractor configured. Pick one:\n"
+            "  - Set ADK_CC_JWT_JWKS_URL (and optionally ISSUER/AUDIENCE) "
+            "for the production JwtAuthExtractor.\n"
             "  - Set ADK_CC_AUTH_TOKENS=token=user:tenant,... for the "
             "built-in dev BearerTokenExtractor.\n"
             "  - Implement an AuthExtractor and call "
