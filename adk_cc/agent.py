@@ -193,6 +193,34 @@ def _make_tenant_mcp_toolset():
 _tenant_mcp = _make_tenant_mcp_toolset()
 
 
+def _make_tenant_skill_toolset():
+    """Construct the per-tenant skill toolset if env config is present.
+
+    Returns None when this is a single-tenant deployment using the
+    static `make_skill_toolset` factory above. For service deployments
+    set:
+
+        ADK_CC_TENANT_SKILLS_DIR=/var/lib/adk-cc/skills
+
+    Skills land at `<root>/<tenant_id>/<skill_name>/`. Skill scripts run
+    inside the active session's sandbox via `SandboxBackedCodeExecutor`.
+    """
+    skill_root = os.environ.get("ADK_CC_TENANT_SKILLS_DIR")
+    if not skill_root:
+        return None
+
+    from .sandbox.code_executor import SandboxBackedCodeExecutor
+    from .tools.skills_tenant import TenantSkillToolset
+
+    return TenantSkillToolset(
+        skill_root=skill_root,
+        code_executor=SandboxBackedCodeExecutor(),
+    )
+
+
+_tenant_skills = _make_tenant_skill_toolset()
+
+
 # ---------- specialist agents (read-only) ----------
 
 explore_agent = LlmAgent(
@@ -252,6 +280,8 @@ if _skills is not None:
     _coordinator_tools.append(_skills)
 if _tenant_mcp is not None:
     _coordinator_tools.append(_tenant_mcp)
+if _tenant_skills is not None:
+    _coordinator_tools.append(_tenant_skills)
 
 root_agent = LlmAgent(
     name="coordinator",
