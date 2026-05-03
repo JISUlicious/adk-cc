@@ -4,6 +4,24 @@ Runs commands and FS operations directly on the process's host. Honors
 config policy (path / network restrictions) via Python checks so the
 contract is exercised in dev — but it is NOT a security boundary. Any
 multi-tenant deployment must use docker/e2b/etc.
+
+Two safety guards aimed at the dev footgun (a buggy or hostile model
+emitting `rm -rf $HOME`) and the misdeployment footgun (`noop` set as
+the production backend by accident):
+
+  1. **Explicit-ack on prod-shaped paths.** `exec()` refuses to run if
+     `cwd` is outside obviously-safe prefixes (`$HOME`, `/tmp`, OS
+     tempdirs) unless `ADK_CC_NOOP_ACK_HOST_EXEC=1` is set. The
+     workspace path normally lives under `$HOME` for dev, so the
+     normal dev flow doesn't hit this. Production-shaped paths
+     (`/var/lib/...`, `/srv/...`, `/opt/...`) trip the guard, and
+     the operator must explicitly acknowledge — same pattern as
+     `ADK_CC_ALLOW_NO_AUTH` for `make_app`.
+
+  2. **cwd-prefix check.** `cwd` must be the workspace itself or
+     a subdirectory of it. Doesn't stop in-shell `cd /` (that needs
+     OS namespace tricks; if you need that, use DockerBackend), but
+     materially harder to escape by accident.
 """
 
 from __future__ import annotations
@@ -26,6 +44,41 @@ if TYPE_CHECKING:
     from ..workspace import WorkspaceRoot
 
 
+def _is_under(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _safe_prefixes() -> list[Path]:
+    """Paths under which NoopBackend exec is unconditionally allowed."""
+    candidates = [
+        Path(os.path.expanduser("~")),
+        Path("/tmp"),
+        Path("/var/folders"),  # macOS tempdir raw form
+        Path("/private/var/folders"),  # macOS tempdir resolved form
+        Path("/private/tmp"),  # macOS /tmp resolved form
+    ]
+    out: list[Path] = []
+    for c in candidates:
+        try:
+            out.append(c.resolve())
+        except OSError:
+            pass
+    return out
+
+
+def _is_prod_shaped(cwd: str) -> bool:
+    """True if `cwd` looks like a production path needing explicit-ack."""
+    try:
+        p = Path(cwd).resolve()
+    except OSError:
+        return True  # can't resolve → treat as prod-shaped
+    return not any(_is_under(p, prefix) for prefix in _safe_prefixes())
+
+
 class NoopBackend(SandboxBackend):
     name = "noop"
 
@@ -41,6 +94,26 @@ class NoopBackend(SandboxBackend):
         timeout_s: int,
         cwd: str,
     ) -> ExecResult:
+        # Guard 1: explicit-ack on prod-shaped paths.
+        if (
+            _is_prod_shaped(cwd)
+            and os.environ.get("ADK_CC_NOOP_ACK_HOST_EXEC") != "1"
+        ):
+            raise SandboxViolation(
+                f"NoopBackend: refusing to exec in prod-shaped path {cwd!r}. "
+                "Either set ADK_CC_NOOP_ACK_HOST_EXEC=1 to acknowledge "
+                "running commands directly on the host (dev-only), or "
+                "switch to ADK_CC_SANDBOX_BACKEND=docker for real "
+                "per-session isolation."
+            )
+
+        # Guard 2: cwd must exist and be a directory. The agent always
+        # passes cwd=ws.abs_path, so this catches obvious misuse rather
+        # than enforcing an in-shell sandbox.
+        cwd_p = Path(cwd)
+        if not cwd_p.is_dir():
+            raise SandboxViolation(f"NoopBackend: cwd not a directory: {cwd!r}")
+
         proc = await asyncio.create_subprocess_shell(
             cmd,
             cwd=cwd,

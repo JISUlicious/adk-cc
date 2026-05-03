@@ -220,7 +220,11 @@ directly.
 **Implementations:**
 
 - **`NoopBackend`** — host execution; honors path / network configs
-  via Python checks. Dev-only; not a security boundary.
+  via Python checks. Dev-only; not a security boundary. Two safety
+  guards: refuses to exec in production-shaped paths (anything outside
+  `$HOME`, `/tmp`, OS tempdirs) unless `ADK_CC_NOOP_ACK_HOST_EXEC=1`
+  is set; rejects non-existent or non-directory `cwd`. Same explicit-
+  ack pattern as `make_app`'s `ADK_CC_ALLOW_NO_AUTH`.
 - **`DockerBackend`** — connects to a (typically remote) Docker
   daemon and runs each session in its own container. Real isolation
   via Linux namespaces + cgroups + read-only rootfs + bind-mounted
