@@ -141,6 +141,58 @@ _read_current_plan = ReadCurrentPlanTool()
 _skills = make_skill_toolset()  # None unless ADK_CC_SKILLS_DIR / skills/ has content
 
 
+def _make_tenant_mcp_toolset():
+    """Construct the per-tenant MCP toolset if env config is present.
+
+    Returns None when this is a single-tenant deployment without per-tenant
+    MCP wiring (the common dev path); the coordinator's tools list then
+    skips this entry. For service deployments, set:
+
+        ADK_CC_TENANT_REGISTRY_DIR=/var/lib/adk-cc/tenants
+        ADK_CC_CREDENTIAL_PROVIDER=encrypted_file
+        ADK_CC_CREDENTIAL_STORE_DIR=/var/lib/adk-cc/credentials
+        ADK_CC_CREDENTIAL_KEY=<fernet-key>
+    """
+    registry_dir = os.environ.get("ADK_CC_TENANT_REGISTRY_DIR")
+    if not registry_dir:
+        return None
+
+    from .credentials import (
+        EncryptedFileCredentialProvider,
+        InMemoryCredentialProvider,
+    )
+    from .service.registry import JsonFileTenantResourceRegistry
+    from .tools.mcp_tenant import McpServerConfig, TenantMcpToolset
+
+    provider_kind = os.environ.get("ADK_CC_CREDENTIAL_PROVIDER", "memory").lower()
+    if provider_kind == "encrypted_file":
+        store_dir = os.environ.get("ADK_CC_CREDENTIAL_STORE_DIR")
+        if not store_dir:
+            raise RuntimeError(
+                "ADK_CC_CREDENTIAL_PROVIDER=encrypted_file requires "
+                "ADK_CC_CREDENTIAL_STORE_DIR to be set"
+            )
+        creds = EncryptedFileCredentialProvider(root=store_dir)
+    elif provider_kind == "memory":
+        creds = InMemoryCredentialProvider()
+    else:
+        raise RuntimeError(
+            f"unknown ADK_CC_CREDENTIAL_PROVIDER={provider_kind!r}; "
+            "valid: memory, encrypted_file"
+        )
+
+    registry = JsonFileTenantResourceRegistry[McpServerConfig](
+        root=registry_dir,
+        kind="mcp",
+        model=McpServerConfig,
+        id_attr="server_name",
+    )
+    return TenantMcpToolset(registry=registry, credentials=creds)
+
+
+_tenant_mcp = _make_tenant_mcp_toolset()
+
+
 # ---------- specialist agents (read-only) ----------
 
 explore_agent = LlmAgent(
@@ -198,6 +250,8 @@ _coordinator_tools: list = [
 ]
 if _skills is not None:
     _coordinator_tools.append(_skills)
+if _tenant_mcp is not None:
+    _coordinator_tools.append(_tenant_mcp)
 
 root_agent = LlmAgent(
     name="coordinator",
