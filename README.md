@@ -95,6 +95,8 @@ uvicorn adk_cc.service.server:make_app --factory --host 0.0.0.0 --port 8000
 
 The factory wires the full plugin chain (`[Audit, Tenancy, Permission, Quota, PlanModeReminder, TaskReminder, ToolCallValidator]`), the configured session backend, and an auth middleware. See [`docs/02-architecture.md`](./docs/02-architecture.md) for the topology and [`docs/04-deployment-sandbox.md`](./docs/04-deployment-sandbox.md) for the sandbox host setup.
 
+`make_app()` **fails closed on auth**: if neither `ADK_CC_AUTH_TOKENS` (the dev `BearerTokenExtractor`) nor `ADK_CC_ALLOW_NO_AUTH=1` (explicit dev escape) is set, it refuses to start. Real production deployments should implement an `AuthExtractor` and call `build_fastapi_app(auth_extractor=...)` from a custom factory rather than going through `make_app()`.
+
 ## Plan mode
 
 When the work warrants a written plan with user approval before any change is made, the coordinator calls `enter_plan_mode(reason=...)` and the session enters plan mode (`permission_mode = "plan"`). The `PlanModeReminderPlugin` then:

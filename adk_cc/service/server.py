@@ -141,6 +141,14 @@ def make_app():
       ADK_CC_QUOTA_PER_MINUTE  (optional)
       ADK_CC_WORKSPACE_ROOT    (optional)
       ADK_CC_AUTH_TOKENS       (optional, see auth.BearerTokenExtractor)
+      ADK_CC_ALLOW_NO_AUTH     (optional dev escape — see below)
+
+    Fails closed on auth: if `ADK_CC_AUTH_TOKENS` is unset and
+    `ADK_CC_ALLOW_NO_AUTH=1` is also unset, the factory refuses to start.
+    Forgetting to wire auth in production was easy to do silently — this
+    forces a deliberate choice. Operators with a real JWT validator should
+    use `build_fastapi_app(auth_extractor=...)` directly and bypass this
+    factory entirely.
     """
     agents_dir = os.environ.get("ADK_CC_AGENTS_DIR")
     if not agents_dir:
@@ -151,6 +159,17 @@ def make_app():
         from .auth import BearerTokenExtractor
 
         extractor = BearerTokenExtractor()
+
+    if extractor is None and os.environ.get("ADK_CC_ALLOW_NO_AUTH") != "1":
+        raise RuntimeError(
+            "make_app(): no auth extractor configured. Pick one:\n"
+            "  - Set ADK_CC_AUTH_TOKENS=token=user:tenant,... for the "
+            "built-in dev BearerTokenExtractor.\n"
+            "  - Implement an AuthExtractor and call "
+            "build_fastapi_app(auth_extractor=...) from your own factory.\n"
+            "  - For local dev only, set ADK_CC_ALLOW_NO_AUTH=1 to "
+            "acknowledge the no-auth deployment."
+        )
 
     return build_fastapi_app(
         agents_dir=agents_dir,
