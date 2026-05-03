@@ -8,6 +8,7 @@ dependencies = [
     "litellm>=1.50",
     "filelock>=3.13",
     "docker>=7.0",
+    "cryptography>=42.0",
 ]
 
 [tool.setuptools.packages.find]
