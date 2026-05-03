@@ -40,4 +40,3 @@ audit.jsonl
 
 # Project-local scratch / experiments not part of the agent
 /cli_calculator/
-/tests/
