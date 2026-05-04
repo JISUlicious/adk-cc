@@ -75,8 +75,8 @@ class SandboxBackedCodeExecutor(BaseCodeExecutor):
         code_execution_input: CodeExecutionInput,
     ) -> CodeExecutionResult:
         state = invocation_context.session.state
-        backend: Optional[SandboxBackend] = state.get("sandbox_backend")
-        ws: Optional[WorkspaceRoot] = state.get("sandbox_workspace")
+        backend: Optional[SandboxBackend] = state.get("temp:sandbox_backend")
+        ws: Optional[WorkspaceRoot] = state.get("temp:sandbox_workspace")
         if backend is None or ws is None:
             return CodeExecutionResult(
                 stdout="",

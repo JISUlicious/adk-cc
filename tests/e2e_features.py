@@ -207,7 +207,7 @@ def test_block_BD_mcp_admin_and_resolver(client, sign, *, registry, credentials)
 
     ts = TenantMcpToolset(registry=registry, credentials=credentials)
 
-    ctx_a = FakeRoCtx({"tenant_context": FakeTenantCtx("tenantA")})
+    ctx_a = FakeRoCtx({"temp:tenant_context": FakeTenantCtx("tenantA")})
     tools = asyncio.run(ts.get_tools(ctx_a))
     # Bad URL → resolver logs warning, returns empty (one bad server
     # doesn't kill the agent).
@@ -221,7 +221,7 @@ def test_block_BD_mcp_admin_and_resolver(client, sign, *, registry, credentials)
     assert r.status_code == 200
     assert r.json()["servers"] == []
 
-    ctx_b = FakeRoCtx({"tenant_context": FakeTenantCtx("tenantB")})
+    ctx_b = FakeRoCtx({"temp:tenant_context": FakeTenantCtx("tenantB")})
     tools_b = asyncio.run(ts.get_tools(ctx_b))
     assert tools_b == []
     print("  OK per-tenant isolation through both HTTP and resolver")
@@ -293,7 +293,7 @@ Print "hello from skill".
             self.state = state  # ADK's ReadonlyContext flattens session.state here
 
     ts = TenantSkillToolset(skill_root=skill_root)
-    ctx_a = FakeRoCtx({"tenant_context": FakeTenantCtx("tenantA")})
+    ctx_a = FakeRoCtx({"temp:tenant_context": FakeTenantCtx("tenantA")})
     tools = asyncio.run(ts.get_tools(ctx_a))
     assert isinstance(tools, list)
     assert len(tools) >= 1, f"expected at least 1 tool from greeter skill, got {len(tools)}"
@@ -302,7 +302,7 @@ Print "hello from skill".
     print(f"  OK resolver loaded valid skill ({len(tools)} tools: {tool_names})")
 
     # Tenant B has no skills → empty list
-    ctx_b = FakeRoCtx({"tenant_context": FakeTenantCtx("tenantB")})
+    ctx_b = FakeRoCtx({"temp:tenant_context": FakeTenantCtx("tenantB")})
     assert asyncio.run(ts.get_tools(ctx_b)) == []
     print("  OK resolver per-tenant scoped")
 

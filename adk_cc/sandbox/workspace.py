@@ -18,7 +18,10 @@ from google.adk.tools.tool_context import ToolContext
 
 from .config import FsReadConfig, FsWriteConfig
 
-_STATE_KEY = "sandbox_workspace"
+# `temp:` prefix — ADK's session service skips temp-keyed state in
+# state-delta extraction. The WorkspaceRoot dataclass isn't JSON-
+# serializable; persisting it would break ADK's session storage.
+_STATE_KEY = "temp:sandbox_workspace"
 
 
 @dataclass(frozen=True)

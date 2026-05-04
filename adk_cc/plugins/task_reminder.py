@@ -194,7 +194,7 @@ class TaskReminderPlugin(BasePlugin):
         # Pull active tasks for this session. Best-effort — never let a
         # storage hiccup tank the request.
         try:
-            ws = callback_context.state.get("sandbox_workspace") or {}
+            ws = callback_context.state.get("temp:sandbox_workspace") or {}
             tenant_id = ws.get("tenant_id") if isinstance(ws, dict) else "local"
             session_id = ws.get("session_id") if isinstance(ws, dict) else "local"
             runner = get_runner()

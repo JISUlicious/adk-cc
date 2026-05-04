@@ -39,7 +39,11 @@ class TenantContext:
         )
 
 
-_STATE_TENANT_KEY = "tenant_context"
+# `temp:` prefix — ADK's session service skips temp-keyed state in
+# state-delta extraction. TenantContext is a dataclass, not JSON-
+# serializable; persisting risks json.dumps failures and stale-session
+# timestamp skew during HITL flows (e.g. tool-confirmation pause/resume).
+_STATE_TENANT_KEY = "temp:tenant_context"
 
 
 class TenancyPlugin(BasePlugin):
@@ -134,7 +138,7 @@ class TenancyPlugin(BasePlugin):
         try:
             session = getattr(invocation_context, "session", None)
             state = getattr(session, "state", None) or {}
-            backend = state.get("sandbox_backend")
+            backend = state.get("temp:sandbox_backend")
             if backend is not None:
                 await backend.close()
         except Exception:

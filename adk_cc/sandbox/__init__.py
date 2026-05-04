@@ -23,7 +23,12 @@ from .config import (
 )
 from .workspace import WorkspaceRoot, default_workspace, get_workspace, set_workspace
 
-_STATE_KEY = "sandbox_backend"
+# `temp:` prefix tells ADK's session service to skip this key in state-delta
+# extraction (`_session_util.extract_state_delta`). The backend object is a
+# runtime handle (NoopBackend / DockerBackend instance), not JSON-serializable;
+# putting it in persisted state risks `json.dumps` failures and stale-session
+# version skew when ADK's storage timestamp diverges from the in-memory ref.
+_STATE_KEY = "temp:sandbox_backend"
 
 
 def make_default_backend() -> SandboxBackend:

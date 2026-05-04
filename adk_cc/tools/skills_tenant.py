@@ -68,7 +68,7 @@ class TenantSkillToolset(BaseToolset):
             return []
         try:
             state = readonly_context.session.state
-            tenant = state.get("tenant_context")
+            tenant = state.get("temp:tenant_context")
             tenant_id = (
                 tenant.tenant_id
                 if tenant is not None and hasattr(tenant, "tenant_id")
