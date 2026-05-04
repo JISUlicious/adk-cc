@@ -58,7 +58,8 @@ adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at
     │   ├── plan_mode.py         # PlanModeReminderPlugin — dynamic tool filter + planning instruction
     │   ├── task_reminder.py     # TaskReminderPlugin — periodic task-list system reminder
     │   ├── quotas.py            # QuotaPlugin (Stage G) — per-tenant rate cap
-    │   └── tool_call_validator.py # converts "tool not found" into corrective tool responses
+    │   ├── tool_call_validator.py # converts "tool not found" into corrective tool responses
+    │   └── context_guard.py     # pre-flight WARN/REJECT for context-length overflow
     ├── service/                 # web-service deployment (Stage G)
     │   ├── tenancy.py           # TenantContext + TenancyPlugin (state seeder)
     │   ├── auth.py              # AuthExtractor protocol + BearerTokenExtractor
@@ -371,6 +372,23 @@ ADK's tool-dispatch flow (`google/adk/flows/llm_flows/functions.py:489-504`) rai
 `ToolCallValidatorPlugin` intervenes for that specific error: it returns a structured `function_response` listing the bad tool name, the args that were attempted, the actually-available tools, and a `<system-reminder>` hint. The hint distinguishes "tool absent from this agent" from "tool filtered by plan-mode policy" — in the latter case it points the model to `exit_plan_mode` rather than a futile transfer.
 
 The motivating failure: prompt drift causes the model to call a tool the agent doesn't have (e.g. `run_bash` from `Explore`, or `write_file` while in plan mode). Without the plugin the run aborts with a stack trace; with the plugin the model receives a corrective tool result and self-corrects on the next iteration. The plugin is registered in both `agent.py`'s `App.plugins` and `service/server.py:build_plugins()`.
+
+## 7.5. Context-length guardrail
+
+Two layers protect against the LLM context window filling up.
+
+**Primary defense — ADK's `EventsCompactionConfig`** (`google/adk/apps/compaction.py`). adk-cc's `agent.py` constructs it from env (`ADK_CC_COMPACTION_TOKEN_THRESHOLD` + `ADK_CC_COMPACTION_EVENT_RETENTION` for token-threshold mode; `ADK_CC_COMPACTION_INTERVAL` + `ADK_CC_COMPACTION_OVERLAP` for sliding-window) and passes it to `App(events_compaction_config=...)`. ADK's runner triggers compaction post-invocation; `LlmEventSummarizer` handles the LLM call, with safe split logic that preserves function-call/response pairing and avoids compacting pending calls.
+
+A dedicated compaction model is supported via `ADK_CC_COMPACTION_MODEL` (+ optional `_API_BASE`/`_API_KEY` for a fully separate provider). When unset, ADK auto-defaults to the agent's main model.
+
+**Safety net — `ContextGuardPlugin`** (`adk_cc/plugins/context_guard.py`). ADK's compaction is reactive — it runs after a successful invocation. A single turn that jumps from below threshold to over the model's window in one step (e.g. one large tool result) would 500 against the model server before compaction can react. The plugin's `before_model_callback` counts tokens (via `litellm.token_counter`, with chars/4 fallback) and:
+
+- **WARN** at `ADK_CC_CONTEXT_WARN_TOKENS` (default 75% of `ADK_CC_MAX_CONTEXT_TOKENS`): structured log line for observability.
+- **REJECT** at `ADK_CC_CONTEXT_REJECT_TOKENS` (default 95%): returns an early `LlmResponse` with a friendly "context near full" message instead of letting the model call fail.
+
+The plugin is always attached. When `ADK_CC_MAX_CONTEXT_TOKENS` is unset, it no-ops — keeps the plugin chain uniform across deployments.
+
+The plugin doesn't trim, doesn't summarize, doesn't call an LLM. ADK's compaction owns content-preserving recovery. The plugin only fail-soft.
 
 ## 8. What ADK does for us
 

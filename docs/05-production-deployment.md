@@ -116,6 +116,12 @@ ADK_CC_TENANT_SKILLS_DIR=/var/lib/adk-cc/skills
 # Tasks / audit
 ADK_CC_TASKS_DIR=/var/lib/adk-cc/tasks
 ADK_CC_AUDIT_LOG=/var/log/adk-cc/audit.jsonl
+
+# Context guardrail (recommended for production)
+ADK_CC_MAX_CONTEXT_TOKENS=100000          # main model's window
+ADK_CC_COMPACTION_TOKEN_THRESHOLD=70000   # ADK compacts past this
+ADK_CC_COMPACTION_EVENT_RETENTION=10      # keep last N raw events
+# ADK_CC_COMPACTION_MODEL=openai/gpt-4o-mini   # optional cheaper compaction model
 ```
 
 Mount `/var/lib/adk-cc/{tasks,credentials,tenants,skills}` and `/var/log/adk-cc/` from a persistent volume; pod restarts otherwise lose state.
@@ -236,6 +242,7 @@ Mark each before serving real users. ✓ = covered by adk-cc; ⚠️ = partial /
 - ✗ **Idle-timeout watchdog.** `DockerBackend` only cleans up on `after_run_callback`. A model that produces long pauses keeps a container hot. Add a watchdog if cost matters.
 - ✗ **Session timeout.** ADK sessions don't expire by default. Operators wanting hard caps wire it via the session service or a janitor.
 - ✗ **LLM retry / circuit-breaker.** LiteLLM has internal retries; no surfaced policy for transient errors above that. A flaky model server can spike user-facing 500s.
+- ✓ **Context-length guardrail.** ADK's `EventsCompactionConfig` runs post-invocation token-threshold compaction via `LlmEventSummarizer` (set `ADK_CC_COMPACTION_TOKEN_THRESHOLD` + `ADK_CC_COMPACTION_EVENT_RETENTION`; optional dedicated compaction model via `ADK_CC_COMPACTION_MODEL`). adk-cc adds `ContextGuardPlugin` for pre-flight WARN logging and fail-soft REJECT (`ADK_CC_MAX_CONTEXT_TOKENS`, `ADK_CC_CONTEXT_WARN_TOKENS`, `ADK_CC_CONTEXT_REJECT_TOKENS`) to catch the rare turn that jumps past the window in one step before ADK can compact. See `02-architecture.md` §7.5.
 
 ### Observability
 

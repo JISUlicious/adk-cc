@@ -56,6 +56,7 @@ from . import prompts
 from .permissions import PermissionMode, SettingsHierarchy
 from .plugins import (
     AuditPlugin,
+    ContextGuardPlugin,
     PermissionPlugin,
     PlanModeReminderPlugin,
     TaskReminderPlugin,
@@ -293,6 +294,70 @@ root_agent = LlmAgent(
 )
 
 
+# ---------- ADK events compaction (primary context-length defense) ----------
+# When configured via env, ADK runs token-threshold or sliding-window
+# compaction post-invocation via LlmEventSummarizer. The thin
+# ContextGuardPlugin below adds pre-flight WARN logging and fail-soft
+# REJECT for the case where a single turn jumps past the window before
+# ADK can react. See plan-mode plan + docs/05-production-deployment.md.
+
+
+def _make_compaction_summarizer():
+    """Construct a custom LlmEventSummarizer if a dedicated compaction model
+    is configured. Returns None to let ADK auto-default to the agent's model."""
+    model_id = os.environ.get("ADK_CC_COMPACTION_MODEL")
+    if not model_id:
+        return None
+    try:
+        from google.adk.apps.llm_event_summarizer import LlmEventSummarizer
+    except ImportError:
+        return None
+    api_base = os.environ.get(
+        "ADK_CC_COMPACTION_API_BASE", os.environ.get("ADK_CC_API_BASE")
+    )
+    api_key = os.environ.get(
+        "ADK_CC_COMPACTION_API_KEY", os.environ.get("ADK_CC_API_KEY", "")
+    )
+    compact_llm = LiteLlm(model=model_id, api_base=api_base, api_key=api_key)
+    return LlmEventSummarizer(llm=compact_llm)
+
+
+def _make_compaction_config():
+    """Construct EventsCompactionConfig from env. Returns None if disabled."""
+    threshold = os.environ.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD")
+    retention = os.environ.get("ADK_CC_COMPACTION_EVENT_RETENTION")
+    interval = os.environ.get("ADK_CC_COMPACTION_INTERVAL")
+    overlap = os.environ.get("ADK_CC_COMPACTION_OVERLAP")
+    if not (threshold or interval):
+        return None  # compaction disabled
+    if bool(threshold) != bool(retention):
+        raise RuntimeError(
+            "ADK_CC_COMPACTION_TOKEN_THRESHOLD and ADK_CC_COMPACTION_EVENT_RETENTION "
+            "must be set together (ADK's EventsCompactionConfig validator requires both or neither)."
+        )
+    try:
+        from google.adk.apps.app import EventsCompactionConfig
+    except ImportError:
+        # ADK's compaction is @experimental; tolerate import breakage.
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "ADK EventsCompactionConfig unavailable; skipping compaction wiring."
+        )
+        return None
+    return EventsCompactionConfig(
+        token_threshold=int(threshold) if threshold else None,
+        event_retention_size=int(retention) if retention else None,
+        # Required fields even when only token-threshold is wanted.
+        compaction_interval=int(interval) if interval else 10,
+        overlap_size=int(overlap) if overlap else 2,
+        summarizer=_make_compaction_summarizer(),
+    )
+
+
+_compaction_config = _make_compaction_config()
+
+
 # ---------- App with permission plugin ----------
 # `adk web` / `adk run` look for `app` first, then `root_agent`. Exposing
 # both keeps direct-test imports of `root_agent` working while letting the
@@ -307,7 +372,7 @@ PERMISSION_MODE = PermissionMode(
 )
 SETTINGS = SettingsHierarchy.empty()  # rules added by operators / Stage G loader
 
-app = App(
+_app_kwargs = dict(
     name="adk_cc",
     root_agent=root_agent,
     # Order matters. Audit goes first so before_tool_callback records every
@@ -325,5 +390,13 @@ app = App(
         # turns them into corrective tool responses so the model can
         # self-correct on the next iteration instead of aborting the run.
         ToolCallValidatorPlugin(),
+        # Pre-flight context-length guardrail: WARN at 75% of MAX,
+        # REJECT at 95%. ADK's EventsCompactionConfig (set above) is
+        # the primary defense; this is the fail-soft safety net.
+        ContextGuardPlugin(),
     ],
 )
+if _compaction_config is not None:
+    _app_kwargs["events_compaction_config"] = _compaction_config
+
+app = App(**_app_kwargs)

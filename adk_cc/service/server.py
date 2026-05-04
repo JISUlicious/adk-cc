@@ -29,10 +29,12 @@ from typing import Optional
 from ..permissions import PermissionMode, SettingsHierarchy
 from ..plugins import (
     AuditPlugin,
+    ContextGuardPlugin,
     PermissionPlugin,
     PlanModeReminderPlugin,
     QuotaPlugin,
     TaskReminderPlugin,
+    ToolCallValidatorPlugin,
 )
 from .tenancy import TenancyPlugin
 
@@ -65,6 +67,12 @@ def build_plugins(
         # before_tool chain rather than inside it.
         PlanModeReminderPlugin(),
         TaskReminderPlugin(),
+        # "Tool not found" recovery — see plugins/tool_call_validator.py.
+        ToolCallValidatorPlugin(),
+        # Context-length guardrail (pre-flight WARN/REJECT). ADK's
+        # EventsCompactionConfig (wired via build_app below) is the
+        # primary defense; this is the safety net.
+        ContextGuardPlugin(),
     ]
 
 
