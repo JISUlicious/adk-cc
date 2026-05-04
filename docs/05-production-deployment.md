@@ -301,6 +301,24 @@ Mark each before serving real users. ✓ = covered by adk-cc; ⚠️ = partial /
 | `TenantMcpToolset: skipping server '<name>' for tenant '<id>'` | MCP server unreachable / misconfigured. Check the tenant's registered URL + credential. |
 | `503 jwks fetch failed` | IdP JWKS endpoint unreachable. Check egress. |
 
+### Incident: stale-session error during HITL confirmation
+
+Symptom: `ValueError: The last_update_time provided in the session object is earlier than the update_time in storage` from `sqlite_session_service.py:386`. Typically fires after several turns, especially across a tool-confirmation pause/resume (e.g. `enter_plan_mode` / `exit_plan_mode` / a `run_bash` confirmed via the permission engine).
+
+Root cause is upstream: ADK's pause/resume cycle bumps SQLite's `update_time` through code paths that don't refresh the SSE generator's in-memory session reference. We mitigated the contribution from our state writes by prefixing runtime handles (`sandbox_backend`, `sandbox_workspace`, `tenant_context`) with `temp:` so ADK skips them in `extract_state_delta`. The remaining churn comes from ADK's own state mutations during the resume.
+
+**Dev workaround**: bypass SQLite session storage entirely:
+
+```bash
+adk web . --session_service_uri=memory://
+# or
+adk api_server . --session_service_uri=memory://
+```
+
+In-memory sessions have no optimistic-locking → no stale-session race. Cost: sessions vanish on process restart.
+
+**Production**: with `ADK_CC_SESSION_DSN=postgresql://...`, the same race may or may not manifest depending on Postgres isolation level. If you hit it, the safest move is a session-service wrapper that retries `append_event` on `stale-session` ValueErrors after refreshing the session reference. Not shipped today; track as a future hardening item.
+
 ### Incident: orphan sandbox containers
 
 Triggered by an agent pod crash. To clean up on the sandbox VM:
