@@ -137,15 +137,19 @@ class AuditPlugin(BasePlugin):
         tool: BaseTool,
         tool_args: dict[str, Any],
         tool_context: ToolContext,
-        result: dict,
+        result: Any,
     ) -> Optional[dict]:
+        # ADK's after_tool_callback signature types `result` as `dict`, but
+        # in practice tools can return strings (MCP tools, some BaseTool
+        # impls). Defensive: only pull `status` when the result is dict-shaped.
+        result_status = result.get("status") if isinstance(result, dict) else None
         self._emit(
             {
                 "ts": time.time(),
                 "event": "tool_call_result",
                 **self._tool_fields(tool),
                 "tool_args": tool_args,
-                "result_status": (result or {}).get("status"),
+                "result_status": result_status,
                 **self._ctx_fields(tool_context),
             }
         )
