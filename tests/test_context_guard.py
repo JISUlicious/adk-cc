@@ -274,12 +274,22 @@ def test_compaction_dedicated_model():
     os.environ["ADK_CC_COMPACTION_MODEL"] = "openai/cheap-stub"
     _reset_modules()
     from adk_cc.agent import app
-    from google.adk.apps.llm_event_summarizer import LlmEventSummarizer
+    from google.adk.apps.base_events_summarizer import BaseEventsSummarizer
 
     cc = app.events_compaction_config
     assert cc is not None
-    assert isinstance(cc.summarizer, LlmEventSummarizer)
-    assert cc.summarizer._llm.model == "openai/cheap-stub"
+    # Lazy summarizer stores config strings only — never a LiteLlm — so the
+    # surrounding config stays JSON-serializable. Real LlmEventSummarizer
+    # is constructed per-compaction call.
+    assert isinstance(cc.summarizer, BaseEventsSummarizer)
+    assert cc.summarizer.model_id == "openai/cheap-stub"
+    # Critical: the config + app must be JSON-serializable. This was the
+    # bug — a LiteLlm sitting on summarizer._llm leaked LiteLLMClient into
+    # pydantic's dump_json and crashed FastAPI's serialize_response.
+    s = cc.model_dump_json(exclude_none=True)
+    assert "openai/cheap-stub" in s
+    # api_key field excluded from dumps so it doesn't leak into logs / traces.
+    assert "api_key" not in s
     print("OK")
 
 

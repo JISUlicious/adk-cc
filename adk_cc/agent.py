@@ -302,15 +302,55 @@ root_agent = LlmAgent(
 # ADK can react. See plan-mode plan + docs/05-production-deployment.md.
 
 
+def _make_lazy_summarizer_class():
+    """Build the lazy summarizer class with deferred BaseEventsSummarizer import.
+
+    Returns a `BaseEventsSummarizer` + `BaseModel` subclass that stores config
+    strings as pydantic fields only — never a live `LiteLlm` — so the
+    surrounding `EventsCompactionConfig` stays JSON-serializable. ADK's
+    flow / OTel / FastAPI paths walk the InvocationContext (which carries
+    the config); a `LiteLlm` sitting on `summarizer._llm` leaks
+    `LiteLLMClient` into pydantic's `dump_json` step and trips with
+    `PydanticSerializationError: Unable to serialize unknown type`.
+
+    The actual `LlmEventSummarizer` + `LiteLlm` are constructed once per
+    compaction call. One extra ~ms object construction; eliminates the
+    serialization hazard.
+    """
+    from google.adk.apps.base_events_summarizer import BaseEventsSummarizer
+    from pydantic import BaseModel, Field
+    from typing import Optional
+
+    class _LazyAdkCcSummarizer(BaseModel, BaseEventsSummarizer):
+        # Plain string fields so pydantic dump_json works.
+        model_id: str
+        api_base: Optional[str] = None
+        # Exclude api_key from dumps so it doesn't leak into logs / traces
+        # if anything serializes the surrounding config.
+        api_key: Optional[str] = Field(default=None, exclude=True, repr=False)
+        prompt_template: Optional[str] = None
+
+        async def maybe_summarize_events(self, *, events):
+            from google.adk.apps.llm_event_summarizer import LlmEventSummarizer
+
+            llm = LiteLlm(
+                model=self.model_id,
+                api_base=self.api_base,
+                api_key=self.api_key,
+            )
+            inner = LlmEventSummarizer(llm=llm, prompt_template=self.prompt_template)
+            return await inner.maybe_summarize_events(events=events)
+
+    return _LazyAdkCcSummarizer
+
+
 def _make_compaction_summarizer():
-    """Construct a custom LlmEventSummarizer if a dedicated compaction model
-    is configured. Returns None to let ADK auto-default to the agent's model."""
+    """Build an env-driven summarizer when a dedicated compaction model is
+    configured. Returns None to let ADK auto-default to the agent's model
+    (its lazy `_ensure_compaction_summarizer` instantiates LlmEventSummarizer
+    just-in-time, so the default path doesn't trip serialization either)."""
     model_id = os.environ.get("ADK_CC_COMPACTION_MODEL")
     if not model_id:
-        return None
-    try:
-        from google.adk.apps.llm_event_summarizer import LlmEventSummarizer
-    except ImportError:
         return None
     api_base = os.environ.get(
         "ADK_CC_COMPACTION_API_BASE", os.environ.get("ADK_CC_API_BASE")
@@ -318,8 +358,8 @@ def _make_compaction_summarizer():
     api_key = os.environ.get(
         "ADK_CC_COMPACTION_API_KEY", os.environ.get("ADK_CC_API_KEY", "")
     )
-    compact_llm = LiteLlm(model=model_id, api_base=api_base, api_key=api_key)
-    return LlmEventSummarizer(llm=compact_llm)
+    cls = _make_lazy_summarizer_class()
+    return cls(model_id=model_id, api_base=api_base, api_key=api_key)
 
 
 def _make_compaction_config():
