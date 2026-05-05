@@ -49,15 +49,33 @@ class WorkspaceRoot:
 def default_workspace() -> WorkspaceRoot:
     """Workspace used when none is seeded into session state.
 
+    Read order:
+      1. `ADK_CC_WORKSPACE_ROOT` env var — explicit configuration.
+         Resolved against CWD if relative (e.g. `./.workspace`).
+         Created on first use if it doesn't exist.
+      2. CWD — last-resort fallback.
+
     Sufficient for `adk web .` on a developer laptop. In production
-    every tool call must come with a workspace seeded by the tenancy
-    plugin, and this default is a safety net rather than a deployment
-    target.
+    multi-tenant deployments, `TenancyPlugin` seeds a per-tenant
+    workspace into session state; this default isn't reached.
     """
+    raw = os.environ.get("ADK_CC_WORKSPACE_ROOT")
+    if raw:
+        path = os.path.abspath(os.path.expanduser(raw))
+        # Create on first use so the agent's first read/write doesn't
+        # trip on a missing dir. NoopBackend's ensure_workspace would
+        # mkdir later, but we want the path resolved before any tool
+        # call so fs_write_config's allow_paths is correct.
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError:
+            pass
+    else:
+        path = os.path.abspath(os.getcwd())
     return WorkspaceRoot(
         tenant_id="local",
         session_id="local",
-        abs_path=os.path.abspath(os.getcwd()),
+        abs_path=path,
     )
 
 
