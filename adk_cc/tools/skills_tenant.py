@@ -95,4 +95,11 @@ class TenantSkillToolset(BaseToolset):
             code_executor=self._code_executor,
             script_timeout=self._script_timeout,
         )
+        # Apply the lenient load_skill_resource patch so this tenant's
+        # skills get the on-disk fallback for non-canonical layouts.
+        from .skills import _build_skill_dir_index, _patch_load_skill_resource
+
+        _patch_load_skill_resource(
+            inner, _build_skill_dir_index(skills, tenant_dir)
+        )
         return await inner.get_tools_with_prefix(readonly_context)
