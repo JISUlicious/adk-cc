@@ -74,9 +74,27 @@ class PermissionPlugin(BasePlugin):
             }
 
         if decision.behavior == "ask":
-            # Surface a HITL pause when the runtime supports it. Tool calls
-            # without a function_call_id (rare, but possible in some test
-            # contexts) skip this without erroring.
+            # Two-call confirmation pattern (mirrors AdkCcTool.run_async):
+            # the first invocation has tool_confirmation=None and asks;
+            # ADK pauses the flow; user confirms (or denies) via the
+            # frontend; ADK re-invokes the tool with tool_confirmation
+            # populated. THIS callback fires for both calls — without
+            # the check below, the second call would call decide()
+            # again, get "ask" again, and re-prompt the user, looping
+            # forever. Check the confirmation state first.
+            confirmation = getattr(tool_context, "tool_confirmation", None)
+            if confirmation is not None:
+                # ADK has already gathered the user's response.
+                if getattr(confirmation, "confirmed", False):
+                    return None  # let the tool run
+                return {
+                    "status": "permission_denied_by_user",
+                    "reason": "User declined the confirmation prompt.",
+                }
+
+            # First invocation: surface a HITL pause. Tool calls without a
+            # function_call_id (rare; some test contexts) skip without
+            # erroring.
             if tool_context.function_call_id:
                 tool_context.request_confirmation(hint=decision.reason)
                 # CRITICAL: ADK's loop breaks when the last yielded event's
