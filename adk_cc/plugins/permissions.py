@@ -79,6 +79,19 @@ class PermissionPlugin(BasePlugin):
             # contexts) skip this without erroring.
             if tool_context.function_call_id:
                 tool_context.request_confirmation(hint=decision.reason)
+                # CRITICAL: ADK's loop breaks when the last yielded event's
+                # `is_final_response()` is True, which requires either
+                # `actions.skip_summarization` or `long_running_tool_ids` to
+                # be set. Setting `requested_tool_confirmations` alone is NOT
+                # enough — ADK yields a separate request-confirmation event
+                # (which IS final), but then yields the function_response_event
+                # AFTER, and the loop checks the last yielded event. Without
+                # this flag, the runner re-invokes the LLM before the user has
+                # confirmed, the model sees `{"status": "needs_confirmation"}`
+                # as a normal tool result, and decides to call another tool —
+                # cascading confirmations queue up. AdkCcTool.run_async sets
+                # this for the same reason; PermissionPlugin must too.
+                tool_context.actions.skip_summarization = True
             return {
                 "status": "needs_confirmation",
                 "reason": decision.reason,
