@@ -23,7 +23,9 @@ class TaskGetTool(AdkCcTool):
         runner = get_runner()
         ws = get_workspace(ctx)
         try:
-            task = await runner.storage.get(args.task_id, tenant_id=ws.tenant_id)
+            task = await runner.storage.get(
+                args.task_id, tenant_id=ws.tenant_id, workspace_path=ws.abs_path,
+            )
         except TaskNotFound as e:
             return {"status": "not_found", "error": str(e)}
         return {"status": "ok", "task": task.model_dump(mode="json")}

@@ -108,6 +108,12 @@ class DockerBackend(SandboxBackend):
         # Workspace path on the SANDBOX HOST (not the agent pod).
         # Set by ensure_workspace when called via the tenancy plugin.
         self._workspace_abs_path: Optional[str] = workspace_abs_path
+        # Production-only: when ensure_workspace gets a WorkspaceRoot with
+        # a session_scratch_path set, this signals "we're under
+        # TenantContext.workspace() — enable per-user install cache mount."
+        # None / False for the dev path; the cache mount is skipped there
+        # because dev is single-user and ~/.cache lives on the host.
+        self._is_per_user_layout: bool = False
         self._client = client or _build_client()
         self._container: Any = None  # docker.models.containers.Container
         self._lock = asyncio.Lock()
@@ -181,6 +187,28 @@ class DockerBackend(SandboxBackend):
         mem_limit = os.environ.get("ADK_CC_SANDBOX_MEM_LIMIT", "4g")
         cpu_quota = int(os.environ.get("ADK_CC_SANDBOX_CPU_QUOTA", "100000"))
         pids_limit = int(os.environ.get("ADK_CC_SANDBOX_PIDS_LIMIT", "256"))
+
+        volumes = {
+            self._workspace_abs_path: {
+                "bind": CONTAINER_WORKSPACE,
+                "mode": "rw",
+            },
+        }
+        # Per-user install cache (production layout only). Bind-mounts
+        # <user_home>/.cache to /root/.cache so uv/pip caches survive
+        # across the user's sessions. Skipped on dev (single-user, no
+        # benefit) and skippable in production via env if operators
+        # want truly stateless containers.
+        if (
+            self._is_per_user_layout
+            and os.environ.get("ADK_CC_DISABLE_INSTALL_CACHE_MOUNT") != "1"
+        ):
+            cache_dir = os.path.join(self._workspace_abs_path, ".cache")
+            volumes[cache_dir] = {
+                "bind": "/root/.cache",
+                "mode": "rw",
+            }
+
         return self._client.containers.run(
             image=image,
             detach=True,
@@ -192,12 +220,7 @@ class DockerBackend(SandboxBackend):
             pids_limit=pids_limit,
             read_only=True,
             tmpfs={"/tmp": "size=1g,mode=1777"},
-            volumes={
-                self._workspace_abs_path: {
-                    "bind": CONTAINER_WORKSPACE,
-                    "mode": "rw",
-                },
-            },
+            volumes=volumes,
             working_dir=CONTAINER_WORKSPACE,
             user=CONTAINER_USER,
             cap_drop=["ALL"],
@@ -220,6 +243,12 @@ class DockerBackend(SandboxBackend):
         """
         self._workspace_abs_path = ws.abs_path
         self._tenant_id = ws.tenant_id
+        # Track whether we're in the production per-user layout so
+        # _spawn_container can decide whether to bind-mount the install
+        # cache. session_scratch_path is the marker — it's only set by
+        # TenantContext.workspace() (production), never by default_workspace
+        # (dev).
+        self._is_per_user_layout = ws.session_scratch_path is not None
         # If the per-session container is already up, the bind mount
         # already covers this. Nothing to do.
         if self._container is not None:
@@ -233,15 +262,37 @@ class DockerBackend(SandboxBackend):
         if not parent:
             return
         image = os.environ.get("ADK_CC_SANDBOX_IMAGE", "adk-cc-sandbox:latest")
-        cmd = ["mkdir", "-p", ws.abs_path]
+
+        # Build the mkdir target list. In production we also mkdir the
+        # scratch path (so the per-session bind-mount target exists) and
+        # the .cache dir owned by the runtime user (so /root/.cache
+        # writes from inside the container don't permission-fail).
+        targets = [ws.abs_path]
+        if ws.session_scratch_path:
+            targets.append(ws.session_scratch_path)
+        if (
+            self._is_per_user_layout
+            and os.environ.get("ADK_CC_DISABLE_INSTALL_CACHE_MOUNT") != "1"
+        ):
+            targets.append(os.path.join(ws.abs_path, ".cache"))
+
+        # Single shell pipeline: mkdir all + chown the user-scoped paths
+        # to the runtime user so the hardened container's user can write.
+        # The container runs as `0:0` for this helper only — exec lifecycle
+        # is detach=False, remove=True, so it's gone before the next call.
+        chown_target = ws.abs_path
+        shell = (
+            "mkdir -p " + " ".join(shlex.quote(p) for p in targets)
+            + " && chown -R 1000:1000 " + shlex.quote(chown_target)
+        )
         try:
             await asyncio.to_thread(
                 self._client.containers.run,
                 image=image,
-                command=cmd,
+                command=["sh", "-c", shell],
                 remove=True,
                 detach=False,
-                user="0:0",  # root inside the helper container, scoped to mkdir
+                user="0:0",  # root inside the helper, scoped to mkdir+chown
                 volumes={parent: {"bind": parent, "mode": "rw"}},
                 # No network or other privileges needed.
                 network_mode="none",

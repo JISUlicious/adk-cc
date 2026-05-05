@@ -217,6 +217,60 @@ class MyAuthExtractor:
 
 Then build the app yourself via `build_fastapi_app(auth_extractor=...)` and skip `make_app` entirely.
 
+## Workspace storage tiers
+
+Workspaces in production are scoped per `<tenant>/<user>/` under `ADK_CC_WORKSPACE_ROOT`. Three operational tiers based on user count; pick one at deploy time. The path layout (`<root>/<tenant>/<user>/`) is identical across all three — Tier 2 / 3 differ only in where storage physically lives.
+
+### Tier 1 — single sandbox VM (≤ ~500 users)
+
+Local NVMe on the sandbox VM. `<root>` is a directory on the VM (e.g. `/var/lib/adk-cc/wks`). Per-session containers bind-mount `<user_home>` directly off local disk.
+
+- **Disk sizing**: ~5 GB per user × 500 = 2.5 TB. Fits on one NVMe.
+- **Backup**: ZFS / btrfs / LVM snapshot to off-host (`zfs send`, `restic` to S3-compatible). Per-user dir is the natural unit.
+- **Concurrency cap**: ~10 concurrent sessions × 4 GB = 40 GB peak. Past 10, the quota plugin (`ADK_CC_QUOTA_PER_MINUTE`) refuses with a friendly message.
+- **GDPR delete**: `rm -rf <root>/<tenant>/<user>/`.
+- **Tenant offboarding**: `rm -rf <root>/<tenant>/`.
+
+### Tier 2 — multi-VM with shared FS (~500–5K users) — path-compatible, not implemented
+
+NFS / EFS / Azure Files mounted at `<root>` on every sandbox VM. Same `<root>/<tenant>/<user>/` paths. Quotas at the FS level (NFS quotas) for per-tenant disk caps.
+
+- **Tradeoff**: NFS I/O is 3–10× slower than local NVMe. Fine for code edits + plan files; painful for large data ingest. Mitigate by keeping the per-user `.cache/` on local NVMe (rebuilt lazily from the network FS).
+- **Failure mode**: NFS server is a single point of failure. Use a managed service (EFS / Filestore) with replication.
+
+### Tier 3 — VM-affinity sharded (≥ ~5K users) — path-compatible, not implemented
+
+Each sandbox VM owns a slice of users by consistent hash on `user_id`. Workspaces live on the assigned VM's local NVMe. Cross-VM access is a control-plane operation (drain → rsync → swap routing entry). Out of scope for v1.
+
+### Per-user install cache
+
+`DockerBackend` bind-mounts `<user_home>/.cache` to `/root/.cache` inside the per-session container. uv/pip caches survive across the user's sessions, so cold-install latency only hits the first session.
+
+Disable via `ADK_CC_DISABLE_INSTALL_CACHE_MOUNT=1` for truly stateless containers (every session reinstalls everything).
+
+### Session scratch retention
+
+Per-session scratch dirs at `<user_home>/.sessions/<session>/` accumulate. `scripts/scratch_reaper.py` reaps dirs older than `ADK_CC_SESSION_SCRATCH_RETENTION_DAYS` (default 7). Wire as cron / systemd timer:
+
+```bash
+# /etc/cron.daily/adk-cc-scratch-reaper
+0 3 * * * /usr/bin/python3 /opt/adk-cc/scripts/scratch_reaper.py \
+  --root /var/lib/adk-cc/wks --max-age-days 7
+```
+
+User home dirs are never reaped — they're the user's persistent state.
+
+### Migration from pre-per-user layouts
+
+Existing tenant-shared deployments (`<root>/<tenant>/...` with files at the tenant root, no `<user>/` nesting) need a one-time migration per tenant. Two cases:
+
+1. **One-user-per-tenant**: `mv <root>/<tenant>/* <root>/<tenant>/<user>/`. Trivial.
+2. **Tenant-shared files**: pick a strategy — copy to a "shared" user home, copy into every user's home, or archive and start fresh. Operator-decided.
+
+Take a snapshot before migrating; rollback = restore from snapshot.
+
+Tasks dir: `mv ~/.adk-cc/tasks/<tenant>/<session>/*.json <root>/<tenant>/<user>/.adk-cc/tasks/<session>/`. Requires session→user mapping (from Postgres `sessions` table joined on user_id).
+
 ## Production readiness checklist
 
 Mark each before serving real users. ✓ = covered by adk-cc; ⚠️ = partial / has caveats; ✗ = operator must add.

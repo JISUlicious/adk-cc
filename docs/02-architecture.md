@@ -390,6 +390,42 @@ The plugin is always attached. When `ADK_CC_MAX_CONTEXT_TOKENS` is unset, it no-
 
 The plugin doesn't trim, doesn't summarize, doesn't call an LLM. ADK's compaction owns content-preserving recovery. The plugin only fail-soft.
 
+## 7.6. Workspace layout (per-user / per-session)
+
+Two shapes exist:
+
+**Dev** (`adk web .`, `default_workspace()`): a single flat directory at `ADK_CC_WORKSPACE_ROOT` (resolved against CWD if relative). `WorkspaceRoot.session_scratch_path = None`. No nesting, no migration story — flat is the dev contract because dev is single-user by definition.
+
+**Production** (via `TenancyPlugin` → `TenantContext.workspace()`):
+
+```
+<ADK_CC_WORKSPACE_ROOT>/
+└── <tenant_id>/
+    └── <user_id>/
+        ├── (user files — persistent across this user's sessions)
+        ├── .adk-cc/
+        │   ├── plans/              ← write_plan output
+        │   └── tasks/<session>/    ← task JSON files
+        ├── .cache/                 ← per-user install cache (bind-mounted into sandbox)
+        └── .sessions/
+            └── <session_id>/       ← per-session scratch, auto-reaped
+```
+
+`WorkspaceRoot.abs_path = <root>/<tenant>/<user>/` (persistent home; default for reads/writes). `WorkspaceRoot.session_scratch_path = <user_home>/.sessions/<session>/` (per-session scratch).
+
+`fs_read_config` / `fs_write_config` allow paths under both roots. `_safe_id` (in `service/tenancy.py`) rejects path-traversal in tenant_id / user_id / session_id before they hit `os.path.join`. The pattern matches `EncryptedFileCredentialProvider._safe_component`.
+
+**Sandbox container** (production): `DockerBackend` bind-mounts `<user_home>` to `/workspace`. The session scratch is automatically visible at `/workspace/.sessions/<session>/` because it's nested under `<user_home>`. A second bind-mount `<user_home>/.cache` → `/root/.cache` enables the per-user install cache (uv / pip caches survive across the user's sessions). Disable via `ADK_CC_DISABLE_INSTALL_CACHE_MOUNT=1`.
+
+**Lifecycle**:
+- User home: persists forever. Wipe per-user via `rm -rf <root>/<tenant>/<user>/`. Tenant offboarding: `rm -rf <root>/<tenant>/`.
+- Session scratch: reaped by `scripts/scratch_reaper.py` after `ADK_CC_SESSION_SCRATCH_RETENTION_DAYS` (default 7).
+- Install cache: persists with user home. Evict via `rm -rf <root>/<tenant>/<user>/.cache`.
+
+**Tasks** are now anchored in the user's workspace (production): `<user_home>/.adk-cc/tasks/<session>/<task>.json`. Dev path keeps the legacy `~/.adk-cc/tasks/<tenant>/<session>/`. `ADK_CC_TASKS_DIR` overrides both paths for operators wanting central task storage.
+
+**Concurrency**: same-user parallel sessions share the user home — file races are possible. Each session has its own scratch. v1's stance: races are the user's problem (same model as `git` on a shared working tree). COW overlay or session locks deferred to v2.
+
 ## 8. What ADK does for us
 
 We rely on ADK 1.31.1 for:

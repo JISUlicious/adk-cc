@@ -1,9 +1,17 @@
 """Per-session workspace root.
 
-In single-tenant dev this is the process CWD. In Stage G's web service
-deployment, it's `/var/lib/adk-cc/wks/{tenant_id}/{session_id}` (or
-whatever the operator chooses) and the tenancy plugin seeds it on
-session creation.
+Two shapes:
+  - **Dev** (`adk web .`, `default_workspace()` fallback): single flat
+    directory. `abs_path = <ADK_CC_WORKSPACE_ROOT>` (resolved against
+    CWD if relative). `session_scratch_path = None`. Behavior unchanged
+    from the pre-multi-tenant baseline. Dev is single-user by definition;
+    isolation has no meaning.
+  - **Production** (via `TenancyPlugin` → `TenantContext.workspace()`):
+    per-user persistent home + per-session scratch.
+    `abs_path = <root>/<tenant>/<user>/` is the user's home (persists
+    across sessions). `session_scratch_path = <user_home>/.sessions/<session>/`
+    is per-session scratch (auto-reaped). Tools default to the home;
+    models can address the scratch dir explicitly for throwaway work.
 
 Tools call `get_workspace(tool_context)` to resolve paths against the
 right root for the current session.
@@ -13,6 +21,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Optional
 
 from google.adk.tools.tool_context import ToolContext
 
@@ -29,6 +38,10 @@ class WorkspaceRoot:
     tenant_id: str
     session_id: str
     abs_path: str
+    # Set by `TenantContext.workspace()` in production to enable
+    # per-session scratch. None for the dev path (`default_workspace()`),
+    # so dev fs configs and bind-mounts behave exactly as before.
+    session_scratch_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Canonicalize so the allow_paths match what Path.resolve() returns
@@ -38,12 +51,25 @@ class WorkspaceRoot:
         canonical = os.path.realpath(self.abs_path)
         if canonical != self.abs_path:
             object.__setattr__(self, "abs_path", canonical)
+        if self.session_scratch_path:
+            scratch_canonical = os.path.realpath(self.session_scratch_path)
+            if scratch_canonical != self.session_scratch_path:
+                object.__setattr__(self, "session_scratch_path", scratch_canonical)
+
+    def _allow_paths(self) -> tuple[str, ...]:
+        paths = (f"{self.abs_path}/**", self.abs_path)
+        if self.session_scratch_path:
+            paths = paths + (
+                f"{self.session_scratch_path}/**",
+                self.session_scratch_path,
+            )
+        return paths
 
     def fs_read_config(self) -> FsReadConfig:
-        return FsReadConfig(allow_paths=(f"{self.abs_path}/**", self.abs_path))
+        return FsReadConfig(allow_paths=self._allow_paths())
 
     def fs_write_config(self) -> FsWriteConfig:
-        return FsWriteConfig(allow_paths=(f"{self.abs_path}/**", self.abs_path))
+        return FsWriteConfig(allow_paths=self._allow_paths())
 
 
 def default_workspace() -> WorkspaceRoot:

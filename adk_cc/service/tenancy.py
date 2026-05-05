@@ -25,17 +25,54 @@ from google.adk.tools.tool_context import ToolContext
 from ..sandbox import SandboxBackend, WorkspaceRoot, make_default_backend
 
 
+def _safe_id(value: str, label: str) -> str:
+    """Reject path-traversal in ids before they hit os.path.join.
+
+    Mirrors the pattern in `EncryptedFileCredentialProvider._safe_component`.
+    Tenant / user / session ids come from auth-validated request state; we
+    still defense-in-depth here because a single mistyped resolver could
+    otherwise let a `..`-laden id escape the workspace root.
+    """
+    safe = "".join(c for c in value if c.isalnum() or c in "-_")
+    if safe != value or not safe:
+        raise ValueError(f"unsafe {label} for filesystem path: {value!r}")
+    return safe
+
+
 @dataclass(frozen=True)
 class TenantContext:
     tenant_id: str
     user_id: str
-    workspace_root_path: str  # absolute filesystem path
+    workspace_root_path: str  # absolute filesystem path — the ROOT under
+                              # which per-tenant / per-user dirs live
 
     def workspace(self, session_id: str) -> WorkspaceRoot:
+        """Build the per-user / per-session WorkspaceRoot.
+
+        Layout:
+            <workspace_root_path>/<tenant>/<user>/                ← home (persistent)
+            <workspace_root_path>/<tenant>/<user>/.sessions/<sid>/ ← scratch (ephemeral)
+
+        Both dirs are created on first access. A janitor (see
+        `scripts/scratch_reaper.py`) reaps old scratch dirs.
+        """
+        safe_tenant = _safe_id(self.tenant_id, "tenant_id")
+        safe_user = _safe_id(self.user_id, "user_id")
+        safe_session = _safe_id(session_id, "session_id")
+
+        user_home = os.path.join(
+            self.workspace_root_path, safe_tenant, safe_user
+        )
+        scratch = os.path.join(user_home, ".sessions", safe_session)
+
+        os.makedirs(user_home, exist_ok=True)
+        os.makedirs(scratch, exist_ok=True)
+
         return WorkspaceRoot(
             tenant_id=self.tenant_id,
             session_id=session_id,
-            abs_path=self.workspace_root_path,
+            abs_path=user_home,
+            session_scratch_path=scratch,
         )
 
 

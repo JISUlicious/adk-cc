@@ -41,6 +41,7 @@ class TaskListTool(AdkCcTool):
             tenant_id=ws.tenant_id,
             session_id=ws.session_id,
             status=status_filter,
+            workspace_path=ws.abs_path,
         )
         return {
             "status": "ok",

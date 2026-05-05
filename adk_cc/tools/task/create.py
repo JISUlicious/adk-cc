@@ -36,6 +36,7 @@ class TaskCreateTool(AdkCcTool):
             tenant_id=ws.tenant_id,
             session_id=ws.session_id,
             blocked_by=args.blocked_by,
+            workspace_path=ws.abs_path,
         )
         return {
             "status": "created",

@@ -30,6 +30,7 @@ class TaskRunner:
         session_id: str = "local",
         blocks: Optional[list[str]] = None,
         blocked_by: Optional[list[str]] = None,
+        workspace_path: Optional[str] = None,
     ) -> Task:
         task = Task(
             id=str(uuid.uuid4()),
@@ -40,7 +41,7 @@ class TaskRunner:
             blocks=list(blocks or []),
             blocked_by=list(blocked_by or []),
         )
-        await self.storage.create(task)
+        await self.storage.create(task, workspace_path=workspace_path)
         return task
 
 

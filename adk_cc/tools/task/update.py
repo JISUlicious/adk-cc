@@ -29,7 +29,9 @@ class TaskUpdateTool(AdkCcTool):
         runner = get_runner()
         ws = get_workspace(ctx)
         try:
-            task = await runner.storage.get(args.task_id, tenant_id=ws.tenant_id)
+            task = await runner.storage.get(
+                args.task_id, tenant_id=ws.tenant_id, workspace_path=ws.abs_path,
+            )
         except TaskNotFound as e:
             return {"status": "not_found", "error": str(e)}
 
@@ -46,5 +48,5 @@ class TaskUpdateTool(AdkCcTool):
             task.description = args.description
 
         task.updated_at = datetime.now(timezone.utc)
-        await runner.storage.update(task)
+        await runner.storage.update(task, workspace_path=ws.abs_path)
         return {"status": "ok", "task": task.model_dump(mode="json")}
