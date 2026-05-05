@@ -307,17 +307,25 @@ Symptom: `ValueError: The last_update_time provided in the session object is ear
 
 Root cause is upstream: ADK's pause/resume cycle bumps SQLite's `update_time` through code paths that don't refresh the SSE generator's in-memory session reference. We mitigated the contribution from our state writes by prefixing runtime handles (`sandbox_backend`, `sandbox_workspace`, `tenant_context`) with `temp:` so ADK skips them in `extract_state_delta`. The remaining churn comes from ADK's own state mutations during the resume.
 
-**Dev workaround**: bypass SQLite session storage entirely:
+**Dev workaround #1 (no persistence)**: bypass SQLite session storage:
 
 ```bash
 adk web . --session_service_uri=memory://
-# or
-adk api_server . --session_service_uri=memory://
 ```
 
-In-memory sessions have no optimistic-locking → no stale-session race. Cost: sessions vanish on process restart.
+In-memory sessions have no optimistic-locking → no stale-session race. Sessions vanish on process restart.
 
-**Production**: with `ADK_CC_SESSION_DSN=postgresql://...`, the same race may or may not manifest depending on Postgres isolation level. If you hit it, the safest move is a session-service wrapper that retries `append_event` on `stale-session` ValueErrors after refreshing the session reference. Not shipped today; track as a future hardening item.
+**Dev / production workaround #2 (retry-on-stale)**: opt into the session-retry wrapper that adk-cc ships in `plugins/session_retry.py`:
+
+```bash
+export ADK_CC_SESSION_RETRY_ON_STALE=1
+```
+
+Patches `SqliteSessionService.append_event` and `DatabaseSessionService.append_event` at module import. On stale-session ValueError it fetches a fresh session, syncs `last_update_time` (and `event_sequence`, post-PR-#4752), retries the append once. Logs every retry at WARNING. Single-retry semantics — if the second attempt also fails, it raises (genuine concurrent-writer conflict the application should surface).
+
+This works for SQLite *and* Postgres. Caveats:
+- A real concurrent writer can still lose its event after the retry — that's by design (only one writer wins).
+- If retries fire frequently, it's a signal of underlying contention that the wrapper is just papering over.
 
 ### Incident: orphan sandbox containers
 
