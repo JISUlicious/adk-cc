@@ -24,11 +24,13 @@ the strict tool returns RESOURCE_NOT_FOUND. The fallback scans the
 real on-disk skill directory by basename, so the model's guess
 resolves to the actual file regardless of which subfolder it picked.
 
-Skill scripts execute under the `code_executor` you pass. For a multi-
-tenant deployment, plug in a code_executor that delegates to the active
-`SandboxBackend`. Until that wiring is in place, scripts run via ADK's
-default executor (host-side); pair with the permission engine if that
-matters for your deployment.
+Skill scripts execute under a `code_executor`. By default this factory
+wires `SandboxBackedCodeExecutor`, which routes script execution through
+the active session's `SandboxBackend` — same isolation as `run_bash`
+(NoopBackend on dev, DockerBackend / SandboxServiceBackend in prod).
+Without this default, ADK's `RunSkillScriptTool` returns
+`NO_CODE_EXECUTOR` and skills with `scripts/` go unused. Pass an
+explicit `code_executor=` to override.
 """
 
 from __future__ import annotations
@@ -263,6 +265,13 @@ def make_skill_toolset(
     skills = discover_skills(base)
     if not skills:
         return None
+    if code_executor is None:
+        # Lazy import keeps `tools/skills.py` importable in tests that
+        # don't need the sandbox layer. The executor reads the active
+        # backend from session state at call time.
+        from ..sandbox.code_executor import SandboxBackedCodeExecutor
+
+        code_executor = SandboxBackedCodeExecutor()
     toolset = SkillToolset(
         skills=skills,
         code_executor=code_executor,
