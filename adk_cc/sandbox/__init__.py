@@ -10,10 +10,17 @@ attached to session state by the runner; tools resolve it via
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from google.adk.tools.tool_context import ToolContext
 
-from .backends import DockerBackend, E2BBackend, NoopBackend, SandboxBackend
+from .backends import (
+    DockerBackend,
+    E2BBackend,
+    NoopBackend,
+    SandboxBackend,
+    SandboxServiceBackend,
+)
 from .config import (
     ExecResult,
     FsReadConfig,
@@ -31,20 +38,40 @@ from .workspace import WorkspaceRoot, default_workspace, get_workspace, set_work
 _STATE_KEY = "temp:sandbox_backend"
 
 
-def make_default_backend() -> SandboxBackend:
+def make_default_backend(
+    *,
+    session_id: str = "local",
+    tenant_id: str = "local",
+    credentials: Any = None,  # Optional[CredentialProvider] — Any to keep the import lazy
+) -> SandboxBackend:
     """Construct the backend named by `ADK_CC_SANDBOX_BACKEND` (default: noop).
 
-    Stub backends (docker, e2b) raise NotImplementedError on use; selecting
-    them without an operator implementation is a deployment misconfig that
-    will surface on the first tool call.
+    `session_id` and `tenant_id` are passed to backends that bind a remote
+    resource per session (DockerBackend's container, SandboxServiceBackend's
+    upstream session). NoopBackend / E2BBackend ignore them.
+
+    `credentials` is passed to `SandboxServiceBackend` for per-tenant token
+    lookup (production multi-tenant). When None and
+    `ADK_CC_SANDBOX_SERVICE_SHARED_TOKEN` is set, the backend uses the
+    static token (dev / single-tenant). Other backends ignore it.
     """
     name = os.environ.get("ADK_CC_SANDBOX_BACKEND", "noop").lower()
     if name == "noop":
         return NoopBackend()
     if name == "docker":
-        return DockerBackend()
+        return DockerBackend(session_id=session_id, tenant_id=tenant_id)
     if name == "e2b":
         return E2BBackend()
+    if name == "sandbox_service":
+        from .backends.sandbox_service_backend import (
+            make_sandbox_service_backend_from_env,
+        )
+
+        return make_sandbox_service_backend_from_env(
+            session_id=session_id,
+            tenant_id=tenant_id,
+            credentials=credentials,
+        )
     raise ValueError(f"unknown sandbox backend: {name!r}")
 
 
@@ -82,6 +109,7 @@ __all__ = [
     "NoopBackend",
     "DockerBackend",
     "E2BBackend",
+    "SandboxServiceBackend",
     "ExecResult",
     "FsReadConfig",
     "FsWriteConfig",

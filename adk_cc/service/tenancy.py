@@ -103,7 +103,9 @@ class TenancyPlugin(BasePlugin):
         tenant_resolver: Optional[
             "callable[[str], TenantContext]"  # noqa: F821 — string for forward ref
         ] = None,
-        backend_factory: Optional["callable[[TenantContext], SandboxBackend]"] = None,  # noqa: F821
+        backend_factory: Optional[
+            "callable[[TenantContext, str], SandboxBackend]"  # noqa: F821
+        ] = None,
         name: str = "adk_cc_tenancy",
     ) -> None:
         super().__init__(name=name)
@@ -113,7 +115,11 @@ class TenancyPlugin(BasePlugin):
             or os.getcwd()
         )
         self._tenant_resolver = tenant_resolver or self._default_resolver
-        self._backend_factory = backend_factory or (lambda _ctx: make_default_backend())
+        self._backend_factory = backend_factory or (
+            lambda ctx, session_id: make_default_backend(
+                session_id=session_id, tenant_id=ctx.tenant_id
+            )
+        )
 
     def _default_resolver(self, user_id: str) -> TenantContext:
         return TenantContext(
@@ -145,7 +151,7 @@ class TenancyPlugin(BasePlugin):
                 session = getattr(tool_context, "session", None)
                 session_id = getattr(session, "id", None) or "local"
                 ws = tenant.workspace(session_id)
-                backend = self._backend_factory(tenant)
+                backend = self._backend_factory(tenant, session_id)
                 set_workspace(tool_context, ws)
                 set_backend(tool_context, backend)
 

@@ -242,6 +242,16 @@ NFS / EFS / Azure Files mounted at `<root>` on every sandbox VM. Same `<root>/<t
 
 Each sandbox VM owns a slice of users by consistent hash on `user_id`. Workspaces live on the assigned VM's local NVMe. Cross-VM access is a control-plane operation (drain → rsync → swap routing entry). Out of scope for v1.
 
+### Tier 4 — service-mediated (any size, sandbox factored out)
+
+`ADK_CC_SANDBOX_BACKEND=sandbox_service` delegates exec / file IO to an external sandbox service ([JISUlicious/sandboxing](https://github.com/JISUlicious/sandboxing) or compatible). Workspaces live on the service's host volumes (`SANDBOX_VOLUME_BASE`, default `/var/lib/sandbox-volumes`), not on the agent host.
+
+- **Persistence ceiling**: `Limits.hard_destroy_ttl_s` (default 86400 — 24h of inactivity) applies. The Tier 1/2 promise of indefinite per-user persistence does **not** hold here; raise `ADK_CC_SANDBOX_SERVICE_HARD_DESTROY_TTL_S` (subject to upstream tenant max) or push long-lived state to an external object store.
+- **Multi-tenancy on the wire**: since upstream PR #10, each adk-cc tenant maps to a distinct service-side tenant with its own scoped token, audit log, and Squid egress allowlist. Operators provision tenants + tokens via the admin API and store the tokens in adk-cc's credential provider; the backend resolves them per-session. Single-tenant deployments can still use `ADK_CC_SANDBOX_SERVICE_SHARED_TOKEN` as a dev/single-tenant escape hatch.
+- **Idempotency**: every mutating request from adk-cc carries an `Idempotency-Key` header (upstream PR #7 follow-up); transient retries don't create duplicate sessions or re-execute commands.
+- **Backup/restore**: snapshot the service's `SANDBOX_VOLUME_BASE` (operator-controlled). Per-user dir naming inside the service depends on adk-cc's `WorkspaceRoot` shape; map to per-adk-cc-user backups via the audit log's session ↔ user mapping.
+- **Operator setup**: see `04-deployment-sandbox.md` §6 and the upstream README's three install paths (A: local dev, B: Compose, C: systemd).
+
 ### Per-user install cache
 
 `DockerBackend` bind-mounts `<user_home>/.cache` to `/root/.cache` inside the per-session container. uv/pip caches survive across the user's sessions, so cold-install latency only hits the first session.

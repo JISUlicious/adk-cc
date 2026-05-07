@@ -188,3 +188,136 @@ containers appear (`docker ps`) and disappear after the session ends
   restart the agent — new sessions get the new limit.
 - **Disk pressure**: Docker overlay can grow. Run
   `docker system df` and `docker system prune --volumes` on a cron.
+
+## 6. Alternative: external sandbox service (`sandbox_service` backend)
+
+For deployments that want to factor sandbox responsibility out of the
+agent process entirely — typical for managed multi-tenant SaaS — adk-cc
+ships a `SandboxServiceBackend` that talks to an external REST sandbox
+service. Today's reference implementation:
+[JISUlicious/sandboxing](https://github.com/JISUlicious/sandboxing).
+
+### When to pick this over `DockerBackend`
+
+- You don't want the agent process holding Docker daemon credentials.
+- You want gVisor isolation + Squid egress allowlist + XFS quotas
+  managed by a dedicated team / image.
+- You're operating at a scale where the agent fleet runs in a different
+  trust boundary from the sandbox host.
+
+### Trade-offs
+
+- **Persistence ceiling**: per-session volumes are wiped after the
+  service's `Limits.hard_destroy_ttl_s` (default 24h of inactivity).
+  `DockerBackend` uses the host-mounted per-user dir, which persists
+  forever. Operators raise the TTL via
+  `ADK_CC_SANDBOX_SERVICE_HARD_DESTROY_TTL_S` (subject to the upstream
+  tenant max), or accept session-bounded persistence and push long-
+  lived state to an object store.
+- **Multi-tenancy** (since upstream PR #10): each adk-cc tenant maps
+  to a distinct service-side tenant with its own scoped token, audit
+  log, and Squid allowlist. Operator wires this via the credential
+  provider (see "Setup" below). For single-tenant / dev deployments,
+  the SHARED_TOKEN env var bypasses the credential provider entirely.
+- **No streaming exec**: the service has SSE at `/exec/stream` and
+  MCP `progress` notifications via `progressToken` (PR #11), but
+  adk-cc's `SandboxBackend.exec` is sync today. The agent waits for
+  full stdout/stderr. Background-process logs side-step this — the
+  upstream service exposes a process API (PRs #8/#9) but adk-cc has
+  not yet surfaced it as a tool surface.
+- **Idempotency**: every mutating request adk-cc sends carries an
+  `Idempotency-Key` header (upstream PR #7 follow-up). Retries after
+  network glitches replay the cached response rather than creating
+  duplicate sessions or re-running exec calls.
+
+### Setup
+
+1. Stand up the sandbox service (one of upstream Path A / B / C — see
+   their `README.md`). Recommended: Path B (Compose, with published
+   images at `ghcr.io/JISUlicious/sandbox-*`).
+
+2. **Single-tenant / dev deployment**: set the shared token:
+
+   ```bash
+   ADK_CC_SANDBOX_BACKEND=sandbox_service
+   ADK_CC_SANDBOX_SERVICE_URL=https://sandbox.internal:8443
+   ADK_CC_SANDBOX_SERVICE_SHARED_TOKEN=<bootstrap bearer>
+
+   # Optional Limits overrides — sent on POST /v1/sessions, subject to
+   # the upstream tenant max.
+   # ADK_CC_SANDBOX_SERVICE_HARD_DESTROY_TTL_S=604800   # 7d
+   # ADK_CC_SANDBOX_SERVICE_WORKSPACE_GIB=4
+   ```
+
+3. **Multi-tenant production deployment**: provision per-tenant
+   scoped tokens via the upstream admin API and store them in adk-cc's
+   credential provider. For each adk-cc tenant `<tid>`:
+
+   ```bash
+   # Create the service-side tenant (admin token required):
+   curl -X POST https://sandbox.internal:8443/v1/tenants \
+       -H "Authorization: Bearer $SANDBOX_ADMIN_TOKEN" \
+       -H "Content-Type: application/json" \
+       -d '{"display_name": "<tid>", "limits": {...}}'
+
+   # Issue a scoped token (only the scopes adk-cc actually uses):
+   curl -X POST "https://sandbox.internal:8443/v1/tenants/<tid>/tokens" \
+       -H "Authorization: Bearer $SANDBOX_ADMIN_TOKEN" \
+       -d '{"scopes": ["session_create","session_destroy","exec",
+                       "file_read","file_write","file_delete"]}'
+   ```
+
+   Store the returned plaintext in adk-cc's credential provider under
+   key `sandbox_service_token` (override via
+   `ADK_CC_SANDBOX_SERVICE_TOKEN_KEY`). With the existing encrypted-
+   file provider:
+
+   ```python
+   # Operator script run after issuing the token:
+   from adk_cc.credentials import EncryptedFileCredentialProvider
+   creds = EncryptedFileCredentialProvider(root="/var/lib/adk-cc/credentials")
+   await creds.put(tenant_id="<tid>", key="sandbox_service_token",
+                   value="<plaintext-token>")
+   ```
+
+   Pass the same provider into `TenancyPlugin`'s `backend_factory` in
+   your `make_app` factory so per-session lookup hits it:
+
+   ```python
+   from adk_cc.sandbox import make_default_backend
+
+   def _backend(tenant, session_id):
+       return make_default_backend(
+           session_id=session_id,
+           tenant_id=tenant.tenant_id,
+           credentials=creds,  # the same provider used for MCP tokens
+       )
+   ```
+
+   Token rotation: call `POST /v1/tenants/<tid>/tokens` for the new
+   token, write it into the credential store, then `DELETE` the old
+   token after the 5-min grace window expires. No agent restart
+   needed because the backend reads the token at session bring-up.
+
+4. Skill scripts (`run_skill_script`) automatically run inside the
+   service via `SandboxBackedCodeExecutor` — no extra wiring.
+
+### Smoke test
+
+```bash
+curl -fsSL -H "Authorization: Bearer $TOKEN" \
+    https://sandbox.internal:8443/healthz
+```
+
+Then drive an agent session; verify a service-side session is created
+(`POST /v1/sessions` audit line) and stopped on session end.
+
+### Note: the service's `/mcp` endpoint
+
+The sandbox service also exposes its surface as MCP tools at `/mcp`
+for direct LLM consumers (Claude Code/Desktop, Cursor). adk-cc does
+NOT use this endpoint — the REST surface is the right shape for a
+programmatic Python consumer. If you also want LLM clients to drive
+the same sandbox directly, point them at `/mcp` with the same Bearer
+token; agent-driven and LLM-driven sessions are isolated by their
+own session IDs and don't conflict.

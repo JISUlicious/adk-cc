@@ -233,6 +233,17 @@ directly.
   host's filesystem**, not the agent pod's; the agent never opens
   workspace files via Python `Path`.
 - **`E2BBackend`** — stub. Hosted Firecracker microVMs. Future.
+- **`SandboxServiceBackend`** — REST client for an external sandbox
+  service ([JISUlicious/sandboxing](https://github.com/JISUlicious/sandboxing)
+  or compatible). Stronger isolation (gVisor + cap-drop + read-only
+  rootfs + userns-remap + Squid egress) and factors sandbox concerns
+  out of the agent process at the cost of a per-call HTTPS round-trip.
+  Per-session volumes are wiped after the service's
+  `Limits.hard_destroy_ttl_s` (default 24h), so per-user persistent
+  state on this backend is bounded — operators raise the TTL or push
+  long-lived state elsewhere. Selected via
+  `ADK_CC_SANDBOX_BACKEND=sandbox_service`. See
+  `docs/04-deployment-sandbox.md` §6 for the operator runbook.
 - (future) `KubernetesBackend`, `ModalBackend`, `NsjailBackend`
   remain pluggable through the same ABC.
 
