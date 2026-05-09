@@ -629,25 +629,19 @@ async def cat_streaming_exec(client: _Client, sid: str) -> list[_Result]:
             assert decoded == b"hello", f"decoded={decoded!r}"
 
     # 4.4 chunks arrive over time, not bunched at the end. The whole
-    # point of streaming is incremental delivery; if the server
+    # point of streaming is incremental delivery; if the SSE handler
     # accidentally buffered the entire stream and flushed at close,
     # all chunks would arrive simultaneously.
     #
-    # Currently SKIPs when the measured span is <0.4s — but that's a
-    # measurement-limitation skip, not a bug skip. See plan-sandbox-
-    # issues-from-e2e.md "RESOLVED 14" for the full write-up: the
-    # sandbox team's server-local timestamps show the endpoint streams
-    # at the expected ~300ms cadence; from many client positions
-    # (especially across network hops, Docker Desktop bridges, httpx
-    # aiter_lines buffer-fill, etc.) the SSE frames coalesce into a
-    # single observed read, making client-side timing measurement
-    # unreliable.
-    #
-    # The test stays in place to catch a real server-side regression
-    # if it ever occurred — but treats span<0.4s as ambiguous (could
-    # be server-bug OR could be network/client buffering on this
-    # path) and skips rather than fails. Server-local probes are the
-    # right tool for the cadence-correctness story.
+    # NB: the consumer-side reader matters here. CPython's
+    # `for line in sys.stdin:` is block-buffered on a pipe (~8 KiB),
+    # which silently turns a streaming source into "all at end" if
+    # used to instrument a curl pipe. httpx's `aiter_lines()` (used
+    # below) properly yields lines as they're received, so timestamps
+    # captured here reflect actual arrival times. See
+    # plan-sandbox-issues-from-e2e.md issue #14 (WITHDRAWN) for the
+    # forensic record on a prior false alarm caused by exactly this
+    # measurement pitfall.
     with _Step("chunks arrive over time (not bunched at end)", results) as s:
         chunk_times: list[float] = []
         final_seen = False
@@ -678,19 +672,14 @@ async def cat_streaming_exec(client: _Client, sid: str) -> list[_Result]:
         assert len(chunk_times) >= 3, (
             f"expected ≥3 stdout chunks, got {len(chunk_times)}"
         )
+        # Three echoes with 0.3s sleeps → ~0.6s span. 0.4s floor allows
+        # slack for noisy environments while still catching a "bunched
+        # at end" regression cleanly.
         span = chunk_times[-1] - chunk_times[0]
-        if span < 0.4:
-            _skip(
-                f"observed chunks bunched at client (span={span:.2f}s for "
-                f"0.9s command). Could be a real server regression OR "
-                f"client/network buffering on this path (Docker Desktop "
-                f"bridge, TCP packet coalescing, httpx aiter_lines buffer "
-                f"fills). Server-local timestamps are the authoritative "
-                f"check — see plan-sandbox-issues-from-e2e.md §RESOLVED 14."
-            )
-        # If we get here, chunks demonstrably arrived over time on this
-        # network path (≥0.4s span across 3 echos with 0.3s sleeps).
-        # Confirms server is streaming AND the path doesn't buffer.
+        assert span >= 0.4, (
+            f"chunks bunched (span={span:.2f}s); SSE delivery may have "
+            f"regressed to buffering-then-flush at command end"
+        )
 
     # 4.5 streaming-side truncation. >8 MiB stdout via /exec/stream
     # should still surface `truncated: true` and the documented cap
