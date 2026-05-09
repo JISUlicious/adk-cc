@@ -93,12 +93,21 @@ class SandboxBackedCodeExecutor(BaseCodeExecutor):
         abs_tmpfile = os.path.join(ws.abs_path, rel_tmpfile)
 
         try:
+            # write_text takes the agent-side absolute path; the backend
+            # translates it to whatever the runtime sees (e.g. /workspace
+            # for Docker / sandbox_service, or the same path for Noop).
             await backend.write_text(
                 abs_tmpfile,
                 code_execution_input.code,
                 fs_write=ws.fs_write_config(),
             )
-            cmd = f"python3 {shlex.quote(abs_tmpfile)}"
+            # NB: pass `cmd` as a relative path, NOT the absolute one.
+            # Commands are opaque to backends — paths baked into the cmd
+            # string don't get translated. cwd=ws.abs_path IS translated
+            # by the backend (Docker / sandbox_service → /workspace,
+            # Noop → identity), so the relative path resolves correctly
+            # inside whichever runtime is in play.
+            cmd = f"python3 {shlex.quote(rel_tmpfile)}"
             res = await backend.exec(
                 cmd,
                 fs_write=ws.fs_write_config(),

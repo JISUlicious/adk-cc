@@ -675,6 +675,88 @@ async def test_session_create_missing_both_fields_raises():
     raise AssertionError("expected RuntimeError")
 
 
+async def test_code_executor_uses_relative_path_in_cmd():
+    """Regression: SandboxBackedCodeExecutor must pass a *relative*
+    script path in the exec cmd, not the agent-side absolute path.
+
+    Why: backends translate paths in write_text/read_text/cwd, but
+    cmd strings are opaque. If the cmd embeds the agent-side absolute
+    path (e.g. /host/wks/.../.adk-cc/code/scratch.py), the runtime
+    container looks for that exact path inside itself and fails:
+        python3: can't open file '/host/wks/...': [Errno 2] No such...
+
+    The fix passes `python3 <rel_tmpfile>` and relies on cwd=ws.abs_path
+    being translated to /workspace (or the equivalent for whatever
+    backend is in play), so the relative path resolves correctly.
+    Pre-fix, this assertion would catch the bug; post-fix, it passes.
+    """
+    captured_argv: list[list[str]] = []
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sessions":
+            return httpx.Response(200, json={"session_id": "svc-codeexec-1"})
+        # write_text — accept any path, succeed
+        if request.method == "POST" and "/files/" in request.url.path:
+            return httpx.Response(201)
+        # exec — capture the argv so we can assert on the cmd
+        if request.url.path.endswith("/exec"):
+            body = json.loads(request.content.decode())
+            captured_argv.append(body["argv"])
+            return httpx.Response(
+                200, json={"stdout": "", "stderr": "", "exit_code": 0}
+            )
+        return httpx.Response(404)
+
+    rec = _Recorder(respond)
+    backend = _make_backend(rec)
+    ws = _make_workspace(abs_path="/host/wks/acme/alice")
+
+    from adk_cc.sandbox.code_executor import SandboxBackedCodeExecutor
+    from google.adk.code_executors.code_execution_utils import CodeExecutionInput
+    from types import SimpleNamespace
+
+    await backend.ensure_workspace(ws)
+
+    # Build the minimal context shape SandboxBackedCodeExecutor reads.
+    ctx = SimpleNamespace(session=SimpleNamespace(state={
+        "temp:sandbox_backend": backend,
+        "temp:sandbox_workspace": ws,
+    }))
+
+    executor = SandboxBackedCodeExecutor()
+    # execute_code is sync; runs `asyncio.run` in a worker thread.
+    # That's the production path that originally exposed the cross-loop
+    # bug (now fixed) — and is the same path that exposes this one.
+    import threading
+    box: list = []
+    err: list = []
+
+    def runner():
+        try:
+            box.append(executor.execute_code(
+                ctx, CodeExecutionInput(code="print('hi')")
+            ))
+        except BaseException as e:
+            err.append(e)
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start(); t.join()
+    assert not err, f"executor raised: {type(err[0]).__name__}: {err[0]}"
+
+    # The cmd inside the bash -lc wrapper must be relative — not
+    # contain the agent-side abs path "/host/wks/...".
+    assert captured_argv, "no exec request captured"
+    cmd_str = captured_argv[0][2]  # ["/bin/bash", "-lc", "<cmd>"]
+    assert "/host/wks/" not in cmd_str, (
+        f"agent-side absolute path baked into cmd — would fail in a real "
+        f"container: {cmd_str!r}"
+    )
+    assert ".adk-cc/code/scratch.py" in cmd_str, (
+        f"expected relative path .adk-cc/code/scratch.py in cmd: {cmd_str!r}"
+    )
+    print("OK code_executor_uses_relative_path_in_cmd")
+
+
 def test_cross_event_loop_safe():
     """Regression: SandboxServiceBackend used from a fresh asyncio loop
     in a worker thread (the SandboxBackedCodeExecutor pattern) must not
@@ -998,6 +1080,7 @@ def main():
     asyncio.run(test_session_create_reads_session_id_field())
     asyncio.run(test_session_create_back_compat_with_id_field())
     asyncio.run(test_session_create_missing_both_fields_raises())
+    asyncio.run(test_code_executor_uses_relative_path_in_cmd())
     test_cross_event_loop_safe()  # synchronous — manages its own asyncio.run
     print("\nall sandbox_service_backend tests passed")
 
