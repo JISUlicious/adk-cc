@@ -629,19 +629,25 @@ async def cat_streaming_exec(client: _Client, sid: str) -> list[_Result]:
             assert decoded == b"hello", f"decoded={decoded!r}"
 
     # 4.4 chunks arrive over time, not bunched at the end. The whole
-    # point of streaming is incremental delivery; if the upstream
+    # point of streaming is incremental delivery; if the server
     # accidentally buffered the entire stream and flushed at close,
     # all chunks would arrive simultaneously.
     #
-    # Currently SKIPS on a known upstream issue: the /exec/stream
-    # endpoint frames events correctly but flushes them all at the
-    # end of command execution, so a 0.9s command produces all SSE
-    # events at t≈0.9s rather than at t=0, 0.3, 0.6 as the command
-    # echoes lines. Filed as upstream issue in
-    # plan-sandbox-issues-from-e2e.md. When upstream fixes the
-    # buffering, this skip will start failing (since the assertion
-    # below will then be reached and pass) — that's the signal to
-    # remove the skip wrapper.
+    # Currently SKIPs when the measured span is <0.4s — but that's a
+    # measurement-limitation skip, not a bug skip. See plan-sandbox-
+    # issues-from-e2e.md "RESOLVED 14" for the full write-up: the
+    # sandbox team's server-local timestamps show the endpoint streams
+    # at the expected ~300ms cadence; from many client positions
+    # (especially across network hops, Docker Desktop bridges, httpx
+    # aiter_lines buffer-fill, etc.) the SSE frames coalesce into a
+    # single observed read, making client-side timing measurement
+    # unreliable.
+    #
+    # The test stays in place to catch a real server-side regression
+    # if it ever occurred — but treats span<0.4s as ambiguous (could
+    # be server-bug OR could be network/client buffering on this
+    # path) and skips rather than fails. Server-local probes are the
+    # right tool for the cadence-correctness story.
     with _Step("chunks arrive over time (not bunched at end)", results) as s:
         chunk_times: list[float] = []
         final_seen = False
@@ -675,15 +681,16 @@ async def cat_streaming_exec(client: _Client, sid: str) -> list[_Result]:
         span = chunk_times[-1] - chunk_times[0]
         if span < 0.4:
             _skip(
-                f"upstream /exec/stream buffers chunks until command end "
-                f"(span={span:.2f}s for 0.9s command). Filed as functional-"
-                f"streaming bug. Test will start failing once upstream "
-                f"fixes the buffering — that's the signal to flip this "
-                f"back to an assertion."
+                f"observed chunks bunched at client (span={span:.2f}s for "
+                f"0.9s command). Could be a real server regression OR "
+                f"client/network buffering on this path (Docker Desktop "
+                f"bridge, TCP packet coalescing, httpx aiter_lines buffer "
+                f"fills). Server-local timestamps are the authoritative "
+                f"check — see plan-sandbox-issues-from-e2e.md §RESOLVED 14."
             )
-        # When upstream is fixed, the skip won't trigger and we'll fall
-        # through to here. Three echos with 0.3s sleeps → ~0.6s span;
-        # the 0.4s floor allows slack for noisy environments.
+        # If we get here, chunks demonstrably arrived over time on this
+        # network path (≥0.4s span across 3 echos with 0.3s sleeps).
+        # Confirms server is streaming AND the path doesn't buffer.
 
     # 4.5 streaming-side truncation. >8 MiB stdout via /exec/stream
     # should still surface `truncated: true` and the documented cap
