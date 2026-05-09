@@ -59,16 +59,19 @@ See `docs/04-deployment-sandbox.md` for the operator setup story
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import os
 import uuid
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 from urllib.parse import quote
 
 import httpx
 
 from ..config import (
+    ExecChunk,
     ExecResult,
     FsReadConfig,
     FsWriteConfig,
@@ -291,6 +294,42 @@ class SandboxServiceBackend(SandboxBackend):
         # start rather than on the first exec.
         await self._ensure_session()
 
+    def _build_exec_body(self, cmd: str, cwd: str, timeout_s: int) -> dict[str, Any]:
+        """Shared argv/timeout shaping for sync `exec` and streaming
+        `exec_stream`. Wraps the caller's shell-style command in
+        `bash -lc` and prepends a `cd` if cwd != /workspace."""
+        container_cwd = self._container_cwd(cwd)
+        argv = ["/bin/bash", "-lc", cmd]
+        if container_cwd != CONTAINER_WORKSPACE:
+            quoted = container_cwd.replace("'", "'\\''")
+            argv = ["/bin/bash", "-lc", f"cd '{quoted}' && {cmd}"]
+        return {
+            "argv": argv,
+            "timeout_s": int(timeout_s) if timeout_s else self._exec_default_timeout_s,
+        }
+
+    @staticmethod
+    def _truncation_note(data: dict[str, Any]) -> str:
+        """Produce the `[sandbox_service: output truncated…]` stderr
+        suffix when `truncated=True`. Empty string otherwise. Shared
+        by sync `exec` and streaming `exec_stream` so both surface
+        the same warning text."""
+        if not data.get("truncated"):
+            return ""
+        cap_bytes = int(
+            data.get("effective_truncation_cap_bytes") or (8 * 1024 * 1024)
+        )
+        cap_human = _humanize_bytes(cap_bytes)
+        truncated_streams = data.get("truncated_streams") or []
+        streams_msg = (
+            f" ({', '.join(truncated_streams)})" if truncated_streams else ""
+        )
+        return (
+            f"\n[sandbox_service: output truncated by service "
+            f"(>{cap_human} per stream{streams_msg}); rerun with "
+            f"redirection to a file]"
+        )
+
     async def exec(
         self,
         cmd: str,
@@ -302,24 +341,10 @@ class SandboxServiceBackend(SandboxBackend):
     ) -> ExecResult:
         sid = await self._ensure_session()
         try:
-            container_cwd = self._container_cwd(cwd)
+            body = self._build_exec_body(cmd, cwd, timeout_s)
         except SandboxViolation:
             # Tool layer will catch and surface; preserve the message.
             raise
-
-        # The service requires argv. Wrap in `bash -lc` so the existing
-        # tool contract (shell-style strings) keeps working.
-        argv = ["/bin/bash", "-lc", cmd]
-        if container_cwd != CONTAINER_WORKSPACE:
-            # The service's exec env defaults cwd to /workspace and the
-            # ExecRequest schema doesn't include a cwd field per the
-            # upstream spec. Prepend a `cd` to honor the caller's cwd.
-            quoted = container_cwd.replace("'", "'\\''")
-            argv = ["/bin/bash", "-lc", f"cd '{quoted}' && {cmd}"]
-        body: dict[str, Any] = {
-            "argv": argv,
-            "timeout_s": int(timeout_s) if timeout_s else self._exec_default_timeout_s,
-        }
         client = await self._get_client()
         try:
             resp = await client.post(
@@ -351,29 +376,7 @@ class SandboxServiceBackend(SandboxBackend):
         stdout = data.get("stdout", "") or ""
         stderr = data.get("stderr", "") or ""
         exit_code = int(data.get("exit_code", -1))
-        truncated = bool(data.get("truncated", False))
-        if truncated:
-            # Surface the truncation flag to the tool layer via stderr;
-            # the model needs to know its output is partial. Use the
-            # service-reported cap (added in the cross-cutting PR) so
-            # the message stays accurate if the upstream cap changes.
-            cap_bytes = int(
-                data.get("effective_truncation_cap_bytes")
-                or (8 * 1024 * 1024)
-            )
-            cap_human = _humanize_bytes(cap_bytes)
-            truncated_streams = data.get("truncated_streams") or []
-            streams_msg = (
-                f" ({', '.join(truncated_streams)})"
-                if truncated_streams
-                else ""
-            )
-            note = (
-                f"\n[sandbox_service: output truncated by service "
-                f"(>{cap_human} per stream{streams_msg}); rerun with "
-                f"redirection to a file]"
-            )
-            stderr = (stderr or "") + note
+        stderr += self._truncation_note(data)
         # `resume_latency_ms` (≥0, default 0) tells us how much of the
         # round-trip was the service waking up a STOPPED session vs.
         # actually executing. Log when it's non-trivial so audits can
@@ -395,6 +398,148 @@ class SandboxServiceBackend(SandboxBackend):
             stdout=stdout,
             stderr=stderr,
             timed_out=False,
+        )
+
+    async def exec_stream(
+        self,
+        cmd: str,
+        *,
+        fs_write: FsWriteConfig,
+        network: NetworkConfig,
+        timeout_s: int,
+        cwd: str,
+    ) -> AsyncIterator[ExecChunk]:
+        """Stream stdout/stderr chunks from the upstream
+        `POST /v1/sessions/<sid>/exec/stream` SSE endpoint, terminating
+        with one `kind="result"` chunk carrying the full ExecResult.
+
+        The upstream emits three event kinds:
+          event: stdout / stderr  →  data: {"chunk_b64": "..."}
+          event: result           →  data: {ExecResponse JSON}
+
+        Yields:
+          ExecChunk(kind="stdout", data=<decoded text>)
+          ExecChunk(kind="stderr", data=<decoded text>)
+          ExecChunk(kind="result", result=ExecResult(...))   ← always last
+
+        On transport / HTTP errors, yields a single `result` chunk with
+        a synthesized ExecResult carrying the error in stderr — same
+        shape as the sync `exec` failure path so callers can write one
+        error-handling pattern.
+        """
+        sid = await self._ensure_session()
+        try:
+            body = self._build_exec_body(cmd, cwd, timeout_s)
+        except SandboxViolation:
+            raise
+
+        client = await self._get_client()
+        url = f"/v1/sessions/{sid}/exec/stream"
+        # Track aggregated streams so the final result chunk is
+        # accurate even if the service's `event: result` is malformed.
+        agg_stdout = []
+        agg_stderr = []
+        try:
+            async with client.stream(
+                "POST",
+                url,
+                json=body,
+                headers={"Idempotency-Key": self._idem_key()},
+            ) as resp:
+                if resp.status_code >= 400:
+                    text = await resp.aread()
+                    yield ExecChunk(
+                        kind="result",
+                        result=ExecResult(
+                            exit_code=-1,
+                            stdout="",
+                            stderr=(
+                                f"sandbox_service: exec/stream returned "
+                                f"{resp.status_code}: "
+                                f"{text.decode('utf-8', 'replace')[:500]}"
+                            ),
+                            timed_out=False,
+                        ),
+                    )
+                    return
+
+                cur_event: str | None = None
+                async for line in resp.aiter_lines():
+                    if not line:
+                        cur_event = None
+                        continue
+                    if line.startswith("event:"):
+                        cur_event = line.split(":", 1)[1].strip()
+                        continue
+                    if line.startswith("data:") and cur_event:
+                        payload_raw = line.split(":", 1)[1].strip()
+                        try:
+                            payload = json.loads(payload_raw)
+                        except json.JSONDecodeError:
+                            continue
+                        if cur_event in ("stdout", "stderr"):
+                            chunk_b64 = payload.get("chunk_b64") or ""
+                            if not chunk_b64:
+                                continue
+                            try:
+                                text = base64.b64decode(chunk_b64).decode(
+                                    "utf-8", errors="replace"
+                                )
+                            except Exception:  # noqa: BLE001 — bad b64
+                                continue
+                            (agg_stdout if cur_event == "stdout" else agg_stderr).append(text)
+                            yield ExecChunk(kind=cur_event, data=text)
+                        elif cur_event == "result":
+                            stdout = payload.get("stdout") or "".join(agg_stdout)
+                            stderr = (payload.get("stderr") or "".join(agg_stderr))
+                            stderr += self._truncation_note(payload)
+                            resume_ms = int(payload.get("resume_latency_ms") or 0)
+                            if resume_ms >= 250:
+                                log.info(
+                                    "sandbox_service: exec/stream on %s "
+                                    "included %d ms of session resume",
+                                    sid,
+                                    resume_ms,
+                                )
+                            yield ExecChunk(
+                                kind="result",
+                                result=ExecResult(
+                                    exit_code=int(payload.get("exit_code", -1)),
+                                    stdout=stdout,
+                                    stderr=stderr,
+                                    timed_out=False,
+                                ),
+                            )
+                            return
+        except httpx.HTTPError as e:
+            yield ExecChunk(
+                kind="result",
+                result=ExecResult(
+                    exit_code=-1,
+                    stdout="".join(agg_stdout),
+                    stderr=(
+                        "".join(agg_stderr)
+                        + f"\nsandbox_service: exec/stream transport error: {e}"
+                    ),
+                    timed_out=False,
+                ),
+            )
+            return
+
+        # If we fall through without seeing a `result` event, synthesize
+        # one from the aggregated streams. Robustness against a malformed
+        # upstream stream that closes without the terminator.
+        yield ExecChunk(
+            kind="result",
+            result=ExecResult(
+                exit_code=-1,
+                stdout="".join(agg_stdout),
+                stderr=(
+                    "".join(agg_stderr)
+                    + "\nsandbox_service: stream ended without result event"
+                ),
+                timed_out=False,
+            ),
         )
 
     async def read_text(self, path: str, *, fs_read: FsReadConfig) -> str:

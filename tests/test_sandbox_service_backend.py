@@ -442,6 +442,127 @@ async def test_credential_provider_missing_token_raises():
     raise AssertionError("expected RuntimeError for missing token")
 
 
+async def test_exec_stream_yields_chunks_then_result():
+    """exec_stream parses SSE events: stdout/stderr → ExecChunk(data),
+    result → ExecChunk(result=ExecResult)."""
+    sse_body = (
+        b"event: stdout\n"
+        b'data: {"chunk_b64": "aGVsbG8="}\n\n'  # "hello"
+        b"event: stdout\n"
+        b'data: {"chunk_b64": "IHdvcmxk"}\n\n'  # " world"
+        b"event: stderr\n"
+        b'data: {"chunk_b64": "d2Fybg=="}\n\n'  # "warn"
+        b"event: result\n"
+        b'data: {"stdout": "hello world", "stderr": "warn", '
+        b'"exit_code": 0, "duration_ms": 12, "effective_timeout_s": 60, '
+        b'"truncated": false, "truncated_streams": [], '
+        b'"effective_truncation_cap_bytes": 8388608, "resume_latency_ms": 0}\n\n'
+    )
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sessions":
+            return httpx.Response(200, json={"id": "svc-stream-1"})
+        if request.url.path == "/v1/sessions/svc-stream-1/exec/stream":
+            return httpx.Response(
+                200,
+                content=sse_body,
+                headers={"content-type": "text/event-stream; charset=utf-8"},
+            )
+        return httpx.Response(404)
+
+    rec = _Recorder(respond)
+    backend = _make_backend(rec)
+    ws = _make_workspace()
+    from adk_cc.sandbox.config import FsWriteConfig, NetworkConfig
+
+    await backend.ensure_workspace(ws)
+
+    chunks = []
+    async for c in backend.exec_stream(
+        "echo hi",
+        fs_write=FsWriteConfig(),
+        network=NetworkConfig(),
+        timeout_s=10,
+        cwd=ws.abs_path,
+    ):
+        chunks.append(c)
+
+    # 3 stream chunks (2 stdout + 1 stderr) + 1 result terminator
+    assert len(chunks) == 4, [(c.kind, c.data) for c in chunks]
+    assert chunks[0].kind == "stdout" and chunks[0].data == "hello"
+    assert chunks[1].kind == "stdout" and chunks[1].data == " world"
+    assert chunks[2].kind == "stderr" and chunks[2].data == "warn"
+    assert chunks[3].kind == "result"
+    assert chunks[3].result is not None
+    assert chunks[3].result.exit_code == 0
+    assert chunks[3].result.stdout == "hello world"
+    assert chunks[3].result.stderr == "warn"
+    print("OK exec_stream_yields_chunks_then_result")
+
+
+async def test_exec_stream_synthesizes_result_on_4xx():
+    """If the upstream returns 4xx for /exec/stream, exec_stream still
+    terminates with one result chunk carrying the error in stderr."""
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sessions":
+            return httpx.Response(200, json={"id": "svc-stream-2"})
+        if request.url.path.endswith("/exec/stream"):
+            return httpx.Response(400, text="bad argv")
+        return httpx.Response(404)
+
+    rec = _Recorder(respond)
+    backend = _make_backend(rec)
+    ws = _make_workspace()
+    from adk_cc.sandbox.config import FsWriteConfig, NetworkConfig
+
+    await backend.ensure_workspace(ws)
+    chunks = []
+    async for c in backend.exec_stream(
+        "x", fs_write=FsWriteConfig(), network=NetworkConfig(),
+        timeout_s=10, cwd=ws.abs_path,
+    ):
+        chunks.append(c)
+    assert len(chunks) == 1, chunks
+    assert chunks[0].kind == "result"
+    assert chunks[0].result is not None
+    assert chunks[0].result.exit_code == -1
+    assert "400" in chunks[0].result.stderr
+    assert "bad argv" in chunks[0].result.stderr
+    print("OK exec_stream_synthesizes_result_on_4xx")
+
+
+async def test_exec_stream_default_impl_for_other_backends():
+    """Backends that don't override exec_stream get the ABC default:
+    call exec, yield one result chunk."""
+    from adk_cc.sandbox.backends import NoopBackend
+    from adk_cc.sandbox.config import FsWriteConfig, NetworkConfig
+    from adk_cc.sandbox.workspace import WorkspaceRoot
+    import tempfile
+
+    backend = NoopBackend()
+    with tempfile.TemporaryDirectory() as td:
+        ws = WorkspaceRoot(tenant_id="t", session_id="s", abs_path=td)
+        os.environ["ADK_CC_NOOP_ACK_HOST_EXEC"] = "1"  # required for NoopBackend
+        try:
+            chunks = []
+            async for c in backend.exec_stream(
+                "echo hi-from-noop",
+                fs_write=FsWriteConfig(allow_paths=(td,)),
+                network=NetworkConfig(),
+                timeout_s=10,
+                cwd=td,
+            ):
+                chunks.append(c)
+        finally:
+            del os.environ["ADK_CC_NOOP_ACK_HOST_EXEC"]
+    # Default impl: just one terminating result chunk with the full result
+    assert len(chunks) == 1, chunks
+    assert chunks[0].kind == "result"
+    assert chunks[0].result is not None
+    assert "hi-from-noop" in chunks[0].result.stdout
+    print("OK exec_stream_default_impl_for_other_backends")
+
+
 async def test_resume_latency_logged_when_nontrivial():
     """resume_latency_ms ≥ 250 ms emits a structured INFO log line."""
     import logging
@@ -645,6 +766,9 @@ def main():
     asyncio.run(test_resume_latency_logged_when_nontrivial())
     asyncio.run(test_credential_provider_resolves_per_tenant_token())
     asyncio.run(test_credential_provider_missing_token_raises())
+    asyncio.run(test_exec_stream_yields_chunks_then_result())
+    asyncio.run(test_exec_stream_synthesizes_result_on_4xx())
+    asyncio.run(test_exec_stream_default_impl_for_other_backends())
     print("\nall sandbox_service_backend tests passed")
 
 

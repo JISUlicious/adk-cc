@@ -27,9 +27,9 @@ without that need don't have to override.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, AsyncIterator
 
-from ..config import ExecResult, FsReadConfig, FsWriteConfig, NetworkConfig
+from ..config import ExecChunk, ExecResult, FsReadConfig, FsWriteConfig, NetworkConfig
 
 if TYPE_CHECKING:
     from ..workspace import WorkspaceRoot
@@ -51,6 +51,33 @@ class SandboxBackend(ABC):
         cwd: str,
     ) -> ExecResult:
         ...
+
+    async def exec_stream(
+        self,
+        cmd: str,
+        *,
+        fs_write: FsWriteConfig,
+        network: NetworkConfig,
+        timeout_s: int,
+        cwd: str,
+    ) -> AsyncIterator[ExecChunk]:
+        """Stream stdout/stderr chunks as they arrive, terminating with
+        a `kind="result"` chunk carrying the full `ExecResult`.
+
+        Default impl: call `exec`, yield one final chunk. Backends that
+        actually stream (currently `SandboxServiceBackend` via SSE)
+        override this to deliver chunks live. Callers can rely on
+        eventual termination — every stream ends with exactly one
+        `result` chunk.
+        """
+        result = await self.exec(
+            cmd,
+            fs_write=fs_write,
+            network=network,
+            timeout_s=timeout_s,
+            cwd=cwd,
+        )
+        yield ExecChunk(kind="result", result=result)
 
     @abstractmethod
     async def read_text(self, path: str, *, fs_read: FsReadConfig) -> str:

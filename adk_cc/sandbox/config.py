@@ -56,6 +56,25 @@ class ExecResult:
     timed_out: bool = False
 
 
+@dataclass
+class ExecChunk:
+    """One frame from a streaming exec.
+
+    Backends that support live output (currently SandboxServiceBackend
+    via SSE) yield one of these per chunk during `exec_stream(...)`.
+    The final chunk in any stream has `kind="result"` and `result` set
+    to the full `ExecResult` so callers don't need to reconstruct it
+    from the stdout/stderr chunks.
+
+    Backends without streaming infrastructure default to a single
+    `kind="result"` chunk after the sync `exec` returns.
+    """
+
+    kind: str  # "stdout" | "stderr" | "result"
+    data: str = ""
+    result: "ExecResult | None" = None
+
+
 class SandboxViolation(Exception):
     """Raised by a backend when an operation is blocked by config.
 
