@@ -306,7 +306,20 @@ class SandboxServiceBackend(SandboxBackend):
                     body = resp.json()
                 except ValueError:
                     body = {}
-                sid = body.get("id") or self._session_id
+                # Upstream's SessionResponse.required field is `session_id`
+                # (per OpenAPI). We also accept `id` for back-compat with
+                # older builds and other clients. Falling back to the
+                # client-supplied `self._session_id` would be wrong — the
+                # upstream may have assigned a different ULID and that's
+                # the one that subsequent /v1/sessions/<sid>/... calls
+                # need to use. If neither field is present, fail loudly
+                # rather than silently use a stale id.
+                sid = body.get("session_id") or body.get("id")
+                if not sid:
+                    raise RuntimeError(
+                        f"sandbox_service: session_create response missing "
+                        f"both `session_id` and `id`: {body!r}"
+                    )
                 self._service_session_id = sid
                 log.info(
                     "sandbox_service: created upstream session %s for adk-cc "

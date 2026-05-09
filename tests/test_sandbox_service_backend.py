@@ -87,7 +87,7 @@ async def test_exec_wraps_in_bash_lc():
         if request.method == "POST" and request.url.path == "/v1/sessions":
             return httpx.Response(
                 200,
-                json={"id": "svc-sid-1", "tenant_id": "acme", "state": "RUNNING"},
+                json={"session_id": "svc-sid-1", "tenant_id": "acme", "state": "RUNNING"},
             )
         if request.url.path == "/v1/sessions/svc-sid-1/exec":
             body = json.loads(request.content.decode())
@@ -133,7 +133,7 @@ async def test_exec_wraps_in_bash_lc():
 async def test_exec_cwd_subdir_gets_cd_prefix():
     async def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/sessions":
-            return httpx.Response(200, json={"id": "svc-sid-2"})
+            return httpx.Response(200, json={"session_id": "svc-sid-2"})
         if request.url.path == "/v1/sessions/svc-sid-2/exec":
             body = json.loads(request.content.decode())
             assert body["argv"][0] == "/bin/bash"
@@ -164,7 +164,7 @@ async def test_exec_cwd_subdir_gets_cd_prefix():
 async def test_path_translation_rejects_outside_workspace():
     async def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/sessions":
-            return httpx.Response(200, json={"id": "svc-sid-3"})
+            return httpx.Response(200, json={"session_id": "svc-sid-3"})
         return httpx.Response(404)
 
     rec = _Recorder(respond)
@@ -193,9 +193,9 @@ async def test_path_translation_rejects_outside_workspace():
 async def test_close_calls_stop_not_destroy():
     async def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/sessions":
-            return httpx.Response(200, json={"id": "svc-sid-4"})
+            return httpx.Response(200, json={"session_id": "svc-sid-4"})
         if request.url.path == "/v1/sessions/svc-sid-4/stop":
-            return httpx.Response(200, json={"id": "svc-sid-4", "state": "STOPPED"})
+            return httpx.Response(200, json={"session_id": "svc-sid-4", "state": "STOPPED"})
         return httpx.Response(404, text=f"unexpected: {request.url}")
 
     rec = _Recorder(respond)
@@ -221,7 +221,7 @@ async def test_per_session_binding():
         async def respond(request: httpx.Request) -> httpx.Response:
             captured[label].append(request.url.path)
             if request.url.path == "/v1/sessions":
-                return httpx.Response(200, json={"id": sid})
+                return httpx.Response(200, json={"session_id": sid})
             if request.url.path == f"/v1/sessions/{sid}/exec":
                 return httpx.Response(
                     200,
@@ -267,7 +267,7 @@ async def test_per_session_binding():
 async def test_truncated_stream_propagates_to_stderr():
     async def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/sessions":
-            return httpx.Response(200, json={"id": "svc-sid-5"})
+            return httpx.Response(200, json={"session_id": "svc-sid-5"})
         if request.url.path.endswith("/exec"):
             return httpx.Response(
                 200,
@@ -309,7 +309,7 @@ async def test_idempotency_key_present_on_mutating_calls():
             assert request.headers.get("idempotency-key"), (
                 "session_create missing Idempotency-Key"
             )
-            return httpx.Response(200, json={"id": "svc-idem"})
+            return httpx.Response(200, json={"session_id": "svc-idem"})
         if request.url.path == "/v1/sessions/svc-idem/exec":
             assert request.headers.get("idempotency-key"), (
                 "exec missing Idempotency-Key"
@@ -377,7 +377,7 @@ async def test_credential_provider_resolves_per_tenant_token():
     async def respond(request: httpx.Request) -> httpx.Response:
         seen_tokens.append(request.headers.get("authorization", ""))
         if request.url.path == "/v1/sessions":
-            return httpx.Response(200, json={"id": "svc-cred"})
+            return httpx.Response(200, json={"session_id": "svc-cred"})
         return httpx.Response(404)
 
     transport = httpx.MockTransport(
@@ -461,7 +461,7 @@ async def test_exec_stream_yields_chunks_then_result():
 
     async def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/sessions":
-            return httpx.Response(200, json={"id": "svc-stream-1"})
+            return httpx.Response(200, json={"session_id": "svc-stream-1"})
         if request.url.path == "/v1/sessions/svc-stream-1/exec/stream":
             return httpx.Response(
                 200,
@@ -505,7 +505,7 @@ async def test_exec_stream_synthesizes_result_on_4xx():
     terminates with one result chunk carrying the error in stderr."""
     async def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/sessions":
-            return httpx.Response(200, json={"id": "svc-stream-2"})
+            return httpx.Response(200, json={"session_id": "svc-stream-2"})
         if request.url.path.endswith("/exec/stream"):
             return httpx.Response(400, text="bad argv")
         return httpx.Response(404)
@@ -563,6 +563,118 @@ async def test_exec_stream_default_impl_for_other_backends():
     print("OK exec_stream_default_impl_for_other_backends")
 
 
+async def test_session_create_reads_session_id_field():
+    """Regression for the bug where session_create response uses
+    `session_id` (per upstream OpenAPI) but the backend was reading
+    `id` and silently falling back to the client-supplied id —
+    making subsequent calls fail with 404 session_not_found because
+    the upstream had assigned a different ULID."""
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sessions":
+            # Server assigns its own ULID, ignores the client hint.
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": "svc-server-assigned-ULID",
+                    "tenant_id": "default",
+                    "state": "RUNNING",
+                },
+            )
+        # Subsequent calls MUST use the server-assigned id, not the
+        # client's session_id ("adkcc-sess-1") that we passed at ctor.
+        if request.url.path == "/v1/sessions/svc-server-assigned-ULID/exec":
+            return httpx.Response(
+                200, json={"stdout": "", "stderr": "", "exit_code": 0},
+            )
+        # Any URL using the client-supplied id is the bug — return 404
+        # so the test fails with a clear message.
+        if request.url.path == "/v1/sessions/adkcc-sess-1/exec":
+            return httpx.Response(
+                404,
+                json={
+                    "detail": {
+                        "code": "session_not_found",
+                        "message": "session not found (using client-supplied id, not server-assigned)",
+                    }
+                },
+            )
+        return httpx.Response(404, text=f"unexpected: {request.url.path}")
+
+    rec = _Recorder(respond)
+    backend = _make_backend(rec)
+    ws = _make_workspace()
+    from adk_cc.sandbox.config import FsWriteConfig, NetworkConfig
+
+    await backend.ensure_workspace(ws)
+    # Pre-fix this would have used "adkcc-sess-1" → 404. Post-fix it
+    # uses the server-assigned ULID and succeeds.
+    res = await backend.exec(
+        "echo hi",
+        fs_write=FsWriteConfig(),
+        network=NetworkConfig(),
+        timeout_s=10,
+        cwd=ws.abs_path,
+    )
+    assert res.exit_code == 0, res
+    print("OK session_create_reads_session_id_field")
+
+
+async def test_session_create_back_compat_with_id_field():
+    """Older builds (or other compatible services) may use `id` instead
+    of `session_id`. Backend reads both for resilience."""
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sessions":
+            return httpx.Response(200, json={"id": "legacy-id-format"})
+        if request.url.path.endswith("/exec"):
+            return httpx.Response(
+                200, json={"stdout": "", "stderr": "", "exit_code": 0},
+            )
+        return httpx.Response(404)
+
+    rec = _Recorder(respond)
+    backend = _make_backend(rec)
+    ws = _make_workspace()
+    from adk_cc.sandbox.config import FsWriteConfig, NetworkConfig
+
+    await backend.ensure_workspace(ws)
+    res = await backend.exec(
+        "echo hi",
+        fs_write=FsWriteConfig(),
+        network=NetworkConfig(),
+        timeout_s=10,
+        cwd=ws.abs_path,
+    )
+    assert res.exit_code == 0, res
+    # Verify the request actually used the legacy id
+    assert any(
+        r.url.path == "/v1/sessions/legacy-id-format/exec"
+        for r in rec.requests
+    ), [r.url.path for r in rec.requests]
+    print("OK session_create_back_compat_with_id_field")
+
+
+async def test_session_create_missing_both_fields_raises():
+    """If the upstream response has neither `session_id` nor `id`,
+    the backend must fail loudly rather than silently fall back to
+    the client-supplied id (which the upstream ignored)."""
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sessions":
+            # Intentionally missing both id fields
+            return httpx.Response(200, json={"state": "RUNNING"})
+        return httpx.Response(404)
+
+    rec = _Recorder(respond)
+    backend = _make_backend(rec)
+    ws = _make_workspace()
+    try:
+        await backend.ensure_workspace(ws)
+    except RuntimeError as e:
+        assert "missing both `session_id` and `id`" in str(e), str(e)
+        print("OK session_create_missing_both_fields_raises")
+        return
+    raise AssertionError("expected RuntimeError")
+
+
 def test_cross_event_loop_safe():
     """Regression: SandboxServiceBackend used from a fresh asyncio loop
     in a worker thread (the SandboxBackedCodeExecutor pattern) must not
@@ -591,7 +703,7 @@ def test_cross_event_loop_safe():
         loop_id = id(asyncio.get_event_loop())
         seen_in_loops.append(loop_id)
         if request.url.path == "/v1/sessions":
-            return httpx.Response(200, json={"id": "svc-cross-loop"})
+            return httpx.Response(200, json={"session_id": "svc-cross-loop"})
         if request.url.path.endswith("/exec"):
             return httpx.Response(
                 200,
@@ -683,7 +795,7 @@ async def test_resume_latency_logged_when_nontrivial():
 
     async def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/sessions":
-            return httpx.Response(200, json={"id": "svc-resume"})
+            return httpx.Response(200, json={"session_id": "svc-resume"})
         if request.url.path.endswith("/exec"):
             return httpx.Response(
                 200,
@@ -731,7 +843,7 @@ async def test_resume_latency_logged_when_nontrivial():
 async def test_read_text_404_to_filenotfound():
     async def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/sessions":
-            return httpx.Response(200, json={"id": "svc-sid-6"})
+            return httpx.Response(200, json={"session_id": "svc-sid-6"})
         if request.url.path.startswith("/v1/sessions/svc-sid-6/files/"):
             return httpx.Response(404, text="not found")
         return httpx.Response(500)
@@ -759,7 +871,7 @@ async def test_write_text_round_trip():
 
     async def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/sessions":
-            return httpx.Response(200, json={"id": "svc-sid-7"})
+            return httpx.Response(200, json={"session_id": "svc-sid-7"})
         if request.url.path == "/v1/sessions/svc-sid-7/files/sub/foo.txt":
             captured_body["content"] = request.content.decode("utf-8")
             captured_body["content_type"] = request.headers.get("content-type")
@@ -883,6 +995,9 @@ def main():
     asyncio.run(test_exec_stream_yields_chunks_then_result())
     asyncio.run(test_exec_stream_synthesizes_result_on_4xx())
     asyncio.run(test_exec_stream_default_impl_for_other_backends())
+    asyncio.run(test_session_create_reads_session_id_field())
+    asyncio.run(test_session_create_back_compat_with_id_field())
+    asyncio.run(test_session_create_missing_both_fields_raises())
     test_cross_event_loop_safe()  # synchronous — manages its own asyncio.run
     print("\nall sandbox_service_backend tests passed")
 
