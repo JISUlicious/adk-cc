@@ -58,12 +58,13 @@ See `docs/04-deployment-sandbox.md` for the operator setup story
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import logging
 import os
+import threading
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 from urllib.parse import quote
@@ -150,15 +151,29 @@ class SandboxServiceBackend(SandboxBackend):
         # translate absolute paths the tool layer passes us into the
         # /workspace-relative paths the service understands.
         self._workspace_abs_path: Optional[str] = None
-        # Service-side session id (currently == self._session_id; kept
-        # separate so a future server-assigned-id model lands cleanly).
+        # Service-side session id (a string — loop-portable). Set by
+        # `_ensure_session()` on first call.
         self._service_session_id: Optional[str] = None
-        # When a pre-built httpx client is passed (tests), it has the
-        # auth header baked in. Otherwise we lazy-construct in
-        # `_get_client()` after resolving the token.
+        # Test-injection override. When set, this client is reused for
+        # all calls (caller owns lifecycle). When unset (production),
+        # each method creates a fresh client per call.
+        #
+        # Why no caching in production: `httpx.AsyncClient` carries an
+        # internal `asyncio.Event` for connection-pool state, which
+        # binds to the event loop it was first used in. Reusing it
+        # across loops fails with `RuntimeError: ... is bound to a
+        # different event loop`. `SandboxBackedCodeExecutor` runs us
+        # inside `asyncio.run` on a worker thread (so a script exec
+        # gets a fresh loop per call), so any cached client from the
+        # main loop blows up on the second access. Per-call client
+        # construction costs ~1 ms on loopback; negligible vs. the
+        # 80–500 ms exec round-trip.
         self._http: Optional[httpx.AsyncClient] = client
-        self._client_lock = asyncio.Lock()
-        self._lock = asyncio.Lock()
+        # threading.Lock (NOT asyncio.Lock) — survives across event
+        # loops. Used to serialize the session_create RTT so a flurry
+        # of concurrent first-calls doesn't create N upstream sessions.
+        # Held briefly across one HTTP POST; never re-entered.
+        self._session_create_lock = threading.Lock()
 
     # --- helpers --------------------------------------------------------
 
@@ -190,20 +205,27 @@ class SandboxServiceBackend(SandboxBackend):
             )
         return token
 
-    async def _get_client(self) -> httpx.AsyncClient:
+    @asynccontextmanager
+    async def _client_ctx(self):
+        """Yield an httpx.AsyncClient bound to the *current* loop.
+
+        Test-injection mode: when the constructor was passed a
+        pre-built `client`, yield that one (caller owns lifecycle, we
+        don't `aclose()` it). Production mode: build a fresh client
+        per call and close it on exit. Per-call construction is
+        deliberate — see the long note in `__init__`.
+        """
         if self._http is not None:
-            return self._http
-        async with self._client_lock:
-            if self._http is not None:
-                return self._http
-            token = await self._resolve_token()
-            self._http = httpx.AsyncClient(
-                base_url=self._base_url,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=self._request_timeout_s,
-                verify=self._verify_tls,
-            )
-        return self._http
+            yield self._http
+            return
+        token = await self._resolve_token()
+        async with httpx.AsyncClient(
+            base_url=self._base_url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=self._request_timeout_s,
+            verify=self._verify_tls,
+        ) as client:
+            yield client
 
     def _to_container_path(self, host_path: str) -> str:
         """Translate an agent-side absolute path to a /workspace-relative path.
@@ -242,8 +264,19 @@ class SandboxServiceBackend(SandboxBackend):
         return str(PurePosixPath(CONTAINER_WORKSPACE) / rel)
 
     async def _ensure_session(self) -> str:
-        """Create the upstream session if not yet created. Returns its id."""
-        async with self._lock:
+        """Create the upstream session if not yet created. Returns its id.
+
+        Cached id is a plain string, so reads are safe across loops.
+        Creation is serialized via a `threading.Lock` (not asyncio) so
+        concurrent first-calls from different threads/loops don't
+        each POST a new session.
+        """
+        # Fast path — string read is loop-portable.
+        if self._service_session_id is not None:
+            return self._service_session_id
+        with self._session_create_lock:
+            # Double-check under the lock: another caller may have
+            # already created the session while we waited.
             if self._service_session_id is not None:
                 return self._service_session_id
             payload: dict[str, Any] = {}
@@ -253,36 +286,36 @@ class SandboxServiceBackend(SandboxBackend):
             # it so the upstream id mirrors the adk-cc session id. The
             # service may ignore unknown keys; harmless fallback.
             payload["session_id"] = self._session_id
-            client = await self._get_client()
-            try:
-                resp = await client.post(
-                    "/v1/sessions",
-                    json=payload,
-                    headers={"Idempotency-Key": self._idem_key()},
+            async with self._client_ctx() as client:
+                try:
+                    resp = await client.post(
+                        "/v1/sessions",
+                        json=payload,
+                        headers={"Idempotency-Key": self._idem_key()},
+                    )
+                except httpx.HTTPError as e:
+                    raise RuntimeError(
+                        f"sandbox_service: session_create failed: {e}"
+                    ) from e
+                if resp.status_code >= 400:
+                    raise RuntimeError(
+                        f"sandbox_service: session_create returned "
+                        f"{resp.status_code}: {resp.text}"
+                    )
+                try:
+                    body = resp.json()
+                except ValueError:
+                    body = {}
+                sid = body.get("id") or self._session_id
+                self._service_session_id = sid
+                log.info(
+                    "sandbox_service: created upstream session %s for adk-cc "
+                    "session %s (tenant=%s)",
+                    sid,
+                    self._session_id,
+                    self._tenant_id,
                 )
-            except httpx.HTTPError as e:
-                raise RuntimeError(
-                    f"sandbox_service: session_create failed: {e}"
-                ) from e
-            if resp.status_code >= 400:
-                raise RuntimeError(
-                    f"sandbox_service: session_create returned "
-                    f"{resp.status_code}: {resp.text}"
-                )
-            try:
-                body = resp.json()
-            except ValueError:
-                body = {}
-            sid = body.get("id") or self._session_id
-            self._service_session_id = sid
-            log.info(
-                "sandbox_service: created upstream session %s for adk-cc "
-                "session %s (tenant=%s)",
-                sid,
-                self._session_id,
-                self._tenant_id,
-            )
-            return sid
+                return sid
 
     # --- ABC methods ----------------------------------------------------
 
@@ -345,60 +378,60 @@ class SandboxServiceBackend(SandboxBackend):
         except SandboxViolation:
             # Tool layer will catch and surface; preserve the message.
             raise
-        client = await self._get_client()
-        try:
-            resp = await client.post(
-                f"/v1/sessions/{sid}/exec",
-                json=body,
-                headers={"Idempotency-Key": self._idem_key()},
-            )
-        except httpx.HTTPError as e:
+        async with self._client_ctx() as client:
+            try:
+                resp = await client.post(
+                    f"/v1/sessions/{sid}/exec",
+                    json=body,
+                    headers={"Idempotency-Key": self._idem_key()},
+                )
+            except httpx.HTTPError as e:
+                return ExecResult(
+                    exit_code=-1,
+                    stdout="",
+                    stderr=f"sandbox_service: exec transport error: {e}",
+                    timed_out=False,
+                )
+            if resp.status_code >= 400:
+                return ExecResult(
+                    exit_code=-1,
+                    stdout="",
+                    stderr=(
+                        f"sandbox_service: exec returned {resp.status_code}: "
+                        f"{resp.text}"
+                    ),
+                    timed_out=False,
+                )
+            try:
+                data = resp.json()
+            except ValueError:
+                data = {}
+            stdout = data.get("stdout", "") or ""
+            stderr = data.get("stderr", "") or ""
+            exit_code = int(data.get("exit_code", -1))
+            stderr += self._truncation_note(data)
+            # `resume_latency_ms` (≥0, default 0) tells us how much of the
+            # round-trip was the service waking up a STOPPED session vs.
+            # actually executing. Log when it's non-trivial so audits can
+            # distinguish "model is slow" from "service had to resume."
+            resume_ms = int(data.get("resume_latency_ms") or 0)
+            if resume_ms >= 250:
+                log.info(
+                    "sandbox_service: exec on %s included %d ms of session "
+                    "resume",
+                    sid,
+                    resume_ms,
+                )
+            # The service signals timeouts inside its own ExecResponse shape
+            # (typically exit_code=-1 with a stderr note); we don't try to
+            # special-case here. `timed_out` stays False unless the agent
+            # round-trip itself exceeded the budget.
             return ExecResult(
-                exit_code=-1,
-                stdout="",
-                stderr=f"sandbox_service: exec transport error: {e}",
+                exit_code=exit_code,
+                stdout=stdout,
+                stderr=stderr,
                 timed_out=False,
             )
-        if resp.status_code >= 400:
-            return ExecResult(
-                exit_code=-1,
-                stdout="",
-                stderr=(
-                    f"sandbox_service: exec returned {resp.status_code}: "
-                    f"{resp.text}"
-                ),
-                timed_out=False,
-            )
-        try:
-            data = resp.json()
-        except ValueError:
-            data = {}
-        stdout = data.get("stdout", "") or ""
-        stderr = data.get("stderr", "") or ""
-        exit_code = int(data.get("exit_code", -1))
-        stderr += self._truncation_note(data)
-        # `resume_latency_ms` (≥0, default 0) tells us how much of the
-        # round-trip was the service waking up a STOPPED session vs.
-        # actually executing. Log when it's non-trivial so audits can
-        # distinguish "model is slow" from "service had to resume."
-        resume_ms = int(data.get("resume_latency_ms") or 0)
-        if resume_ms >= 250:
-            log.info(
-                "sandbox_service: exec on %s included %d ms of session "
-                "resume",
-                sid,
-                resume_ms,
-            )
-        # The service signals timeouts inside its own ExecResponse shape
-        # (typically exit_code=-1 with a stderr note); we don't try to
-        # special-case here. `timed_out` stays False unless the agent
-        # round-trip itself exceeded the budget.
-        return ExecResult(
-            exit_code=exit_code,
-            stdout=stdout,
-            stderr=stderr,
-            timed_out=False,
-        )
 
     async def exec_stream(
         self,
@@ -433,14 +466,13 @@ class SandboxServiceBackend(SandboxBackend):
         except SandboxViolation:
             raise
 
-        client = await self._get_client()
         url = f"/v1/sessions/{sid}/exec/stream"
         # Track aggregated streams so the final result chunk is
         # accurate even if the service's `event: result` is malformed.
-        agg_stdout = []
-        agg_stderr = []
+        agg_stdout: list[str] = []
+        agg_stderr: list[str] = []
         try:
-            async with client.stream(
+            async with self._client_ctx() as client, client.stream(
                 "POST",
                 url,
                 json=body,
@@ -551,25 +583,25 @@ class SandboxServiceBackend(SandboxBackend):
                 f"root itself ({path!r})"
             )
         url = f"/v1/sessions/{sid}/files/{quote(rel, safe='/')}"
-        client = await self._get_client()
-        try:
-            resp = await client.get(url)
-        except httpx.HTTPError as e:
-            raise RuntimeError(
-                f"sandbox_service: read_text transport error for "
-                f"{path!r}: {e}"
-            ) from e
-        if resp.status_code == 404:
-            raise FileNotFoundError(path)
-        if resp.status_code >= 400:
-            raise RuntimeError(
-                f"sandbox_service: read_text returned {resp.status_code} "
-                f"for {path!r}: {resp.text}"
-            )
-        # The service's REST file_read returns the bytes directly
-        # (`Content-Type: application/octet-stream`). Decode as UTF-8;
-        # binary reads aren't part of the SandboxBackend contract.
-        return resp.content.decode("utf-8", errors="replace")
+        async with self._client_ctx() as client:
+            try:
+                resp = await client.get(url)
+            except httpx.HTTPError as e:
+                raise RuntimeError(
+                    f"sandbox_service: read_text transport error for "
+                    f"{path!r}: {e}"
+                ) from e
+            if resp.status_code == 404:
+                raise FileNotFoundError(path)
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"sandbox_service: read_text returned {resp.status_code} "
+                    f"for {path!r}: {resp.text}"
+                )
+            # The service's REST file_read returns the bytes directly
+            # (`Content-Type: application/octet-stream`). Decode as UTF-8;
+            # binary reads aren't part of the SandboxBackend contract.
+            return resp.content.decode("utf-8", errors="replace")
 
     async def write_text(
         self, path: str, content: str, *, fs_write: FsWriteConfig
@@ -582,26 +614,26 @@ class SandboxServiceBackend(SandboxBackend):
                 f"workspace root itself ({path!r})"
             )
         url = f"/v1/sessions/{sid}/files/{quote(rel, safe='/')}"
-        client = await self._get_client()
-        try:
-            resp = await client.post(
-                url,
-                content=content.encode("utf-8"),
-                headers={
-                    "Content-Type": "application/octet-stream",
-                    "Idempotency-Key": self._idem_key(),
-                },
-            )
-        except httpx.HTTPError as e:
-            raise RuntimeError(
-                f"sandbox_service: write_text transport error for "
-                f"{path!r}: {e}"
-            ) from e
-        if resp.status_code >= 400:
-            raise RuntimeError(
-                f"sandbox_service: write_text returned {resp.status_code} "
-                f"for {path!r}: {resp.text}"
-            )
+        async with self._client_ctx() as client:
+            try:
+                resp = await client.post(
+                    url,
+                    content=content.encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "Idempotency-Key": self._idem_key(),
+                    },
+                )
+            except httpx.HTTPError as e:
+                raise RuntimeError(
+                    f"sandbox_service: write_text transport error for "
+                    f"{path!r}: {e}"
+                ) from e
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"sandbox_service: write_text returned {resp.status_code} "
+                    f"for {path!r}: {resp.text}"
+                )
 
     async def close(self) -> None:
         # POST stop, not destroy: preserves the volume so the next session
@@ -612,22 +644,15 @@ class SandboxServiceBackend(SandboxBackend):
             return
         sid = self._service_session_id
         try:
-            client = await self._get_client()
-            await client.post(
-                f"/v1/sessions/{sid}/stop",
-                headers={"Idempotency-Key": self._idem_key()},
-            )
+            async with self._client_ctx() as client:
+                await client.post(
+                    f"/v1/sessions/{sid}/stop",
+                    headers={"Idempotency-Key": self._idem_key()},
+                )
         except Exception as e:  # noqa: BLE001 — best-effort
             log.warning(
                 "sandbox_service: stop %s failed (best-effort): %s", sid, e
             )
-        finally:
-            try:
-                if self._http is not None:
-                    await self._http.aclose()
-            except Exception:  # noqa: BLE001
-                pass
-            self._http = None
 
 
 def make_sandbox_service_backend_from_env(
