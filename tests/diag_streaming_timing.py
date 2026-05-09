@@ -46,6 +46,87 @@ if _ENV_FILE.is_file():
             os.environ[k] = v
 
 
+async def _raw_probe(
+    url: str,
+    token: str,
+    sid: str,
+    *,
+    connection_header: str,
+    user_agent: str,
+    label: str,
+) -> None:
+    """Open a raw asyncio TCP socket, send an HTTP/1.1 POST to
+    /exec/stream, print body chunks with timestamps. Used to vary
+    the request headers to see if the server changes streaming
+    behavior based on the client's identity."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    body = (
+        '{"argv":["/bin/bash","-lc",'
+        '"for i in 1 2 3; do echo line-$i; sleep 0.3; done"]}'
+    )
+    request = (
+        f"POST /v1/sessions/{sid}/exec/stream HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        f"User-Agent: {user_agent}\r\n"
+        f"Accept: */*\r\n"
+        f"Authorization: Bearer {token}\r\n"
+        f"Content-Type: application/json\r\n"
+        f"Idempotency-Key: {uuid.uuid4().hex}\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        f"Connection: {connection_header}\r\n"
+        f"\r\n"
+        f"{body}"
+    ).encode()
+
+    reader, writer = await asyncio.open_connection(host, port)
+    writer.write(request)
+    await writer.drain()
+
+    # Capture and print response headers
+    print(f"  ── {label} response headers:")
+    while True:
+        line = await reader.readline()
+        if not line or line == b"\r\n":
+            break
+        decoded = line.decode("ascii", errors="replace").rstrip()
+        # Only print interesting headers
+        lower = decoded.lower()
+        if any(
+            tag in lower
+            for tag in (
+                "content-type", "content-length", "content-encoding",
+                "transfer-encoding", "x-accel", "cache-control",
+                "connection",
+            )
+        ):
+            print(f"     {decoded}")
+        # First line is "HTTP/1.1 200 ..." — print that too
+        if decoded.startswith("HTTP/"):
+            print(f"     {decoded}")
+
+    print(f"  ── {label} body chunks (post-headers timer):")
+    t0 = time.perf_counter()
+    try:
+        while True:
+            chunk = await asyncio.wait_for(reader.read(256), timeout=5)
+            if not chunk:
+                break
+            t = time.perf_counter() - t0
+            print(f"     {t:.3f}s  +{len(chunk):>4d}B  {chunk[:80]!r}")
+    except asyncio.TimeoutError:
+        print("     (timeout — connection idle, probably done)")
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+
 async def main() -> int:
     url = os.environ.get(
         "ADK_CC_SANDBOX_SERVICE_URL", "http://127.0.0.1:8000"
@@ -82,12 +163,9 @@ async def main() -> int:
         sid = r.json()["session_id"]
         print(f"session: {sid}")
 
-        # === Probe 1: Inspect response headers ===
-        # If Content-Encoding/Transfer-Encoding is present, httpx may
-        # be buffering for decode. We never want to see Content-Length
-        # on a streaming response.
+        # === Probe 1a: headers for SHORT command (instant response) ===
         print()
-        print("=== response headers (probe 1) ===")
+        print("=== headers — SHORT cmd 'echo immediate' (probe 1a) ===")
         async with client.stream(
             "POST", f"/v1/sessions/{sid}/exec/stream",
             json={"argv": ["/bin/bash", "-lc", "echo immediate"]},
@@ -101,7 +179,29 @@ async def main() -> int:
                     "connection",
                 ):
                     print(f"  {k}: {v}")
-            # Drain
+            async for _ in r.aiter_bytes():
+                pass
+
+        # === Probe 1b: headers for SLOW command (multi-event response) ===
+        # Critical question: does the server use Transfer-Encoding: chunked
+        # for the multi-event response (= streaming) or Content-Length
+        # (= buffered)? If Content-Length, the server is buffering this
+        # specific path despite the team's curl probe seeing cadence.
+        print()
+        print("=== headers — SLOW cmd (1s with 3 echoes) (probe 1b) ===")
+        async with client.stream(
+            "POST", f"/v1/sessions/{sid}/exec/stream",
+            json={"argv": cmd_argv},
+            headers={"Idempotency-Key": uuid.uuid4().hex},
+        ) as r:
+            for k, v in r.headers.items():
+                if k.lower() in (
+                    "content-type", "content-encoding",
+                    "content-length", "transfer-encoding",
+                    "x-accel-buffering", "cache-control",
+                    "connection",
+                ):
+                    print(f"  {k}: {v}")
             async for _ in r.aiter_bytes():
                 pass
 
@@ -148,60 +248,32 @@ async def main() -> int:
                 f"span={(last_byte_t - first_byte_t):.3f}s"
             )
 
-        # === Probe 4: Raw asyncio socket (no httpx) ===
-        # Bypass httpx entirely. Talk HTTP/1.1 directly via asyncio
-        # streams. If THIS streams cleanly but httpx doesn't, the
-        # buffering is unambiguously inside httpx.
+        # === Probe 4a: Raw asyncio socket with httpx-like headers ===
+        # Bypass httpx but reproduce its header set. If THIS streams,
+        # the buffering is in httpx. If it bunches, it's the server
+        # responding to one of these headers.
         print()
-        print("=== raw asyncio socket (no httpx) ===")
-        from urllib.parse import urlparse
-        parsed = urlparse(url)
-        host = parsed.hostname
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-
-        body = (
-            '{"argv":["/bin/bash","-lc",'
-            '"for i in 1 2 3; do echo line-$i; sleep 0.3; done"]}'
+        print("=== raw asyncio socket (httpx-like headers) ===")
+        await _raw_probe(
+            url, token, sid,
+            connection_header="close",
+            user_agent="python-httpx/0.28.1",
+            label="httpx-like",
         )
-        request = (
-            f"POST /v1/sessions/{sid}/exec/stream HTTP/1.1\r\n"
-            f"Host: {host}:{port}\r\n"
-            f"Authorization: Bearer {token}\r\n"
-            f"Content-Type: application/json\r\n"
-            f"Idempotency-Key: {uuid.uuid4().hex}\r\n"
-            f"Content-Length: {len(body)}\r\n"
-            f"Connection: close\r\n"
-            f"\r\n"
-            f"{body}"
-        ).encode()
 
-        reader, writer = await asyncio.open_connection(host, port)
-        writer.write(request)
-        await writer.drain()
-
-        # Skip headers (everything until \r\n\r\n)
-        while True:
-            line = await reader.readline()
-            if not line or line == b"\r\n":
-                break
-
-        t0 = time.perf_counter()
-        try:
-            while True:
-                # Read in tiny chunks — minimal client buffering
-                chunk = await asyncio.wait_for(reader.read(256), timeout=5)
-                if not chunk:
-                    break
-                t = time.perf_counter() - t0
-                print(f"  {t:.3f}s  +{len(chunk):>4d}B  {chunk[:120]!r}")
-        except asyncio.TimeoutError:
-            print("  (timeout — connection idle, probably done)")
-        finally:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
+        # === Probe 4b: Raw socket with CURL-like headers ===
+        # Curl sends `Connection: keep-alive` (default), `Accept: */*`,
+        # and `User-Agent: curl/...`. If the server fast-paths streaming
+        # for clients that look like curl, we'd see streaming here but
+        # not in 4a.
+        print()
+        print("=== raw asyncio socket (curl-like headers) ===")
+        await _raw_probe(
+            url, token, sid,
+            connection_header="keep-alive",
+            user_agent="curl/8.0.0",
+            label="curl-like",
+        )
 
         # Cleanup
         await client.post(
