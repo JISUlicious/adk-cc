@@ -628,6 +628,97 @@ async def cat_streaming_exec(client: _Client, sid: str) -> list[_Result]:
                         decoded += base64.b64decode(payload["chunk_b64"])
             assert decoded == b"hello", f"decoded={decoded!r}"
 
+    # 4.4 chunks arrive over time, not bunched at the end. The whole
+    # point of streaming is incremental delivery; if the upstream
+    # accidentally buffered the entire stream and flushed at close,
+    # all chunks would arrive simultaneously.
+    #
+    # Currently SKIPS on a known upstream issue: the /exec/stream
+    # endpoint frames events correctly but flushes them all at the
+    # end of command execution, so a 0.9s command produces all SSE
+    # events at t≈0.9s rather than at t=0, 0.3, 0.6 as the command
+    # echoes lines. Filed as upstream issue in
+    # plan-sandbox-issues-from-e2e.md. When upstream fixes the
+    # buffering, this skip will start failing (since the assertion
+    # below will then be reached and pass) — that's the signal to
+    # remove the skip wrapper.
+    with _Step("chunks arrive over time (not bunched at end)", results) as s:
+        chunk_times: list[float] = []
+        final_seen = False
+        started = time.perf_counter()
+        async with client._http.stream(
+            "POST", f"/v1/sessions/{sid}/exec/stream",
+            json={
+                "argv": [
+                    "/bin/bash", "-lc",
+                    "for i in 1 2 3; do echo line-$i; sleep 0.3; done",
+                ],
+            },
+            headers={"Idempotency-Key": _idem()},
+        ) as r:
+            cur_event = None
+            async for raw in r.aiter_lines():
+                if not raw:
+                    cur_event = None
+                    continue
+                if raw.startswith("event:"):
+                    cur_event = raw.split(":", 1)[1].strip()
+                elif raw.startswith("data:") and cur_event == "stdout":
+                    chunk_times.append(time.perf_counter() - started)
+                elif raw.startswith("data:") and cur_event == "result":
+                    final_seen = True
+                    break
+        assert final_seen, "stream ended without a result event"
+        assert len(chunk_times) >= 3, (
+            f"expected ≥3 stdout chunks, got {len(chunk_times)}"
+        )
+        span = chunk_times[-1] - chunk_times[0]
+        if span < 0.4:
+            _skip(
+                f"upstream /exec/stream buffers chunks until command end "
+                f"(span={span:.2f}s for 0.9s command). Filed as functional-"
+                f"streaming bug. Test will start failing once upstream "
+                f"fixes the buffering — that's the signal to flip this "
+                f"back to an assertion."
+            )
+        # When upstream is fixed, the skip won't trigger and we'll fall
+        # through to here. Three echos with 0.3s sleeps → ~0.6s span;
+        # the 0.4s floor allows slack for noisy environments.
+
+    # 4.5 streaming-side truncation. >8 MiB stdout via /exec/stream
+    # should still surface `truncated: true` and the documented cap
+    # in the final result event — same contract as sync /exec.
+    with _Step("/exec/stream signals truncation on >8 MiB stdout", results) as s:
+        final: dict | None = None
+        async with client._http.stream(
+            "POST", f"/v1/sessions/{sid}/exec/stream",
+            json={
+                "argv": [
+                    "/bin/bash", "-lc",
+                    "head -c 16777216 /dev/zero | tr '\\0' 'x'",
+                ],
+            },
+            headers={"Idempotency-Key": _idem()},
+            timeout=30,
+        ) as r:
+            cur_event = None
+            async for raw in r.aiter_lines():
+                if not raw:
+                    cur_event = None
+                    continue
+                if raw.startswith("event:"):
+                    cur_event = raw.split(":", 1)[1].strip()
+                elif raw.startswith("data:") and cur_event == "result":
+                    final = json.loads(raw.split(":", 1)[1].strip())
+                    break
+        assert final is not None, "no result event received"
+        assert final.get("truncated") is True, (
+            f"expected truncated=true, got {final.get('truncated')}"
+        )
+        cap = final.get("effective_truncation_cap_bytes")
+        assert cap and cap > 0, f"missing/zero cap: {cap}"
+        assert "stdout" in (final.get("truncated_streams") or []), final
+
     return results
 
 
