@@ -63,13 +63,17 @@ async def main() -> int:
     print(f"httpx version: {httpx.__version__}")
     print()
 
+    cmd_argv = [
+        "/bin/bash", "-lc",
+        "for i in 1 2 3; do echo line-$i; sleep 0.3; done",
+    ]
+
     async with httpx.AsyncClient(
         base_url=url,
         headers={"Authorization": f"Bearer {token}"},
         timeout=30.0,
         verify=False,
     ) as client:
-        # Create session
         r = await client.post(
             "/v1/sessions", json={},
             headers={"Idempotency-Key": uuid.uuid4().hex},
@@ -78,53 +82,126 @@ async def main() -> int:
         sid = r.json()["session_id"]
         print(f"session: {sid}")
 
-        # Drive the same probe the comprehensive test uses, with rich
-        # timestamping at three layers:
-        #   - aiter_bytes: raw byte chunks from transport
-        #   - aiter_lines: parsed lines
-        #   - per-line decode/print
+        # === Probe 1: Inspect response headers ===
+        # If Content-Encoding/Transfer-Encoding is present, httpx may
+        # be buffering for decode. We never want to see Content-Length
+        # on a streaming response.
         print()
-        print("=== aiter_bytes (raw transport chunks) ===")
-        t0 = time.perf_counter()
-        try:
-            async with client.stream(
-                "POST", f"/v1/sessions/{sid}/exec/stream",
-                json={
-                    "argv": [
-                        "/bin/bash", "-lc",
-                        "for i in 1 2 3; do echo line-$i; sleep 0.3; done",
-                    ],
-                },
-                headers={"Idempotency-Key": uuid.uuid4().hex},
-            ) as r:
-                async for raw_bytes in r.aiter_bytes():
-                    t = time.perf_counter() - t0
-                    print(
-                        f"  {t:.3f}s  +{len(raw_bytes):>4d}B  "
-                        f"{raw_bytes[:120]!r}"
-                    )
-        except Exception as e:
-            print(f"  err: {type(e).__name__}: {e}")
+        print("=== response headers (probe 1) ===")
+        async with client.stream(
+            "POST", f"/v1/sessions/{sid}/exec/stream",
+            json={"argv": ["/bin/bash", "-lc", "echo immediate"]},
+            headers={"Idempotency-Key": uuid.uuid4().hex},
+        ) as r:
+            for k, v in r.headers.items():
+                if k.lower() in (
+                    "content-type", "content-encoding",
+                    "content-length", "transfer-encoding",
+                    "x-accel-buffering", "cache-control",
+                    "connection",
+                ):
+                    print(f"  {k}: {v}")
+            # Drain
+            async for _ in r.aiter_bytes():
+                pass
 
+        # === Probe 2: aiter_raw (skips Content-Encoding decoding) ===
+        # If the server sends gzipped/deflate, aiter_bytes may buffer
+        # to decompress while aiter_raw streams. If raw streams but
+        # bytes don't, that's the hint.
         print()
-        print("=== aiter_lines (line decoder) ===")
+        print("=== aiter_raw (no Content-Encoding decoding) ===")
+        t0 = time.perf_counter()
+        async with client.stream(
+            "POST", f"/v1/sessions/{sid}/exec/stream",
+            json={"argv": cmd_argv},
+            headers={"Idempotency-Key": uuid.uuid4().hex},
+        ) as r:
+            async for raw in r.aiter_raw():
+                t = time.perf_counter() - t0
+                print(f"  {t:.3f}s  +{len(raw):>4d}B  {raw[:120]!r}")
+
+        # === Probe 3: aiter_bytes with explicit small chunk_size ===
+        # Default chunk_size may pull large batches from the transport.
+        # Force chunk_size=1 — we should see one byte at a time IF
+        # the transport is delivering as data arrives.
+        print()
+        print("=== aiter_bytes(chunk_size=1) ===")
+        t0 = time.perf_counter()
+        async with client.stream(
+            "POST", f"/v1/sessions/{sid}/exec/stream",
+            json={"argv": cmd_argv},
+            headers={"Idempotency-Key": uuid.uuid4().hex},
+        ) as r:
+            chunk_count = 0
+            first_byte_t: float | None = None
+            last_byte_t: float | None = None
+            async for raw in r.aiter_bytes(chunk_size=1):
+                t = time.perf_counter() - t0
+                if first_byte_t is None:
+                    first_byte_t = t
+                last_byte_t = t
+                chunk_count += 1
+            print(
+                f"  chunks={chunk_count}  "
+                f"first={first_byte_t:.3f}s  last={last_byte_t:.3f}s  "
+                f"span={(last_byte_t - first_byte_t):.3f}s"
+            )
+
+        # === Probe 4: Raw asyncio socket (no httpx) ===
+        # Bypass httpx entirely. Talk HTTP/1.1 directly via asyncio
+        # streams. If THIS streams cleanly but httpx doesn't, the
+        # buffering is unambiguously inside httpx.
+        print()
+        print("=== raw asyncio socket (no httpx) ===")
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+        body = (
+            '{"argv":["/bin/bash","-lc",'
+            '"for i in 1 2 3; do echo line-$i; sleep 0.3; done"]}'
+        )
+        request = (
+            f"POST /v1/sessions/{sid}/exec/stream HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            f"Authorization: Bearer {token}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Idempotency-Key: {uuid.uuid4().hex}\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+            f"{body}"
+        ).encode()
+
+        reader, writer = await asyncio.open_connection(host, port)
+        writer.write(request)
+        await writer.drain()
+
+        # Skip headers (everything until \r\n\r\n)
+        while True:
+            line = await reader.readline()
+            if not line or line == b"\r\n":
+                break
+
         t0 = time.perf_counter()
         try:
-            async with client.stream(
-                "POST", f"/v1/sessions/{sid}/exec/stream",
-                json={
-                    "argv": [
-                        "/bin/bash", "-lc",
-                        "for i in 1 2 3; do echo line-$i; sleep 0.3; done",
-                    ],
-                },
-                headers={"Idempotency-Key": uuid.uuid4().hex},
-            ) as r:
-                async for line in r.aiter_lines():
-                    t = time.perf_counter() - t0
-                    print(f"  {t:.3f}s  {line[:100]!r}")
-        except Exception as e:
-            print(f"  err: {type(e).__name__}: {e}")
+            while True:
+                # Read in tiny chunks — minimal client buffering
+                chunk = await asyncio.wait_for(reader.read(256), timeout=5)
+                if not chunk:
+                    break
+                t = time.perf_counter() - t0
+                print(f"  {t:.3f}s  +{len(chunk):>4d}B  {chunk[:120]!r}")
+        except asyncio.TimeoutError:
+            print("  (timeout — connection idle, probably done)")
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
 
         # Cleanup
         await client.post(
