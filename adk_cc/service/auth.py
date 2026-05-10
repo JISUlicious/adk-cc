@@ -20,10 +20,45 @@ TenancyPlugin's resolver picks them up.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import time
 from typing import Any, Awaitable, Callable, Optional, Protocol
+
+
+# Per-request auth context, scoped to the asyncio task chain handling
+# one HTTP request. Set by the auth middleware before invoking the
+# downstream handler; read by `TenancyPlugin._default_resolver` so it
+# can pick up the auth-provided tenant_id without needing the
+# operator to wire a custom resolver. Defaults to None outside of an
+# authenticated request (so dev `adk web .` and unit tests just see
+# None and fall back to the legacy "local" tenant).
+_AUTH_CTX: contextvars.ContextVar[Optional[tuple[str, str]]] = (
+    contextvars.ContextVar("adk_cc_auth", default=None)
+)
+
+
+def get_auth_context() -> Optional[tuple[str, str]]:
+    """Return the (user_id, tenant_id) pair set by the auth middleware
+    for the current request, or None if no auth context is active.
+
+    Plugins (notably TenancyPlugin) call this to bridge auth-extracted
+    tenancy into ADK's plugin layer, since ADK's tool_context doesn't
+    carry the FastAPI request.state directly.
+    """
+    return _AUTH_CTX.get()
+
+
+def set_auth_context(user_id: str, tenant_id: str) -> contextvars.Token:
+    """Stash the (user_id, tenant_id) pair into the current async task's
+    context. Returns a Token the caller can use to reset.
+
+    Public so operators with a non-FastAPI deployment shape (e.g. a
+    custom transport, or unit tests that want to simulate authenticated
+    requests) can drive the same code path the middleware uses.
+    """
+    return _AUTH_CTX.set((user_id, tenant_id))
 
 # fastapi is an optional dep — only imported when the server module is used.
 try:
@@ -215,11 +250,26 @@ class JwtAuthExtractor:
 
 
 def make_auth_middleware(extractor: AuthExtractor):
-    """Build a Starlette middleware that calls `extractor` and stashes the
-    result on `request.state.adk_cc_auth = (user_id, tenant_id)`.
+    """Build a Starlette middleware that calls `extractor`, stashes the
+    result on `request.state.adk_cc_auth = (user_id, tenant_id)`, AND
+    sets the same pair into a ContextVar so ADK plugins downstream
+    (notably `TenancyPlugin`) can pick it up.
 
-    The TenancyPlugin's resolver reads from this via the request that
-    flows into ADK's session-creation path.
+    The two redundant stash points cover two access patterns:
+      - `request.state.adk_cc_auth`: for code that has the FastAPI
+        request in hand (custom routes, request-scoped middleware).
+      - `_AUTH_CTX` ContextVar (read via `get_auth_context()`): for
+        code that runs deeper in ADK's runner / plugin chain and only
+        sees the `tool_context`. ContextVars propagate through async
+        task boundaries (and through `asyncio.to_thread` worker
+        threads via `copy_context`), so the auth context is reachable
+        from `before_tool_callback` and friends.
+
+    Without this bridge, the JWT extractor's tenant claim is silently
+    dropped: `TenancyPlugin._default_resolver` only receives
+    `user_id`, hardcodes `tenant_id="local"`, and the JWT's tenant is
+    never used unless the operator supplies a custom resolver. The
+    ContextVar closes that gap.
     """
     if not _FASTAPI_AVAILABLE:
         raise RuntimeError("fastapi is not installed")
@@ -235,6 +285,10 @@ def make_auth_middleware(extractor: AuthExtractor):
                     content=e.detail, status_code=e.status_code, media_type="text/plain"
                 )
             request.state.adk_cc_auth = (user_id, tenant_id)
-            return await call_next(request)
+            token = _AUTH_CTX.set((user_id, tenant_id))
+            try:
+                return await call_next(request)
+            finally:
+                _AUTH_CTX.reset(token)
 
     return _AuthMiddleware
