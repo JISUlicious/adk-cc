@@ -9,7 +9,7 @@
 - **Discovery**: `adk web` / `adk run` finds the agent via the module-level export `adk_cc.agent.app` (preferred) or `adk_cc.agent.root_agent`. The directory layout matches ADK's documented convention: `<AGENTS_DIR>/<agent_name>/{__init__.py, agent.py}`.
 - **Entry points**:
   - Development: `adk web .` or `adk run adk_cc` from the `adk-cc/` directory.
-  - Production: `uvicorn adk_cc.service.server:make_app --factory` (multi-tenant, with auth, quotas, postgres-backed sessions).
+  - Single-instance / multi-tenant server: `uvicorn adk_cc.service.server:make_app --factory` (FastAPI app with auth middleware, quotas, configurable session storage). The same factory serves both single-tenant deployments (one team, static tokens) and multi-tenant production (JWT auth, per-tenant resources) — what differs is which auth + per-tenant env vars are wired.
 - **Configuration**: env-driven, loaded from `adk_cc/.env` automatically in dev. Required minimum: `ADK_CC_API_KEY`. The full surface is documented in [`.env.example`](../.env.example) — model, permissions, sandbox backend, audit, web fetch, skills, tasks, and the multi-tenant service variables.
 
 ## Roles
@@ -47,7 +47,7 @@ Planning is **not** a sub-agent. The coordinator handles planning itself by ente
 ## Out of scope (deferred or pluggable, not implemented)
 
 - A custom CLI or web UI (uses `adk web` / `adk run` for dev; `uvicorn ... make_app --factory` for prod).
-- E2B / Kubernetes / Modal / nsjail sandbox backends (the `SandboxBackend` ABC is the seam; only `NoopBackend` and `DockerBackend` are implemented today, plus a stub for `E2BBackend`).
+- E2B / Kubernetes / Modal / nsjail sandbox backends. Implemented today: `NoopBackend` (host execution, dev), `DockerBackend` (per-session container), `SandboxServiceBackend` (REST client for an external gVisor-isolated sandbox service like [JISUlicious/sandboxing](https://github.com/JISUlicious/sandboxing)). `E2BBackend` is a stub. The `SandboxBackend` ABC is the seam; new backends drop in without changes upstream of `make_default_backend()`.
 - Per-host outbound network filtering inside `run_bash` (today: all-or-nothing; per-domain filtering needs a sidecar proxy).
 - A real `transfer_to_agent` handler for the synthetic `_handback_to_coordinator` call (it's a control signal only — see [02-architecture.md §3.2](./02-architecture.md#32-same-turn-after_agent_callback)).
 - Production-readiness gaps tracked in [05-production-deployment.md](./05-production-deployment.md) — health endpoint, Prometheus metrics, Helm chart, container reaper, LLM cost ceiling, storage quotas, tenant lifecycle, CI / regression suite. Operators close the ones their threat model and SLO require.

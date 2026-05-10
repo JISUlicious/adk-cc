@@ -1,8 +1,17 @@
 # Production deployment
 
-This is the runbook + readiness checklist for taking adk-cc from `adk web .` on a laptop to a multi-tenant FastAPI service. Read end-to-end before standing up production; the order matters.
+This is the runbook + readiness checklist for taking adk-cc from `adk web .` on a laptop to a FastAPI service. Read end-to-end before standing up production; the order matters.
 
-> **Status: alpha.** adk-cc is functional and exercised end-to-end (`tests/e2e_features.py`) but has not yet been hardened against the operational shocks of a real deployment. The checklist below honestly marks what works (✓), what's partial (⚠️), and what's missing (✗). Operators should close the ✗ items appropriate to their threat model and SLO before serving real users.
+> **Status: alpha.** adk-cc is functional and exercised end-to-end (~135 unit + e2e checks across 11 test files) but has not yet been hardened against the operational shocks of a real deployment. The checklist below honestly marks what works (✓), what's partial (⚠️), and what's missing (✗). Operators should close the ✗ items appropriate to their threat model and SLO before serving real users.
+
+## Two deployment shapes from the same factory
+
+The `make_app` factory serves both:
+
+- **Single-instance, single-tenant.** One server, one team, static-token auth, sqlite session storage, local Docker or a co-located sandbox service. Smallest viable production. The README's "Minimal single-tenant production-ish recipe" section covers this end-to-end.
+- **Multi-tenant SaaS.** JWT auth with tenant claims, postgres session storage, per-tenant credential / MCP / skill registries. The full topology below.
+
+What changes between them is **which env vars + per-tenant resources you wire**, not which factory or which code path. The single-tenant flavor is just multi-tenant with one tenant; the per-tenant resource layout still applies (workspaces under `<wks>/<tenant>/<user>/`, etc.). This document covers both as one deployment story; jump to the readiness checklist for the gap list that applies regardless of shape.
 
 ## Topology
 
