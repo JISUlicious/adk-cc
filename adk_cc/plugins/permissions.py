@@ -29,10 +29,29 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
+from ..permissions.confirmation import confirm_deny_prompt
 from ..permissions.engine import decide
 from ..permissions.modes import PermissionMode
 from ..permissions.settings import SettingsHierarchy
 from ..tools.base import AdkCcTool
+
+
+def _read_choice_id(confirmation: Any) -> Optional[str]:
+    """Pull `chose_id` out of `ToolConfirmation.payload` if present.
+
+    Returns the string id when the frontend submitted a structured
+    response (`payload = {"chose_id": "allow" | "deny"}`); returns
+    None otherwise so callers can fall back to `confirmed: bool`.
+    Tolerates garbage payloads — a missing key, a non-dict, or an
+    unexpected type all collapse to None rather than raising.
+    """
+    payload = getattr(confirmation, "payload", None)
+    if not isinstance(payload, dict):
+        return None
+    chose = payload.get("chose_id")
+    if isinstance(chose, str):
+        return chose
+    return None
 
 
 class PermissionPlugin(BasePlugin):
@@ -84,9 +103,16 @@ class PermissionPlugin(BasePlugin):
             # forever. Check the confirmation state first.
             confirmation = getattr(tool_context, "tool_confirmation", None)
             if confirmation is not None:
-                # ADK has already gathered the user's response.
-                if getattr(confirmation, "confirmed", False):
+                # ADK has already gathered the user's response. Prefer the
+                # structured `chose_id` from the payload; fall back to the
+                # ADK-standard `confirmed: bool` so frontends that ignore
+                # the payload protocol (e.g. the bundled `adk web` UI) still
+                # work exactly as before.
+                chose_id = _read_choice_id(confirmation)
+                if chose_id == "allow":
                     return None  # let the tool run
+                if chose_id is None and getattr(confirmation, "confirmed", False):
+                    return None  # legacy back-compat path
                 return {
                     "status": "permission_denied_by_user",
                     "reason": "User declined the confirmation prompt.",
@@ -96,7 +122,11 @@ class PermissionPlugin(BasePlugin):
             # function_call_id (rare; some test contexts) skip without
             # erroring.
             if tool_context.function_call_id:
-                tool_context.request_confirmation(hint=decision.reason)
+                prompt = confirm_deny_prompt(tool.meta.name, decision.reason)
+                tool_context.request_confirmation(
+                    hint=decision.reason,            # back-compat for hint-only frontends
+                    payload=prompt.model_dump(),     # structured for two-button rendering
+                )
                 # CRITICAL: ADK's loop breaks when the last yielded event's
                 # `is_final_response()` is True, which requires either
                 # `actions.skip_summarization` or `long_running_tool_ids` to
