@@ -29,9 +29,15 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
-from ..permissions.confirmation import confirm_deny_prompt
+from ..permissions.confirmation import allow_once_always_deny_prompt
 from ..permissions.engine import decide
 from ..permissions.modes import PermissionMode
+from ..permissions.rules import (
+    _RULE_KEY_EXTRACTORS,
+    PermissionRule,
+    RuleBehavior,
+    RuleSource,
+)
 from ..permissions.settings import SettingsHierarchy
 from ..tools.base import AdkCcTool
 
@@ -108,11 +114,18 @@ class PermissionPlugin(BasePlugin):
                 # ADK-standard `confirmed: bool` so frontends that ignore
                 # the payload protocol (e.g. the bundled `adk web` UI) still
                 # work exactly as before.
+                #
+                # `allow` is the legacy two-option-prompt id; treat it as
+                # `allow_once` for back-compat with the first cut of this
+                # protocol.
                 chose_id = _read_choice_id(confirmation)
-                if chose_id == "allow":
+                if chose_id in ("allow", "allow_once"):
                     return None  # let the tool run
+                if chose_id == "allow_always":
+                    self._add_session_allow(tool, tool_args)
+                    return None  # let the tool run + skip future re-asks
                 if chose_id is None and getattr(confirmation, "confirmed", False):
-                    return None  # legacy back-compat path
+                    return None  # legacy back-compat path (bundled `adk web` UI)
                 return {
                     "status": "permission_denied_by_user",
                     "reason": "User declined the confirmation prompt.",
@@ -122,10 +135,10 @@ class PermissionPlugin(BasePlugin):
             # function_call_id (rare; some test contexts) skip without
             # erroring.
             if tool_context.function_call_id:
-                prompt = confirm_deny_prompt(tool.meta.name, decision.reason)
+                prompt = allow_once_always_deny_prompt(tool.meta.name, decision.reason)
                 tool_context.request_confirmation(
                     hint=decision.reason,            # back-compat for hint-only frontends
-                    payload=prompt.model_dump(),     # structured for two-button rendering
+                    payload=prompt.model_dump(),     # structured for 3-option rendering
                 )
                 # CRITICAL: ADK's loop breaks when the last yielded event's
                 # `is_final_response()` is True, which requires either
@@ -151,6 +164,29 @@ class PermissionPlugin(BasePlugin):
             }
 
         return None
+
+    def _add_session_allow(self, tool: AdkCcTool, args: dict) -> None:
+        """Inject a SESSION-scope ALLOW rule for the (tool, rule key) pair.
+
+        Scope: exact rule-key match (e.g. for `run_bash`, the literal
+        command string; for `write_file`, the literal path). The user
+        explicitly approved THIS operation — broadening (e.g. fnmatch
+        wildcards) would be unsafe. If the tool has no rule-key
+        extractor, the rule omits `rule_content` and applies to all
+        invocations of that tool for the session — a conservative
+        fallback for custom tools.
+        """
+        tool_name = tool.meta.name
+        extractor = _RULE_KEY_EXTRACTORS.get(tool_name)
+        rule_content = extractor(args) if extractor is not None else None
+        self._settings.add_session_rule(
+            PermissionRule(
+                source=RuleSource.SESSION,
+                behavior=RuleBehavior.ALLOW,
+                tool_name=tool_name,
+                rule_content=rule_content,
+            )
+        )
 
     def _mode_from_context(self, ctx: ToolContext) -> PermissionMode:
         try:

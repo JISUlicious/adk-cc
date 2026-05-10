@@ -210,6 +210,10 @@ The coordinator produces the plan via `write_plan` (each call creates a new time
 
 Plan mode is asymmetric with `exit_plan_mode`: entering tightens posture (no confirmation), exiting relaxes (user must approve).
 
+## Confirmations
+
+Destructive tool calls (and any ASK-rule match) pause for human confirmation via ADK's `request_confirmation` seam. The plugin sends a structured `ConfirmPrompt` payload with three options — **Allow once / Allow always / Deny** — so payload-aware frontends can render labelled buttons. "Allow always" injects a SESSION-scope ALLOW rule keyed by `(tool, extracted rule key)` so the same operation isn't re-asked for the rest of the session; scope is intentionally narrow (exact rule-key match, no wildcards). Frontends that ignore `payload` — including the bundled `adk web` UI — fall back to ADK's `confirmed: bool` checkbox and behave exactly as before. Wire contract: [`docs/06-confirmation-protocol.md`](./docs/06-confirmation-protocol.md).
+
 ## Tasks
 
 Four `task_*` tools (`task_create` / `task_get` / `task_list` / `task_update`) for pure tracking — no execution semantics. Tasks persist as JSON files under `<workspace>/.adk-cc/tasks/<session_id>/<task_id>.json` (override the root via `ADK_CC_TASKS_DIR`). Tasks survive process restarts; multi-worker deployments are safe via `filelock` writes.
@@ -233,7 +237,8 @@ tests/
 │   ├── test_skill_resource_fallback.py    6 tests
 │   ├── test_session_retry.py              7 tests
 │   ├── test_context_guard.py             10 tests
-│   └── test_tenancy_resolver.py           7 tests   ── 65 unit tests total
+│   ├── test_tenancy_resolver.py           7 tests
+│   └── test_permissions_confirmation.py  12 tests   ── 77 unit tests total
 │
 ├── e2e_features.py                 ← in-process FastAPI e2e (auth + admin + skill upload)
 │
@@ -265,4 +270,4 @@ Both `e2e_skills.py` and `e2e_streaming_adapter.py` need Python 3.12+ and adk-cc
 
 ## Status
 
-**Alpha.** Functional and exercised end-to-end (~135 unit + e2e checks across 11 test files). Has known operational gaps documented in [`docs/05-production-deployment.md`](./docs/05-production-deployment.md)'s readiness checklist (security / reliability / observability / ops / multi-tenancy / config / tests). Close the ✗ items appropriate to your threat model and SLO before serving real users.
+**Alpha.** Functional and exercised end-to-end (~147 unit + e2e checks across 12 test files). Has known operational gaps documented in [`docs/05-production-deployment.md`](./docs/05-production-deployment.md)'s readiness checklist (security / reliability / observability / ops / multi-tenancy / config / tests). Close the ✗ items appropriate to your threat model and SLO before serving real users.

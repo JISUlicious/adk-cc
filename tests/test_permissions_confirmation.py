@@ -1,17 +1,22 @@
-"""Unit tests for the confirm/deny confirmation UX in `PermissionPlugin`.
+"""Unit tests for the structured-payload confirmation UX in `PermissionPlugin`.
 
 Covers:
-  - Call-site payload shape: structured `ConfirmPrompt` is sent via
-    `request_confirmation(payload=...)`, mirroring the documented
-    frontend protocol.
+  - Prompt helpers: `confirm_deny_prompt` (binary) and
+    `allow_once_always_deny_prompt` (3-option, used by the destructive gate).
+  - Call-site payload shape: the destructive gate sends a
+    `single_select` structured `ConfirmPrompt` with 3 stable ids.
   - Resume paths:
-      1. structured response with `chose_id="allow"` → run the tool
-      2. structured response with `chose_id="deny"` → return
-         permission_denied_by_user
-      3. legacy frontend, `confirmed=True`, no payload → run the tool
-      4. legacy frontend, `confirmed=False`, no payload → denied
-      5. malformed payload (`chose_id="bogus"`) → falls back to
-         `confirmed: bool`; doesn't crash
+      1. `chose_id="allow_once"` → run the tool, no session rule.
+      2. `chose_id="allow_always"` → run the tool, SESSION ALLOW rule
+         appended scoped to (tool, extracted rule key).
+      3. `chose_id="allow"` (legacy two-option id) → run the tool,
+         no session rule (back-compat).
+      4. `chose_id="deny"` → permission_denied_by_user.
+      5. legacy frontend, `confirmed=True`, no payload → run the tool.
+      6. legacy frontend, `confirmed=False`, no payload → denied.
+      7. malformed payload → falls back to `confirmed: bool`.
+  - End-to-end: after `allow_always`, a second call with the same
+    args is auto-allowed by the engine (the session rule did its job).
 
 Run: `.venv/bin/python tests/test_permissions_confirmation.py`
 """
@@ -29,9 +34,12 @@ from pydantic import BaseModel
 from adk_cc.permissions.confirmation import (
     ConfirmOption,
     ConfirmPrompt,
+    allow_once_always_deny_prompt,
     confirm_deny_prompt,
 )
+from adk_cc.permissions.engine import decide
 from adk_cc.permissions.modes import PermissionMode
+from adk_cc.permissions.rules import RuleBehavior, RuleSource
 from adk_cc.permissions.settings import SettingsHierarchy
 from adk_cc.plugins.permissions import PermissionPlugin, _read_choice_id
 from adk_cc.tools.base import AdkCcTool, ToolMeta
@@ -45,7 +53,7 @@ class _Args(BaseModel):
 
 
 class _FakeBashTool(AdkCcTool):
-    """Stand-in AdkCcTool that decide() will classify as destructive.
+    """Stand-in AdkCcTool that decide() classifies as destructive.
 
     `is_destructive=True` triggers the destructive-tool fallback in
     the permission engine, so `decide()` returns `behavior="ask"` —
@@ -74,7 +82,7 @@ class _FakeToolContext:
     """Minimal stand-in for ADK's ToolContext.
 
     Captures the args of `request_confirmation()` so tests can assert
-    on the structured payload. Mirrors the attribute surface that
+    on the structured payload. Mirrors the attribute surface
     `PermissionPlugin.before_tool_callback` reads.
     """
 
@@ -112,40 +120,59 @@ class _FakeConfirmation:
         self.hint = hint
 
 
-def _make_plugin() -> PermissionPlugin:
+def _make_plugin(settings: Optional[SettingsHierarchy] = None) -> PermissionPlugin:
     # No explicit rules needed: `_FakeBashTool.meta.is_destructive=True`
     # makes `decide()` return "ask" via the destructive-tool fallback
     # in DEFAULT mode (engine.py step 4).
-    return PermissionPlugin(SettingsHierarchy(), default_mode=PermissionMode.DEFAULT)
+    return PermissionPlugin(
+        settings if settings is not None else SettingsHierarchy(),
+        default_mode=PermissionMode.DEFAULT,
+    )
 
 
-# --- Module-level helpers ------------------------------------------
+# --- Helper-level tests ---------------------------------------------
 
 
 def test_confirm_deny_prompt_shape() -> None:
-    """`confirm_deny_prompt` produces the canonical two-option payload."""
+    """The two-button helper still produces the canonical binary prompt."""
     prompt = confirm_deny_prompt("run_bash", "destructive op")
     assert isinstance(prompt, ConfirmPrompt)
     assert prompt.style == "confirm_deny"
     assert prompt.title == "Confirm run_bash?"
     assert prompt.detail == "destructive op"
-    assert len(prompt.options) == 2
     assert [o.id for o in prompt.options] == ["allow", "deny"]
-    # Each option carries label + description for the frontend.
     for opt in prompt.options:
         assert isinstance(opt, ConfirmOption)
         assert opt.label and opt.description
-    # Serializes cleanly — this is what hits the wire.
     dumped = prompt.model_dump()
     assert dumped["style"] == "confirm_deny"
-    assert dumped["options"][0]["id"] == "allow"
-    assert dumped["options"][1]["id"] == "deny"
     print("OK test_confirm_deny_prompt_shape")
+
+
+def test_allow_once_always_deny_prompt_shape() -> None:
+    """The 3-option helper produces a `single_select` prompt with the
+    canonical ids in the expected order."""
+    prompt = allow_once_always_deny_prompt("run_bash", "destructive op")
+    assert isinstance(prompt, ConfirmPrompt)
+    assert prompt.style == "single_select"
+    assert prompt.title == "Confirm run_bash?"
+    assert prompt.detail == "destructive op"
+    assert [o.id for o in prompt.options] == ["allow_once", "allow_always", "deny"]
+    for opt in prompt.options:
+        assert opt.label and opt.description
+    dumped = prompt.model_dump()
+    assert dumped["style"] == "single_select"
+    assert [o["id"] for o in dumped["options"]] == [
+        "allow_once",
+        "allow_always",
+        "deny",
+    ]
+    print("OK test_allow_once_always_deny_prompt_shape")
 
 
 def test_read_choice_id_helper() -> None:
     """The helper tolerates every kind of garbage."""
-    assert _read_choice_id(_FakeConfirmation(payload={"chose_id": "allow"})) == "allow"
+    assert _read_choice_id(_FakeConfirmation(payload={"chose_id": "allow_once"})) == "allow_once"
     assert _read_choice_id(_FakeConfirmation(payload={"chose_id": "deny"})) == "deny"
     assert _read_choice_id(_FakeConfirmation(payload=None)) is None
     assert _read_choice_id(_FakeConfirmation(payload={})) is None
@@ -157,46 +184,62 @@ def test_read_choice_id_helper() -> None:
 # --- before_tool_callback paths ------------------------------------
 
 
-def test_first_call_emits_structured_payload() -> None:
-    """First invocation: plugin must call `request_confirmation` with a
-    structured `ConfirmPrompt` payload AND set skip_summarization."""
+def test_first_call_emits_single_select_payload() -> None:
+    """First invocation: plugin calls `request_confirmation` with a
+    structured `single_select` payload AND sets skip_summarization."""
     plugin = _make_plugin()
     tool = _FakeBashTool()
     ctx = _FakeToolContext()
 
     result = asyncio.run(
         plugin.before_tool_callback(
-            tool=tool, tool_args={"command": "rm -rf /"}, tool_context=ctx
+            tool=tool, tool_args={"command": "rm -rf /tmp/foo"}, tool_context=ctx
         )
     )
 
-    # Returns a needs_confirmation dict so the model sees the gate.
-    assert isinstance(result, dict), result
-    assert result["status"] == "needs_confirmation", result
-
-    # request_confirmation was called exactly once.
+    assert isinstance(result, dict) and result["status"] == "needs_confirmation", result
     assert len(ctx.requested) == 1, ctx.requested
     call = ctx.requested[0]
-
-    # hint mirrors the legacy back-compat field.
     assert call["hint"]
-    # payload is the structured ConfirmPrompt dump.
     payload = call["payload"]
     assert isinstance(payload, dict), payload
-    assert payload["style"] == "confirm_deny"
+    assert payload["style"] == "single_select"
     assert payload["title"] == "Confirm run_bash?"
     assert payload["detail"] == call["hint"]
-    assert [o["id"] for o in payload["options"]] == ["allow", "deny"]
-
-    # The skip_summarization flag is the linchpin keeping ADK's runner
-    # from re-prompting the LLM before the user responds.
+    assert [o["id"] for o in payload["options"]] == [
+        "allow_once",
+        "allow_always",
+        "deny",
+    ]
     assert ctx.actions.skip_summarization is True
-    print("OK test_first_call_emits_structured_payload")
+    print("OK test_first_call_emits_single_select_payload")
 
 
-def test_resume_allow_via_payload() -> None:
-    """Frontend submits `chose_id=allow` → plugin lets the tool run."""
-    plugin = _make_plugin()
+def test_resume_allow_once_runs_tool_no_session_rule() -> None:
+    """`chose_id=allow_once` lets the tool run and adds NO session rule."""
+    settings = SettingsHierarchy()
+    plugin = _make_plugin(settings)
+    tool = _FakeBashTool()
+    ctx = _FakeToolContext(
+        tool_confirmation=_FakeConfirmation(payload={"chose_id": "allow_once"})
+    )
+
+    result = asyncio.run(
+        plugin.before_tool_callback(
+            tool=tool, tool_args={"command": "ls"}, tool_context=ctx
+        )
+    )
+    assert result is None, result
+    # No session rule was injected.
+    assert settings.all_rules() == [], settings.all_rules()
+    print("OK test_resume_allow_once_runs_tool_no_session_rule")
+
+
+def test_resume_legacy_allow_id_back_compat() -> None:
+    """`chose_id=allow` (the legacy two-option id) keeps working —
+    treated as allow_once. No session rule appended."""
+    settings = SettingsHierarchy()
+    plugin = _make_plugin(settings)
     tool = _FakeBashTool()
     ctx = _FakeToolContext(
         tool_confirmation=_FakeConfirmation(payload={"chose_id": "allow"})
@@ -208,11 +251,78 @@ def test_resume_allow_via_payload() -> None:
         )
     )
     assert result is None, result
-    print("OK test_resume_allow_via_payload")
+    assert settings.all_rules() == [], settings.all_rules()
+    print("OK test_resume_legacy_allow_id_back_compat")
+
+
+def test_resume_allow_always_injects_session_rule() -> None:
+    """`chose_id=allow_always` runs the tool AND appends a SESSION ALLOW
+    rule scoped to (tool_name, extracted rule key)."""
+    settings = SettingsHierarchy()
+    plugin = _make_plugin(settings)
+    tool = _FakeBashTool()
+    ctx = _FakeToolContext(
+        tool_confirmation=_FakeConfirmation(payload={"chose_id": "allow_always"})
+    )
+
+    result = asyncio.run(
+        plugin.before_tool_callback(
+            tool=tool, tool_args={"command": "git status"}, tool_context=ctx
+        )
+    )
+    # Tool runs.
+    assert result is None, result
+    # Exactly one session rule was injected with the right scope.
+    rules = settings.all_rules()
+    assert len(rules) == 1, rules
+    r = rules[0]
+    assert r.source is RuleSource.SESSION
+    assert r.behavior is RuleBehavior.ALLOW
+    assert r.tool_name == "run_bash"
+    assert r.rule_content == "git status"
+    print("OK test_resume_allow_always_injects_session_rule")
+
+
+def test_allow_always_skips_re_ask_on_second_call() -> None:
+    """End-to-end: after allow_always, the SAME (tool, command) is
+    auto-allowed by the engine on the next call — no second prompt."""
+    settings = SettingsHierarchy()
+    plugin = _make_plugin(settings)
+    tool = _FakeBashTool()
+
+    # First call: user picks allow_always.
+    ctx1 = _FakeToolContext(
+        tool_confirmation=_FakeConfirmation(payload={"chose_id": "allow_always"})
+    )
+    asyncio.run(
+        plugin.before_tool_callback(
+            tool=tool, tool_args={"command": "git status"}, tool_context=ctx1
+        )
+    )
+
+    # Second call, same command: engine sees the session rule and returns
+    # `allow` without going through the ask branch at all.
+    decision = decide(
+        tool=tool,
+        args={"command": "git status"},
+        mode=PermissionMode.DEFAULT,
+        settings=settings,
+    )
+    assert decision.behavior == "allow", decision
+
+    # Different command (not covered by the rule): still gates.
+    decision_other = decide(
+        tool=tool,
+        args={"command": "rm -rf /"},
+        mode=PermissionMode.DEFAULT,
+        settings=settings,
+    )
+    assert decision_other.behavior == "ask", decision_other
+    print("OK test_allow_always_skips_re_ask_on_second_call")
 
 
 def test_resume_deny_via_payload() -> None:
-    """Frontend submits `chose_id=deny` → plugin short-circuits."""
+    """`chose_id=deny` short-circuits."""
     plugin = _make_plugin()
     tool = _FakeBashTool()
     ctx = _FakeToolContext(
@@ -265,19 +375,16 @@ def test_resume_legacy_confirmed_false() -> None:
 
 
 def test_resume_malformed_payload_falls_back() -> None:
-    """Garbage `chose_id` → falls back to `confirmed: bool`.
+    """Garbage `chose_id` doesn't crash.
 
-    Two sub-cases: with confirmed=True (allow) and confirmed=False (deny).
-    Either way the plugin must not crash on the bogus id.
+    A bogus string id (e.g. "bogus") falls through to the denied branch
+    because it's not one of the known ids. A non-string id (e.g. integer)
+    collapses to None in `_read_choice_id`, which then consults `confirmed`.
     """
     plugin = _make_plugin()
     tool = _FakeBashTool()
 
-    # Bogus id, confirmed=True → denied. Garbage id is NOT silently
-    # treated as allow — only the literal "allow" is allow. This matches
-    # the call-site code: `chose_id == "allow"` first; only if chose_id
-    # is None do we consult `confirmed`. So a non-None bogus id with
-    # confirmed=True falls through to the denied branch. Defensive.
+    # Bogus string id, confirmed=True → still denied. Unknown ids fail closed.
     ctx_a = _FakeToolContext(
         tool_confirmation=_FakeConfirmation(
             confirmed=True, payload={"chose_id": "bogus"}
@@ -291,8 +398,7 @@ def test_resume_malformed_payload_falls_back() -> None:
     assert isinstance(result_a, dict), result_a
     assert result_a["status"] == "permission_denied_by_user", result_a
 
-    # Non-string `chose_id` (e.g. integer) → helper returns None,
-    # falls back cleanly to `confirmed: bool`.
+    # Non-string chose_id → helper returns None, falls back to `confirmed`.
     ctx_b = _FakeToolContext(
         tool_confirmation=_FakeConfirmation(
             confirmed=True, payload={"chose_id": 42}
@@ -309,9 +415,13 @@ def test_resume_malformed_payload_falls_back() -> None:
 
 def main() -> None:
     test_confirm_deny_prompt_shape()
+    test_allow_once_always_deny_prompt_shape()
     test_read_choice_id_helper()
-    test_first_call_emits_structured_payload()
-    test_resume_allow_via_payload()
+    test_first_call_emits_single_select_payload()
+    test_resume_allow_once_runs_tool_no_session_rule()
+    test_resume_legacy_allow_id_back_compat()
+    test_resume_allow_always_injects_session_rule()
+    test_allow_always_skips_re_ask_on_second_call()
     test_resume_deny_via_payload()
     test_resume_legacy_confirmed_true()
     test_resume_legacy_confirmed_false()
