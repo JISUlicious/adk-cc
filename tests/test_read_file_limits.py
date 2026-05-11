@@ -167,28 +167,34 @@ def test_large_file_default_caps_at_50_lines() -> None:
 
 
 def test_offset_reads_subsequent_slice() -> None:
-    """Pagination: second call with offset=2001 gets the next slice."""
-    body = "\n".join(f"L{i}" for i in range(1, 5001))
+    """Pagination: each call returns up to 50 lines (the hard cap);
+    `offset` walks forward through the file."""
+    body = "\n".join(f"L{i}" for i in range(1, 201))  # 200 lines
     path = _make_file(body)
     try:
-        out = _call(path, offset=2001, limit=2000)
-        assert out["start_line"] == 2001
-        assert out["end_line"] == 4000
+        # Default limit (50). First call returns lines 1..50.
+        out = _call(path)
+        assert out["start_line"] == 1
+        assert out["end_line"] == 50
         assert out["has_more"] is True
 
-        parsed = _parse_cat_n(out["content"])
-        assert parsed[0] == (2001, "L2001")
-        assert parsed[-1] == (4000, "L4000")
+        # Second call: offset = end_line + 1.
+        out2 = _call(path, offset=51, limit=50)
+        assert out2["start_line"] == 51
+        assert out2["end_line"] == 100
+        assert out2["has_more"] is True
+        parsed2 = _parse_cat_n(out2["content"])
+        assert parsed2[0] == (51, "L51")
+        assert parsed2[-1] == (100, "L100")
 
-        # Third call gets the tail.
-        out3 = _call(path, offset=4001, limit=2000)
-        assert out3["start_line"] == 4001
-        assert out3["end_line"] == 5000
-        assert out3["has_more"] is False
-        parsed3 = _parse_cat_n(out3["content"])
-        # Line numbers continue the file's numbering, not the slice's.
-        assert parsed3[0] == (4001, "L4001")
-        assert parsed3[-1] == (5000, "L5000")
+        # Final call reaches the tail.
+        out_last = _call(path, offset=151, limit=50)
+        assert out_last["start_line"] == 151
+        assert out_last["end_line"] == 200
+        assert out_last["has_more"] is False
+        parsed_last = _parse_cat_n(out_last["content"])
+        assert parsed_last[0] == (151, "L151")
+        assert parsed_last[-1] == (200, "L200")
     finally:
         os.unlink(path)
     print("OK test_offset_reads_subsequent_slice")
@@ -253,13 +259,19 @@ def test_custom_limit_within_bounds() -> None:
     print("OK test_custom_limit_within_bounds")
 
 
-def test_schema_rejects_limit_over_2000() -> None:
-    try:
-        ReadFileArgs(path="x", limit=2001)
-    except ValidationError:
-        print("OK test_schema_rejects_limit_over_2000")
-        return
-    raise AssertionError("expected ValidationError for limit > 2000")
+def test_schema_rejects_limit_over_50() -> None:
+    """Hard upper bound: 50 lines per read. Models can't accidentally
+    request a huge slice that blows the LLM context — they have to
+    paginate via `offset` instead."""
+    for bad in (51, 100, 2000, 10000):
+        try:
+            ReadFileArgs(path="x", limit=bad)
+        except ValidationError:
+            continue
+        raise AssertionError(f"expected ValidationError for limit={bad}")
+    # Boundary: 50 is allowed.
+    ReadFileArgs(path="x", limit=50)
+    print("OK test_schema_rejects_limit_over_50")
 
 
 def test_schema_rejects_zero_or_negative_offset() -> None:
@@ -381,7 +393,7 @@ def main() -> None:
     test_offset_past_end_returns_empty_slice()
     test_per_line_truncation_cap()
     test_custom_limit_within_bounds()
-    test_schema_rejects_limit_over_2000()
+    test_schema_rejects_limit_over_50()
     test_schema_rejects_zero_or_negative_offset()
     test_schema_rejects_zero_or_negative_limit()
     test_nonexistent_file_returns_error()
