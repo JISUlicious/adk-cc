@@ -4,7 +4,7 @@ plugin chain alongside PermissionPlugin.
 What this proves over the unit tests:
 
   - Outbound rewrite reaches the actual event stream — adk web would
-    see the sentinel name `_adk_cc_confirmation_form` with a populated
+    see the sentinel name `adk_cc_confirmation_form` with a populated
     `response_schema` on the wire, and the bundled UI's render path
     would take the form widget instead of the binary confirmation
     widget.

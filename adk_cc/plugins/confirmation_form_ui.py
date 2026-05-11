@@ -53,8 +53,10 @@ single-true vote.
   - Also write `args.prompt` to the prompt's title (+ detail when set)
     so the bundled UI shows it above the form.
   - Rename the call's name from `adk_request_confirmation` to
-    `_adk_cc_confirmation_form` so the bundled UI's confirmation
-    short-circuit doesn't trigger and the form-widget path takes over.
+    `adk_cc_confirmation_form` (no leading underscore — some
+    OpenAI-compatible backends reject names starting with `_`) so the
+    bundled UI's confirmation short-circuit doesn't trigger and the
+    form-widget path takes over.
   - The function-call **id is preserved**. ADK's resume processor
     matches on id, not on name, so the rename is transparent to resume.
 
@@ -94,11 +96,17 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
 # Sentinel function name that swaps in for `adk_request_confirmation`
-# on outbound events. The leading underscore signals "internal"; the
-# `_adk_cc_` prefix avoids any collision with real ADK names. The
-# bundled UI's confirmation short-circuit (`name === "adk_request_confirmation"`)
-# does not match, so the UI proceeds to its form-widget path.
-CONFIRMATION_FORM_FUNCTION_CALL_NAME = "_adk_cc_confirmation_form"
+# on outbound events. The bundled UI's confirmation short-circuit
+# (`name === "adk_request_confirmation"`) does not match this, so the
+# UI proceeds to its form-widget path.
+#
+# Naming: stick to `[a-zA-Z][a-zA-Z0-9_]*`. OpenAI's spec permits
+# leading underscores in function names (`^[a-zA-Z0-9_-]+$`) but
+# stricter backends (e.g. sglang's OpenAI-compatible endpoint) reject
+# names starting with `_` — those become role-like control tokens in
+# some chat templates. The `adk_cc_` prefix is enough to namespace us
+# away from real ADK names without the underscore tripping validators.
+CONFIRMATION_FORM_FUNCTION_CALL_NAME = "adk_cc_confirmation_form"
 
 # Keys we should NEVER treat as chose_ids when scanning the response
 # for a True-valued field. Some are part of the ADK ToolConfirmation
