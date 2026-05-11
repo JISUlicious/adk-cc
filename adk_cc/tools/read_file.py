@@ -65,7 +65,7 @@ class ReadFileTool(AdkCcTool):
     input_model = ReadFileArgs
     description = (
         "Read a UTF-8 text file. Returns the slice from `offset` for up to "
-        "`limit` lines (defaults: lines 1-2000) in `cat -n` format. The "
+        "`limit` lines (defaults: lines 1-1000) in `cat -n` format. The "
         "response also includes `total_lines`, `total_bytes`, and `has_more` "
         "so you can decide whether to paginate (next call with "
         "`offset = end_line + 1`) or use `grep`/`glob_files` for a more "
