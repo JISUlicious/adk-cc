@@ -1,3 +1,4 @@
+from .ask_user_question_ui import AskUserQuestionUiHintPlugin
 from .audit import AuditPlugin
 from .context_guard import ContextGuardPlugin
 from .permissions import PermissionPlugin
@@ -10,6 +11,7 @@ from .task_reminder import TaskReminderPlugin
 from .tool_call_validator import ToolCallValidatorPlugin
 
 __all__ = [
+    "AskUserQuestionUiHintPlugin",
     "AuditPlugin",
     "ContextGuardPlugin",
     "PermissionPlugin",

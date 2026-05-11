@@ -1,18 +1,24 @@
-"""End-to-end test that `ask_user_question` actually pauses the agent loop.
+"""End-to-end test that `ask_user_question` pauses the agent loop AND
+keeps the bundled `adk web` UI's response widget visible.
 
-Bug being verified: without the `skip_summarization` invariant for
-long-running tools in `AdkCcTool.run_async`, ADK's function-response
-event for `ask_user_question` isn't marked final
-(`long_running_tool_ids` is set on the function-CALL event but not the
-RESPONSE event built by `__build_response_event`). The runner therefore
-re-invokes the LLM with `{"status": "awaiting_user_input"}` as a normal
-tool result and the model cascades into more questions — same root
-cause as the confirmation-cascade bug we fixed earlier.
+Two invariants:
 
-Test strategy: queue exactly ONE LLM response (the initial
-`function_call`) on the scripted LLM. If the loop pauses correctly the
-queue is never re-consumed. If it cascades, `_ScriptedLlm` raises
-"queue empty" and the test fails loudly.
+  1. Loop pauses after the initial call (no LLM re-invocation until the
+     user submits an answer). Verified by queuing exactly ONE LLM
+     response on the scripted LLM — if the loop cascades, the queue
+     empties and `_ScriptedLlm` raises loudly.
+
+  2. No function_response event is built for the initial call. The
+     bundled UI's response widget renders only when
+     `needsResponse && !hasFunctionResponse(callId)` — so as soon as a
+     function_response lands, the widget hides. `_execute` returning
+     `None` lets ADK's long-running short-circuit (`functions.py:578`)
+     skip the response-event build, keeping the call "pending" until
+     the user actually submits.
+
+Pause mechanism: `long_running_tool_ids` on the function-CALL event
+(set by ADK from `is_long_running=True`), which alone makes the call
+event `is_final_response()` → runner pauses.
 
 Run: `.venv/bin/python tests/e2e_ask_user_question.py`
 """
@@ -20,7 +26,6 @@ Run: `.venv/bin/python tests/e2e_ask_user_question.py`
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from typing import AsyncGenerator
 
@@ -151,32 +156,53 @@ async def test_loop_pauses_after_ask_user_question() -> None:
     # The runner exited cleanly after a single LLM call. Without the fix,
     # _ScriptedLlm would have raised on the second call.
     assert llm.calls_made == 1, llm.calls_made
-
-    # Verify the function_response carries the awaiting_user_input payload.
-    awaiting_seen = False
-    for ev in events:
-        for fr in ev.get_function_responses():
-            resp = fr.response
-            if isinstance(resp, dict) and resp.get("status") == "awaiting_user_input":
-                qs = resp.get("questions") or []
-                assert len(qs) == 1 and qs[0]["header"] == "Path", qs
-                awaiting_seen = True
-    assert awaiting_seen, "expected awaiting_user_input function_response in events"
-
-    # The function-response event itself must be final
-    # (is_final_response() True), otherwise ADK's loop would have iterated.
-    last_response_event = next(
-        (e for e in reversed(events) if e.get_function_responses()), None
-    )
-    assert last_response_event is not None
-    assert last_response_event.is_final_response(), (
-        "function-response event must be is_final_response() for the loop to pause; "
-        "either skip_summarization or long_running_tool_ids must be set"
-    )
-    assert last_response_event.actions.skip_summarization is True, (
-        "AdkCcTool.run_async should set skip_summarization for long_running tools"
-    )
     print("OK test_loop_pauses_after_ask_user_question")
+
+
+async def test_no_function_response_event_for_initial_call() -> None:
+    """When `_execute` returns None, ADK skips the function_response
+    event entirely — the call stays "pending" and the bundled UI's
+    response widget remains visible (its render condition is
+    `needsResponse && !hasFunctionResponse(callId)`)."""
+    runner, _ = _build_runner(
+        llm_responses=[_tool_call_response("call-1", "ask_user_question", _ask_args())]
+    )
+    await _create_session(runner, "alice", "s-no-resp")
+
+    events: list[Event] = []
+    async for ev in runner.run_async(
+        user_id="alice",
+        session_id="s-no-resp",
+        new_message=types.Content(
+            role="user", parts=[types.Part(text="ask me")]
+        ),
+    ):
+        events.append(ev)
+
+    # No event should carry a function_response for call-1.
+    responses_for_call = [
+        fr
+        for ev in events
+        for fr in ev.get_function_responses()
+        if fr.id == "call-1"
+    ]
+    assert responses_for_call == [], (
+        f"expected zero function_responses for the initial call; got "
+        f"{[fr.response for fr in responses_for_call]}"
+    )
+
+    # The function-call event for call-1 must still be in the stream and
+    # must carry long_running_tool_ids — that's what pauses the runner.
+    call_events = [
+        e for e in events
+        if any(fc.id == "call-1" for fc in e.get_function_calls())
+    ]
+    assert call_events, "expected the ask_user_question function-call event"
+    assert any(
+        e.long_running_tool_ids and "call-1" in e.long_running_tool_ids
+        for e in call_events
+    ), "function-call event must carry long_running_tool_ids for the pause"
+    print("OK test_no_function_response_event_for_initial_call")
 
 
 async def test_resume_with_user_answer_continues_loop() -> None:
@@ -201,13 +227,11 @@ async def test_resume_with_user_answer_continues_loop() -> None:
         pass
     assert llm.calls_made == 1, llm.calls_made
 
-    # Invocation 2: user submits the answer as a function_response with
-    # the same call_id. The session history then contains both the
-    # awaiting_user_input result and the answered result; the LLM sees both.
-    answer = {
-        "status": "answered",
-        "answers": {"Which path do you prefer?": "Refactor"},
-    }
+    # Invocation 2: user submits the answer as the FIRST function_response
+    # for the call. With the new design there's no awaiting_user_input
+    # event sitting in history — the user's answer is the call's only
+    # response.
+    answer = {"Which path do you prefer?": "Refactor"}
     async for _ in runner.run_async(
         user_id="alice",
         session_id="s-resume",
@@ -232,8 +256,8 @@ async def test_resume_with_user_answer_continues_loop() -> None:
 
 async def test_long_running_flag_propagates_to_event() -> None:
     """Sanity check on ADK behavior we rely on: the function-CALL event
-    has the tool's call_id in `long_running_tool_ids`. This is the OTHER
-    half of the pause mechanism (the half ADK does for us)."""
+    has the tool's call_id in `long_running_tool_ids`. This is what
+    actually pauses the loop in the absence of a function_response."""
     runner, _ = _build_runner(
         llm_responses=[_tool_call_response("call-1", "ask_user_question", _ask_args())]
     )
@@ -251,7 +275,6 @@ async def test_long_running_flag_propagates_to_event() -> None:
 
     call_events = [e for e in events if e.get_function_calls()]
     assert call_events, "expected at least one function-call event"
-    # At least one function-call event must list call-1 in long_running_tool_ids.
     flagged = any(
         e.long_running_tool_ids and "call-1" in e.long_running_tool_ids
         for e in call_events
@@ -268,6 +291,7 @@ async def test_long_running_flag_propagates_to_event() -> None:
 
 async def main() -> None:
     await test_loop_pauses_after_ask_user_question()
+    await test_no_function_response_event_for_initial_call()
     await test_resume_with_user_answer_continues_loop()
     await test_long_running_flag_propagates_to_event()
     print("\nall e2e ask_user_question tests passed")
