@@ -14,6 +14,25 @@ from pydantic import BaseModel, Field
 
 class ReadFileArgs(BaseModel):
     path: str = Field(description="Absolute or relative path to the file.")
+    offset: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Starting line number (1-indexed). Defaults to 1 (start of file). "
+            "Use with `limit` to page through large files."
+        ),
+    )
+    limit: int = Field(
+        default=2000,
+        ge=1,
+        le=2000,
+        description=(
+            "Maximum number of lines to return (1-2000). Defaults to 2000. "
+            "Files longer than `limit` require multiple reads with increasing "
+            "`offset`; the response includes `has_more` and `total_lines` so "
+            "you can tell when to stop."
+        ),
+    )
 
 
 class GlobFilesArgs(BaseModel):
