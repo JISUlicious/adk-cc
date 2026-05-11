@@ -19,7 +19,7 @@ So a `ConfirmPrompt` with N options renders as a single checkbox. This
 plugin rewrites both directions of the protocol so the bundled UI takes
 the form-widget path instead.
 
-## Why one-boolean-per-option (not a `string`/`enum`)
+## Why boolean checkboxes (not `string`/`enum`) — and the binary collapse
 
 Bundled `adk web`'s form-widget renders fields by JSON Schema `type`
 only (see `initForm()` in `main-*.js`):
@@ -30,18 +30,25 @@ only (see `initForm()` in `main-*.js`):
 
 `enum` is **not consulted** — a `{type: "string", enum: [...]}` schema
 renders as a plain textbox where the operator has to type one of the
-ids manually (and a typo silently denies the operation). The only path
-to a real "pick one" UI in the bundled form is **one boolean field per
-option**: each option renders as a checkbox, the operator ticks one,
-and on submit the response is `{<chose_id_a>: false, <chose_id_b>:
-true, ...}`. The plugin then maps the first True-valued key to
-`chose_id` and reshapes for ADK's resume processor.
+ids manually (and a typo silently denies the operation). There is no
+radio-group rendering. The only path to a "pick one" UI in the bundled
+form is the boolean type.
 
-Yes, it's awkward that "pick one of N" is rendered as N checkboxes
-rather than a radio group or dropdown — but the bundled UI has no
-form-side support for either. The label + description on each checkbox
-makes the intent clear, and the inbound side accepts a clean
-single-true vote.
+**Binary prompts (2 options) collapse to a SINGLE boolean.** The form
+shows one checkbox keyed on the positive option's id (the one whose
+id is not `"deny"`, or the first option when neither is). Checked =
+positive choice; unchecked = the negative option (conventionally
+`"deny"`). The operator physically can't pick both — there's only one
+box. The description includes "Unchecked = <negative label>." so the
+meaning of the empty state is obvious.
+
+**N≥3 prompts (e.g. `allow_once`/`allow_always`/`deny`) still render
+as N checkboxes**, since there's no way to collapse without losing
+distinct choices. To guard against accidental multi-check, the
+inbound side applies **"deny wins"**: if `deny` is True regardless of
+other True values, the result is "deny" (fail-closed for destructive
+operations). For non-deny multi-checks, the first True-valued key in
+schema order wins (deterministic).
 
 ## OUTBOUND (`on_event_callback`)
 
@@ -249,11 +256,23 @@ class ConfirmationFormUiPlugin(BasePlugin):
         if not incoming:
             return None  # nothing addressed to this plugin
 
+        # Hoist session events up — `_extract_chose_id`'s binary-collapse
+        # fallback needs the original `ConfirmPrompt` payload (looked up
+        # by wrap_id) to know which option id represents the negative
+        # choice.
+        events = _session_events(invocation_context)
+
         # Reshape each incoming response to the standard ToolConfirmation
         # shape ({confirmed: bool, payload: {chose_id: <id>, comment?: <text>}}).
         reshaped_incoming: dict[str, dict] = {}
         for fr in incoming:
-            chose_id = _extract_chose_id(fr.response)
+            wrap_payload = _payload_for_wrap_id(events, fr.id)
+            options = (
+                wrap_payload.get("options")
+                if isinstance(wrap_payload, dict)
+                else None
+            )
+            chose_id = _extract_chose_id(fr.response, options=options)
             if chose_id is None:
                 # Unrecognized response shape — let it through unmodified so
                 # any error surfaces rather than getting silently swallowed.
@@ -270,7 +289,6 @@ class ConfirmationFormUiPlugin(BasePlugin):
         if not reshaped_incoming:
             return None  # all incoming responses were unparseable
 
-        events = _session_events(invocation_context)
         outstanding = _outstanding_wrap_ids(events)
         already_pending = _stashed_pending_responses(events)
 
@@ -481,18 +499,23 @@ def _build_choice_schema(
     options: list, *, with_comment: bool = False
 ) -> Optional[dict]:
     """Convert `ConfirmPrompt.options` to a JSON Schema renderable by the
-    bundled UI's form widget as one checkbox per option.
+    bundled UI's form widget.
 
-    Each option becomes a `boolean` property keyed on its `id`. The
-    `description` is `<label> — <option description>` so the operator
-    sees the human-readable label next to the checkbox.
+    Binary collapse (len == 2): a SINGLE boolean property keyed on the
+    positive option. The bundled UI shows one checkbox; physically
+    impossible to pick both. Description includes "Unchecked = <neg
+    label>." so the meaning of the empty state is explicit.
+
+    N options (len >= 3): one boolean property per option, keyed on
+    each id — the operator ticks the one they want. Inbound side
+    enforces "deny wins" if multiple are checked.
 
     When `with_comment=True`, an additional string property
     (`comment`) is added so the bundled UI renders a textbox alongside
-    the checkboxes — operator can pair their choice with feedback
+    the checkbox(es) — operator can pair their choice with feedback
     (e.g. "Deny + 'try a smaller scope'").
     """
-    properties: dict[str, Any] = {}
+    valid: list[dict] = []
     for opt in options:
         if not isinstance(opt, dict):
             continue
@@ -504,14 +527,34 @@ def _build_choice_schema(
             # the inbound disambiguation. Skip; the prompt still works
             # via the other options.
             continue
-        label = opt.get("label") or oid
-        desc = opt.get("description") or ""
-        properties[oid] = {
-            "type": "boolean",
-            "description": f"{label} — {desc}" if desc else label,
-        }
-    if not properties:
+        valid.append(opt)
+    if not valid:
         return None
+
+    properties: dict[str, Any] = {}
+    if len(valid) == 2:
+        pos, neg = _binary_positive_negative(valid)
+        pos_label = pos.get("label") or pos["id"]
+        pos_desc = pos.get("description") or ""
+        neg_label = neg.get("label") or neg["id"]
+        if pos_desc:
+            description = f"{pos_label} — {pos_desc} Leave unchecked for {neg_label}."
+        else:
+            description = f"{pos_label}. Unchecked = {neg_label}."
+        properties[pos["id"]] = {
+            "type": "boolean",
+            "description": description,
+        }
+    else:
+        for opt in valid:
+            oid = opt["id"]
+            label = opt.get("label") or oid
+            desc = opt.get("description") or ""
+            properties[oid] = {
+                "type": "boolean",
+                "description": f"{label} — {desc}" if desc else label,
+            }
+
     if with_comment:
         properties[COMMENT_FIELD_KEY] = {
             "type": "string",
@@ -522,6 +565,18 @@ def _build_choice_schema(
             ),
         }
     return {"type": "object", "properties": properties}
+
+
+def _binary_positive_negative(options: list) -> tuple[dict, dict]:
+    """For a 2-option prompt, pick which is positive and which is
+    negative. Convention: the option with id == "deny" is the negative.
+    When neither id is "deny", the SECOND option (by list order) is
+    treated as the negative — option lists are written
+    positive-then-negative throughout the codebase
+    (e.g. allow→deny, approve→deny)."""
+    if options[0].get("id") == "deny":
+        return options[1], options[0]
+    return options[0], options[1]
 
 
 def _build_prompt_text(title: Optional[str], detail: Optional[str]) -> str:
@@ -535,13 +590,28 @@ def _build_prompt_text(title: Optional[str], detail: Optional[str]) -> str:
     return "\n\n".join(p for p in parts if p)
 
 
-def _extract_chose_id(response: Any) -> Optional[str]:
+def _extract_chose_id(
+    response: Any, *, options: Optional[list] = None
+) -> Optional[str]:
     """Pull a chose_id from any of the supported response shapes.
 
     Order:
       1. `choice` / `chose_id` (legacy / payload-aware)
       2. `result` (bundled UI's free-form textarea fallback)
-      3. First True-valued non-reserved key (current bundled UI form)
+      3. Boolean-per-option:
+         a. Deny wins — if a "deny" boolean is True, short-circuit
+            (defends multi-check on N≥3 prompts).
+         b. First True-valued non-reserved key.
+      4. Binary-collapse fallback: when `options` is supplied AND
+         has exactly 2 entries AND no True boolean was found, treat
+         the submission as "operator left the single positive
+         checkbox unchecked" → return the negative option's id
+         (conventionally "deny").
+
+    `options` is the original `ConfirmPrompt.options` list. The
+    caller resolves it from the wrapper event in session history;
+    direct callers (e.g. unit tests) can omit it and lose only the
+    binary-unchecked fallback.
     """
     if not isinstance(response, dict):
         return None
@@ -554,14 +624,64 @@ def _extract_chose_id(response: Any) -> Optional[str]:
     result = response.get("result")
     if isinstance(result, str) and result:
         return result
-    # Boolean-per-option shape (current bundled UI form output). Use the
-    # first True-valued key in iteration order — Python dicts preserve
-    # insertion order, so this matches the option order from the schema.
+    # Deny wins — if the operator multi-checked and `deny` is one of
+    # the checked options, the safe choice is deny regardless of the
+    # other True keys.
+    if response.get("deny") is True:
+        return "deny"
+    # First True-valued non-reserved key. Python dicts preserve
+    # insertion order so this matches schema order.
     for key, val in response.items():
         if key in _RESERVED_RESPONSE_KEYS:
             continue
         if val is True:
             return key
+    # Binary-collapse fallback: 2-option prompts render as a single
+    # boolean (see `_build_choice_schema`). An unchecked submission
+    # means the operator picked the negative option.
+    if isinstance(options, list) and len(options) == 2:
+        neg = _binary_negative_id(options)
+        if neg is not None:
+            return neg
+    return None
+
+
+def _binary_negative_id(options: list) -> Optional[str]:
+    """Return the negative option's id for a 2-option prompt — the
+    same convention `_binary_positive_negative` uses for outbound."""
+    valid: list[dict] = [
+        opt
+        for opt in options
+        if isinstance(opt, dict)
+        and isinstance(opt.get("id"), str)
+        and opt["id"]
+        and opt["id"] not in _RESERVED_RESPONSE_KEYS
+    ]
+    if len(valid) != 2:
+        return None
+    _, neg = _binary_positive_negative(valid)
+    return neg["id"]
+
+
+def _payload_for_wrap_id(events: list, wrap_id: Optional[str]) -> Optional[dict]:
+    """Scan session events for the wrapper function-call with this id
+    and our sentinel name; return the original `ConfirmPrompt` payload
+    so inbound logic can resolve the negative id for binary-collapsed
+    schemas. None when the wrap event isn't found (defensive)."""
+    if not wrap_id or not events:
+        return None
+    for ev in events:
+        for fc in ev.get_function_calls():
+            if fc.name != CONFIRMATION_FORM_FUNCTION_CALL_NAME:
+                continue
+            if fc.id != wrap_id:
+                continue
+            args = fc.args or {}
+            tool_conf = args.get("toolConfirmation")
+            if isinstance(tool_conf, dict):
+                payload = tool_conf.get("payload")
+                if isinstance(payload, dict):
+                    return payload
     return None
 
 
