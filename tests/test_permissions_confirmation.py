@@ -34,8 +34,10 @@ from pydantic import BaseModel
 from adk_cc.permissions.confirmation import (
     ConfirmOption,
     ConfirmPrompt,
+    _MAX_SUBJECT_LENGTH,
     allow_once_always_deny_prompt,
     confirm_deny_prompt,
+    extract_subject,
 )
 from adk_cc.permissions.engine import decide
 from adk_cc.permissions.modes import PermissionMode
@@ -149,6 +151,13 @@ def test_confirm_deny_prompt_shape() -> None:
     print("OK test_confirm_deny_prompt_shape")
 
 
+def test_confirm_deny_prompt_subject_in_title() -> None:
+    """`subject` keyword goes into the title after a colon for disambig."""
+    prompt = confirm_deny_prompt("run_bash", "x", subject="git status")
+    assert prompt.title == "Confirm run_bash: git status?", prompt.title
+    print("OK test_confirm_deny_prompt_subject_in_title")
+
+
 def test_allow_once_always_deny_prompt_shape() -> None:
     """The 3-option helper produces a `single_select` prompt with the
     canonical ids in the expected order."""
@@ -168,6 +177,55 @@ def test_allow_once_always_deny_prompt_shape() -> None:
         "deny",
     ]
     print("OK test_allow_once_always_deny_prompt_shape")
+
+
+def test_allow_once_always_deny_prompt_subject_in_title() -> None:
+    """`subject` keyword goes into the title for the 3-option helper too."""
+    prompt = allow_once_always_deny_prompt(
+        "write_file", "destructive write_file requires confirmation",
+        subject="/tmp/foo.txt",
+    )
+    assert prompt.title == "Confirm write_file: /tmp/foo.txt?", prompt.title
+    # Options + detail unchanged by the subject.
+    assert [o.id for o in prompt.options] == ["allow_once", "allow_always", "deny"]
+    print("OK test_allow_once_always_deny_prompt_subject_in_title")
+
+
+def test_extract_subject_per_tool() -> None:
+    """`extract_subject` uses the engine's `_RULE_KEY_EXTRACTORS` to pick
+    the right arg per tool: command for bash, path for file ops, etc."""
+    assert extract_subject("run_bash", {"command": "git status"}) == "git status"
+    assert extract_subject("write_file", {"path": "/tmp/foo.txt", "content": "..."}) == "/tmp/foo.txt"
+    assert extract_subject("read_file", {"path": "/etc/hosts"}) == "/etc/hosts"
+    assert extract_subject("edit_file", {"path": "/x", "old_string": "a", "new_string": "b"}) == "/x"
+    assert extract_subject("glob_files", {"root": "src", "pattern": "**/*.py"}) == "src"
+    assert extract_subject("grep", {"path": ".", "pattern": "TODO"}) == "."
+    print("OK test_extract_subject_per_tool")
+
+
+def test_extract_subject_truncates_long_strings() -> None:
+    """A multi-hundred-char command gets clipped with an ellipsis so the
+    title stays readable. Internal newlines collapse to spaces too."""
+    cmd = "echo " + "x" * 500
+    out = extract_subject("run_bash", {"command": cmd})
+    assert out is not None
+    assert len(out) == _MAX_SUBJECT_LENGTH, len(out)
+    assert out.endswith("…")
+    # Multi-line collapses to single line.
+    multiline = extract_subject("run_bash", {"command": "git\nstatus\n-v"})
+    assert multiline == "git status -v"
+    print("OK test_extract_subject_truncates_long_strings")
+
+
+def test_extract_subject_returns_none_for_unknown_tool() -> None:
+    """Tools without a rule-key extractor entry (custom user tools)
+    return None; the prompt title falls back to `Confirm <tool>?`."""
+    assert extract_subject("some_custom_tool", {"path": "/x"}) is None
+    assert extract_subject("ask_user_question", {}) is None
+    # Known tool but empty arg.
+    assert extract_subject("run_bash", {}) is None
+    assert extract_subject("run_bash", {"command": ""}) is None
+    print("OK test_extract_subject_returns_none_for_unknown_tool")
 
 
 def test_read_choice_id_helper() -> None:
@@ -204,7 +262,9 @@ def test_first_call_emits_single_select_payload() -> None:
     payload = call["payload"]
     assert isinstance(payload, dict), payload
     assert payload["style"] == "single_select"
-    assert payload["title"] == "Confirm run_bash?"
+    # Subject (the command) is now in the title so concurrent prompts
+    # for the same tool can be told apart.
+    assert payload["title"] == "Confirm run_bash: rm -rf /tmp/foo?", payload["title"]
     assert payload["detail"] == call["hint"]
     assert [o["id"] for o in payload["options"]] == [
         "allow_once",
@@ -415,7 +475,12 @@ def test_resume_malformed_payload_falls_back() -> None:
 
 def main() -> None:
     test_confirm_deny_prompt_shape()
+    test_confirm_deny_prompt_subject_in_title()
     test_allow_once_always_deny_prompt_shape()
+    test_allow_once_always_deny_prompt_subject_in_title()
+    test_extract_subject_per_tool()
+    test_extract_subject_truncates_long_strings()
+    test_extract_subject_returns_none_for_unknown_tool()
     test_read_choice_id_helper()
     test_first_call_emits_single_select_payload()
     test_resume_allow_once_runs_tool_no_session_rule()
