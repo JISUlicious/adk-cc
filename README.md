@@ -212,7 +212,11 @@ Plan mode is asymmetric with `exit_plan_mode`: entering tightens posture (no con
 
 ## Confirmations
 
-Destructive tool calls (and any ASK-rule match) pause for human confirmation via ADK's `request_confirmation` seam. The plugin sends a structured `ConfirmPrompt` payload with three options — **Allow once / Allow always / Deny** — so payload-aware frontends can render labelled buttons. "Allow always" injects a SESSION-scope ALLOW rule keyed by `(tool, extracted rule key)` so the same operation isn't re-asked for the rest of the session; scope is intentionally narrow (exact rule-key match, no wildcards). Frontends that ignore `payload` — including the bundled `adk web` UI — fall back to ADK's `confirmed: bool` checkbox and behave exactly as before. Wire contract: [`docs/06-confirmation-protocol.md`](./docs/06-confirmation-protocol.md).
+Destructive tool calls (and any ASK-rule match) pause for human confirmation via ADK's `request_confirmation` seam. `PermissionPlugin` sends a structured `ConfirmPrompt` payload with three options — **Allow once / Allow always / Deny**. "Allow always" injects a SESSION-scope ALLOW rule keyed by `(tool, extracted rule key)` so the same operation isn't re-asked for the rest of the session; scope is intentionally narrow (exact rule-key match, no wildcards).
+
+`ConfirmationFormUiPlugin` (registered by default) bridges this to bundled `adk web` so the options actually render as a selectable form instead of a hardcoded binary checkbox: it rewrites the wrapper event's name to a sentinel, injects a `response_schema` derived from the options, then reshapes the user's submission back to ADK's standard `ToolConfirmation` shape on the way in. Disable the plugin to revert to bundled UI's binary checkbox; both `PermissionPlugin` and the underlying ADK flow keep working. Custom payload-aware frontends can read the original `ConfirmPrompt` from the rewritten event's args.
+
+Wire contract: [`docs/06-confirmation-protocol.md`](./docs/06-confirmation-protocol.md).
 
 ## Tasks
 
@@ -239,11 +243,13 @@ tests/
 │   ├── test_context_guard.py             10 tests
 │   ├── test_tenancy_resolver.py             7 tests
 │   ├── test_permissions_confirmation.py    12 tests
-│   └── test_ask_user_question_ui_hint.py   11 tests   ── 88 unit tests total
+│   ├── test_ask_user_question_ui_hint.py   11 tests
+│   └── test_confirmation_form_ui.py        14 tests   ── 102 unit tests total
 │
 ├── e2e_features.py                 ← in-process FastAPI e2e (auth + admin + skill upload)
 ├── e2e_confirmation_flow.py        ← in-process ADK Runner e2e (4 tests) — confirmation gate, allow_always session rule, deny path, scope-narrow check
-├── e2e_ask_user_question.py        ← in-process ADK Runner e2e (3 tests) — long_running pause, resume with user answer, long_running_tool_ids on call event
+├── e2e_confirmation_form_ui.py     ← in-process ADK Runner e2e (3 tests) — sentinel-name rewrite, form-shaped resume, deny path with form widget
+├── e2e_ask_user_question.py        ← in-process ADK Runner e2e (4 tests) — long_running pause, no premature response event, resume with user answer, long_running_tool_ids on call event
 │
 └── e2e against a live sandbox service:
     ├── e2e_sandbox_service.py            9 contract checks + 6 bug-fix verifications
@@ -273,4 +279,4 @@ Both `e2e_skills.py` and `e2e_streaming_adapter.py` need Python 3.12+ and adk-cc
 
 ## Status
 
-**Alpha.** Functional and exercised end-to-end (~165 unit + e2e checks across 15 test files). Has known operational gaps documented in [`docs/05-production-deployment.md`](./docs/05-production-deployment.md)'s readiness checklist (security / reliability / observability / ops / multi-tenancy / config / tests). Close the ✗ items appropriate to your threat model and SLO before serving real users.
+**Alpha.** Functional and exercised end-to-end (~182 unit + e2e checks across 17 test files). Has known operational gaps documented in [`docs/05-production-deployment.md`](./docs/05-production-deployment.md)'s readiness checklist (security / reliability / observability / ops / multi-tenancy / config / tests). Close the ✗ items appropriate to your threat model and SLO before serving real users.

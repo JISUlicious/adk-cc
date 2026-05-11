@@ -57,6 +57,7 @@ from .permissions import PermissionMode, SettingsHierarchy
 from .plugins import (
     AskUserQuestionUiHintPlugin,
     AuditPlugin,
+    ConfirmationFormUiPlugin,
     ContextGuardPlugin,
     PermissionPlugin,
     PlanModeReminderPlugin,
@@ -437,6 +438,13 @@ _app_kwargs = dict(
         # textarea). after_model_callback runs after the LLM emits the
         # call but before ADK builds the event the UI consumes.
         AskUserQuestionUiHintPlugin(),
+        # Rewrites adk_request_confirmation events so adk web's bundled
+        # UI renders an N-option dropdown form instead of its hardcoded
+        # binary checkbox widget. Inbound user submissions are reshaped
+        # back to ADK's expected ToolConfirmation shape so the existing
+        # request_confirmation resume processor handles them unchanged.
+        # Disable to fall back to the binary widget.
+        ConfirmationFormUiPlugin(),
         # Pre-flight context-length guardrail: WARN at 75% of MAX,
         # REJECT at 95%. ADK's EventsCompactionConfig (set above) is
         # the primary defense; this is the fail-soft safety net.
