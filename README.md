@@ -244,7 +244,9 @@ tests/
 │   ├── test_tenancy_resolver.py             7 tests
 │   ├── test_permissions_confirmation.py    12 tests
 │   ├── test_ask_user_question_ui_hint.py   11 tests
-│   └── test_confirmation_form_ui.py        14 tests   ── 102 unit tests total
+│   ├── test_confirmation_form_ui.py        14 tests
+│   ├── test_plan_mode_env_default.py        9 tests
+│   └── test_read_file_limits.py            15 tests   ── 126 unit tests total
 │
 ├── e2e_features.py                 ← in-process FastAPI e2e (auth + admin + skill upload)
 ├── e2e_confirmation_flow.py        ← in-process ADK Runner e2e (4 tests) — confirmation gate, allow_always session rule, deny path, scope-narrow check
@@ -279,4 +281,4 @@ Both `e2e_skills.py` and `e2e_streaming_adapter.py` need Python 3.12+ and adk-cc
 
 ## Status
 
-**Alpha.** Functional and exercised end-to-end (~182 unit + e2e checks across 17 test files). Has known operational gaps documented in [`docs/05-production-deployment.md`](./docs/05-production-deployment.md)'s readiness checklist (security / reliability / observability / ops / multi-tenancy / config / tests). Close the ✗ items appropriate to your threat model and SLO before serving real users.
+**Alpha.** Functional and exercised end-to-end (~206 unit + e2e checks across 19 test files). Has known operational gaps documented in [`docs/05-production-deployment.md`](./docs/05-production-deployment.md)'s readiness checklist (security / reliability / observability / ops / multi-tenancy / config / tests). Close the ✗ items appropriate to your threat model and SLO before serving real users.
