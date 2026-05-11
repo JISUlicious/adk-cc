@@ -124,6 +124,21 @@ class AdkCcTool(BaseTool):
         result = self._execute(validated, tool_context)
         if inspect.isawaitable(result):
             result = await result
+
+        # Long-running tools (e.g. ask_user_question) pause the agent loop
+        # while waiting for an asynchronous user/system response. ADK marks
+        # the function-CALL event as final via `long_running_tool_ids`
+        # (base_llm_flow.py:106), but the function-RESPONSE event built
+        # afterwards in `__build_response_event` (functions.py:1120) carries
+        # only `actions` — not `long_running_tool_ids`. Without
+        # `skip_summarization`, the response event's `is_final_response()`
+        # returns False, the runner re-invokes the LLM with our
+        # `{"status": "awaiting_user_input"}` as a normal tool result, and
+        # the model cascades into more questions before the user has
+        # answered. Same root cause as the PermissionPlugin "ask" branch.
+        if self.meta.long_running:
+            tool_context.actions.skip_summarization = True
+
         return result
 
     async def _execute(
