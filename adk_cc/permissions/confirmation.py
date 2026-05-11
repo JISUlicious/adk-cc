@@ -74,12 +74,20 @@ class ConfirmPrompt(BaseModel):
 
     `style` is a discriminator — frontends switch rendering on it and
     fall back to ADK's default `hint` rendering for unknown styles.
+
+    `with_comment=True` asks the frontend to surface an optional
+    free-form text field alongside the option buttons. Useful for
+    approval flows where the operator might want to give feedback on
+    a denied plan (e.g. `exit_plan_mode`). The destructive-tool gate
+    leaves it off — Allow once / Allow always / Deny carry enough
+    signal on their own.
     """
 
     style: Literal["confirm_deny", "single_select"]
     title: str
     detail: str
     options: list[ConfirmOption]
+    with_comment: bool = False
 
 
 def extract_subject(tool_name: str, args: dict) -> Optional[str]:

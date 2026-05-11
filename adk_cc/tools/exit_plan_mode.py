@@ -14,7 +14,8 @@ from typing import Any
 from google.adk.tools.tool_context import ToolContext
 from pydantic import BaseModel, Field
 
-from .base import AdkCcTool, ToolMeta
+from ..permissions.confirmation import ConfirmOption, ConfirmPrompt
+from .base import AdkCcTool, ToolMeta, _extract_user_comment
 
 
 class ExitPlanModeArgs(BaseModel):
@@ -60,8 +61,39 @@ class ExitPlanModeTool(AdkCcTool):
     def _approval_hint(self, args: ExitPlanModeArgs) -> str:
         return f"Approve plan and exit plan mode?\n\n{args.plan_summary}"
 
-    def _approval_payload(self, args: ExitPlanModeArgs) -> dict[str, str]:
-        return {"plan_summary": args.plan_summary}
+    def _approval_payload(self, args: ExitPlanModeArgs) -> dict[str, Any]:
+        # ConfirmPrompt-shaped payload so `ConfirmationFormUiPlugin`
+        # renders the bundled UI as two checkboxes (Approve / Deny) +
+        # an optional comment textbox. Without options the bundled UI
+        # falls back to a single "Confirmed" checkbox, where deny is
+        # implicit (leave unchecked) and there's no way to give
+        # feedback. `with_comment=True` adds the textbox; the operator
+        # can pair Deny with "try smaller scope" and the model reads
+        # it from the denied response's `user_comment` field.
+        prompt = ConfirmPrompt(
+            style="single_select",
+            title="Exit plan mode?",
+            detail=args.plan_summary,
+            options=[
+                ConfirmOption(
+                    id="approve",
+                    label="Approve",
+                    description=(
+                        "Exit plan mode and start implementing the plan."
+                    ),
+                ),
+                ConfirmOption(
+                    id="deny",
+                    label="Deny",
+                    description=(
+                        "Stay in plan mode. The model sees your comment "
+                        "(if any) and revises the plan."
+                    ),
+                ),
+            ],
+            with_comment=True,
+        )
+        return prompt.model_dump() | {"plan_summary": args.plan_summary}
 
     async def _execute(
         self, args: ExitPlanModeArgs, ctx: ToolContext
@@ -91,9 +123,18 @@ class ExitPlanModeTool(AdkCcTool):
             ctx.state["permission_mode"] = "default"
         except Exception as e:
             return {"status": "error", "error": f"could not update state: {e}"}
-        return {
+        response: dict[str, Any] = {
             "status": "approved",
             "previous_mode": previous,
             "new_mode": "default",
             "plan_summary": args.plan_summary,
         }
+        # If the operator added a comment in the approval form, the model
+        # should see it — they might be approving conditionally ("go ahead
+        # but be careful about X"). The denied response is handled in
+        # AdkCcTool.run_async (which the operator never reaches if they
+        # approved).
+        comment = _extract_user_comment(getattr(ctx, "tool_confirmation", None))
+        if comment:
+            response["user_comment"] = comment
+        return response

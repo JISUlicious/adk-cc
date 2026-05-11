@@ -43,6 +43,7 @@ from adk_cc.plugins.confirmation_form_ui import (
     ConfirmationFormUiPlugin,
     _build_choice_schema,
     _extract_chose_id,
+    _extract_comment,
 )
 
 
@@ -117,10 +118,22 @@ class _FakeInvocationCtx:
         self.session = _FakeSession(events)
 
 
-def _wrap_call_event(wrap_id: str) -> Event:
+def _wrap_call_event(wrap_id: str, *, payload: Optional[dict] = None) -> Event:
     """A function-call event with our sentinel name — what
     `on_event_callback` produces after renaming
-    `adk_request_confirmation`. Represents an outstanding wrap."""
+    `adk_request_confirmation`. Represents an outstanding wrap.
+
+    When `payload` is supplied, it's attached as
+    `toolConfirmation.payload` so the inbound side can look up the
+    options list (needed for the binary-collapse fallback to know
+    which id is the negative)."""
+    args: dict[str, Any] = {"originalFunctionCall": {"id": f"orig-{wrap_id}"}}
+    if payload is not None:
+        args["toolConfirmation"] = {
+            "hint": "test",
+            "confirmed": False,
+            "payload": payload,
+        }
     return Event(
         invocation_id="inv-1",
         author="test-agent",
@@ -131,12 +144,27 @@ def _wrap_call_event(wrap_id: str) -> Event:
                     function_call=types.FunctionCall(
                         id=wrap_id,
                         name=CONFIRMATION_FORM_FUNCTION_CALL_NAME,
-                        args={"originalFunctionCall": {"id": f"orig-{wrap_id}"}},
+                        args=args,
                     )
                 )
             ],
         ),
     )
+
+
+def _binary_payload() -> dict:
+    """Canonical 2-option `ConfirmPrompt` (approve/deny) as
+    `exit_plan_mode` would send. Used by binary-collapse tests."""
+    return {
+        "style": "single_select",
+        "title": "Exit plan mode?",
+        "detail": "rewrite the auth middleware",
+        "options": [
+            {"id": "approve", "label": "Approve", "description": "Go."},
+            {"id": "deny", "label": "Deny", "description": "Hold."},
+        ],
+        "with_comment": True,
+    }
 
 
 def _user_response_event(wrap_id: str, name: str, response: dict) -> Event:
@@ -216,16 +244,113 @@ def test_build_choice_schema_empty_options_returns_none() -> None:
 def test_build_choice_schema_skips_reserved_keys() -> None:
     """An option whose id collides with a reserved key (`confirmed`,
     `choice`, `chose_id`, `result`) would confuse the inbound disambig,
-    so the plugin drops it from the schema rather than risking shadowing."""
+    so the plugin drops it from the schema rather than risking shadowing.
+    Here that filtering leaves 2 valid options, which then hit the
+    binary collapse → a single positive boolean keyed on "allow"."""
     options = [
         {"id": "allow", "label": "Allow", "description": ""},
-        {"id": "chose_id", "label": "Bogus", "description": ""},  # reserved
+        {"id": "chose_id", "label": "Bogus", "description": ""},  # reserved → dropped
         {"id": "deny", "label": "Deny", "description": ""},
     ]
     schema = _build_choice_schema(options)
     assert schema is not None
-    assert set(schema["properties"].keys()) == {"allow", "deny"}
+    # Reserved id dropped; remaining 2 collapse → only positive id "allow".
+    assert set(schema["properties"].keys()) == {"allow"}
     print("OK test_build_choice_schema_skips_reserved_keys")
+
+
+def test_build_choice_schema_with_comment_adds_textbox() -> None:
+    """`with_comment=True` adds a `comment` string property so the
+    bundled UI renders an optional free-form textbox alongside the
+    option checkbox(es). For a binary prompt (2 options), the schema
+    collapses to a single positive boolean — so the comment textbox
+    sits beside ONE checkbox, not two."""
+    from adk_cc.plugins.confirmation_form_ui import COMMENT_FIELD_KEY
+
+    options = [
+        {"id": "approve", "label": "Approve", "description": "Go ahead"},
+        {"id": "deny", "label": "Deny", "description": "Hold up"},
+    ]
+    schema = _build_choice_schema(options, with_comment=True)
+    assert schema is not None
+    # Binary collapse: only the positive option's boolean + comment.
+    assert set(schema["properties"].keys()) == {"approve", COMMENT_FIELD_KEY}
+    comment_prop = schema["properties"][COMMENT_FIELD_KEY]
+    assert comment_prop["type"] == "string"
+    # Description hints at the dual use (approve + comment / deny + comment).
+    assert "Optional" in comment_prop["description"]
+    print("OK test_build_choice_schema_with_comment_adds_textbox")
+
+
+def test_build_choice_schema_binary_collapses_to_single_boolean() -> None:
+    """2-option prompts render as ONE checkbox keyed on the positive
+    option. The operator physically can't pick both — there's only one
+    box. The description explains the unchecked meaning ("Unchecked =
+    Deny.") so the empty state isn't ambiguous."""
+    options = [
+        {"id": "approve", "label": "Approve", "description": "Go ahead"},
+        {"id": "deny", "label": "Deny", "description": "Hold up"},
+    ]
+    schema = _build_choice_schema(options)
+    assert schema is not None
+    assert list(schema["properties"].keys()) == ["approve"], schema
+    approve_prop = schema["properties"]["approve"]
+    assert approve_prop["type"] == "boolean"
+    # Description teaches the operator what unchecked means.
+    assert "Approve" in approve_prop["description"]
+    assert "Deny" in approve_prop["description"]
+    assert "unchecked" in approve_prop["description"].lower()
+    print("OK test_build_choice_schema_binary_collapses_to_single_boolean")
+
+
+def test_build_choice_schema_binary_no_deny_id_uses_first_as_positive() -> None:
+    """When neither id is `"deny"`, the FIRST option is the positive
+    (matches the codebase's positive-then-negative ordering)."""
+    options = [
+        {"id": "yes", "label": "Yes", "description": "Proceed"},
+        {"id": "no", "label": "No", "description": "Cancel"},
+    ]
+    schema = _build_choice_schema(options)
+    assert list(schema["properties"].keys()) == ["yes"]
+    assert "Yes" in schema["properties"]["yes"]["description"]
+    assert "No" in schema["properties"]["yes"]["description"]
+    print("OK test_build_choice_schema_binary_no_deny_id_uses_first_as_positive")
+
+
+def test_build_choice_schema_binary_deny_first_picks_second_as_positive() -> None:
+    """If somehow deny is the FIRST option, the second one is treated
+    as positive — defensive against future callers ordering options
+    differently."""
+    options = [
+        {"id": "deny", "label": "Deny", "description": "Cancel"},
+        {"id": "allow", "label": "Allow", "description": "Run it"},
+    ]
+    schema = _build_choice_schema(options)
+    assert list(schema["properties"].keys()) == ["allow"]
+    print("OK test_build_choice_schema_binary_deny_first_picks_second_as_positive")
+
+
+def test_build_choice_schema_without_comment_no_textbox() -> None:
+    """Default `with_comment=False` produces no comment property — the
+    destructive-tool gate doesn't need it."""
+    options = [{"id": "allow", "label": "Allow", "description": ""}]
+    schema = _build_choice_schema(options)
+    assert "comment" not in schema["properties"]
+    print("OK test_build_choice_schema_without_comment_no_textbox")
+
+
+def test_extract_comment_helper() -> None:
+    """Returns stripped string when present + non-empty; None otherwise."""
+    assert _extract_comment({"comment": "hello"}) == "hello"
+    assert _extract_comment({"comment": "  trim me  "}) == "trim me"
+    # Bundled UI sends null for empty textboxes after getCleanedFormModel.
+    assert _extract_comment({"comment": None}) is None
+    assert _extract_comment({"comment": ""}) is None
+    assert _extract_comment({"comment": "    "}) is None
+    assert _extract_comment({}) is None
+    assert _extract_comment(None) is None
+    assert _extract_comment("not a dict") is None
+    print("OK test_extract_comment_helper")
 
 
 def test_extract_chose_id_accepts_all_shapes() -> None:
@@ -238,11 +363,15 @@ def test_extract_chose_id_accepts_all_shapes() -> None:
     assert _extract_chose_id(
         {"allow_once": False, "allow_always": True, "deny": False}
     ) == "allow_always"
-    # First true wins for ambiguous multi-true (deterministic on insertion).
+    # Deny wins on multi-true (safety) — overrides iteration-order.
+    assert _extract_chose_id(
+        {"allow_once": True, "allow_always": True, "deny": True}
+    ) == "deny"
+    # Non-deny multi-true: first true wins, deterministic on insertion.
     assert _extract_chose_id(
         {"allow_once": True, "allow_always": True}
     ) == "allow_once"
-    # All false → no choice → None.
+    # All false, no options → no choice → None.
     assert _extract_chose_id(
         {"allow_once": False, "deny": False}
     ) is None
@@ -259,7 +388,84 @@ def test_extract_chose_id_accepts_all_shapes() -> None:
     print("OK test_extract_chose_id_accepts_all_shapes")
 
 
+def test_extract_chose_id_binary_unchecked_returns_negative_id() -> None:
+    """When `options` describes a 2-option prompt AND the response has
+    no True boolean, the function infers the operator left the lone
+    positive checkbox unchecked → returns the negative id."""
+    binary_options = [
+        {"id": "approve", "label": "Approve", "description": ""},
+        {"id": "deny", "label": "Deny", "description": ""},
+    ]
+    # No True booleans at all (operator submitted with the box unchecked).
+    assert (
+        _extract_chose_id({"approve": False}, options=binary_options) == "deny"
+    )
+    # Empty response (defensive — bundled UI submits {} when nothing was filled).
+    assert _extract_chose_id({}, options=binary_options) == "deny"
+    # Even with a comment but no chosen box, unchecked → deny.
+    assert (
+        _extract_chose_id(
+            {"approve": False, "comment": "no thanks"}, options=binary_options
+        )
+        == "deny"
+    )
+    # When the positive IS checked, the binary fallback does NOT fire —
+    # the True branch wins.
+    assert (
+        _extract_chose_id({"approve": True}, options=binary_options) == "approve"
+    )
+    print("OK test_extract_chose_id_binary_unchecked_returns_negative_id")
+
+
+def test_extract_chose_id_binary_no_deny_id_uses_second_as_negative() -> None:
+    """Symmetric to the schema-builder: when neither option's id is
+    "deny", the SECOND option is the negative. Unchecked → that id."""
+    binary_options = [
+        {"id": "yes", "label": "Yes", "description": ""},
+        {"id": "no", "label": "No", "description": ""},
+    ]
+    assert _extract_chose_id({"yes": False}, options=binary_options) == "no"
+    assert _extract_chose_id({}, options=binary_options) == "no"
+    print("OK test_extract_chose_id_binary_no_deny_id_uses_second_as_negative")
+
+
+def test_extract_chose_id_three_options_unchecked_still_returns_none() -> None:
+    """For N≥3 prompts, all-False does NOT auto-deny — operator
+    explicitly didn't pick anything, so the response is ambiguous and
+    should surface as such (None → deferred / unparseable)."""
+    triple = [
+        {"id": "allow_once", "label": "", "description": ""},
+        {"id": "allow_always", "label": "", "description": ""},
+        {"id": "deny", "label": "", "description": ""},
+    ]
+    assert (
+        _extract_chose_id(
+            {"allow_once": False, "allow_always": False, "deny": False},
+            options=triple,
+        )
+        is None
+    )
+    print("OK test_extract_chose_id_three_options_unchecked_still_returns_none")
+
+
 # --- Outbound rewrite -----------------------------------------------
+
+
+def test_outbound_with_comment_flag_adds_textbox_property() -> None:
+    """A ConfirmPrompt carrying `with_comment=True` gets a `comment`
+    string property in the schema — bundled UI then renders a textbox
+    alongside the option checkboxes."""
+    from adk_cc.plugins.confirmation_form_ui import COMMENT_FIELD_KEY
+
+    plugin = ConfirmationFormUiPlugin()
+    payload = _confirm_payload() | {"with_comment": True}
+    event = _confirmation_event(payload)
+    _run_event(plugin, event)
+    fc = _first_fc(event)
+    schema = fc.args["response_schema"]
+    assert COMMENT_FIELD_KEY in schema["properties"]
+    assert schema["properties"][COMMENT_FIELD_KEY]["type"] == "string"
+    print("OK test_outbound_with_comment_flag_adds_textbox_property")
 
 
 def test_outbound_renames_and_injects_response_schema() -> None:
@@ -419,6 +625,128 @@ def test_inbound_reshape_boolean_per_option_form_submission() -> None:
     assert fr.name == REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
     assert fr.response == {"confirmed": True, "payload": {"chose_id": "allow_always"}}
     print("OK test_inbound_reshape_boolean_per_option_form_submission")
+
+
+def test_inbound_comment_folds_into_payload() -> None:
+    """When the form has a `comment` field and the operator typed
+    something, it ends up in `toolConfirmation.payload.comment` —
+    accessible via `_extract_user_comment` in the tool layer."""
+    plugin = ConfirmationFormUiPlugin()
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"approve": False, "deny": True, "comment": "try smaller scope first"},
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+    fr = out.parts[0].function_response
+    assert fr.response == {
+        "confirmed": False,
+        "payload": {"chose_id": "deny", "comment": "try smaller scope first"},
+    }
+    print("OK test_inbound_comment_folds_into_payload")
+
+
+def test_inbound_empty_comment_not_included() -> None:
+    """Bundled UI sends null for empty textboxes (per its
+    getCleanedFormModel). The reshape should omit the `comment` key
+    entirely when there's no meaningful text — avoid sending the model
+    `payload: {chose_id: ..., comment: ""}`-style noise."""
+    plugin = ConfirmationFormUiPlugin()
+    # Null / empty / whitespace-only — all treated as "no comment".
+    for empty_value in (None, "", "   ", "\n  \t  "):
+        msg = _user_message(
+            CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+            {"approve": True, "deny": False, "comment": empty_value},
+        )
+        out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+        fr = out.parts[0].function_response
+        assert "comment" not in fr.response["payload"], (
+            f"expected no comment key for {empty_value!r}, got {fr.response}"
+        )
+    print("OK test_inbound_empty_comment_not_included")
+
+
+def test_inbound_comment_with_approve_passes_through() -> None:
+    """Operator can add a comment on approve too (e.g. 'go ahead but
+    be careful about X'). The model sees both signals."""
+    plugin = ConfirmationFormUiPlugin()
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"approve": True, "deny": False, "comment": "watch the edge case"},
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+    fr = out.parts[0].function_response
+    assert fr.response == {
+        "confirmed": True,
+        "payload": {"chose_id": "approve", "comment": "watch the edge case"},
+    }
+    print("OK test_inbound_comment_with_approve_passes_through")
+
+
+def test_inbound_binary_unchecked_form_resolves_to_deny() -> None:
+    """End-to-end of the binary collapse:
+      - Outbound schema was a single boolean keyed on `approve`.
+      - Operator submitted with the box unchecked → `{approve: False}`.
+      - Inbound resolves via the wrap event's payload → chose_id="deny",
+        confirmed=False.
+    """
+    plugin = ConfirmationFormUiPlugin()
+    ctx = _FakeInvocationCtx([_wrap_call_event("wrap-1", payload=_binary_payload())])
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME, {"approve": False}
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=ctx)
+    fr = out.parts[0].function_response
+    assert fr.name == REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
+    assert fr.response == {"confirmed": False, "payload": {"chose_id": "deny"}}
+    print("OK test_inbound_binary_unchecked_form_resolves_to_deny")
+
+
+def test_inbound_binary_unchecked_with_comment_attaches_comment_to_deny() -> None:
+    """Operator unchecks the lone box AND types a reason — the comment
+    rides on the denied response so the model can revise the plan."""
+    plugin = ConfirmationFormUiPlugin()
+    ctx = _FakeInvocationCtx([_wrap_call_event("wrap-1", payload=_binary_payload())])
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"approve": False, "comment": "split into two phases"},
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=ctx)
+    fr = out.parts[0].function_response
+    assert fr.response == {
+        "confirmed": False,
+        "payload": {"chose_id": "deny", "comment": "split into two phases"},
+    }
+    print("OK test_inbound_binary_unchecked_with_comment_attaches_comment_to_deny")
+
+
+def test_inbound_binary_checked_form_resolves_to_approve() -> None:
+    """Operator ticks the lone box → chose_id="approve", confirmed=True."""
+    plugin = ConfirmationFormUiPlugin()
+    ctx = _FakeInvocationCtx([_wrap_call_event("wrap-1", payload=_binary_payload())])
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME, {"approve": True}
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=ctx)
+    fr = out.parts[0].function_response
+    assert fr.response == {"confirmed": True, "payload": {"chose_id": "approve"}}
+    print("OK test_inbound_binary_checked_form_resolves_to_approve")
+
+
+def test_inbound_three_option_deny_wins_over_multi_check() -> None:
+    """If a (defensive / buggy) submission has `deny: True` alongside
+    other True booleans, deny short-circuits — destructive ops fail
+    closed instead of running because the operator also clicked
+    `allow_once`."""
+    plugin = ConfirmationFormUiPlugin()
+    ctx = _ctx_with_one_outstanding()
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"allow_once": True, "allow_always": False, "deny": True},
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=ctx)
+    fr = out.parts[0].function_response
+    assert fr.response == {"confirmed": False, "payload": {"chose_id": "deny"}}
+    print("OK test_inbound_three_option_deny_wins_over_multi_check")
 
 
 def test_inbound_boolean_form_deny_sets_confirmed_false() -> None:
@@ -691,7 +1019,17 @@ def main() -> None:
     test_build_choice_schema_uses_one_boolean_property_per_option()
     test_build_choice_schema_empty_options_returns_none()
     test_build_choice_schema_skips_reserved_keys()
+    test_build_choice_schema_with_comment_adds_textbox()
+    test_build_choice_schema_binary_collapses_to_single_boolean()
+    test_build_choice_schema_binary_no_deny_id_uses_first_as_positive()
+    test_build_choice_schema_binary_deny_first_picks_second_as_positive()
+    test_build_choice_schema_without_comment_no_textbox()
+    test_extract_comment_helper()
     test_extract_chose_id_accepts_all_shapes()
+    test_extract_chose_id_binary_unchecked_returns_negative_id()
+    test_extract_chose_id_binary_no_deny_id_uses_second_as_negative()
+    test_extract_chose_id_three_options_unchecked_still_returns_none()
+    test_outbound_with_comment_flag_adds_textbox_property()
     test_outbound_renames_and_injects_response_schema()
     test_outbound_skips_event_without_options()
     test_outbound_ignores_non_confirmation_events()
@@ -702,6 +1040,13 @@ def main() -> None:
     test_inbound_accepts_free_form_result_fallback()
     test_inbound_garbage_response_left_unchanged()
     test_inbound_reshape_boolean_per_option_form_submission()
+    test_inbound_binary_unchecked_form_resolves_to_deny()
+    test_inbound_binary_unchecked_with_comment_attaches_comment_to_deny()
+    test_inbound_binary_checked_form_resolves_to_approve()
+    test_inbound_three_option_deny_wins_over_multi_check()
+    test_inbound_comment_folds_into_payload()
+    test_inbound_empty_comment_not_included()
+    test_inbound_comment_with_approve_passes_through()
     test_inbound_boolean_form_deny_sets_confirmed_false()
     test_inbound_boolean_form_all_false_treated_as_no_choice()
     test_inbound_ignores_non_matching_names()

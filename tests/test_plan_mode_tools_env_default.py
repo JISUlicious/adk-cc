@@ -35,6 +35,7 @@ from typing import Optional
 
 os.environ.setdefault("ADK_CC_API_KEY", "sk-dummy-for-tests")
 
+from adk_cc.tools.base import _extract_user_comment
 from adk_cc.tools.enter_plan_mode import EnterPlanModeArgs, EnterPlanModeTool
 from adk_cc.tools.exit_plan_mode import ExitPlanModeArgs, ExitPlanModeTool
 
@@ -59,9 +60,38 @@ class _FakeState:
         return k in self._d
 
 
+class _FakeActions:
+    """Minimal stand-in for ADK's EventActions — only the field
+    AdkCcTool.run_async assigns to."""
+
+    def __init__(self) -> None:
+        self.skip_summarization: bool = False
+
+
+class _FakeConfirmation:
+    """Minimal stand-in for ADK's ToolConfirmation. The base-tool deny
+    branch only reads `.confirmed` and `.payload`."""
+
+    def __init__(self, confirmed: bool, payload: Optional[dict] = None) -> None:
+        self.confirmed = confirmed
+        self.payload = payload
+
+
 class _FakeToolContext:
-    def __init__(self, state: Optional[dict] = None) -> None:
+    def __init__(
+        self,
+        state: Optional[dict] = None,
+        *,
+        tool_confirmation: Optional[_FakeConfirmation] = None,
+    ) -> None:
         self.state = _FakeState(state)
+        self.actions = _FakeActions()
+        self.tool_confirmation = tool_confirmation
+
+    def request_confirmation(self, *, hint=None, payload=None) -> None:  # noqa: ARG002
+        # First-invocation path isn't exercised in these tests; provide a
+        # no-op so a stray call doesn't AttributeError.
+        return None
 
 
 def _run_exit(tool: ExitPlanModeTool, ctx: _FakeToolContext, summary: str = "test plan") -> dict:
@@ -214,6 +244,128 @@ def test_reproduces_and_resolves_env_plan_stuck_loop() -> None:
     print("OK test_reproduces_and_resolves_env_plan_stuck_loop")
 
 
+# --- exit_plan_mode deny / approve-with-comment --------------------
+#
+# These cover the ConfirmPrompt-shaped `_approval_payload`, the deny
+# branch in AdkCcTool.run_async, and the approve path's user_comment
+# pass-through in ExitPlanModeTool._execute. See PR-in-progress
+# feat/confirmation-deny-with-comment.
+
+
+def test_extract_user_comment_helper() -> None:
+    """The shared base-tool helper strips/normalises payload['comment']
+    and returns None on absent/empty/non-string."""
+    # Absent / wrong shape.
+    assert _extract_user_comment(None) is None
+    assert _extract_user_comment(_FakeConfirmation(False, None)) is None
+    assert _extract_user_comment(_FakeConfirmation(False, {})) is None
+    # Non-string.
+    assert _extract_user_comment(_FakeConfirmation(False, {"comment": 42})) is None
+    # Empty / whitespace-only → None (don't surface a useless field).
+    assert _extract_user_comment(_FakeConfirmation(False, {"comment": ""})) is None
+    assert _extract_user_comment(_FakeConfirmation(False, {"comment": "   "})) is None
+    # Real text gets stripped.
+    out = _extract_user_comment(_FakeConfirmation(False, {"comment": "  try smaller scope  "}))
+    assert out == "try smaller scope"
+    print("OK test_extract_user_comment_helper")
+
+
+def test_approval_payload_has_approve_deny_with_comment() -> None:
+    """`_approval_payload` returns a ConfirmPrompt-shaped dict with the
+    two approve/deny options + with_comment=True so the bundled form-UI
+    plugin renders a textbox. Also carries `plan_summary` for any
+    frontend that wants to render it separately from `detail`."""
+    tool = ExitPlanModeTool(default_mode="plan")
+    payload = tool._approval_payload(ExitPlanModeArgs(plan_summary="rewrite the auth middleware"))
+    assert payload["style"] == "single_select", payload
+    assert payload["title"] == "Exit plan mode?", payload
+    assert payload["detail"] == "rewrite the auth middleware", payload
+    assert payload["with_comment"] is True, payload
+    ids = [opt["id"] for opt in payload["options"]]
+    assert ids == ["approve", "deny"], ids
+    # Plan summary is also surfaced verbatim for frontends that want
+    # to render the plan body distinct from `detail`.
+    assert payload["plan_summary"] == "rewrite the auth middleware", payload
+    print("OK test_approval_payload_has_approve_deny_with_comment")
+
+
+def test_run_async_denied_surfaces_user_comment() -> None:
+    """When the operator denies the prompt and typed a comment into the
+    form's textbox, AdkCcTool.run_async returns the comment on the
+    denied response so the model can revise the plan."""
+    tool = ExitPlanModeTool(default_mode="plan")
+    confirmation = _FakeConfirmation(
+        confirmed=False,
+        payload={"chose_id": "deny", "comment": "too aggressive — split the refactor"},
+    )
+    ctx = _FakeToolContext({"permission_mode": "plan"}, tool_confirmation=confirmation)
+    out = asyncio.run(
+        tool.run_async(
+            args={"plan_summary": "ship the whole rewrite at once"},
+            tool_context=ctx,
+        )
+    )
+    assert out["status"] == "denied", out
+    assert out["user_comment"] == "too aggressive — split the refactor", out
+    # State must NOT have flipped — denial means stay in plan mode.
+    assert ctx.state["permission_mode"] == "plan", ctx.state._d
+    print("OK test_run_async_denied_surfaces_user_comment")
+
+
+def test_run_async_denied_without_comment_omits_field() -> None:
+    """Empty / missing comment → response has no `user_comment` key
+    (cleaner for the model than a noisy empty-string field)."""
+    tool = ExitPlanModeTool(default_mode="plan")
+    confirmation = _FakeConfirmation(
+        confirmed=False, payload={"chose_id": "deny"}
+    )
+    ctx = _FakeToolContext({"permission_mode": "plan"}, tool_confirmation=confirmation)
+    out = asyncio.run(
+        tool.run_async(
+            args={"plan_summary": "any plan"}, tool_context=ctx
+        )
+    )
+    assert out["status"] == "denied", out
+    assert "user_comment" not in out, out
+    print("OK test_run_async_denied_without_comment_omits_field")
+
+
+def test_run_async_approved_surfaces_user_comment() -> None:
+    """Conditional approvals ("go ahead but be careful about X") — the
+    operator approves AND types a comment. The model needs the comment
+    on the approved response too, not only the denied one."""
+    tool = ExitPlanModeTool(default_mode="plan")
+    confirmation = _FakeConfirmation(
+        confirmed=True,
+        payload={"chose_id": "approve", "comment": "be careful with the DB migration"},
+    )
+    ctx = _FakeToolContext({"permission_mode": "plan"}, tool_confirmation=confirmation)
+    out = asyncio.run(
+        tool.run_async(
+            args={"plan_summary": "rewrite auth middleware"}, tool_context=ctx
+        )
+    )
+    assert out["status"] == "approved", out
+    assert out["user_comment"] == "be careful with the DB migration", out
+    # State flipped to default — approval took effect.
+    assert ctx.state["permission_mode"] == "default", ctx.state._d
+    print("OK test_run_async_approved_surfaces_user_comment")
+
+
+def test_run_async_approved_without_comment_omits_field() -> None:
+    tool = ExitPlanModeTool(default_mode="plan")
+    confirmation = _FakeConfirmation(confirmed=True, payload={"chose_id": "approve"})
+    ctx = _FakeToolContext({"permission_mode": "plan"}, tool_confirmation=confirmation)
+    out = asyncio.run(
+        tool.run_async(
+            args={"plan_summary": "rewrite auth middleware"}, tool_context=ctx
+        )
+    )
+    assert out["status"] == "approved", out
+    assert "user_comment" not in out, out
+    print("OK test_run_async_approved_without_comment_omits_field")
+
+
 # --- Driver ---------------------------------------------------------
 
 
@@ -229,6 +381,12 @@ def main() -> None:
     test_enter_flips_state_when_explicit_default()
     test_enter_default_mode_ctor_default()
     test_reproduces_and_resolves_env_plan_stuck_loop()
+    test_extract_user_comment_helper()
+    test_approval_payload_has_approve_deny_with_comment()
+    test_run_async_denied_surfaces_user_comment()
+    test_run_async_denied_without_comment_omits_field()
+    test_run_async_approved_surfaces_user_comment()
+    test_run_async_approved_without_comment_omits_field()
     print("\nall plan-mode-tools env-default tests passed")
 
 
