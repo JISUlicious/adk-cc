@@ -25,14 +25,16 @@ class ReadFileArgs(BaseModel):
     limit: int = Field(
         default=50,
         ge=1,
-        le=2000,
+        le=50,
         description=(
-            "Maximum number of lines to return (1-2000). Defaults to 50 — "
-            "small on purpose so the typical first read doesn't blow LLM "
-            "context. Bump `limit` (up to 2000) when you need a wider "
-            "slice, or paginate with increasing `offset`. The response "
-            "includes `has_more`, `total_lines`, and `total_bytes` so "
-            "you can decide whether to paginate or grep instead."
+            "Maximum number of lines to return per call (1-50). Defaults "
+            "to 50. The hard cap of 50 is tighter than upstream Claude "
+            "Code's tool — 50 lines is enough for typical recon reads "
+            "while keeping each call cheap on a local LLM's context. "
+            "To read more, paginate with increasing `offset` (next call "
+            "starts at `end_line + 1`). The response includes "
+            "`has_more`, `total_lines`, and `total_bytes` so you can "
+            "decide whether to paginate or pivot to `grep`/`glob_files`."
         ),
     )
 
