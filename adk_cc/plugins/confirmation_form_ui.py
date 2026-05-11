@@ -2,11 +2,11 @@
 long-running form widget.
 
 PR #1 wired `PermissionPlugin`'s ask branch to send a structured
-`ConfirmPrompt` payload via ADK's `request_confirmation`. ADK in turn
-emits an `adk_request_confirmation` function-call event. The bundled
-`adk web` UI short-circuits this event into its **binary** widget
-(checkbox + read-only payload textarea + Submit) because of a literal
-name check (`main-*.js`):
+`ConfirmPrompt` payload via ADK's `request_confirmation`. ADK emits an
+`adk_request_confirmation` function-call event. The bundled `adk web`
+UI short-circuits this event into its **binary** widget (checkbox +
+read-only payload textarea + Submit) because of a literal name check
+(`main-*.js`):
 
     get isConfirmationRequest() {
         return this.functionCall?.name === "adk_request_confirmation"
@@ -17,35 +17,67 @@ name check (`main-*.js`):
 
 So a `ConfirmPrompt` with N options renders as a single checkbox. This
 plugin rewrites both directions of the protocol so the bundled UI takes
-the form-widget path instead, displaying a dropdown of N option ids.
+the form-widget path instead.
 
-OUTBOUND (`on_event_callback`):
+## Why one-boolean-per-option (not a `string`/`enum`)
+
+Bundled `adk web`'s form-widget renders fields by JSON Schema `type`
+only (see `initForm()` in `main-*.js`):
+
+    if (n === "boolean")  → checkbox input
+    else if (n === "integer" || n === "number") → numeric input
+    else (incl. "string") → free-form text input
+
+`enum` is **not consulted** — a `{type: "string", enum: [...]}` schema
+renders as a plain textbox where the operator has to type one of the
+ids manually (and a typo silently denies the operation). The only path
+to a real "pick one" UI in the bundled form is **one boolean field per
+option**: each option renders as a checkbox, the operator ticks one,
+and on submit the response is `{<chose_id_a>: false, <chose_id_b>:
+true, ...}`. The plugin then maps the first True-valued key to
+`chose_id` and reshapes for ADK's resume processor.
+
+Yes, it's awkward that "pick one of N" is rendered as N checkboxes
+rather than a radio group or dropdown — but the bundled UI has no
+form-side support for either. The label + description on each checkbox
+makes the intent clear, and the inbound side accepts a clean
+single-true vote.
+
+## OUTBOUND (`on_event_callback`)
 
   - Find function-call events whose name is `adk_request_confirmation`.
-  - Build a `response_schema` from the `ConfirmPrompt`'s `options`: one
-    `string` property `choice` whose `enum` is the option ids.
-  - Inject the schema into the call's args, then **rename** the call's
-    name from `adk_request_confirmation` to a sentinel
-    (`_adk_cc_confirmation_form`) so the bundled UI's confirmation
-    short-circuit doesn't trigger. The bundled UI then takes the form
-    branch and renders a dropdown.
-  - The function-call id is preserved — ADK's resume processor matches
-    on id, not on name, so renaming doesn't break the resume.
+  - Build a `response_schema` where each `ConfirmPrompt.options[i]`
+    becomes a boolean property keyed on the option's id. The
+    description on each property is `<label> — <option description>`.
+  - Inject the schema into the call's args.
+  - Also write `args.prompt` to the prompt's title (+ detail when set)
+    so the bundled UI shows it above the form.
+  - Rename the call's name from `adk_request_confirmation` to
+    `_adk_cc_confirmation_form` so the bundled UI's confirmation
+    short-circuit doesn't trigger and the form-widget path takes over.
+  - The function-call **id is preserved**. ADK's resume processor
+    matches on id, not on name, so the rename is transparent to resume.
 
-INBOUND (`on_user_message_callback`):
+## INBOUND (`on_user_message_callback`)
 
-  - When the user submits a function_response whose name matches our
-    sentinel, accept either `{choice: <id>}` (bundled UI form) or
-    `{chose_id: <id>}` (custom frontend) as the shape.
-  - Rewrite the response to ADK's standard
-    `{confirmed: <bool>, payload: {chose_id: <id>}}` shape.
+  - When the user submits a function_response under the sentinel name,
+    accept any of:
+      - `{<chose_id>: true, ...}` — bundled UI form output. Take the
+        first True-valued key as the chose_id.
+      - `{choice: <id>}` — legacy bundled-UI shape (when we shipped a
+        `string`/`enum` schema in v1 of this plugin).
+      - `{chose_id: <id>}` — payload-aware custom frontend.
+      - `{result: <id>}` — bundled UI's free-form textarea fallback.
+  - Reshape the response to ADK's standard
+    `{confirmed: <bool>, payload: {chose_id: <id>}}` (confirmed =
+    chose_id != "deny").
   - Rename the function_response back to `adk_request_confirmation` so
     ADK's `_RequestConfirmationLlmRequestProcessor` finds it and resumes
-    the gated tool exactly as it would without this plugin.
+    the gated tool exactly as before.
 
-The `toolConfirmation.payload` (rich `ConfirmPrompt`) is preserved in
-the renamed event's args, so payload-aware custom frontends can read
-the full structure if they listen for both names.
+The `toolConfirmation.payload` (rich `ConfirmPrompt`) stays in the
+renamed event's args, so payload-aware custom frontends can read the
+full structure if they listen for both names.
 
 Disabling this plugin reverts to the binary widget without breaking
 anything — `PermissionPlugin` and ADK's request_confirmation flow run
@@ -68,10 +100,17 @@ from google.genai import types
 # does not match, so the UI proceeds to its form-widget path.
 CONFIRMATION_FORM_FUNCTION_CALL_NAME = "_adk_cc_confirmation_form"
 
+# Keys we should NEVER treat as chose_ids when scanning the response
+# for a True-valued field. Some are part of the ADK ToolConfirmation
+# shape (`confirmed`), others are legacy shapes (`choice`, `chose_id`)
+# that we handle in their own branches.
+_RESERVED_RESPONSE_KEYS = frozenset({"confirmed", "choice", "chose_id", "result"})
+
 
 class ConfirmationFormUiPlugin(BasePlugin):
     """Make `adk_request_confirmation` events render as the bundled UI's
-    long-running form widget instead of its binary confirmation widget.
+    long-running form widget (one checkbox per option) instead of its
+    binary confirmation widget.
 
     See module docstring for the full rewrite contract on both sides.
     """
@@ -102,10 +141,18 @@ class ConfirmationFormUiPlugin(BasePlugin):
             options = payload.get("options")
             if not isinstance(options, list) or not options:
                 continue
-            schema = _build_choice_schema(options, payload.get("title"))
+            schema = _build_choice_schema(options)
             if schema is None:
                 continue
             args["response_schema"] = schema
+            # The bundled UI reads `prompt` (or `message`) and shows it
+            # above the form. Without this, the prompt section just
+            # displays "Please provide your response".
+            prompt_text = _build_prompt_text(
+                payload.get("title"), payload.get("detail")
+            )
+            if prompt_text:
+                args["prompt"] = prompt_text
             fc.args = args
             fc.name = CONFIRMATION_FORM_FUNCTION_CALL_NAME
             mutated = True
@@ -138,59 +185,73 @@ class ConfirmationFormUiPlugin(BasePlugin):
         return user_message if mutated else None
 
 
-def _build_choice_schema(options: list, title: Optional[str]) -> Optional[dict]:
+def _build_choice_schema(options: list) -> Optional[dict]:
     """Convert `ConfirmPrompt.options` to a JSON Schema renderable by the
-    bundled UI's form widget.
+    bundled UI's form widget as one checkbox per option.
 
-    The schema has a single `choice` property with `enum` set to the
-    option `id`s. The `description` lists the human-readable label and
-    description for each id so the operator sees what they're picking.
+    Each option becomes a `boolean` property keyed on its `id`. The
+    `description` is `<label> — <option description>` so the operator
+    sees the human-readable label next to the checkbox.
     """
-    enum_values: list[str] = []
-    description_lines: list[str] = []
+    properties: dict[str, Any] = {}
     for opt in options:
         if not isinstance(opt, dict):
             continue
         oid = opt.get("id")
-        if not isinstance(oid, str):
+        if not isinstance(oid, str) or not oid:
             continue
-        enum_values.append(oid)
+        if oid in _RESERVED_RESPONSE_KEYS:
+            # Refuse to shadow a reserved response key — would confuse
+            # the inbound disambiguation. Skip; the prompt still works
+            # via the other options.
+            continue
         label = opt.get("label") or oid
         desc = opt.get("description") or ""
-        line = f"- {oid}: {label}"
-        if desc:
-            line += f" — {desc}"
-        description_lines.append(line)
-    if not enum_values:
+        properties[oid] = {
+            "type": "boolean",
+            "description": f"{label} — {desc}" if desc else label,
+        }
+    if not properties:
         return None
-    description = (title or "Choose an option").strip()
-    if description_lines:
-        description = description + "\n\n" + "\n".join(description_lines)
-    return {
-        "type": "object",
-        "properties": {
-            "choice": {
-                "type": "string",
-                "enum": enum_values,
-                "description": description,
-            }
-        },
-        "required": ["choice"],
-    }
+    return {"type": "object", "properties": properties}
+
+
+def _build_prompt_text(title: Optional[str], detail: Optional[str]) -> str:
+    """Format the prompt text shown above the form. The bundled UI reads
+    `args.prompt` and renders it as the prompt heading."""
+    parts: list[str] = []
+    if title:
+        parts.append(str(title).strip())
+    if detail and str(detail).strip() != (parts[0] if parts else ""):
+        parts.append(str(detail).strip())
+    return "\n\n".join(p for p in parts if p)
 
 
 def _extract_chose_id(response: Any) -> Optional[str]:
-    """Pull a chose_id from either the bundled-UI form shape (`choice`)
-    or the legacy payload-aware shape (`chose_id`)."""
+    """Pull a chose_id from any of the supported response shapes.
+
+    Order:
+      1. `choice` / `chose_id` (legacy / payload-aware)
+      2. `result` (bundled UI's free-form textarea fallback)
+      3. First True-valued non-reserved key (current bundled UI form)
+    """
     if not isinstance(response, dict):
         return None
+    # Single-value shapes for custom frontends + legacy payload protocol.
     for key in ("choice", "chose_id"):
         val = response.get(key)
         if isinstance(val, str) and val:
             return val
-    # Bundled UI may also send {result: <text>} if the form widget falls
-    # back to free-form. Try to recover a chose_id from that text.
+    # Bundled UI free-form fallback.
     result = response.get("result")
     if isinstance(result, str) and result:
         return result
+    # Boolean-per-option shape (current bundled UI form output). Use the
+    # first True-valued key in iteration order — Python dicts preserve
+    # insertion order, so this matches the option order from the schema.
+    for key, val in response.items():
+        if key in _RESERVED_RESPONSE_KEYS:
+            continue
+        if val is True:
+            return key
     return None

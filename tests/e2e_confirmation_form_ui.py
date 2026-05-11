@@ -126,7 +126,13 @@ def _find_form_call(events: list[Event]) -> tuple[str, dict]:
 
 
 def _user_form_submission(call_id: str, choice: str) -> types.Content:
-    """Mimic the bundled UI's onSend for the form-widget path."""
+    """Mimic the bundled UI's onSend for the form-widget path.
+
+    The current schema produces one boolean field per option (so the UI
+    renders N checkboxes); ticking one yields `{<chose_id>: true, ...}`.
+    """
+    all_ids = ["allow_once", "allow_always", "deny"]
+    response = {oid: (oid == choice) for oid in all_ids}
     return types.Content(
         role="user",
         parts=[
@@ -134,7 +140,7 @@ def _user_form_submission(call_id: str, choice: str) -> types.Content:
                 function_response=types.FunctionResponse(
                     id=call_id,
                     name=CONFIRMATION_FORM_FUNCTION_CALL_NAME,
-                    response={"choice": choice},
+                    response=response,
                 )
             )
         ],
@@ -193,8 +199,12 @@ async def test_outbound_event_has_sentinel_name_and_schema() -> None:
     assert call_id, call_id
     schema = args.get("response_schema")
     assert isinstance(schema, dict) and schema.get("type") == "object"
-    enum_values = schema["properties"]["choice"]["enum"]
-    assert enum_values == ["allow_once", "allow_always", "deny"], enum_values
+    # One boolean property per option (so the bundled form renders one
+    # checkbox per choice — enum strings would render as a text input).
+    props = schema["properties"]
+    assert list(props.keys()) == ["allow_once", "allow_always", "deny"], list(props)
+    for key in props:
+        assert props[key]["type"] == "boolean", props[key]
 
     # No event should still have the original adk_request_confirmation
     # name — the rewrite happens on every confirmation event.
