@@ -102,39 +102,54 @@ ADK's bundled `adk web` UI hard-codes a binary widget (checkbox + read-only payl
 
 `ConfirmationFormUiPlugin` (registered in the default plugin chain) rewrites both sides of the protocol so the bundled UI takes its **form-widget** path instead:
 
+### Why a boolean field per option (not `string`/`enum`)
+
+Bundled `adk web`'s form widget renders fields by JSON Schema **`type`** only (see `initForm()` in `main-*.js`):
+
+```js
+n === "boolean"          → checkbox
+n === "integer/number"   → numeric input
+else (incl. "string")    → free-form text input
+```
+
+`enum` is **not consulted** — a `{type: "string", enum: [...]}` schema renders as a plain textbox where the operator has to type one of the ids manually (and a typo silently denies the operation). The only path to a real "pick one" UI in the bundled form is **one boolean field per option**: each option renders as its own checkbox, the operator ticks one, the submit produces `{<chose_id>: true, ...}`. The plugin then maps the first `true`-valued key to `chose_id` and reshapes for ADK's resume processor.
+
+It's awkward that "pick one of N" renders as N checkboxes rather than a radio group or dropdown, but the bundled UI offers neither. The label + description on each checkbox makes the intent clear.
+
 ### Outbound rewrite (event → bundled UI)
 
 - Find the `adk_request_confirmation` function-call event ADK emits.
-- Derive a JSON schema from `ConfirmPrompt.options`:
+- Derive a JSON schema where each `ConfirmPrompt.options[i]` becomes a boolean property keyed on the option's id; description is `<label> — <option description>`:
   ```json
   {
     "type": "object",
     "properties": {
-      "choice": {
-        "type": "string",
-        "enum": ["allow_once", "allow_always", "deny"],
-        "description": "<title>\n\n- allow_once: Allow once — Run this one time. …\n- allow_always: Allow always — …\n- deny: Deny — Cancel; …"
-      }
-    },
-    "required": ["choice"]
+      "allow_once":   {"type": "boolean", "description": "Allow once — Run this one time. …"},
+      "allow_always": {"type": "boolean", "description": "Allow always — Stop asking …"},
+      "deny":         {"type": "boolean", "description": "Deny — Cancel; the model …"}
+    }
   }
   ```
 - Inject the schema into `args.response_schema`.
-- **Rename** the function-call's `name` from `adk_request_confirmation` to the sentinel `_adk_cc_confirmation_form`. The bundled UI's `isConfirmationRequest = (name === "adk_request_confirmation")` short-circuit no longer triggers; the UI proceeds to the form-widget branch and renders a dropdown of the option ids.
+- Write `args.prompt` to the title (+ detail when set) so the bundled UI's form widget shows it above the checkbox list.
+- **Rename** the function-call's `name` from `adk_request_confirmation` to the sentinel `_adk_cc_confirmation_form`. The bundled UI's `isConfirmationRequest = (name === "adk_request_confirmation")` short-circuit no longer triggers; the UI proceeds to the form-widget branch and renders one checkbox per option.
 - The function-call **id** is preserved. ADK's resume processor matches on id, not on name, so this rename is transparent to resume.
 - The original `toolConfirmation.payload` (rich `ConfirmPrompt`) is **also preserved** in the rewritten event's args. Custom payload-aware frontends can still read it if they listen for the sentinel name in addition to `adk_request_confirmation`.
 
 ### Inbound rewrite (bundled UI → plugin)
 
-The bundled UI's form widget submits `{choice: "<enum value>"}` as the function_response's `response`. `ConfirmationFormUiPlugin.on_user_message_callback`:
+The bundled UI's form widget submits the form model as the function_response's `response`. With the boolean-per-option schema, the model is `{<chose_id_a>: false, <chose_id_b>: true, ...}`. `ConfirmationFormUiPlugin.on_user_message_callback`:
 
 - Detects function_responses whose name is the sentinel.
 - Accepts any of these shapes for the `response`:
-  - `{choice: "<chose_id>"}` — bundled UI form widget output.
-  - `{chose_id: "<chose_id>"}` — payload-aware custom frontend using the original PR-1 protocol.
-  - `{result: "<chose_id>"}` — bundled UI's free-form fallback if the operator typed an id directly.
+  - `{<chose_id>: true, ...}` — current bundled UI form widget output. The first `true`-valued key is the choice. Reserved keys (`confirmed`, `choice`, `chose_id`, `result`) are skipped during the scan so they can't shadow a real chose_id.
+  - `{chose_id: "<id>"}` — payload-aware custom frontend using the original PR-1 protocol.
+  - `{choice: "<id>"}` — legacy bundled-UI string-enum shape (kept for back-compat with older versions of this plugin).
+  - `{result: "<id>"}` — bundled UI's free-form textarea fallback if the operator typed an id directly.
 - Reshapes the response to ADK's standard `{confirmed: <bool>, payload: {chose_id: <id>}}` (where `confirmed = chose_id != "deny"`).
 - Renames the function_response back to `adk_request_confirmation`.
+
+If the operator submits the form without ticking anything (`{<all>: false}`), no chose_id can be extracted; the plugin leaves the response untouched so ADK's processor surfaces a clean "no confirmation" error rather than silently treating it as an allow or a deny.
 
 ADK's existing `_RequestConfirmationLlmRequestProcessor` then picks up the rewritten response and resumes the gated tool exactly as if the plugin weren't there.
 

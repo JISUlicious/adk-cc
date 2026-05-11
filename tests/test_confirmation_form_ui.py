@@ -126,42 +126,80 @@ def _first_fr(msg: types.Content) -> types.FunctionResponse:
 # --- Schema-builder unit cases --------------------------------------
 
 
-def test_build_choice_schema_includes_all_option_ids_in_enum() -> None:
-    schema = _build_choice_schema(_confirm_payload()["options"], title="Confirm run_bash?")
+def test_build_choice_schema_uses_one_boolean_property_per_option() -> None:
+    """The bundled UI's form widget ignores `enum`; only `type` matters.
+    A boolean property per option renders as one checkbox per choice."""
+    schema = _build_choice_schema(_confirm_payload()["options"])
     assert schema is not None
     assert schema["type"] == "object"
-    assert "choice" in schema["properties"]
-    choice = schema["properties"]["choice"]
-    assert choice["type"] == "string"
-    assert choice["enum"] == ["allow_once", "allow_always", "deny"]
-    # Description carries the title + per-option labels for operator clarity.
-    desc = choice["description"]
-    assert "Confirm run_bash?" in desc
-    for token in ("allow_once", "allow_always", "deny", "Allow once", "Deny"):
-        assert token in desc, f"missing {token!r} in description"
-    print("OK test_build_choice_schema_includes_all_option_ids_in_enum")
+    # Property keys are the option ids, in the same order.
+    assert list(schema["properties"].keys()) == [
+        "allow_once",
+        "allow_always",
+        "deny",
+    ]
+    for key in ("allow_once", "allow_always", "deny"):
+        prop = schema["properties"][key]
+        assert prop["type"] == "boolean", prop
+        # description carries the human-readable label + option description
+        assert prop["description"], prop
+    # Sanity-check the specific descriptions wire through.
+    assert "Allow once" in schema["properties"]["allow_once"]["description"]
+    assert "Stop asking" in schema["properties"]["allow_always"]["description"]
+    print("OK test_build_choice_schema_uses_one_boolean_property_per_option")
 
 
 def test_build_choice_schema_empty_options_returns_none() -> None:
-    assert _build_choice_schema([], None) is None
-    assert _build_choice_schema([{"label": "no id"}], None) is None
-    assert _build_choice_schema([{"id": 42}], None) is None  # id must be str
+    assert _build_choice_schema([]) is None
+    assert _build_choice_schema([{"label": "no id"}]) is None
+    assert _build_choice_schema([{"id": 42}]) is None  # id must be str
     print("OK test_build_choice_schema_empty_options_returns_none")
 
 
-def test_extract_chose_id_accepts_both_shapes() -> None:
+def test_build_choice_schema_skips_reserved_keys() -> None:
+    """An option whose id collides with a reserved key (`confirmed`,
+    `choice`, `chose_id`, `result`) would confuse the inbound disambig,
+    so the plugin drops it from the schema rather than risking shadowing."""
+    options = [
+        {"id": "allow", "label": "Allow", "description": ""},
+        {"id": "chose_id", "label": "Bogus", "description": ""},  # reserved
+        {"id": "deny", "label": "Deny", "description": ""},
+    ]
+    schema = _build_choice_schema(options)
+    assert schema is not None
+    assert set(schema["properties"].keys()) == {"allow", "deny"}
+    print("OK test_build_choice_schema_skips_reserved_keys")
+
+
+def test_extract_chose_id_accepts_all_shapes() -> None:
+    # 1. Single-string shapes (legacy + payload-aware).
     assert _extract_chose_id({"choice": "allow_once"}) == "allow_once"
     assert _extract_chose_id({"chose_id": "deny"}) == "deny"
-    # `result` is the bundled UI's free-form fallback shape.
+    # 2. Bundled UI free-form fallback.
     assert _extract_chose_id({"result": "allow_always"}) == "allow_always"
-    # Priority: choice > chose_id > result.
-    assert _extract_chose_id({"choice": "a", "chose_id": "b"}) == "a"
+    # 3. Boolean-per-option (current bundled UI form).
+    assert _extract_chose_id(
+        {"allow_once": False, "allow_always": True, "deny": False}
+    ) == "allow_always"
+    # First true wins for ambiguous multi-true (deterministic on insertion).
+    assert _extract_chose_id(
+        {"allow_once": True, "allow_always": True}
+    ) == "allow_once"
+    # All false → no choice → None.
+    assert _extract_chose_id(
+        {"allow_once": False, "deny": False}
+    ) is None
+    # Priority: choice > chose_id > result > booleans.
+    assert _extract_chose_id({"choice": "a", "deny": True}) == "a"
     # Garbage doesn't crash.
     assert _extract_chose_id(None) is None
     assert _extract_chose_id({}) is None
     assert _extract_chose_id({"choice": 42}) is None
     assert _extract_chose_id("not a dict") is None
-    print("OK test_extract_chose_id_accepts_both_shapes")
+    # `confirmed` is a reserved key — `confirmed: True` must NOT be
+    # mistaken for a chose_id called "confirmed".
+    assert _extract_chose_id({"confirmed": True}) is None
+    print("OK test_extract_chose_id_accepts_all_shapes")
 
 
 # --- Outbound rewrite -----------------------------------------------
@@ -180,14 +218,18 @@ def test_outbound_renames_and_injects_response_schema() -> None:
     assert fc.name == CONFIRMATION_FORM_FUNCTION_CALL_NAME
     # ID preserved — ADK's resume processor matches on id, not name.
     assert fc.id == "wrap-1"
-    # response_schema is now in args.
+    # response_schema is now in args. One boolean property per option.
     assert "response_schema" in fc.args
     schema = fc.args["response_schema"]
-    assert schema["properties"]["choice"]["enum"] == [
+    assert list(schema["properties"].keys()) == [
         "allow_once",
         "allow_always",
         "deny",
     ]
+    for key in schema["properties"]:
+        assert schema["properties"][key]["type"] == "boolean"
+    # Prompt text is set so the bundled UI shows the title/detail above the form.
+    assert "Confirm run_bash?" in fc.args.get("prompt", "")
     # Original toolConfirmation is preserved so payload-aware frontends
     # can still read it.
     assert fc.args["toolConfirmation"]["payload"]["style"] == "single_select"
@@ -300,6 +342,49 @@ def test_inbound_garbage_response_left_unchanged() -> None:
     print("OK test_inbound_garbage_response_left_unchanged")
 
 
+def test_inbound_reshape_boolean_per_option_form_submission() -> None:
+    """Current bundled UI form: user ticks one of N checkboxes; the
+    submitted response is `{<chose_id_a>: false, <chose_id_b>: true, ...}`.
+    The plugin reshapes to ADK's ToolConfirmation shape."""
+    plugin = ConfirmationFormUiPlugin()
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"allow_once": False, "allow_always": True, "deny": False},
+    )
+    _run_user_msg(plugin, msg)
+    fr = _first_fr(msg)
+    assert fr.name == REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
+    assert fr.response == {"confirmed": True, "payload": {"chose_id": "allow_always"}}
+    print("OK test_inbound_reshape_boolean_per_option_form_submission")
+
+
+def test_inbound_boolean_form_deny_sets_confirmed_false() -> None:
+    plugin = ConfirmationFormUiPlugin()
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"allow_once": False, "allow_always": False, "deny": True},
+    )
+    _run_user_msg(plugin, msg)
+    fr = _first_fr(msg)
+    assert fr.response == {"confirmed": False, "payload": {"chose_id": "deny"}}
+    print("OK test_inbound_boolean_form_deny_sets_confirmed_false")
+
+
+def test_inbound_boolean_form_all_false_treated_as_no_choice() -> None:
+    """User submitted the form without ticking anything. No mutation;
+    let ADK's processor surface the error naturally."""
+    plugin = ConfirmationFormUiPlugin()
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"allow_once": False, "allow_always": False, "deny": False},
+    )
+    out = _run_user_msg(plugin, msg)
+    assert out is None
+    fr = _first_fr(msg)
+    assert fr.name == CONFIRMATION_FORM_FUNCTION_CALL_NAME
+    print("OK test_inbound_boolean_form_all_false_treated_as_no_choice")
+
+
 def test_inbound_ignores_non_matching_names() -> None:
     plugin = ConfirmationFormUiPlugin()
     # Could be a regular tool response, or the legacy confirmation
@@ -324,9 +409,10 @@ def test_inbound_handles_empty_parts() -> None:
 
 
 def main() -> None:
-    test_build_choice_schema_includes_all_option_ids_in_enum()
+    test_build_choice_schema_uses_one_boolean_property_per_option()
     test_build_choice_schema_empty_options_returns_none()
-    test_extract_chose_id_accepts_both_shapes()
+    test_build_choice_schema_skips_reserved_keys()
+    test_extract_chose_id_accepts_all_shapes()
     test_outbound_renames_and_injects_response_schema()
     test_outbound_skips_event_without_options()
     test_outbound_ignores_non_confirmation_events()
@@ -336,6 +422,9 @@ def main() -> None:
     test_inbound_accepts_legacy_chose_id_shape()
     test_inbound_accepts_free_form_result_fallback()
     test_inbound_garbage_response_left_unchanged()
+    test_inbound_reshape_boolean_per_option_form_submission()
+    test_inbound_boolean_form_deny_sets_confirmed_false()
+    test_inbound_boolean_form_all_false_treated_as_no_choice()
     test_inbound_ignores_non_matching_names()
     test_inbound_handles_empty_parts()
     print("\nall confirmation_form_ui tests passed")
