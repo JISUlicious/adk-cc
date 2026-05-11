@@ -23,14 +23,15 @@ class ReadFileArgs(BaseModel):
         ),
     )
     limit: int = Field(
-        default=2000,
+        default=1000,
         ge=1,
         le=2000,
         description=(
-            "Maximum number of lines to return (1-2000). Defaults to 2000. "
-            "Files longer than `limit` require multiple reads with increasing "
-            "`offset`; the response includes `has_more` and `total_lines` so "
-            "you can tell when to stop."
+            "Maximum number of lines to return (1-2000). Defaults to 1000. "
+            "Most code files fit; for larger files paginate with increasing "
+            "`offset`. The response includes `has_more` and `total_lines` so "
+            "you can tell when to stop, and `total_bytes` so you can decide "
+            "whether to paginate or grep instead."
         ),
     )
 

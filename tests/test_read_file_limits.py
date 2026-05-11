@@ -8,7 +8,7 @@ on large files. The fix adds `offset`/`limit` with sensible defaults
 Covers:
   - Default reads slice from the start with metadata.
   - Small file: full content returned, has_more=False.
-  - Large file (>2000 lines): default returns 2000 with has_more=True.
+  - Large file (>1000 lines): default returns 1000 with has_more=True.
   - offset past end-of-file: empty content, has_more=False.
   - Per-line truncation cap (lines over 2000 chars marked + counted).
   - Custom offset+limit combinations.
@@ -142,24 +142,27 @@ def test_small_file_returns_full_content_no_more() -> None:
     print("OK test_small_file_returns_full_content_no_more")
 
 
-def test_large_file_default_caps_at_2000_lines() -> None:
-    """File with 5000 lines: default reads lines 1..2000, has_more=True."""
+def test_large_file_default_caps_at_1000_lines() -> None:
+    """File with 5000 lines: default (limit=1000) reads lines 1..1000,
+    has_more=True. Default lowered from 2000 → 1000 to keep typical
+    reads well under the LLM context window even when the model is
+    inspecting a moderately large file."""
     body = "\n".join(f"L{i}" for i in range(1, 5001))
     path = _make_file(body)
     try:
         out = _call(path)
         assert out["status"] == "ok"
         assert out["start_line"] == 1
-        assert out["end_line"] == 2000
+        assert out["end_line"] == 1000
         assert out["total_lines"] == 5000
         assert out["has_more"] is True
         texts = _texts(out["content"])
-        assert len(texts) == 2000
+        assert len(texts) == 1000
         assert texts[0] == "L1"
-        assert texts[-1] == "L2000"
+        assert texts[-1] == "L1000"
     finally:
         os.unlink(path)
-    print("OK test_large_file_default_caps_at_2000_lines")
+    print("OK test_large_file_default_caps_at_1000_lines")
 
 
 def test_offset_reads_subsequent_slice() -> None:
@@ -372,7 +375,7 @@ def test_cat_n_format_padding() -> None:
 
 def main() -> None:
     test_small_file_returns_full_content_no_more()
-    test_large_file_default_caps_at_2000_lines()
+    test_large_file_default_caps_at_1000_lines()
     test_offset_reads_subsequent_slice()
     test_offset_past_end_returns_empty_slice()
     test_per_line_truncation_cap()
