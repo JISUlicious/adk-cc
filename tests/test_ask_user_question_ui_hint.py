@@ -552,6 +552,61 @@ def test_inbound_handles_empty_parts() -> None:
     print("OK test_inbound_handles_empty_parts")
 
 
+# --- Schema constraint regression ---------------------------------
+#
+# Reported scenario: the model emitted an intake form with broad-category
+# questions ("Domain": 8 options, "Stack": 7 options). The original
+# `max_length=4` rejected them, the agent loop got stuck retrying the
+# same invalid payload. Cap raised to 8 to match the realistic ceiling
+# of intake-style questions without becoming unbounded.
+
+
+def test_ask_question_accepts_up_to_eight_options() -> None:
+    """Realistic intake question with 8 broad-category options
+    validates cleanly. Mirrors the user-reported "Domain" payload."""
+    from adk_cc.tools.schemas import AskUserQuestionArgs
+
+    questions = [
+        {
+            "header": "Domain",
+            "question": "What domain or topic interests you?",
+            "multi_select": False,
+            "options": [
+                {"label": f"opt{i}", "description": "x"} for i in range(8)
+            ],
+        }
+    ]
+    out = AskUserQuestionArgs(questions=questions)
+    assert len(out.questions[0].options) == 8
+    print("OK test_ask_question_accepts_up_to_eight_options")
+
+
+def test_ask_question_rejects_nine_options() -> None:
+    """Cap is still meaningful — 9+ options reject so degenerate cases
+    (model emitting 50 options) still fail fast rather than producing
+    an unwieldy form."""
+    from pydantic import ValidationError
+
+    from adk_cc.tools.schemas import AskUserQuestionArgs
+
+    too_many = [
+        {
+            "header": "X",
+            "question": "X?",
+            "multi_select": False,
+            "options": [
+                {"label": str(i), "description": "x"} for i in range(9)
+            ],
+        }
+    ]
+    try:
+        AskUserQuestionArgs(questions=too_many)
+    except ValidationError:
+        print("OK test_ask_question_rejects_nine_options")
+        return
+    raise AssertionError("9 options should have failed validation")
+
+
 # --- Driver --------------------------------------------------------
 
 
@@ -581,6 +636,8 @@ def main() -> None:
     test_inbound_no_matching_call_in_session_leaves_alone()
     test_inbound_ignores_other_function_responses()
     test_inbound_handles_empty_parts()
+    test_ask_question_accepts_up_to_eight_options()
+    test_ask_question_rejects_nine_options()
     print("\nall ask_user_question_ui_hint tests passed")
 
 
