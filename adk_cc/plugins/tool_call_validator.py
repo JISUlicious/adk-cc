@@ -33,8 +33,19 @@ _NOT_FOUND_MARKER = "not found.\nAvailable tools:"
 class ToolCallValidatorPlugin(BasePlugin):
     """Convert "tool not found" ValueErrors into corrective tool responses."""
 
-    def __init__(self, name: str = "adk_cc_tool_call_validator") -> None:
+    def __init__(
+        self,
+        *,
+        default_mode: str = "default",
+        name: str = "adk_cc_tool_call_validator",
+    ) -> None:
         super().__init__(name=name)
+        # See `PlanModeReminderPlugin.__init__` for why each plugin
+        # reading `state["permission_mode"]` needs an env-default
+        # fallback: a fresh session has empty state, and without the
+        # fallback the hint won't mention plan mode even when plan mode
+        # is active by env default.
+        self._default_mode = (default_mode or "default").lower()
 
     async def on_tool_error_callback(
         self,
@@ -99,9 +110,9 @@ class ToolCallValidatorPlugin(BasePlugin):
         except Exception:
             return None
 
-    @staticmethod
-    def _in_plan_mode(tool_context: ToolContext) -> bool:
+    def _in_plan_mode(self, tool_context: ToolContext) -> bool:
         try:
-            return tool_context.state.get("permission_mode") == "plan"
+            mode = tool_context.state.get("permission_mode")
         except Exception:
-            return False
+            mode = None
+        return (mode or self._default_mode) == "plan"

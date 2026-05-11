@@ -158,8 +158,18 @@ def _append_to_system_instruction(req: LlmRequest, text: str) -> None:
 class TaskReminderPlugin(BasePlugin):
     """Injects the current task set into the model's context periodically."""
 
-    def __init__(self, name: str = "adk_cc_task_reminder") -> None:
+    def __init__(
+        self,
+        *,
+        default_mode: str = "default",
+        name: str = "adk_cc_task_reminder",
+    ) -> None:
         super().__init__(name=name)
+        # Fall back to the env-set default when state hasn't been
+        # initialized — otherwise a session that boots with
+        # `ADK_CC_PERMISSION_MODE=plan` would emit task reminders even
+        # though task tools are filtered out by PlanModeReminderPlugin.
+        self._default_mode = (default_mode or "default").lower()
         self._turns_since_write = int(
             os.environ.get("ADK_CC_TASK_REMINDER_TURNS_SINCE_WRITE", "10")
         )
@@ -179,10 +189,11 @@ class TaskReminderPlugin(BasePlugin):
         # Task tools are filtered out in plan mode; reminding the model
         # about tools it can't see just wastes context.
         try:
-            if callback_context.state.get("permission_mode") == "plan":
-                return None
+            mode = callback_context.state.get("permission_mode")
         except Exception:
-            pass
+            mode = None
+        if (mode or self._default_mode) == "plan":
+            return None
 
         events = list(getattr(callback_context.session, "events", []) or [])
 

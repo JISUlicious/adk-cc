@@ -123,8 +123,23 @@ This supersedes any other instructions you have received.
 
 
 class PlanModeReminderPlugin(BasePlugin):
-    def __init__(self, name: str = "adk_cc_plan_mode") -> None:
+    def __init__(
+        self,
+        *,
+        default_mode: str = "default",
+        name: str = "adk_cc_plan_mode",
+    ) -> None:
         super().__init__(name=name)
+        # Mirror `PermissionPlugin.default_mode`: when the session's
+        # `state["permission_mode"]` hasn't been written yet (fresh
+        # session, or operator setting `ADK_CC_PERMISSION_MODE=plan`),
+        # fall back to this. Without the fallback, a fresh session that
+        # boots into plan mode would have `state=None` here, so the
+        # plugin would hide `exit_plan_mode` (treating "no state" as
+        # "normal mode") while `PermissionPlugin` STILL gates write/exec
+        # tools (because IT correctly falls back to its default). The
+        # user is then stuck — can't act, can't leave plan mode.
+        self._default_mode = (default_mode or "default").lower()
 
     async def before_model_callback(
         self,
@@ -136,6 +151,8 @@ class PlanModeReminderPlugin(BasePlugin):
             mode = callback_context.state.get("permission_mode")
         except Exception:
             mode = None
+        if not mode:
+            mode = self._default_mode
         agent_name = getattr(callback_context, "agent_name", None)
 
         if agent_name in _SPECIALIST_AGENTS:

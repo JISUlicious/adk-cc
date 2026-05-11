@@ -425,12 +425,21 @@ _app_kwargs = dict(
         PermissionPlugin(SETTINGS, default_mode=PERMISSION_MODE),
         # Reminders run on before_model_callback, lifecycle independent of
         # the before_tool chain — order relative to others doesn't matter.
-        PlanModeReminderPlugin(),
-        TaskReminderPlugin(),
+        # Pass the env-set default to every plugin that reads
+        # `state["permission_mode"]` — without this, a fresh session
+        # booted with `ADK_CC_PERMISSION_MODE=plan` has state=None at
+        # the time these plugins fire, so they treat the session as
+        # NORMAL mode (hiding `exit_plan_mode`, emitting task reminders,
+        # not mentioning plan mode in error hints) — while
+        # PermissionPlugin gates write/exec because IT correctly falls
+        # back to its default. The result is a deadlock: write tools
+        # blocked, no way to exit plan mode.
+        PlanModeReminderPlugin(default_mode=PERMISSION_MODE.value),
+        TaskReminderPlugin(default_mode=PERMISSION_MODE.value),
         # Catches "tool not found" errors from ADK's tool dispatch and
         # turns them into corrective tool responses so the model can
         # self-correct on the next iteration instead of aborting the run.
-        ToolCallValidatorPlugin(),
+        ToolCallValidatorPlugin(default_mode=PERMISSION_MODE.value),
         # Injects a UI-side response_schema into ask_user_question
         # function-call args so adk web's bundled UI renders a structured
         # form per question (instead of falling back to a free-form
