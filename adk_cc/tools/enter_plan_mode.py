@@ -50,6 +50,17 @@ class EnterPlanModeTool(AdkCcTool):
         "user approves via `exit_plan_mode` when you're ready to act."
     )
 
+    def __init__(self, *, default_mode: str = "default") -> None:
+        super().__init__()
+        # Mirror of ExitPlanModeTool: fall back to env-set default when
+        # state["permission_mode"] is unset, so the noop guard correctly
+        # identifies "already in plan mode" on fresh sessions that boot
+        # with ADK_CC_PERMISSION_MODE=plan. Without this, the model
+        # would see "ok, switched to plan" when it was already there
+        # by env default — confusing but not catastrophic. Symmetric to
+        # the exit tool fix.
+        self._default_mode = (default_mode or "default").lower()
+
     async def _execute(
         self, args: EnterPlanModeArgs, ctx: ToolContext
     ) -> dict[str, Any]:
@@ -57,6 +68,8 @@ class EnterPlanModeTool(AdkCcTool):
             previous = ctx.state.get("permission_mode")
         except Exception:
             previous = None
+        if not previous:
+            previous = self._default_mode
         if previous == "plan":
             return {
                 "status": "noop",

@@ -43,6 +43,20 @@ class ExitPlanModeTool(AdkCcTool):
         "to execute."
     )
 
+    def __init__(self, *, default_mode: str = "default") -> None:
+        super().__init__()
+        # Fall back to the env-set default when session state hasn't been
+        # written yet. Same pattern PR #4 used for the plan-mode plugins.
+        #
+        # The bug it prevents: with ADK_CC_PERMISSION_MODE=plan, a fresh
+        # session is in plan-mode posture via the plugin-layer fallback
+        # (PR #4), but state["permission_mode"] is still None. Without
+        # this fallback, `previous = state.get(...)` is None, the
+        # `previous != "plan"` guard trips, the tool returns noop, and
+        # state["permission_mode"] is NEVER written. The next turn the
+        # plugins fall back to env-default="plan" again → stuck loop.
+        self._default_mode = (default_mode or "default").lower()
+
     def _approval_hint(self, args: ExitPlanModeArgs) -> str:
         return f"Approve plan and exit plan mode?\n\n{args.plan_summary}"
 
@@ -58,12 +72,16 @@ class ExitPlanModeTool(AdkCcTool):
             previous = ctx.state.get("permission_mode")
         except Exception:
             previous = None
+        # Fall back to env default so "fresh session + env=plan" is
+        # correctly seen as "in plan mode" for the noop guard.
+        if not previous:
+            previous = self._default_mode
         # Defensive idempotency — exiting from non-plan mode is meaningless;
         # don't pretend it happened.
         if previous != "plan":
             return {
                 "status": "noop",
-                "current_mode": previous or "default",
+                "current_mode": previous,
                 "message": (
                     f"Not in plan mode (current: {previous!r}); nothing to exit. "
                     "Use the regular tools to proceed."
