@@ -286,6 +286,247 @@ async def test_long_running_flag_propagates_to_event() -> None:
     print("OK test_long_running_flag_propagates_to_event")
 
 
+# --- With AskUserQuestionUiHintPlugin in the chain ----------------
+
+
+from adk_cc.plugins.ask_user_question_ui import AskUserQuestionUiHintPlugin
+
+
+def _build_runner_with_form_plugin(
+    *, llm_responses: list[LlmResponse]
+) -> tuple[InMemoryRunner, _ScriptedLlm]:
+    llm = _ScriptedLlm(responses=list(llm_responses))
+    agent = LlmAgent(
+        name="test_agent",
+        model=llm,
+        instruction="Test agent.",
+        tools=[AskUserQuestionTool()],
+    )
+    runner = InMemoryRunner(
+        agent=agent,
+        plugins=[AskUserQuestionUiHintPlugin()],
+        app_name="e2e-ask-form",
+    )
+    return runner, llm
+
+
+def _multi_question_args() -> dict:
+    """Two questions in one call: a single-select and a multi-select.
+    Exercises mixed-question schema generation + reshape. AskOption
+    requires both label and description, so every option carries a
+    description (use empty string when not meaningful)."""
+    return {
+        "questions": [
+            {
+                "question": "Which DB?",
+                "header": "DB",
+                "options": [
+                    {"label": "Postgres", "description": "Strong tooling"},
+                    {"label": "MySQL", "description": "Wide support"},
+                ],
+                "multi_select": False,
+            },
+            {
+                "question": "Tags?",
+                "header": "Tags",
+                "options": [
+                    {"label": "urgent", "description": ""},
+                    {"label": "cleanup", "description": ""},
+                    {"label": "docs", "description": ""},
+                ],
+                "multi_select": True,
+            },
+        ]
+    }
+
+
+async def test_outbound_schema_uses_boolean_per_option_and_freeform() -> None:
+    """With the plugin wired, the function-call event the bundled UI
+    sees carries a `response_schema` with boolean checkbox properties
+    per option plus a free-form string per question — the only shape
+    bundled `adk web` actually renders as checkboxes (not enum dropdowns
+    which it ignores)."""
+    runner, _ = _build_runner_with_form_plugin(
+        llm_responses=[
+            _tool_call_response("call-1", "ask_user_question", _multi_question_args())
+        ]
+    )
+    await _create_session(runner, "alice", "s-form-outbound")
+
+    events: list[Event] = []
+    async for ev in runner.run_async(
+        user_id="alice",
+        session_id="s-form-outbound",
+        new_message=types.Content(
+            role="user", parts=[types.Part(text="ask me two things")]
+        ),
+    ):
+        events.append(ev)
+
+    # Find the ask_user_question function-call.
+    fc = None
+    for ev in events:
+        for f in ev.get_function_calls():
+            if f.name == "ask_user_question":
+                fc = f
+                break
+        if fc:
+            break
+    assert fc is not None, "no ask_user_question function-call event"
+    schema = (fc.args or {}).get("response_schema")
+    assert isinstance(schema, dict), schema
+    assert schema["type"] == "object"
+    props = schema["properties"]
+    # Q1 (single-select, 2 options) → 2 checkboxes + 1 free-form.
+    # Q2 (multi-select, 3 options)  → 3 checkboxes + 1 free-form.
+    assert {
+        "q0_opt0", "q0_opt1", "q0_other",
+        "q1_opt0", "q1_opt1", "q1_opt2", "q1_other",
+    } <= set(props), set(props)
+    for key in ("q0_opt0", "q0_opt1", "q1_opt0", "q1_opt1", "q1_opt2"):
+        assert props[key]["type"] == "boolean", props[key]
+    for key in ("q0_other", "q1_other"):
+        assert props[key]["type"] == "string", props[key]
+    # Descriptions thread the question text + label so flat checkboxes
+    # remain readable.
+    assert "Which DB?" in props["q0_opt0"]["description"]
+    assert "Postgres" in props["q0_opt0"]["description"]
+    assert "Tags?" in props["q1_opt0"]["description"]
+    print("OK test_outbound_schema_uses_boolean_per_option_and_freeform")
+
+
+async def test_inbound_form_submission_reshaped_for_model() -> None:
+    """Operator submits the bundled form (boolean keys). The plugin
+    reshapes it back to the natural `{status, answers: {question: ...}}`
+    shape before the LLM sees the next turn."""
+    runner, llm = _build_runner_with_form_plugin(
+        llm_responses=[
+            _tool_call_response("call-1", "ask_user_question", _multi_question_args()),
+            _text_response("got answers"),
+        ]
+    )
+    await _create_session(runner, "alice", "s-form-inbound")
+
+    # Turn 1: ask.
+    async for _ in runner.run_async(
+        user_id="alice",
+        session_id="s-form-inbound",
+        new_message=types.Content(role="user", parts=[types.Part(text="ask me")]),
+    ):
+        pass
+
+    # Operator submits the bundled-UI form widget output. Q1: Postgres
+    # (radio tick). Q2: urgent + docs + custom text.
+    form_submission = types.Content(
+        role="user",
+        parts=[
+            types.Part(
+                function_response=types.FunctionResponse(
+                    id="call-1",
+                    name="ask_user_question",
+                    response={
+                        "q0_opt0": True, "q0_opt1": False, "q0_other": None,
+                        "q1_opt0": True, "q1_opt1": False, "q1_opt2": True,
+                        "q1_other": "experimental",
+                    },
+                )
+            )
+        ],
+    )
+
+    async for _ in runner.run_async(
+        user_id="alice",
+        session_id="s-form-inbound",
+        new_message=form_submission,
+    ):
+        pass
+
+    # LLM should have been called once more after the form submission
+    # (which means the reshaped response made it through ADK's flow).
+    assert llm.calls_made == 2, llm.calls_made
+
+    # Walk session events for the user-side function_response — it
+    # should now be the reshaped natural form.
+    session = await runner.session_service.get_session(
+        app_name=runner.app_name, user_id="alice", session_id="s-form-inbound"
+    )
+    fr = None
+    for ev in session.events:
+        if getattr(ev, "author", None) != "user":
+            continue
+        for resp in ev.get_function_responses():
+            if resp.name == "ask_user_question":
+                fr = resp
+                break
+        if fr:
+            break
+    assert fr is not None, "no ask_user_question function_response in session"
+    assert fr.response == {
+        "status": "answered",
+        "answers": {
+            "Which DB?": "Postgres",
+            "Tags?": ["urgent", "docs", "experimental"],
+        },
+    }, fr.response
+    print("OK test_inbound_form_submission_reshaped_for_model")
+
+
+async def test_inbound_freeform_overrides_radio_tick() -> None:
+    """Single-select: operator ticked Postgres AND typed something
+    custom. The typed text wins (explicit input shouldn't be silently
+    discarded)."""
+    runner, _ = _build_runner_with_form_plugin(
+        llm_responses=[
+            _tool_call_response("call-1", "ask_user_question", _ask_args()),
+            _text_response("ok"),
+        ]
+    )
+    await _create_session(runner, "alice", "s-form-freeform")
+
+    async for _ in runner.run_async(
+        user_id="alice",
+        session_id="s-form-freeform",
+        new_message=types.Content(role="user", parts=[types.Part(text="ask me")]),
+    ):
+        pass
+
+    form_submission = types.Content(
+        role="user",
+        parts=[
+            types.Part(
+                function_response=types.FunctionResponse(
+                    id="call-1", name="ask_user_question",
+                    response={
+                        "q0_opt0": True,
+                        "q0_opt1": False,
+                        "q0_other": "neither, I want SQLite",
+                    },
+                )
+            )
+        ],
+    )
+
+    async for _ in runner.run_async(
+        user_id="alice",
+        session_id="s-form-freeform",
+        new_message=form_submission,
+    ):
+        pass
+
+    session = await runner.session_service.get_session(
+        app_name=runner.app_name, user_id="alice", session_id="s-form-freeform"
+    )
+    fr = next(
+        resp
+        for ev in session.events
+        if getattr(ev, "author", None) == "user"
+        for resp in ev.get_function_responses()
+        if resp.name == "ask_user_question"
+    )
+    assert fr.response["answers"]["Which path do you prefer?"] == "neither, I want SQLite"
+    print("OK test_inbound_freeform_overrides_radio_tick")
+
+
 # --- Driver ---------------------------------------------------------
 
 
@@ -294,6 +535,10 @@ async def main() -> None:
     await test_no_function_response_event_for_initial_call()
     await test_resume_with_user_answer_continues_loop()
     await test_long_running_flag_propagates_to_event()
+    # With AskUserQuestionUiHintPlugin wired (PR #15)
+    await test_outbound_schema_uses_boolean_per_option_and_freeform()
+    await test_inbound_form_submission_reshaped_for_model()
+    await test_inbound_freeform_overrides_radio_tick()
     print("\nall e2e ask_user_question tests passed")
 
 
