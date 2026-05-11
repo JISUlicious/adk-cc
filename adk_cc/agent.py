@@ -122,6 +122,17 @@ MODEL = LiteLlm(
     api_key=os.environ["ADK_CC_API_KEY"],
 )
 
+# ---------- permission mode (env-driven) ----------
+# Hoisted above tool instantiation so the plan-mode tools can use it as
+# their `default_mode` fallback (mirroring the plugin-side fix in PR #4).
+# Default `bypassPermissions` preserves the dev experience: permissions
+# plugin is always loaded (so audit/quota/etc can layer on top) but only
+# enforces deny rules. Flip via env to exercise plan/default/acceptEdits/dontAsk.
+PERMISSION_MODE = PermissionMode(
+    os.environ.get("ADK_CC_PERMISSION_MODE", PermissionMode.BYPASS_PERMISSIONS.value)
+)
+SETTINGS = SettingsHierarchy.empty()  # rules added by operators / Stage G loader
+
 
 # ---------- shared tool instances ----------
 # Tools are stateless; one instance per tool, reused across agents.
@@ -137,8 +148,13 @@ _task_create = TaskCreateTool()
 _task_get = TaskGetTool()
 _task_list = TaskListTool()
 _task_update = TaskUpdateTool()
-_exit_plan_mode = ExitPlanModeTool()
-_enter_plan_mode = EnterPlanModeTool()
+# Plan-mode tools take the env default so their internal "previous mode"
+# check sees the right value on a fresh session booted with
+# ADK_CC_PERMISSION_MODE=plan. Without this fallback, exit_plan_mode reads
+# state["permission_mode"]=None, the `previous != "plan"` guard trips, and
+# state never flips to "default" — the session stays stuck in plan mode.
+_exit_plan_mode = ExitPlanModeTool(default_mode=PERMISSION_MODE.value)
+_enter_plan_mode = EnterPlanModeTool(default_mode=PERMISSION_MODE.value)
 _write_plan = WritePlanTool()
 _read_current_plan = ReadCurrentPlanTool()
 _skills = make_skill_toolset()  # None unless ADK_CC_SKILLS_DIR / skills/ has content
@@ -403,16 +419,9 @@ _compaction_config = _make_compaction_config()
 # ---------- App with permission plugin ----------
 # `adk web` / `adk run` look for `app` first, then `root_agent`. Exposing
 # both keeps direct-test imports of `root_agent` working while letting the
-# CLI wire the plugin chain automatically.
-#
-# Default mode is `bypassPermissions` to preserve the dev experience: the
-# plugin is always loaded (so Stage D/G can layer audit/quotas on top),
-# but it only enforces deny rules. Flip to `default`/`plan`/`acceptEdits`/
-# `dontAsk` via env to exercise the engine.
-PERMISSION_MODE = PermissionMode(
-    os.environ.get("ADK_CC_PERMISSION_MODE", PermissionMode.BYPASS_PERMISSIONS.value)
-)
-SETTINGS = SettingsHierarchy.empty()  # rules added by operators / Stage G loader
+# CLI wire the plugin chain automatically. `PERMISSION_MODE` / `SETTINGS`
+# are defined above (near tool instantiation) so plan-mode tools can use
+# the env default for their internal mode check.
 
 _app_kwargs = dict(
     name="adk_cc",
