@@ -132,7 +132,7 @@ It's awkward that "pick one of N" renders as N checkboxes rather than a radio gr
   ```
 - Inject the schema into `args.response_schema`.
 - Write `args.prompt` to the title (+ detail when set) so the bundled UI's form widget shows it above the checkbox list.
-- **Rename** the function-call's `name` from `adk_request_confirmation` to the sentinel `_adk_cc_confirmation_form`. The bundled UI's `isConfirmationRequest = (name === "adk_request_confirmation")` short-circuit no longer triggers; the UI proceeds to the form-widget branch and renders one checkbox per option.
+- **Rename** the function-call's `name` from `adk_request_confirmation` to the sentinel `adk_cc_confirmation_form` (no leading underscore — some OpenAI-compatible backends, including sglang, reject function names starting with `_`). The bundled UI's `isConfirmationRequest = (name === "adk_request_confirmation")` short-circuit no longer triggers; the UI proceeds to the form-widget branch and renders one checkbox per option.
 - The function-call **id** is preserved. ADK's resume processor matches on id, not on name, so this rename is transparent to resume.
 - The original `toolConfirmation.payload` (rich `ConfirmPrompt`) is **also preserved** in the rewritten event's args. Custom payload-aware frontends can still read it if they listen for the sentinel name in addition to `adk_request_confirmation`.
 
