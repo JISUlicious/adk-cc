@@ -244,7 +244,9 @@ async def test_allow_once_end_to_end() -> None:
         "allow_always",
         "deny",
     ], payload
-    assert payload["title"] == "Confirm run_bash?", payload
+    # Subject (the command) is in the title so concurrent gated calls
+    # for the same tool can be distinguished by the operator.
+    assert payload["title"] == "Confirm run_bash: git status?", payload
 
     # Tool should not have been invoked yet.
     assert _FakeBashTool.invocations == [], _FakeBashTool.invocations

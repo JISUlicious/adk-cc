@@ -29,7 +29,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
-from ..permissions.confirmation import allow_once_always_deny_prompt
+from ..permissions.confirmation import allow_once_always_deny_prompt, extract_subject
 from ..permissions.engine import decide
 from ..permissions.modes import PermissionMode
 from ..permissions.rules import (
@@ -135,7 +135,14 @@ class PermissionPlugin(BasePlugin):
             # function_call_id (rare; some test contexts) skip without
             # erroring.
             if tool_context.function_call_id:
-                prompt = allow_once_always_deny_prompt(tool.meta.name, decision.reason)
+                # Include the tool's rule key (e.g. command for run_bash,
+                # path for write_file) in the prompt title so the operator
+                # can tell concurrent prompts apart when the model emits
+                # multiple gated calls in one turn.
+                subject = extract_subject(tool.meta.name, tool_args)
+                prompt = allow_once_always_deny_prompt(
+                    tool.meta.name, decision.reason, subject=subject
+                )
                 tool_context.request_confirmation(
                     hint=decision.reason,            # back-compat for hint-only frontends
                     payload=prompt.model_dump(),     # structured for 3-option rendering

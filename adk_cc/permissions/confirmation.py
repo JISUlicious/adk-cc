@@ -44,9 +44,16 @@ by a tool other than the permission gate) without breaking schemas.
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel
+
+from .rules import _RULE_KEY_EXTRACTORS
+
+# Subjects longer than this get truncated in the title so the prompt
+# header stays readable. The full args are still recoverable from the
+# tool's function_call payload — this is just for the title.
+_MAX_SUBJECT_LENGTH = 80
 
 
 class ConfirmOption(BaseModel):
@@ -75,13 +82,59 @@ class ConfirmPrompt(BaseModel):
     options: list[ConfirmOption]
 
 
-def confirm_deny_prompt(tool_name: str, reason: str) -> ConfirmPrompt:
+def extract_subject(tool_name: str, args: dict) -> Optional[str]:
+    """Pull a short summary of a tool's args for use in the prompt title.
+
+    Reuses `_RULE_KEY_EXTRACTORS` — the same per-tool arg-key map the
+    permission engine uses to match rule_content patterns. So for
+    `run_bash` you get the `command`, for `write_file` you get the
+    `path`, etc. Returns None when the tool has no extractor or the
+    extracted value is empty.
+
+    Long subjects (e.g. multi-line bash commands) are truncated with an
+    ellipsis to keep the prompt title readable.
+    """
+    extractor = _RULE_KEY_EXTRACTORS.get(tool_name)
+    if extractor is None:
+        return None
+    try:
+        raw = extractor(args)
+    except Exception:
+        return None
+    if not isinstance(raw, str) or not raw:
+        return None
+    # Collapse internal newlines so multi-line commands don't blow up
+    # the title; full args remain visible in the function_call payload.
+    single_line = " ".join(raw.split())
+    if len(single_line) > _MAX_SUBJECT_LENGTH:
+        return single_line[: _MAX_SUBJECT_LENGTH - 1] + "…"
+    return single_line
+
+
+def _title(tool_name: str, subject: Optional[str]) -> str:
+    """Compose the prompt title. With `subject`, include it after a colon
+    so the operator can tell two concurrent prompts apart."""
+    if subject:
+        return f"Confirm {tool_name}: {subject}?"
+    return f"Confirm {tool_name}?"
+
+
+def confirm_deny_prompt(
+    tool_name: str,
+    reason: str,
+    *,
+    subject: Optional[str] = None,
+) -> ConfirmPrompt:
     """Two-button payload — kept for callers that want a strict binary
     gate. The destructive-tool gate uses `allow_once_always_deny_prompt`
-    instead so users can opt into a session-scope rule."""
+    instead so users can opt into a session-scope rule.
+
+    Pass `subject` (e.g. the file path or command) to disambiguate
+    concurrent prompts for the same tool.
+    """
     return ConfirmPrompt(
         style="confirm_deny",
-        title=f"Confirm {tool_name}?",
+        title=_title(tool_name, subject),
         detail=reason,
         options=[
             ConfirmOption(
@@ -98,7 +151,12 @@ def confirm_deny_prompt(tool_name: str, reason: str) -> ConfirmPrompt:
     )
 
 
-def allow_once_always_deny_prompt(tool_name: str, reason: str) -> ConfirmPrompt:
+def allow_once_always_deny_prompt(
+    tool_name: str,
+    reason: str,
+    *,
+    subject: Optional[str] = None,
+) -> ConfirmPrompt:
     """Three-option payload used by the permission plugin's "ask" branch.
 
     "Allow always" tells the plugin to add a SESSION-scope ALLOW rule
@@ -106,10 +164,17 @@ def allow_once_always_deny_prompt(tool_name: str, reason: str) -> ConfirmPrompt:
     re-gated for the rest of the session. Scope is intentionally
     narrow — exact rule-key match — so a user who approves
     `git status` does NOT thereby allow `git push`.
+
+    Pass `subject` (the tool's rule key, e.g. the `command` for
+    `run_bash` or the `path` for `write_file`) to disambiguate
+    concurrent prompts. The title becomes
+    `"Confirm run_bash: git status?"` instead of `"Confirm run_bash?"`,
+    so an operator faced with three pending `write_file` confirmations
+    can tell which file each one is gating.
     """
     return ConfirmPrompt(
         style="single_select",
-        title=f"Confirm {tool_name}?",
+        title=_title(tool_name, subject),
         detail=reason,
         options=[
             ConfirmOption(
