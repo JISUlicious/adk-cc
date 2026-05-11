@@ -1,8 +1,13 @@
 """Ask the user a multi-choice question mid-session.
 
-Marked `long_running=True` so ADK pauses the tool result and surfaces
-the question payload to the frontend. The frontend collects the answer
-and submits it back as the function-call response.
+Marked `long_running=True`. The pause is delivered by two things working
+together:
+  1. ADK sets `long_running_tool_ids` on the function-CALL event from
+     the tool's `is_long_running` flag (base_llm_flow.py:106).
+  2. `AdkCcTool.run_async` sets `tool_context.actions.skip_summarization
+     = True` after `_execute` returns. Without (2), the function-RESPONSE
+     event isn't marked final and the loop cascades — see the comment in
+     `adk_cc/tools/base.py`.
 
 Output shape (the LLM consumes this on resume):
     {
@@ -17,8 +22,9 @@ For the initial pause, the tool returns:
     }
 
 The frontend that wires up `adk web` is expected to render the questions
-and POST the answer back. Without a frontend that knows this protocol,
-the call will time out — the contract is documented; operators wire it.
+and POST the answer back as a function_response with the same call_id.
+Without a frontend that knows this protocol, the call will time out —
+the contract is documented; operators wire it.
 """
 
 from __future__ import annotations
