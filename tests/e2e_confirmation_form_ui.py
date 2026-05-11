@@ -280,6 +280,175 @@ async def test_inbound_deny_choice_blocks_tool() -> None:
     print("OK test_inbound_deny_choice_blocks_tool")
 
 
+def _build_runner_multi_tool() -> tuple[InMemoryRunner, _ScriptedLlm]:
+    """Two run_bash function_calls in the FIRST LLM response so the gate
+    fires twice in the same turn."""
+    _FakeBashTool.invocations = []
+    llm = _ScriptedLlm(
+        responses=[
+            LlmResponse(
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part(function_call=types.FunctionCall(
+                            id="orig-1", name="run_bash",
+                            args={"command": "git status"},
+                        )),
+                        types.Part(function_call=types.FunctionCall(
+                            id="orig-2", name="run_bash",
+                            args={"command": "git diff"},
+                        )),
+                    ],
+                ),
+                partial=False,
+            ),
+            _text_response("done"),
+        ]
+    )
+    agent = LlmAgent(
+        name="test_agent",
+        model=llm,
+        instruction="Test agent.",
+        tools=[_FakeBashTool()],
+    )
+    plugins = [
+        PermissionPlugin(SettingsHierarchy(), default_mode=PermissionMode.DEFAULT),
+        ConfirmationFormUiPlugin(),
+    ]
+    runner = InMemoryRunner(agent=agent, plugins=plugins, app_name="e2e-form-multi")
+    return runner, llm
+
+
+def _all_form_call_ids(events: list[Event]) -> list[str]:
+    """Every confirmation wrapper id seen in the event stream, in order."""
+    ids: list[str] = []
+    for ev in events:
+        for fc in ev.get_function_calls():
+            if fc.name == CONFIRMATION_FORM_FUNCTION_CALL_NAME:
+                ids.append(fc.id)
+    return ids
+
+
+async def test_multi_tool_first_submission_defers_no_tool_run() -> None:
+    """Two gated tool calls in one turn → two confirmation widgets.
+    Submitting widget 1 must NOT resume tool 1 yet — the plugin defers
+    until all are submitted. After the first submit, _FakeBashTool
+    has zero invocations."""
+    runner, _ = _build_runner_multi_tool()
+    await _create_session(runner, "alice", "s-multi-defer")
+
+    # Turn 1: model emits two run_bash → both gated.
+    events1: list[Event] = []
+    async for ev in runner.run_async(
+        user_id="alice",
+        session_id="s-multi-defer",
+        new_message=types.Content(
+            role="user", parts=[types.Part(text="run both")]
+        ),
+    ):
+        events1.append(ev)
+    wrap_ids = _all_form_call_ids(events1)
+    assert len(wrap_ids) == 2, wrap_ids
+
+    # Submit only widget 1.
+    async for _ in runner.run_async(
+        user_id="alice",
+        session_id="s-multi-defer",
+        new_message=_user_form_submission(wrap_ids[0], "allow_once"),
+    ):
+        pass
+
+    # Neither tool should have run yet — first submission is deferred.
+    assert _FakeBashTool.invocations == [], (
+        f"expected no tool runs after only 1 of 2 confirmations submitted, "
+        f"got {_FakeBashTool.invocations}"
+    )
+    print("OK test_multi_tool_first_submission_defers_no_tool_run")
+
+
+async def test_multi_tool_final_submission_bundles_and_resumes_all() -> None:
+    """After submitting widget 2, both tools resume in one pass (modulo
+    the deny decision on widget 1 vs widget 2)."""
+    runner, _ = _build_runner_multi_tool()
+    await _create_session(runner, "alice", "s-multi-bundle")
+
+    events1: list[Event] = []
+    async for ev in runner.run_async(
+        user_id="alice",
+        session_id="s-multi-bundle",
+        new_message=types.Content(
+            role="user", parts=[types.Part(text="run both")]
+        ),
+    ):
+        events1.append(ev)
+    wrap_ids = _all_form_call_ids(events1)
+    assert len(wrap_ids) == 2
+
+    # Submit widget 1 (deferred).
+    async for _ in runner.run_async(
+        user_id="alice",
+        session_id="s-multi-bundle",
+        new_message=_user_form_submission(wrap_ids[0], "allow_once"),
+    ):
+        pass
+    assert _FakeBashTool.invocations == []
+
+    # Submit widget 2 — final submission triggers the bundle and ADK's
+    # resume processor runs both tools.
+    async for _ in runner.run_async(
+        user_id="alice",
+        session_id="s-multi-bundle",
+        new_message=_user_form_submission(wrap_ids[1], "allow_always"),
+    ):
+        pass
+
+    # BOTH tools should have run now.
+    commands = sorted(d["command"] for d in _FakeBashTool.invocations)
+    assert commands == ["git diff", "git status"], commands
+    print("OK test_multi_tool_final_submission_bundles_and_resumes_all")
+
+
+async def test_multi_tool_mixed_allow_and_deny_bundles() -> None:
+    """Deny one, allow the other. Final submission bundles both — the
+    allow tool runs, the deny tool surfaces a permission_denied_by_user
+    response without running."""
+    runner, _ = _build_runner_multi_tool()
+    await _create_session(runner, "alice", "s-multi-mixed")
+
+    events1: list[Event] = []
+    async for ev in runner.run_async(
+        user_id="alice",
+        session_id="s-multi-mixed",
+        new_message=types.Content(
+            role="user", parts=[types.Part(text="run both")]
+        ),
+    ):
+        events1.append(ev)
+    wrap_ids = _all_form_call_ids(events1)
+
+    # Deny widget 1 (will not run).
+    async for _ in runner.run_async(
+        user_id="alice",
+        session_id="s-multi-mixed",
+        new_message=_user_form_submission(wrap_ids[0], "deny"),
+    ):
+        pass
+    assert _FakeBashTool.invocations == []
+
+    # Allow widget 2 — bundle fires, denied tool stays denied, allowed runs.
+    async for _ in runner.run_async(
+        user_id="alice",
+        session_id="s-multi-mixed",
+        new_message=_user_form_submission(wrap_ids[1], "allow_once"),
+    ):
+        pass
+
+    commands = [d["command"] for d in _FakeBashTool.invocations]
+    # Only the second (allowed) ran.
+    assert commands == ["git diff"], commands
+    print("OK test_multi_tool_mixed_allow_and_deny_bundles")
+
+
 # --- Driver ---------------------------------------------------------
 
 
@@ -287,6 +456,9 @@ async def main() -> None:
     await test_outbound_event_has_sentinel_name_and_schema()
     await test_inbound_form_submission_resumes_tool()
     await test_inbound_deny_choice_blocks_tool()
+    await test_multi_tool_first_submission_defers_no_tool_run()
+    await test_multi_tool_final_submission_bundles_and_resumes_all()
+    await test_multi_tool_mixed_allow_and_deny_bundles()
     print("\nall e2e confirmation_form_ui tests passed")
 
 

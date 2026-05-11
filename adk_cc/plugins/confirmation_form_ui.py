@@ -81,6 +81,39 @@ The `toolConfirmation.payload` (rich `ConfirmPrompt`) stays in the
 renamed event's args, so payload-aware custom frontends can read the
 full structure if they listen for both names.
 
+## Deferred-batch processing (multi-tool confirmation)
+
+When the model emits N gated tool calls in one turn, ADK emits N
+wrapper events (`adk_cc_confirmation_form`). Bundled `adk web` renders
+N independent widgets; each Submit click fires a separate HTTP
+request. By default ADK's `_RequestConfirmationLlmRequestProcessor`
+would resume each tool the moment its widget is submitted — N
+separate resume cycles with an LLM call between each. The operator
+sees the agent half-act between every click, which is jarring and
+expensive in LLM tokens.
+
+`on_user_message_callback` defers each submission until ALL
+outstanding wraps have been answered, then bundles them into one user
+event. ADK's processor scans that single event and resumes all N
+tools in one pass via `handle_function_call_list_async`. One LLM call
+follows with all N results in context.
+
+Mechanism: deferred submissions are persisted with a non-matching
+sentinel name (`adk_cc_pending_confirmation`) so ADK's processor
+ignores them. Outstanding wrap_ids are computed from session events
+(function_calls with the sentinel form name minus those already
+resolved by an `adk_request_confirmation` response). When the latest
+submission completes the set, all stashed responses are pulled from
+prior session events, reshaped to the standard `ToolConfirmation`
+shape, and emitted as one bundled user event with proper names.
+
+The deferred responses persist with the session (durable across
+restarts when `ADK_CC_SESSION_DSN` is configured), so the operator
+can pause a batch and come back later. The orphan
+`adk_cc_pending_confirmation` responses sit in session history as
+inert bookkeeping — `before_model_callback` filters them from the
+LLM's view so the model sees a clean history.
+
 Disabling this plugin reverts to the binary widget without breaking
 anything — `PermissionPlugin` and ADK's request_confirmation flow run
 unchanged underneath.
@@ -89,9 +122,12 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events.event import Event
 from google.adk.flows.llm_flows.functions import REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
@@ -113,6 +149,16 @@ CONFIRMATION_FORM_FUNCTION_CALL_NAME = "adk_cc_confirmation_form"
 # shape (`confirmed`), others are legacy shapes (`choice`, `chose_id`)
 # that we handle in their own branches.
 _RESERVED_RESPONSE_KEYS = frozenset({"confirmed", "choice", "chose_id", "result"})
+
+# Sentinel function name for deferred submissions. ADK's
+# `_RequestConfirmationLlmRequestProcessor` only matches the literal
+# `adk_request_confirmation` name, so anything else (including this
+# sentinel) is ignored — which is exactly what we want for "hold this
+# until all are in". When the last submission arrives, the deferred
+# responses are pulled back out of session history, renamed to the
+# real name, and bundled into one user event so the processor resumes
+# all tools in one pass.
+PENDING_CONFIRMATION_NAME = "adk_cc_pending_confirmation"
 
 
 class ConfirmationFormUiPlugin(BasePlugin):
@@ -174,23 +220,242 @@ class ConfirmationFormUiPlugin(BasePlugin):
     ) -> Optional[types.Content]:
         if not user_message.parts:
             return None
-        mutated = False
+
+        # Collect incoming function_response parts that target our sentinel.
+        incoming: list[types.FunctionResponse] = []
+        other_parts: list[types.Part] = []
         for part in user_message.parts:
             fr = getattr(part, "function_response", None)
-            if fr is None or fr.name != CONFIRMATION_FORM_FUNCTION_CALL_NAME:
-                continue
+            if fr is not None and fr.name == CONFIRMATION_FORM_FUNCTION_CALL_NAME:
+                incoming.append(fr)
+            else:
+                other_parts.append(part)
+
+        if not incoming:
+            return None  # nothing addressed to this plugin
+
+        # Reshape each incoming response to the standard ToolConfirmation
+        # shape ({confirmed: bool, payload: {chose_id: <id>}}).
+        reshaped_incoming: dict[str, dict] = {}
+        for fr in incoming:
             chose_id = _extract_chose_id(fr.response)
             if chose_id is None:
-                # Unrecognized response shape; leave it alone so any error is
-                # visible rather than silently swallowed.
+                # Unrecognized response shape — let it through unmodified so
+                # any error surfaces rather than getting silently swallowed.
                 continue
-            fr.name = REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
-            fr.response = {
+            reshaped_incoming[fr.id or ""] = {
                 "confirmed": chose_id != "deny",
                 "payload": {"chose_id": chose_id},
             }
-            mutated = True
-        return user_message if mutated else None
+
+        if not reshaped_incoming:
+            return None  # all incoming responses were unparseable
+
+        events = _session_events(invocation_context)
+        outstanding = _outstanding_wrap_ids(events)
+        already_pending = _stashed_pending_responses(events)
+
+        # Anything not in `outstanding - resolved` is either stale (already
+        # resumed) or unknown (defensive). Filter both incoming and pending
+        # down to the relevant set.
+        unresolved = outstanding - _resolved_wrap_ids(events)
+        relevant_incoming = {
+            k: v for k, v in reshaped_incoming.items() if k in unresolved
+        }
+        relevant_pending = {
+            k: v for k, v in already_pending.items() if k in unresolved
+        }
+        union_ids = set(relevant_incoming) | set(relevant_pending)
+
+        if not unresolved or not unresolved.issubset(union_ids):
+            # Either no outstanding wraps to bundle yet (defensive), or
+            # not all wraps have responses yet. Persist every reshaped
+            # submission under the deferred sentinel name so ADK's
+            # processor ignores it; the bundle step filters out stale
+            # ids later, so renaming uniformly here is safe.
+            new_parts = list(other_parts)
+            for fr in incoming:
+                if fr.id in reshaped_incoming:
+                    new_parts.append(
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                id=fr.id,
+                                name=PENDING_CONFIRMATION_NAME,
+                                response=reshaped_incoming[fr.id],
+                            )
+                        )
+                    )
+                else:
+                    # Unparseable response — leave the original part so
+                    # the operator sees the natural error rather than a
+                    # silently-deferred mystery vote.
+                    new_parts.append(
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                id=fr.id, name=fr.name, response=fr.response
+                            )
+                        )
+                    )
+            if not new_parts:
+                return None
+            return types.Content(role=user_message.role, parts=new_parts)
+
+        # All in. Bundle every relevant response into one user event with
+        # the real `adk_request_confirmation` name. ADK's resume processor
+        # scans this single event and runs all tools in one pass.
+        bundle: dict[str, dict] = dict(relevant_pending)
+        bundle.update(relevant_incoming)  # incoming wins if both have an id
+
+        bundle_parts: list[types.Part] = []
+        for wrap_id, response in bundle.items():
+            bundle_parts.append(
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        id=wrap_id,
+                        name=REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+                        response=response,
+                    )
+                )
+            )
+        # Preserve any non-confirmation parts the operator's UI may have
+        # included alongside the function_response (rare; defensive).
+        bundle_parts.extend(other_parts)
+        return types.Content(role=user_message.role, parts=bundle_parts)
+
+    async def before_model_callback(
+        self,
+        *,
+        callback_context: CallbackContext,
+        llm_request: LlmRequest,
+    ) -> Optional[LlmResponse]:
+        """Two jobs:
+
+        1. **Hide deferred bookkeeping** — filter
+           `adk_cc_pending_confirmation` function_responses out of
+           `llm_request.contents` so the LLM never sees them. These are
+           internal stash entries that look like duplicate / orphan tool
+           responses to strict providers (sglang's OpenAI-compatible
+           endpoint, OpenAI tool_calls validation, etc).
+
+        2. **Short-circuit the LLM call when a batch is still in flight**
+           — if we're in deferred-batch mode (outstanding wraps that
+           haven't all been answered yet), return an empty `LlmResponse`
+           so ADK skips the actual model call. The operator's HTTP
+           request returns quickly with no agent action; the next
+           submission re-enters the flow. This avoids wasted LLM
+           round-trips per click.
+
+        Pure read-side hygiene on (1); short-circuit on (2). Session
+        events are unchanged on disk either way.
+        """
+        contents = getattr(llm_request, "contents", None) or []
+
+        # Job 1: filter pending sentinels.
+        mutated = False
+        new_contents: list[types.Content] = []
+        for content in contents:
+            kept_parts: list[types.Part] = []
+            for part in (content.parts or []):
+                fr = getattr(part, "function_response", None)
+                if fr is not None and fr.name == PENDING_CONFIRMATION_NAME:
+                    mutated = True
+                    continue
+                kept_parts.append(part)
+            if kept_parts:
+                new_contents.append(
+                    types.Content(role=content.role, parts=kept_parts)
+                )
+            elif content.parts:
+                # Content had only pending-sentinel parts — drop it.
+                mutated = True
+        if mutated:
+            llm_request.contents = new_contents
+
+        # Job 2: short-circuit if a deferred batch is still in flight.
+        # Compute outstanding vs resolved from session events; if there
+        # are any outstanding wraps with no `adk_request_confirmation`
+        # response yet, we're mid-batch and shouldn't waste an LLM call.
+        events: list = []
+        try:
+            session_events = getattr(callback_context.session, "events", None)
+            if session_events:
+                events = list(session_events)
+        except Exception:
+            pass
+        if events:
+            outstanding = _outstanding_wrap_ids(events)
+            resolved = _resolved_wrap_ids(events)
+            if outstanding - resolved:
+                # At least one wrap is unresolved. Skip the LLM call.
+                return LlmResponse()
+
+        return None
+
+
+def _session_events(invocation_context) -> list:
+    """Best-effort fetch of session events for the deferred-batch logic.
+    Returns an empty list when the context, session, or events are
+    missing — keeps the plugin testable with a fake context and tolerant
+    of unusual session shapes."""
+    if invocation_context is None:
+        return []
+    session = getattr(invocation_context, "session", None)
+    if session is None:
+        return []
+    events = getattr(session, "events", None)
+    if not events:
+        return []
+    return list(events)
+
+
+def _outstanding_wrap_ids(events) -> set[str]:
+    """Return the set of wrap_call_ids for every confirmation wrapper
+    event ADK ever emitted in this session (renamed to our sentinel by
+    `on_event_callback`). Includes both currently-pending wraps and
+    already-resolved ones; callers subtract `_resolved_wrap_ids` to get
+    the live set."""
+    ids: set[str] = set()
+    for ev in events:
+        for fc in ev.get_function_calls():
+            if fc.name == CONFIRMATION_FORM_FUNCTION_CALL_NAME and fc.id:
+                ids.add(fc.id)
+    return ids
+
+
+def _resolved_wrap_ids(events) -> set[str]:
+    """Return wrap_call_ids that have already gone through ADK's resume
+    processor — i.e. are referenced by a `function_response` whose name
+    is the canonical `adk_request_confirmation`. These came from a
+    successful bundle and the wrapped tool has already been re-run."""
+    ids: set[str] = set()
+    for ev in events:
+        if getattr(ev, "author", None) != "user":
+            continue
+        for fr in ev.get_function_responses():
+            if fr.name == REQUEST_CONFIRMATION_FUNCTION_CALL_NAME and fr.id:
+                ids.add(fr.id)
+    return ids
+
+
+def _stashed_pending_responses(events) -> dict[str, dict]:
+    """Return wrap_call_id → ToolConfirmation-shaped response for every
+    submission persisted earlier under the deferred sentinel name.
+
+    The bundle at the final-submission step pulls from this so the
+    operator's earlier votes don't get lost.
+    """
+    pending: dict[str, dict] = {}
+    for ev in events:
+        if getattr(ev, "author", None) != "user":
+            continue
+        for fr in ev.get_function_responses():
+            if fr.name != PENDING_CONFIRMATION_NAME:
+                continue
+            if not fr.id:
+                continue
+            if isinstance(fr.response, dict):
+                pending[fr.id] = fr.response
+    return pending
 
 
 def _build_choice_schema(options: list) -> Optional[dict]:
