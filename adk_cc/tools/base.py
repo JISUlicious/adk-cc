@@ -23,12 +23,28 @@ typed Pydantic input contract that policy plugins later consume.
 from __future__ import annotations
 
 import inspect
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Optional
 
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 from pydantic import BaseModel, ValidationError
+
+
+def _extract_user_comment(confirmation: Any) -> Optional[str]:
+    """Read the optional `comment` field from a ToolConfirmation's
+    `payload` dict. Populated by `ConfirmationFormUiPlugin` when the
+    `ConfirmPrompt` was sent with `with_comment=True` and the operator
+    typed something into the form's comment textbox. Returns None when
+    absent or empty."""
+    payload = getattr(confirmation, "payload", None)
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("comment")
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    return text or None
 
 
 class ToolMeta(BaseModel):
@@ -119,7 +135,19 @@ class AdkCcTool(BaseTool):
                     }
                 return {"status": "awaiting_user_confirmation"}
             if not getattr(confirmation, "confirmed", False):
-                return {"status": "denied", "reason": "user did not approve"}
+                # When the bundled UI's form widget includes a comment
+                # field (ConfirmPrompt.with_comment=True), the operator's
+                # feedback is in `confirmation.payload["comment"]`.
+                # Surface it on the denied response so the model can
+                # read it and adjust (e.g. revise the plan after deny).
+                response: dict[str, Any] = {
+                    "status": "denied",
+                    "reason": "user did not approve",
+                }
+                comment = _extract_user_comment(confirmation)
+                if comment:
+                    response["user_comment"] = comment
+                return response
 
         result = self._execute(validated, tool_context)
         if inspect.isawaitable(result):

@@ -144,11 +144,24 @@ from google.genai import types
 # away from real ADK names without the underscore tripping validators.
 CONFIRMATION_FORM_FUNCTION_CALL_NAME = "adk_cc_confirmation_form"
 
+# Property key for the optional free-form comment field. When the
+# outgoing `ConfirmPrompt` has `with_comment=True`, the schema adds a
+# string property under this key so the bundled UI renders a textbox
+# alongside the option checkboxes. On the inbound side, the value (if
+# non-empty) is folded into the `toolConfirmation.payload` so the tool
+# can read it from `ctx.tool_confirmation.payload["comment"]`.
+COMMENT_FIELD_KEY = "comment"
+
 # Keys we should NEVER treat as chose_ids when scanning the response
 # for a True-valued field. Some are part of the ADK ToolConfirmation
 # shape (`confirmed`), others are legacy shapes (`choice`, `chose_id`)
-# that we handle in their own branches.
-_RESERVED_RESPONSE_KEYS = frozenset({"confirmed", "choice", "chose_id", "result"})
+# that we handle in their own branches. `comment` is the optional
+# free-form text field — it's a string, not a boolean, so the scan
+# wouldn't match anyway, but we list it explicitly to make the intent
+# obvious.
+_RESERVED_RESPONSE_KEYS = frozenset(
+    {"confirmed", "choice", "chose_id", "result", COMMENT_FIELD_KEY}
+)
 
 # Sentinel function name for deferred submissions. ADK's
 # `_RequestConfirmationLlmRequestProcessor` only matches the literal
@@ -195,7 +208,9 @@ class ConfirmationFormUiPlugin(BasePlugin):
             options = payload.get("options")
             if not isinstance(options, list) or not options:
                 continue
-            schema = _build_choice_schema(options)
+            schema = _build_choice_schema(
+                options, with_comment=bool(payload.get("with_comment"))
+            )
             if schema is None:
                 continue
             args["response_schema"] = schema
@@ -235,7 +250,7 @@ class ConfirmationFormUiPlugin(BasePlugin):
             return None  # nothing addressed to this plugin
 
         # Reshape each incoming response to the standard ToolConfirmation
-        # shape ({confirmed: bool, payload: {chose_id: <id>}}).
+        # shape ({confirmed: bool, payload: {chose_id: <id>, comment?: <text>}}).
         reshaped_incoming: dict[str, dict] = {}
         for fr in incoming:
             chose_id = _extract_chose_id(fr.response)
@@ -243,9 +258,13 @@ class ConfirmationFormUiPlugin(BasePlugin):
                 # Unrecognized response shape — let it through unmodified so
                 # any error surfaces rather than getting silently swallowed.
                 continue
+            payload_out: dict[str, Any] = {"chose_id": chose_id}
+            comment = _extract_comment(fr.response)
+            if comment:
+                payload_out["comment"] = comment
             reshaped_incoming[fr.id or ""] = {
                 "confirmed": chose_id != "deny",
-                "payload": {"chose_id": chose_id},
+                "payload": payload_out,
             }
 
         if not reshaped_incoming:
@@ -458,13 +477,20 @@ def _stashed_pending_responses(events) -> dict[str, dict]:
     return pending
 
 
-def _build_choice_schema(options: list) -> Optional[dict]:
+def _build_choice_schema(
+    options: list, *, with_comment: bool = False
+) -> Optional[dict]:
     """Convert `ConfirmPrompt.options` to a JSON Schema renderable by the
     bundled UI's form widget as one checkbox per option.
 
     Each option becomes a `boolean` property keyed on its `id`. The
     `description` is `<label> — <option description>` so the operator
     sees the human-readable label next to the checkbox.
+
+    When `with_comment=True`, an additional string property
+    (`comment`) is added so the bundled UI renders a textbox alongside
+    the checkboxes — operator can pair their choice with feedback
+    (e.g. "Deny + 'try a smaller scope'").
     """
     properties: dict[str, Any] = {}
     for opt in options:
@@ -486,6 +512,15 @@ def _build_choice_schema(options: list) -> Optional[dict]:
         }
     if not properties:
         return None
+    if with_comment:
+        properties[COMMENT_FIELD_KEY] = {
+            "type": "string",
+            "description": (
+                "Optional comment / feedback — passed to the tool on "
+                "both approve and deny. Useful for explaining why a "
+                "plan was rejected so the model can revise it."
+            ),
+        }
     return {"type": "object", "properties": properties}
 
 
@@ -528,3 +563,19 @@ def _extract_chose_id(response: Any) -> Optional[str]:
         if val is True:
             return key
     return None
+
+
+def _extract_comment(response: Any) -> Optional[str]:
+    """Pull the free-form `comment` field from a form-widget submission.
+
+    Returns the stripped string when present and non-empty; None
+    otherwise (the bundled UI sends `null` for empty strings per its
+    `getCleanedFormModel`).
+    """
+    if not isinstance(response, dict):
+        return None
+    raw = response.get(COMMENT_FIELD_KEY)
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    return text or None

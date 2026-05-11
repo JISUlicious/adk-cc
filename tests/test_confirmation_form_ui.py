@@ -43,6 +43,7 @@ from adk_cc.plugins.confirmation_form_ui import (
     ConfirmationFormUiPlugin,
     _build_choice_schema,
     _extract_chose_id,
+    _extract_comment,
 )
 
 
@@ -228,6 +229,49 @@ def test_build_choice_schema_skips_reserved_keys() -> None:
     print("OK test_build_choice_schema_skips_reserved_keys")
 
 
+def test_build_choice_schema_with_comment_adds_textbox() -> None:
+    """`with_comment=True` adds a `comment` string property so the
+    bundled UI renders an optional free-form textbox alongside the
+    option checkboxes."""
+    from adk_cc.plugins.confirmation_form_ui import COMMENT_FIELD_KEY
+
+    options = [
+        {"id": "approve", "label": "Approve", "description": "Go ahead"},
+        {"id": "deny", "label": "Deny", "description": "Hold up"},
+    ]
+    schema = _build_choice_schema(options, with_comment=True)
+    assert schema is not None
+    assert set(schema["properties"].keys()) == {"approve", "deny", COMMENT_FIELD_KEY}
+    comment_prop = schema["properties"][COMMENT_FIELD_KEY]
+    assert comment_prop["type"] == "string"
+    # Description hints at the dual use (approve + comment / deny + comment).
+    assert "Optional" in comment_prop["description"]
+    print("OK test_build_choice_schema_with_comment_adds_textbox")
+
+
+def test_build_choice_schema_without_comment_no_textbox() -> None:
+    """Default `with_comment=False` produces no comment property — the
+    destructive-tool gate doesn't need it."""
+    options = [{"id": "allow", "label": "Allow", "description": ""}]
+    schema = _build_choice_schema(options)
+    assert "comment" not in schema["properties"]
+    print("OK test_build_choice_schema_without_comment_no_textbox")
+
+
+def test_extract_comment_helper() -> None:
+    """Returns stripped string when present + non-empty; None otherwise."""
+    assert _extract_comment({"comment": "hello"}) == "hello"
+    assert _extract_comment({"comment": "  trim me  "}) == "trim me"
+    # Bundled UI sends null for empty textboxes after getCleanedFormModel.
+    assert _extract_comment({"comment": None}) is None
+    assert _extract_comment({"comment": ""}) is None
+    assert _extract_comment({"comment": "    "}) is None
+    assert _extract_comment({}) is None
+    assert _extract_comment(None) is None
+    assert _extract_comment("not a dict") is None
+    print("OK test_extract_comment_helper")
+
+
 def test_extract_chose_id_accepts_all_shapes() -> None:
     # 1. Single-string shapes (legacy + payload-aware).
     assert _extract_chose_id({"choice": "allow_once"}) == "allow_once"
@@ -260,6 +304,23 @@ def test_extract_chose_id_accepts_all_shapes() -> None:
 
 
 # --- Outbound rewrite -----------------------------------------------
+
+
+def test_outbound_with_comment_flag_adds_textbox_property() -> None:
+    """A ConfirmPrompt carrying `with_comment=True` gets a `comment`
+    string property in the schema — bundled UI then renders a textbox
+    alongside the option checkboxes."""
+    from adk_cc.plugins.confirmation_form_ui import COMMENT_FIELD_KEY
+
+    plugin = ConfirmationFormUiPlugin()
+    payload = _confirm_payload() | {"with_comment": True}
+    event = _confirmation_event(payload)
+    _run_event(plugin, event)
+    fc = _first_fc(event)
+    schema = fc.args["response_schema"]
+    assert COMMENT_FIELD_KEY in schema["properties"]
+    assert schema["properties"][COMMENT_FIELD_KEY]["type"] == "string"
+    print("OK test_outbound_with_comment_flag_adds_textbox_property")
 
 
 def test_outbound_renames_and_injects_response_schema() -> None:
@@ -419,6 +480,61 @@ def test_inbound_reshape_boolean_per_option_form_submission() -> None:
     assert fr.name == REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
     assert fr.response == {"confirmed": True, "payload": {"chose_id": "allow_always"}}
     print("OK test_inbound_reshape_boolean_per_option_form_submission")
+
+
+def test_inbound_comment_folds_into_payload() -> None:
+    """When the form has a `comment` field and the operator typed
+    something, it ends up in `toolConfirmation.payload.comment` —
+    accessible via `_extract_user_comment` in the tool layer."""
+    plugin = ConfirmationFormUiPlugin()
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"approve": False, "deny": True, "comment": "try smaller scope first"},
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+    fr = out.parts[0].function_response
+    assert fr.response == {
+        "confirmed": False,
+        "payload": {"chose_id": "deny", "comment": "try smaller scope first"},
+    }
+    print("OK test_inbound_comment_folds_into_payload")
+
+
+def test_inbound_empty_comment_not_included() -> None:
+    """Bundled UI sends null for empty textboxes (per its
+    getCleanedFormModel). The reshape should omit the `comment` key
+    entirely when there's no meaningful text — avoid sending the model
+    `payload: {chose_id: ..., comment: ""}`-style noise."""
+    plugin = ConfirmationFormUiPlugin()
+    # Null / empty / whitespace-only — all treated as "no comment".
+    for empty_value in (None, "", "   ", "\n  \t  "):
+        msg = _user_message(
+            CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+            {"approve": True, "deny": False, "comment": empty_value},
+        )
+        out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+        fr = out.parts[0].function_response
+        assert "comment" not in fr.response["payload"], (
+            f"expected no comment key for {empty_value!r}, got {fr.response}"
+        )
+    print("OK test_inbound_empty_comment_not_included")
+
+
+def test_inbound_comment_with_approve_passes_through() -> None:
+    """Operator can add a comment on approve too (e.g. 'go ahead but
+    be careful about X'). The model sees both signals."""
+    plugin = ConfirmationFormUiPlugin()
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"approve": True, "deny": False, "comment": "watch the edge case"},
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+    fr = out.parts[0].function_response
+    assert fr.response == {
+        "confirmed": True,
+        "payload": {"chose_id": "approve", "comment": "watch the edge case"},
+    }
+    print("OK test_inbound_comment_with_approve_passes_through")
 
 
 def test_inbound_boolean_form_deny_sets_confirmed_false() -> None:
@@ -691,7 +807,11 @@ def main() -> None:
     test_build_choice_schema_uses_one_boolean_property_per_option()
     test_build_choice_schema_empty_options_returns_none()
     test_build_choice_schema_skips_reserved_keys()
+    test_build_choice_schema_with_comment_adds_textbox()
+    test_build_choice_schema_without_comment_no_textbox()
+    test_extract_comment_helper()
     test_extract_chose_id_accepts_all_shapes()
+    test_outbound_with_comment_flag_adds_textbox_property()
     test_outbound_renames_and_injects_response_schema()
     test_outbound_skips_event_without_options()
     test_outbound_ignores_non_confirmation_events()
@@ -702,6 +822,9 @@ def main() -> None:
     test_inbound_accepts_free_form_result_fallback()
     test_inbound_garbage_response_left_unchanged()
     test_inbound_reshape_boolean_per_option_form_submission()
+    test_inbound_comment_folds_into_payload()
+    test_inbound_empty_comment_not_included()
+    test_inbound_comment_with_approve_passes_through()
     test_inbound_boolean_form_deny_sets_confirmed_false()
     test_inbound_boolean_form_all_false_treated_as_no_choice()
     test_inbound_ignores_non_matching_names()
