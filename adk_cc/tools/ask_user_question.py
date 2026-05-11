@@ -1,35 +1,46 @@
 """Ask the user a multi-choice question mid-session.
 
-Marked `long_running=True`. The pause is delivered by two things working
-together:
-  1. ADK sets `long_running_tool_ids` on the function-CALL event from
-     the tool's `is_long_running` flag (base_llm_flow.py:106).
-  2. `AdkCcTool.run_async` sets `tool_context.actions.skip_summarization
-     = True` after `_execute` returns. Without (2), the function-RESPONSE
-     event isn't marked final and the loop cascades — see the comment in
-     `adk_cc/tools/base.py`.
+Marked `long_running=True`. The pause is delivered by ADK's long-running
+machinery + the bundled `adk web` UI's response widget:
 
-Output shape (the LLM consumes this on resume):
-    {
-      "status": "answered" | "cancelled",
-      "answers": { "<question text>": "<chosen label>" | ["<l1>", "<l2>"] },
-    }
+  1. ADK sets `long_running_tool_ids` on the function-CALL event from the
+     tool's `is_long_running` flag (base_llm_flow.py:106). This alone
+     makes the call event `is_final_response()` → the loop pauses.
 
-For the initial pause, the tool returns:
-    {
-      "status": "awaiting_user_input",
-      "questions": [...],
-    }
+  2. `_execute` returns `None`, NOT a dict. ADK's tool dispatcher
+     (`functions.py:578-582`) short-circuits the response-event build
+     when a long-running tool returns falsy:
 
-The frontend that wires up `adk web` is expected to render the questions
-and POST the answer back as a function_response with the same call_id.
-Without a frontend that knows this protocol, the call will time out —
-the contract is documented; operators wire it.
+        if tool.is_long_running:
+            if not function_response:
+                return None
+
+     Without this, returning `{"status": "awaiting_user_input", ...}`
+     produces an immediate function_response event. The bundled `adk
+     web` UI's `app-long-running-response` widget renders only when
+     `needsResponse && !hasFunctionResponse(callId)` — so as soon as
+     the response event lands, the widget hides itself. Returning None
+     keeps the call "pending" so the widget stays visible until the
+     user actually submits an answer.
+
+  3. The bundled UI surfaces a structured form for each question because
+     `AskUserQuestionUiHintPlugin` injects a `response_schema` into the
+     function-call args after the LLM emits the call. Without that hint,
+     the UI falls back to a free-form text/JSON textarea.
+
+When the user submits, the bundled UI POSTs a function_response with the
+same call_id whose `response` is `{<question text>: <chosen label>}` (or
+the array variant for multi_select). That becomes the first response for
+the call and the LLM consumes it on the next turn.
+
+Without a frontend that knows the long-running response protocol, the
+call will hang forever — there's no auto-timeout. Operators wire either
+the bundled `adk web` UI or a compatible custom frontend.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from google.adk.tools.tool_context import ToolContext
 
@@ -53,11 +64,10 @@ class AskUserQuestionTool(AdkCcTool):
 
     async def _execute(
         self, args: AskUserQuestionArgs, ctx: ToolContext
-    ) -> dict[str, Any]:
-        # The actual answer arrives via ADK's long-running tool resumption
-        # path, which replaces this initial payload with the user's response.
-        # Until that arrives, the LLM sees a deterministic awaiting state.
-        return {
-            "status": "awaiting_user_input",
-            "questions": [q.model_dump() for q in args.questions],
-        }
+    ) -> Optional[dict[str, Any]]:
+        # Return None so ADK skips building the function_response event.
+        # The function-CALL event already has `long_running_tool_ids` set
+        # (ADK does that from `meta.long_running=True`), which is enough
+        # to pause the loop AND keep the bundled UI's response widget
+        # visible (see module docstring for the full mechanism).
+        return None
