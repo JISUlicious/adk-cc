@@ -55,6 +55,7 @@ from google.genai import types
 from . import prompts
 from .permissions import PermissionMode, SettingsHierarchy
 from .plugins import (
+    AskUserQuestionUiHintPlugin,
     AuditPlugin,
     ContextGuardPlugin,
     PermissionPlugin,
@@ -430,6 +431,12 @@ _app_kwargs = dict(
         # turns them into corrective tool responses so the model can
         # self-correct on the next iteration instead of aborting the run.
         ToolCallValidatorPlugin(),
+        # Injects a UI-side response_schema into ask_user_question
+        # function-call args so adk web's bundled UI renders a structured
+        # form per question (instead of falling back to a free-form
+        # textarea). after_model_callback runs after the LLM emits the
+        # call but before ADK builds the event the UI consumes.
+        AskUserQuestionUiHintPlugin(),
         # Pre-flight context-length guardrail: WARN at 75% of MAX,
         # REJECT at 95%. ADK's EventsCompactionConfig (set above) is
         # the primary defense; this is the fail-soft safety net.

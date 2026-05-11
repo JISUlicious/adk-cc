@@ -237,11 +237,13 @@ tests/
 │   ├── test_skill_resource_fallback.py    6 tests
 │   ├── test_session_retry.py              7 tests
 │   ├── test_context_guard.py             10 tests
-│   ├── test_tenancy_resolver.py           7 tests
-│   └── test_permissions_confirmation.py  12 tests   ── 77 unit tests total
+│   ├── test_tenancy_resolver.py             7 tests
+│   ├── test_permissions_confirmation.py    12 tests
+│   └── test_ask_user_question_ui_hint.py   11 tests   ── 88 unit tests total
 │
 ├── e2e_features.py                 ← in-process FastAPI e2e (auth + admin + skill upload)
 ├── e2e_confirmation_flow.py        ← in-process ADK Runner e2e (4 tests) — confirmation gate, allow_always session rule, deny path, scope-narrow check
+├── e2e_ask_user_question.py        ← in-process ADK Runner e2e (3 tests) — long_running pause, resume with user answer, long_running_tool_ids on call event
 │
 └── e2e against a live sandbox service:
     ├── e2e_sandbox_service.py            9 contract checks + 6 bug-fix verifications
@@ -271,4 +273,4 @@ Both `e2e_skills.py` and `e2e_streaming_adapter.py` need Python 3.12+ and adk-cc
 
 ## Status
 
-**Alpha.** Functional and exercised end-to-end (~151 unit + e2e checks across 13 test files). Has known operational gaps documented in [`docs/05-production-deployment.md`](./docs/05-production-deployment.md)'s readiness checklist (security / reliability / observability / ops / multi-tenancy / config / tests). Close the ✗ items appropriate to your threat model and SLO before serving real users.
+**Alpha.** Functional and exercised end-to-end (~165 unit + e2e checks across 15 test files). Has known operational gaps documented in [`docs/05-production-deployment.md`](./docs/05-production-deployment.md)'s readiness checklist (security / reliability / observability / ops / multi-tenancy / config / tests). Close the ✗ items appropriate to your threat model and SLO before serving real users.
