@@ -23,6 +23,13 @@ Covers both ends of the bidirectional rewrite:
     - "deny" chose_id → confirmed=False; everything else → confirmed=True.
     - Non-matching name → left untouched.
 
+  History filter (before_model_callback):
+    - Wrapper function_call events (name=sentinel) are dropped.
+    - User function_responses matching wrapper call_ids are dropped.
+    - Intermediate `{status: "needs_confirmation"}` gate responses dropped.
+    - History with no wrapper events is untouched.
+    - The model's original function_call + final function_response survive.
+
 Run: `.venv/bin/python tests/test_confirmation_form_ui.py`
 """
 
@@ -405,6 +412,194 @@ def test_inbound_handles_empty_parts() -> None:
     print("OK test_inbound_handles_empty_parts")
 
 
+# --- before_model_callback: filter wrapper bookkeeping from LLM history ---
+
+
+class _FakeLlmRequest:
+    """Minimal LlmRequest stand-in: only `contents` is consulted by the
+    plugin's filter."""
+
+    def __init__(self, contents: list) -> None:
+        self.contents = contents
+
+
+def _fn_call_content(role: str, name: str, call_id: str, args: Optional[dict] = None) -> types.Content:
+    return types.Content(
+        role=role,
+        parts=[
+            types.Part(
+                function_call=types.FunctionCall(id=call_id, name=name, args=args or {})
+            )
+        ],
+    )
+
+
+def _fn_response_content(role: str, name: str, call_id: str, response: Any) -> types.Content:
+    return types.Content(
+        role=role,
+        parts=[
+            types.Part(
+                function_response=types.FunctionResponse(
+                    id=call_id, name=name, response=response
+                )
+            )
+        ],
+    )
+
+
+def _user_text(text: str) -> types.Content:
+    return types.Content(role="user", parts=[types.Part(text=text)])
+
+
+def _run_before_model(plugin: ConfirmationFormUiPlugin, req: _FakeLlmRequest):
+    return asyncio.run(
+        plugin.before_model_callback(callback_context=None, llm_request=req)
+    )
+
+
+def test_filter_drops_wrapper_call_response_and_gate() -> None:
+    """Full deny-cycle history: model emits run_bash, gate fires,
+    wrapper renamed by on_event_callback, user denies, resume re-runs
+    run_bash → final response. The filter strips:
+      - wrapper function_call
+      - user's function_response for wrapper id
+      - intermediate `needs_confirmation` gate response
+    Leaving: user text + assistant run_bash + final tool response."""
+    plugin = ConfirmationFormUiPlugin()
+    req = _FakeLlmRequest([
+        _user_text("please rm /tmp/foo"),
+        _fn_call_content("model", "run_bash", "orig-1", {"command": "rm /tmp/foo"}),
+        _fn_response_content(
+            "user", "run_bash", "orig-1", {"status": "needs_confirmation"}
+        ),
+        _fn_call_content(
+            "user", CONFIRMATION_FORM_FUNCTION_CALL_NAME, "wrap-1",
+            {"originalFunctionCall": {"id": "orig-1", "name": "run_bash"}},
+        ),
+        _fn_response_content(
+            "user", "adk_request_confirmation", "wrap-1",
+            {"confirmed": False, "payload": {"chose_id": "deny"}},
+        ),
+        _fn_response_content(
+            "user", "run_bash", "orig-1",
+            {"status": "permission_denied_by_user"},
+        ),
+    ])
+
+    _run_before_model(plugin, req)
+
+    # Survivors: user text, assistant run_bash, final tool response.
+    survivors: list[tuple[str, str]] = []
+    for c in req.contents:
+        for p in c.parts:
+            if p.text:
+                survivors.append((c.role, f"text:{p.text}"))
+            elif p.function_call:
+                survivors.append((c.role, f"call:{p.function_call.name}#{p.function_call.id}"))
+            elif p.function_response:
+                survivors.append((
+                    c.role,
+                    f"resp:{p.function_response.name}#{p.function_response.id}",
+                ))
+    assert survivors == [
+        ("user", "text:please rm /tmp/foo"),
+        ("model", "call:run_bash#orig-1"),
+        ("user", "resp:run_bash#orig-1"),
+    ], survivors
+
+    # The final tool response is the deny status (not "needs_confirmation").
+    final = req.contents[-1].parts[0].function_response.response
+    assert final == {"status": "permission_denied_by_user"}, final
+    print("OK test_filter_drops_wrapper_call_response_and_gate")
+
+
+def test_filter_noop_when_no_wrapper_present() -> None:
+    """Conversations that don't use the form bridge are untouched."""
+    plugin = ConfirmationFormUiPlugin()
+    original = [
+        _user_text("hi"),
+        _fn_call_content("model", "read_file", "c1", {"path": "/etc/hosts"}),
+        _fn_response_content("user", "read_file", "c1", {"content": "..."}),
+    ]
+    req = _FakeLlmRequest(list(original))
+    _run_before_model(plugin, req)
+    # contents reference might be different (no-op returns early without
+    # rebuilding), so compare by structure: same length, same calls/responses.
+    assert len(req.contents) == 3
+    assert req.contents[1].parts[0].function_call.name == "read_file"
+    assert req.contents[2].parts[0].function_response.id == "c1"
+    print("OK test_filter_noop_when_no_wrapper_present")
+
+
+def test_filter_preserves_user_text_in_wrapper_round_trip() -> None:
+    """Even when the user's resume submission is mixed with text, the
+    filter only drops the function_response part — surrounding text
+    survives. (In practice the bundled UI submits function_response
+    alone, but the filter is defensive.)"""
+    plugin = ConfirmationFormUiPlugin()
+    mixed = types.Content(
+        role="user",
+        parts=[
+            types.Part(text="here is my answer"),
+            types.Part(
+                function_response=types.FunctionResponse(
+                    id="wrap-1",
+                    name="adk_request_confirmation",
+                    response={"confirmed": False, "payload": {"chose_id": "deny"}},
+                )
+            ),
+        ],
+    )
+    req = _FakeLlmRequest([
+        _fn_call_content("user", CONFIRMATION_FORM_FUNCTION_CALL_NAME, "wrap-1"),
+        mixed,
+    ])
+    _run_before_model(plugin, req)
+    # Wrapper call dropped; user content kept but its function_response
+    # part filtered → leaves only the text part.
+    assert len(req.contents) == 1
+    kept_parts = req.contents[0].parts
+    assert len(kept_parts) == 1
+    assert kept_parts[0].text == "here is my answer"
+    print("OK test_filter_preserves_user_text_in_wrapper_round_trip")
+
+
+def test_filter_drops_only_matching_gate_responses() -> None:
+    """`needs_confirmation` is the marker; other function_responses with
+    a `status` field (e.g. `ok`) are NOT filtered."""
+    plugin = ConfirmationFormUiPlugin()
+    req = _FakeLlmRequest([
+        _fn_call_content("user", CONFIRMATION_FORM_FUNCTION_CALL_NAME, "wrap-1"),
+        _fn_response_content("user", "run_bash", "orig-1", {"status": "ok", "stdout": "..."}),
+        _fn_response_content("user", "run_bash", "orig-2", {"status": "needs_confirmation"}),
+    ])
+    _run_before_model(plugin, req)
+    # Only the needs_confirmation response is filtered (alongside the wrapper).
+    surviving_responses = [
+        p.function_response
+        for c in req.contents
+        for p in c.parts
+        if p.function_response
+    ]
+    assert len(surviving_responses) == 1
+    assert surviving_responses[0].id == "orig-1"
+    print("OK test_filter_drops_only_matching_gate_responses")
+
+
+def test_filter_handles_empty_or_missing_contents() -> None:
+    plugin = ConfirmationFormUiPlugin()
+    # Empty contents → no-op, no crash.
+    req = _FakeLlmRequest([])
+    _run_before_model(plugin, req)
+    assert req.contents == []
+    # `contents` attribute missing → no-op, no crash.
+    class _NoContents:
+        pass
+    out = _run_before_model(plugin, _NoContents())
+    assert out is None
+    print("OK test_filter_handles_empty_or_missing_contents")
+
+
 # --- Driver ---------------------------------------------------------
 
 
@@ -427,6 +622,11 @@ def main() -> None:
     test_inbound_boolean_form_all_false_treated_as_no_choice()
     test_inbound_ignores_non_matching_names()
     test_inbound_handles_empty_parts()
+    test_filter_drops_wrapper_call_response_and_gate()
+    test_filter_noop_when_no_wrapper_present()
+    test_filter_preserves_user_text_in_wrapper_round_trip()
+    test_filter_drops_only_matching_gate_responses()
+    test_filter_handles_empty_or_missing_contents()
     print("\nall confirmation_form_ui tests passed")
 
 

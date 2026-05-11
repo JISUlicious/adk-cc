@@ -81,6 +81,17 @@ The `toolConfirmation.payload` (rich `ConfirmPrompt`) stays in the
 renamed event's args, so payload-aware custom frontends can read the
 full structure if they listen for both names.
 
+## LLM history filter (`before_model_callback`)
+
+The wrapper events are useful for the bundled UI but messy in the
+LLM's view of history (dangling tool messages, duplicate responses
+for one call_id, sentinel function name visible to strict chat-template
+validators like sglang's OpenAI-compatible endpoint). `before_model_callback`
+filters them out before the LLM call so the model sees the same clean
+`assistant: tool_call → tool: result` pair it would see without this
+plugin in the chain. See the method's docstring for the full filter
+contract.
+
 Disabling this plugin reverts to the binary widget without breaking
 anything — `PermissionPlugin` and ADK's request_confirmation flow run
 unchanged underneath.
@@ -89,9 +100,12 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events.event import Event
 from google.adk.flows.llm_flows.functions import REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
@@ -165,6 +179,98 @@ class ConfirmationFormUiPlugin(BasePlugin):
             fc.name = CONFIRMATION_FORM_FUNCTION_CALL_NAME
             mutated = True
         return event if mutated else None
+
+    async def before_model_callback(
+        self,
+        *,
+        callback_context: CallbackContext,
+        llm_request: LlmRequest,
+    ) -> Optional[LlmResponse]:
+        """Filter wrapper-related bookkeeping from the LLM's view of history.
+
+        After a confirmation round-trip, the session contains:
+
+          1. The model's original `function_call(<tool>, id=orig)`.
+          2. The intermediate `function_response(<tool>, id=orig,
+             response={"status": "needs_confirmation", ...})` from
+             `PermissionPlugin`'s gate.
+          3. Our renamed wrapper event: `function_call(adk_cc_confirmation_form,
+             id=wrap)` with `content.role="user"` (inherited from the
+             function_response event that triggered it).
+          4. The user's `function_response(adk_request_confirmation, id=wrap, ...)`
+             — renamed back by `on_user_message_callback` but still
+             carrying the wrapper's call_id.
+          5. The FINAL `function_response(<tool>, id=orig, response=...)`
+             after ADK's resume processor re-executes the tool.
+
+        Sent to the LLM as-is via LiteLLM's converter, this produces:
+          - An empty user message (3 has `role=user` + only function_call
+            parts, which the converter drops).
+          - A dangling `role=tool` message (4: `tool_call_id=wrap` with
+            no matching assistant tool_call — the wrapper's function_call
+            was on a user-role event and got dropped).
+          - Two `role=tool` messages for `tool_call_id=orig` (2 and 5),
+            which strict providers (sglang's OpenAI-compatible endpoint
+            included) reject as duplicate responses for one call.
+
+        The bundled UI needs the wrapper events to render its form widget,
+        but the LLM only needs to see the original tool call and the
+        final response. Filter the three internal artifacts (#2, #3, #4)
+        from `llm_request.contents` before the LLM call — the LLM sees
+        a clean `assistant: tool_call → tool: result` pair, exactly the
+        shape the provider expects.
+
+        Returning `None` lets ADK proceed with the (now-filtered)
+        `llm_request`.
+        """
+        contents = getattr(llm_request, "contents", None) or []
+
+        # Pass 1: identify wrapper call_ids in the current history.
+        wrapper_call_ids: set[str] = set()
+        for content in contents:
+            for part in (content.parts or []):
+                fc = getattr(part, "function_call", None)
+                if (
+                    fc is not None
+                    and fc.name == CONFIRMATION_FORM_FUNCTION_CALL_NAME
+                    and fc.id
+                ):
+                    wrapper_call_ids.add(fc.id)
+
+        if not wrapper_call_ids:
+            # No wrapped confirmation in this turn — nothing to filter.
+            return None
+
+        # Pass 2: drop wrapper function_calls, matching function_responses,
+        # and intermediate "needs_confirmation" gate responses.
+        new_contents: list[types.Content] = []
+        for content in contents:
+            kept_parts = []
+            for part in (content.parts or []):
+                fc = getattr(part, "function_call", None)
+                if fc is not None and fc.name == CONFIRMATION_FORM_FUNCTION_CALL_NAME:
+                    continue
+                fr = getattr(part, "function_response", None)
+                if fr is not None:
+                    if fr.id and fr.id in wrapper_call_ids:
+                        # User's confirmation submission — internal.
+                        continue
+                    if (
+                        isinstance(fr.response, dict)
+                        and fr.response.get("status") == "needs_confirmation"
+                    ):
+                        # PermissionPlugin's gate dict; superseded by the
+                        # final response after resume. Hide from the LLM.
+                        continue
+                kept_parts.append(part)
+
+            if kept_parts:
+                new_contents.append(
+                    types.Content(role=content.role, parts=kept_parts)
+                )
+
+        llm_request.contents = new_contents
+        return None
 
     async def on_user_message_callback(
         self,
