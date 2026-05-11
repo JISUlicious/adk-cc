@@ -107,11 +107,68 @@ def _run_event(plugin: ConfirmationFormUiPlugin, event: Event) -> Optional[Event
     )
 
 
+class _FakeSession:
+    def __init__(self, events: Optional[list] = None) -> None:
+        self.events = list(events or [])
+
+
+class _FakeInvocationCtx:
+    def __init__(self, events: Optional[list] = None) -> None:
+        self.session = _FakeSession(events)
+
+
+def _wrap_call_event(wrap_id: str) -> Event:
+    """A function-call event with our sentinel name — what
+    `on_event_callback` produces after renaming
+    `adk_request_confirmation`. Represents an outstanding wrap."""
+    return Event(
+        invocation_id="inv-1",
+        author="test-agent",
+        content=types.Content(
+            role="user",
+            parts=[
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id=wrap_id,
+                        name=CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+                        args={"originalFunctionCall": {"id": f"orig-{wrap_id}"}},
+                    )
+                )
+            ],
+        ),
+    )
+
+
+def _user_response_event(wrap_id: str, name: str, response: dict) -> Event:
+    """A user-authored function_response event — used to seed the
+    session with deferred (`PENDING_CONFIRMATION_NAME`) or resolved
+    (`adk_request_confirmation`) submissions."""
+    return Event(
+        invocation_id="inv-1",
+        author="user",
+        content=types.Content(
+            role="user",
+            parts=[
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        id=wrap_id, name=name, response=response
+                    )
+                )
+            ],
+        ),
+    )
+
+
 def _run_user_msg(
-    plugin: ConfirmationFormUiPlugin, msg: types.Content
+    plugin: ConfirmationFormUiPlugin,
+    msg: types.Content,
+    *,
+    invocation_context: Optional[Any] = None,
 ) -> Optional[types.Content]:
     return asyncio.run(
-        plugin.on_user_message_callback(invocation_context=None, user_message=msg)
+        plugin.on_user_message_callback(
+            invocation_context=invocation_context, user_message=msg
+        )
     )
 
 
@@ -288,12 +345,18 @@ def test_outbound_handles_empty_content() -> None:
 # --- Inbound rewrite ------------------------------------------------
 
 
+def _ctx_with_one_outstanding(wrap_id: str = "wrap-1") -> _FakeInvocationCtx:
+    """One outstanding wrap; a single submission completes the set and
+    triggers the bundle path."""
+    return _FakeInvocationCtx([_wrap_call_event(wrap_id)])
+
+
 def test_inbound_reshape_allow_once_choice() -> None:
     plugin = ConfirmationFormUiPlugin()
     msg = _user_message(CONFIRMATION_FORM_FUNCTION_CALL_NAME, {"choice": "allow_once"})
-    out = _run_user_msg(plugin, msg)
-    assert out is msg
-    fr = _first_fr(msg)
+    out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+    assert out is not None
+    fr = out.parts[0].function_response
     assert fr.name == REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
     assert fr.response == {"confirmed": True, "payload": {"chose_id": "allow_once"}}
     print("OK test_inbound_reshape_allow_once_choice")
@@ -302,8 +365,8 @@ def test_inbound_reshape_allow_once_choice() -> None:
 def test_inbound_reshape_deny_sets_confirmed_false() -> None:
     plugin = ConfirmationFormUiPlugin()
     msg = _user_message(CONFIRMATION_FORM_FUNCTION_CALL_NAME, {"choice": "deny"})
-    _run_user_msg(plugin, msg)
-    fr = _first_fr(msg)
+    out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+    fr = out.parts[0].function_response
     assert fr.name == REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
     assert fr.response == {"confirmed": False, "payload": {"chose_id": "deny"}}
     print("OK test_inbound_reshape_deny_sets_confirmed_false")
@@ -312,8 +375,8 @@ def test_inbound_reshape_deny_sets_confirmed_false() -> None:
 def test_inbound_accepts_legacy_chose_id_shape() -> None:
     plugin = ConfirmationFormUiPlugin()
     msg = _user_message(CONFIRMATION_FORM_FUNCTION_CALL_NAME, {"chose_id": "allow_always"})
-    _run_user_msg(plugin, msg)
-    fr = _first_fr(msg)
+    out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+    fr = out.parts[0].function_response
     assert fr.response == {"confirmed": True, "payload": {"chose_id": "allow_always"}}
     print("OK test_inbound_accepts_legacy_chose_id_shape")
 
@@ -323,8 +386,8 @@ def test_inbound_accepts_free_form_result_fallback() -> None:
     matched. If the operator typed a valid chose_id, recover it."""
     plugin = ConfirmationFormUiPlugin()
     msg = _user_message(CONFIRMATION_FORM_FUNCTION_CALL_NAME, {"result": "allow_once"})
-    _run_user_msg(plugin, msg)
-    fr = _first_fr(msg)
+    out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+    fr = out.parts[0].function_response
     assert fr.response == {"confirmed": True, "payload": {"chose_id": "allow_once"}}
     print("OK test_inbound_accepts_free_form_result_fallback")
 
@@ -332,7 +395,7 @@ def test_inbound_accepts_free_form_result_fallback() -> None:
 def test_inbound_garbage_response_left_unchanged() -> None:
     plugin = ConfirmationFormUiPlugin()
     msg = _user_message(CONFIRMATION_FORM_FUNCTION_CALL_NAME, {"unrelated": "blob"})
-    out = _run_user_msg(plugin, msg)
+    out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
     # No mutation happened, so the callback returns None and the original
     # message goes through (and ADK's processor will fail to recognize it,
     # which is fine — better to surface than silently swallow).
@@ -351,8 +414,8 @@ def test_inbound_reshape_boolean_per_option_form_submission() -> None:
         CONFIRMATION_FORM_FUNCTION_CALL_NAME,
         {"allow_once": False, "allow_always": True, "deny": False},
     )
-    _run_user_msg(plugin, msg)
-    fr = _first_fr(msg)
+    out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+    fr = out.parts[0].function_response
     assert fr.name == REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
     assert fr.response == {"confirmed": True, "payload": {"chose_id": "allow_always"}}
     print("OK test_inbound_reshape_boolean_per_option_form_submission")
@@ -364,8 +427,8 @@ def test_inbound_boolean_form_deny_sets_confirmed_false() -> None:
         CONFIRMATION_FORM_FUNCTION_CALL_NAME,
         {"allow_once": False, "allow_always": False, "deny": True},
     )
-    _run_user_msg(plugin, msg)
-    fr = _first_fr(msg)
+    out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+    fr = out.parts[0].function_response
     assert fr.response == {"confirmed": False, "payload": {"chose_id": "deny"}}
     print("OK test_inbound_boolean_form_deny_sets_confirmed_false")
 
@@ -378,7 +441,7 @@ def test_inbound_boolean_form_all_false_treated_as_no_choice() -> None:
         CONFIRMATION_FORM_FUNCTION_CALL_NAME,
         {"allow_once": False, "allow_always": False, "deny": False},
     )
-    out = _run_user_msg(plugin, msg)
+    out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
     assert out is None
     fr = _first_fr(msg)
     assert fr.name == CONFIRMATION_FORM_FUNCTION_CALL_NAME
@@ -405,6 +468,222 @@ def test_inbound_handles_empty_parts() -> None:
     print("OK test_inbound_handles_empty_parts")
 
 
+# --- Deferred-batch processing -------------------------------------
+
+
+def test_first_of_three_defers_with_pending_name() -> None:
+    """3 outstanding wraps, operator submits widget 1. Plugin defers:
+    response renamed to the pending sentinel; no bundle yet."""
+    plugin = ConfirmationFormUiPlugin()
+    ctx = _FakeInvocationCtx([
+        _wrap_call_event("w1"),
+        _wrap_call_event("w2"),
+        _wrap_call_event("w3"),
+    ])
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"allow_once": True, "allow_always": False, "deny": False},
+        call_id="w1",
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=ctx)
+    assert out is not None
+    assert len(out.parts) == 1
+    fr = out.parts[0].function_response
+    # Deferred: renamed to pending sentinel so ADK's processor ignores it.
+    from adk_cc.plugins.confirmation_form_ui import PENDING_CONFIRMATION_NAME
+    assert fr.name == PENDING_CONFIRMATION_NAME
+    assert fr.id == "w1"
+    # The reshaped response IS persisted so the bundle can pick it up later.
+    assert fr.response == {"confirmed": True, "payload": {"chose_id": "allow_once"}}
+    print("OK test_first_of_three_defers_with_pending_name")
+
+
+def test_second_of_three_also_defers() -> None:
+    """One submission already pending; another arrives → still defer."""
+    plugin = ConfirmationFormUiPlugin()
+    from adk_cc.plugins.confirmation_form_ui import PENDING_CONFIRMATION_NAME
+    ctx = _FakeInvocationCtx([
+        _wrap_call_event("w1"),
+        _wrap_call_event("w2"),
+        _wrap_call_event("w3"),
+        _user_response_event(
+            "w1", PENDING_CONFIRMATION_NAME,
+            {"confirmed": True, "payload": {"chose_id": "allow_once"}},
+        ),
+    ])
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"allow_once": False, "allow_always": False, "deny": True},
+        call_id="w2",
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=ctx)
+    fr = out.parts[0].function_response
+    assert fr.name == PENDING_CONFIRMATION_NAME
+    assert fr.id == "w2"
+    assert fr.response == {"confirmed": False, "payload": {"chose_id": "deny"}}
+    print("OK test_second_of_three_also_defers")
+
+
+def test_third_of_three_bundles_all() -> None:
+    """The final submission collects two stashed pending responses + this
+    one and returns a single Content with all three as
+    `adk_request_confirmation` — ADK's processor will then resume all
+    three tools in one pass."""
+    plugin = ConfirmationFormUiPlugin()
+    from adk_cc.plugins.confirmation_form_ui import PENDING_CONFIRMATION_NAME
+    ctx = _FakeInvocationCtx([
+        _wrap_call_event("w1"),
+        _wrap_call_event("w2"),
+        _wrap_call_event("w3"),
+        _user_response_event(
+            "w1", PENDING_CONFIRMATION_NAME,
+            {"confirmed": True, "payload": {"chose_id": "allow_once"}},
+        ),
+        _user_response_event(
+            "w2", PENDING_CONFIRMATION_NAME,
+            {"confirmed": False, "payload": {"chose_id": "deny"}},
+        ),
+    ])
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"allow_once": False, "allow_always": True, "deny": False},
+        call_id="w3",
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=ctx)
+    assert out is not None
+    # Three function_responses, all with the real confirmation name.
+    frs = [p.function_response for p in out.parts if p.function_response]
+    assert len(frs) == 3, frs
+    by_id = {fr.id: fr for fr in frs}
+    assert set(by_id) == {"w1", "w2", "w3"}
+    for fr in frs:
+        assert fr.name == REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, fr
+    assert by_id["w1"].response == {"confirmed": True, "payload": {"chose_id": "allow_once"}}
+    assert by_id["w2"].response == {"confirmed": False, "payload": {"chose_id": "deny"}}
+    assert by_id["w3"].response == {"confirmed": True, "payload": {"chose_id": "allow_always"}}
+    print("OK test_third_of_three_bundles_all")
+
+
+def test_resolved_wraps_no_longer_count() -> None:
+    """Wraps resolved in a prior turn (already have an
+    `adk_request_confirmation` response) drop out of `unresolved`; a new
+    turn with one fresh wrap bundles correctly on the first submit."""
+    plugin = ConfirmationFormUiPlugin()
+    ctx = _FakeInvocationCtx([
+        _wrap_call_event("old-1"),
+        _user_response_event(
+            "old-1", REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+            {"confirmed": True, "payload": {"chose_id": "allow_once"}},
+        ),
+        _wrap_call_event("new-1"),
+    ])
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"choice": "allow_once"},
+        call_id="new-1",
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=ctx)
+    fr = out.parts[0].function_response
+    # Only `new-1` is unresolved; submission completes the set → bundle.
+    assert fr.name == REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
+    assert fr.id == "new-1"
+    print("OK test_resolved_wraps_no_longer_count")
+
+
+def test_unknown_wrap_id_falls_into_defer() -> None:
+    """Submission for a wrap_id that's not outstanding (stale duplicate,
+    spurious submit) gets persisted with the pending sentinel name —
+    inert, ADK's processor ignores it, no tool resumes."""
+    plugin = ConfirmationFormUiPlugin()
+    from adk_cc.plugins.confirmation_form_ui import PENDING_CONFIRMATION_NAME
+    ctx = _FakeInvocationCtx([_wrap_call_event("w1")])
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"choice": "allow_once"},
+        call_id="stale-id",
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=ctx)
+    fr = out.parts[0].function_response
+    # Stale: still gets renamed to PENDING (won't satisfy the outstanding
+    # `w1`, won't be matched by ADK's processor).
+    assert fr.name == PENDING_CONFIRMATION_NAME
+    assert fr.id == "stale-id"
+    print("OK test_unknown_wrap_id_falls_into_defer")
+
+
+# --- before_model_callback filter ----------------------------------
+
+
+class _FakeLlmRequest:
+    def __init__(self, contents: list) -> None:
+        self.contents = contents
+
+
+def _run_before_model(
+    plugin: ConfirmationFormUiPlugin, req: _FakeLlmRequest
+) -> Optional[Any]:
+    return asyncio.run(
+        plugin.before_model_callback(callback_context=None, llm_request=req)
+    )
+
+
+def test_before_model_filters_pending_confirmation_responses() -> None:
+    """Orphan deferred submissions (`adk_cc_pending_confirmation` name)
+    should not be sent to the LLM — they're internal bookkeeping that
+    look like duplicate/unmatched tool responses to strict providers."""
+    from adk_cc.plugins.confirmation_form_ui import PENDING_CONFIRMATION_NAME
+    plugin = ConfirmationFormUiPlugin()
+    req = _FakeLlmRequest([
+        types.Content(role="user", parts=[types.Part(text="please run X")]),
+        types.Content(role="user", parts=[
+            types.Part(function_response=types.FunctionResponse(
+                id="w1", name=PENDING_CONFIRMATION_NAME,
+                response={"confirmed": True, "payload": {"chose_id": "allow_once"}},
+            ))
+        ]),
+        types.Content(role="model", parts=[types.Part(text="ok")]),
+    ])
+    _run_before_model(plugin, req)
+    # PENDING content removed; user-text + model-text survive.
+    assert len(req.contents) == 2
+    assert req.contents[0].parts[0].text == "please run X"
+    assert req.contents[1].parts[0].text == "ok"
+    print("OK test_before_model_filters_pending_confirmation_responses")
+
+
+def test_before_model_preserves_non_pending_function_responses() -> None:
+    """The filter is targeted at the pending sentinel only.
+    `adk_request_confirmation` and regular tool responses pass through."""
+    plugin = ConfirmationFormUiPlugin()
+    req = _FakeLlmRequest([
+        types.Content(role="user", parts=[
+            types.Part(function_response=types.FunctionResponse(
+                id="w1", name=REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+                response={"confirmed": True, "payload": {"chose_id": "allow_once"}},
+            ))
+        ]),
+        types.Content(role="user", parts=[
+            types.Part(function_response=types.FunctionResponse(
+                id="t1", name="run_bash", response={"status": "ok"},
+            ))
+        ]),
+    ])
+    _run_before_model(plugin, req)
+    assert len(req.contents) == 2
+    assert req.contents[0].parts[0].function_response.name == REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
+    assert req.contents[1].parts[0].function_response.name == "run_bash"
+    print("OK test_before_model_preserves_non_pending_function_responses")
+
+
+def test_before_model_handles_empty_contents() -> None:
+    """No contents → no-op, no crash."""
+    plugin = ConfirmationFormUiPlugin()
+    req = _FakeLlmRequest([])
+    _run_before_model(plugin, req)
+    assert req.contents == []
+    print("OK test_before_model_handles_empty_contents")
+
+
 # --- Driver ---------------------------------------------------------
 
 
@@ -427,6 +706,16 @@ def main() -> None:
     test_inbound_boolean_form_all_false_treated_as_no_choice()
     test_inbound_ignores_non_matching_names()
     test_inbound_handles_empty_parts()
+    # Deferred-batch processing
+    test_first_of_three_defers_with_pending_name()
+    test_second_of_three_also_defers()
+    test_third_of_three_bundles_all()
+    test_resolved_wraps_no_longer_count()
+    test_unknown_wrap_id_falls_into_defer()
+    # before_model_callback filter
+    test_before_model_filters_pending_confirmation_responses()
+    test_before_model_preserves_non_pending_function_responses()
+    test_before_model_handles_empty_contents()
     print("\nall confirmation_form_ui tests passed")
 
 
