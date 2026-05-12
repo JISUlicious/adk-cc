@@ -93,9 +93,14 @@ class AskQuestion(BaseModel):
         max_length=12,
     )
     options: list[AskOption] = Field(
-        description="2-4 distinct choices. The user can also pick 'Other' (provided automatically).",
+        description=(
+            "Distinct choices for the question. Aim for 2-4 for crisp "
+            "decisions; up to 8 is allowed for broad-category intake "
+            "questions (e.g. 'which domain?'). The user can also pick "
+            "'Other' (a free-form text field is provided automatically)."
+        ),
         min_length=2,
-        max_length=4,
+        max_length=8,
     )
     multi_select: bool = Field(
         default=False, description="Allow multiple options to be selected."
