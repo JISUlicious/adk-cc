@@ -49,33 +49,18 @@ def _capture_logs(logger_name: str, level: int = logging.WARNING) -> tuple[Strin
     return buf, handler
 
 
-def _varied_text(target_tokens: int, model: str = "openai/gpt-4") -> str:
-    """Generate varied text close to a target token count under tiktoken.
-
-    Repeated 'x' compresses to ~1 token per several thousand chars; varied
-    UUID-style words count closer to 1 token each. This helper builds a
-    string and verifies the actual count is within ~10% of the target.
-    """
-    import litellm
-    import uuid
-
-    words: list[str] = []
-    while True:
-        words.append(uuid.uuid4().hex[:8])
-        if len(words) % 100 == 0:
-            text = " ".join(words)
-            actual = int(litellm.token_counter(model=model, text=text))
-            if actual >= target_tokens:
-                return text
-
-
 def _build_request(*, target_tokens: int = 0, system_instruction: Optional[str] = None,
                    model: str = "openai/gpt-4"):
-    """Build a fake LlmRequest with a controlled token count under tiktoken."""
+    """Build a fake LlmRequest whose chars/4 estimate equals `target_tokens`.
+
+    Plugin threshold checks (PR #23 / token-counter unification) use
+    ADK's shared chars/4 estimator. Tests target that algorithm
+    directly: a text of `target_tokens * 4` characters yields exactly
+    `target_tokens` under chars/4."""
     from google.adk.models.llm_request import LlmRequest
     from google.genai import types
 
-    text = _varied_text(target_tokens, model=model) if target_tokens > 0 else ""
+    text = "x" * (target_tokens * 4) if target_tokens > 0 else ""
     parts = [types.Part(text=text)] if text else []
     contents = [types.Content(role="user", parts=parts)] if parts else []
 
@@ -191,34 +176,135 @@ def test_reject_short_circuits():
     print("OK")
 
 
-def test_token_counter_fallback():
-    """Force litellm.token_counter to fail; chars/4 fallback should still work."""
-    print("test_token_counter_fallback: ", end="")
+def test_chars_div_4_threshold_path():
+    """Threshold check uses ADK's chars/4 algorithm — 4000 chars
+    yields exactly 1000 tokens, crossing REJECT (950 = 95% of 1000)."""
+    print("test_chars_div_4_threshold_path: ", end="")
     os.environ["ADK_CC_MAX_CONTEXT_TOKENS"] = "1000"
     _clear_env("ADK_CC_CONTEXT_WARN_TOKENS", "ADK_CC_CONTEXT_REJECT_TOKENS")
     _reset_modules()
     from adk_cc.plugins.context_guard import ContextGuardPlugin
     from google.adk.models.llm_request import LlmRequest
     from google.genai import types
-    import litellm
 
-    # Build a request with ~1000 token chars/4 estimate; force fallback.
-    text = "x" * 4000  # 1000 tokens by chars/4
+    # 4000 chars / 4 = 1000 tokens → over REJECT.
+    text = "x" * 4000
     req = LlmRequest(
         model="openai/gpt-4",
         contents=[types.Content(role="user", parts=[types.Part(text=text)])],
         config=types.GenerateContentConfig(),
     )
-    original = litellm.token_counter
-    litellm.token_counter = lambda **kw: (_ for _ in ()).throw(RuntimeError("forced failure"))
-    try:
-        plugin = ContextGuardPlugin()
-        result = asyncio.run(plugin.before_model_callback(
-            callback_context=_FakeCallbackContext(), llm_request=req,
-        ))
-        assert result is not None, "fallback path should still fire REJECT"
-    finally:
-        litellm.token_counter = original
+    plugin = ContextGuardPlugin()
+    result = asyncio.run(plugin.before_model_callback(
+        callback_context=_FakeCallbackContext(), llm_request=req,
+    ))
+    assert result is not None, "threshold check should fire REJECT"
+    print("OK")
+
+
+def test_uses_usage_metadata_when_present():
+    """When session events carry `usage_metadata.prompt_token_count`,
+    the plugin uses that (model's own count from a prior response)
+    instead of the chars/4 estimate. This mirrors ADK's
+    `_latest_prompt_token_count` algorithm — unifying the two layers."""
+    print("test_uses_usage_metadata_when_present: ", end="")
+    os.environ["ADK_CC_MAX_CONTEXT_TOKENS"] = "10000"
+    _clear_env("ADK_CC_CONTEXT_WARN_TOKENS", "ADK_CC_CONTEXT_REJECT_TOKENS")
+    _reset_modules()
+    from adk_cc.plugins.context_guard import ContextGuardPlugin
+    from google.adk.models.llm_request import LlmRequest
+    from google.genai import types
+
+    # Small text (chars/4 = ~10 tokens) but usage_metadata reports 9600 tokens.
+    # If the plugin honors usage_metadata, REJECT fires (9600 >= 9500).
+    # If it falls back to chars/4 by mistake, the request would slip through.
+    req = LlmRequest(
+        model="openai/gpt-4",
+        contents=[types.Content(role="user", parts=[types.Part(text="short")])],
+        config=types.GenerateContentConfig(),
+    )
+
+    class _FakeUsage:
+        prompt_token_count = 9600
+
+    class _FakeEvent:
+        usage_metadata = _FakeUsage()
+
+    class _FakeSessionWithEvents:
+        id = "sess-X"
+        events = [_FakeEvent()]
+
+    class _FakeCtxWithEvents:
+        @property
+        def session(self): return _FakeSessionWithEvents()
+
+    plugin = ContextGuardPlugin()
+    result = asyncio.run(plugin.before_model_callback(
+        callback_context=_FakeCtxWithEvents(), llm_request=req,
+    ))
+    assert result is not None, "should REJECT based on usage_metadata count"
+    print("OK")
+
+
+def test_agrees_with_adk_estimate_when_no_metadata():
+    """The shared helper's chars/4 algorithm matches ADK's per-content
+    counter byte-for-byte. Both layers' total then depends on which
+    content list they're handed:
+
+      - ADK's `_estimate_prompt_token_count` runs `_get_contents()` to
+        produce an effective-content list (filters by branch / agent),
+        then sums `_count_text_chars_in_content` over it.
+      - Our `estimate_prompt_tokens` sums the same `_count_text_chars_in_content`
+        over `llm_request.contents` (already built by the time our
+        plugin fires).
+
+    So full-pipeline agreement requires both layers to see the same
+    inputs. The ALGORITHM agreement is what unification fixes — verify
+    by feeding the SAME content list to both estimators."""
+    print("test_agrees_with_adk_estimate_when_no_metadata: ", end="")
+    _clear_env("ADK_CC_MAX_CONTEXT_TOKENS",
+               "ADK_CC_CONTEXT_WARN_TOKENS", "ADK_CC_CONTEXT_REJECT_TOKENS")
+    _reset_modules()
+    from adk_cc.permissions.token_counter import (
+        _count_text_chars_in_content,
+        estimate_prompt_tokens,
+    )
+    from google.adk.apps.compaction import _count_text_chars_in_content as adk_count
+    from google.adk.models.llm_request import LlmRequest
+    from google.genai import types
+
+    # Per-content char count agrees with ADK's, byte-for-byte.
+    cases = [
+        "hello world",
+        "x" * 1000,
+        "multi\nline\ntext",
+        "",
+        "unicode: ñ é ü 中文 emoji 🚀",
+    ]
+    for txt in cases:
+        c = types.Content(role="user", parts=[types.Part(text=txt)])
+        assert _count_text_chars_in_content(c) == adk_count(c), (
+            f"per-content count diverges for {txt!r}: "
+            f"ours={_count_text_chars_in_content(c)} adk={adk_count(c)}"
+        )
+
+    # Full estimator: given the same content list (no usage_metadata),
+    # chars/4 sum is identical to what ADK gets over the same list.
+    contents = [
+        types.Content(role="user",
+                      parts=[types.Part(text="hello world " * 50)]),
+        types.Content(role="model",
+                      parts=[types.Part(text="response text " * 30)]),
+    ]
+    req = LlmRequest(
+        model="openai/gpt-4",
+        contents=contents,
+        config=types.GenerateContentConfig(),
+    )
+    ours = estimate_prompt_tokens(req, session_events=None)
+    theirs_chars = sum(adk_count(c) for c in contents)
+    theirs = theirs_chars // 4
+    assert ours == theirs, f"ours={ours} theirs={theirs}"
     print("OK")
 
 
@@ -325,7 +411,9 @@ def main():
     test_no_action_below_warn()
     test_warn_logs_no_mutation()
     test_reject_short_circuits()
-    test_token_counter_fallback()
+    test_chars_div_4_threshold_path()
+    test_uses_usage_metadata_when_present()
+    test_agrees_with_adk_estimate_when_no_metadata()
     test_absolute_overrides()
     test_compaction_config_unset_returns_none()
     test_compaction_config_token_threshold()
