@@ -210,8 +210,12 @@ def allow_once_always_deny_prompt(
                 description="Cancel; the model will see the denial and adjust.",
             ),
         ],
-        # Surface the optional "persist across sessions" toggle. Default
-        # unchecked — operator gets the same per-session scope as before
-        # unless they deliberately tick it to promote to USER scope.
-        with_persist_toggle=True,
+        # NOTE: the inbound plugin still understands a
+        # `persist_across_sessions` payload field (it promotes the
+        # resulting allow rule to USER scope), but we deliberately do
+        # NOT surface a toggle on this high-frequency destructive
+        # prompt — cross-session promotion is too consequential to be
+        # one careless click away from a denial. A future designated
+        # admin UI is expected to set `with_persist_toggle=True` for
+        # its own deliberate-promotion flow.
     )
