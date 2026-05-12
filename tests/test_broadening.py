@@ -117,20 +117,23 @@ def test_single_token_command_only() -> None:
 
 
 def test_compound_and() -> None:
-    """`cd foo && pytest tests/x.py` → broaden each segment, rejoin
-    with `&&`. Both `cd` and `pytest` are 1-token in the per-binary
-    table, so the broadened pattern is `cd * && pytest *` — covers
-    `cd bar && pytest other`, blocks `cd bar && rm -rf /`."""
+    """`cd foo && pytest tests/x.py` — `cd` is scope-preserving so its
+    segment stays literal. `pytest` is 1-token so its segment
+    broadens. Net pattern: `cd foo && pytest *`. Covers
+    `cd foo && pytest different`, blocks `cd bar && pytest different`
+    (different cd path) and blocks `cd foo && rm -rf /` (different
+    second-segment binary)."""
     out = compute_allow_always_rule_contents(
         "run_bash", {"command": "cd foo && pytest tests/x.py"}
     )
     assert len(out) == 2, out
     assert out[0] == "cd foo && pytest tests/x.py"
-    assert out[1] == "cd * && pytest *", out[1]
+    assert out[1] == "cd foo && pytest *", out[1]
     # Match semantics end-to-end.
-    assert fnmatch.fnmatch("cd bar && pytest other", out[1])
+    assert fnmatch.fnmatch("cd foo && pytest other", out[1])
     assert fnmatch.fnmatch("cd foo && pytest tests/x.py", out[1])
-    assert not fnmatch.fnmatch("cd bar && rm -rf /", out[1])
+    assert not fnmatch.fnmatch("cd bar && pytest other", out[1])  # different cd
+    assert not fnmatch.fnmatch("cd foo && rm -rf /", out[1])      # different binary
     print("OK test_compound_and")
 
 
@@ -264,6 +267,138 @@ def test_non_string_command_returns_empty() -> None:
     print("OK test_non_string_command_returns_empty")
 
 
+# --- Quote-aware metachar check ------------------------------------
+
+
+def test_metachars_inside_double_quotes_are_safe() -> None:
+    """Parens / braces inside a double-quoted string are user-data,
+    not shell syntax — the broadener walks the segment in a state
+    machine so `python3 -c "print(1)"` broadens cleanly to
+    `python3 *` instead of bailing out on the `(`.
+
+    This is the user-reported bug: the model emits commands like
+    `python3 -c "..."` where the quoted code contains parens, and
+    the previous naive metachar check bailed out, leaving only a
+    literal rule that re-prompted on every code variation."""
+    out = compute_allow_always_rule_contents(
+        "run_bash", {"command": 'python3 -c "print(1)"'}
+    )
+    # python3 is 1-token in the per-binary table.
+    assert out == ['python3 -c "print(1)"', "python3 *"], out
+    # Subsequent `python3 -c "print(2)"` auto-allows via the broadened
+    # pattern.
+    assert fnmatch.fnmatch('python3 -c "print(2)"', out[1])
+    print("OK test_metachars_inside_double_quotes_are_safe")
+
+
+def test_metachars_inside_single_quotes_are_safe() -> None:
+    """Single quotes are fully literal in POSIX sh — even `$` inside
+    `'...'` doesn't expand. Broadener treats them as user data."""
+    out = compute_allow_always_rule_contents(
+        "run_bash", {"command": "echo 'hi $there'"}
+    )
+    assert out == ["echo 'hi $there'", "echo *"], out
+    print("OK test_metachars_inside_single_quotes_are_safe")
+
+
+def test_expansion_inside_double_quotes_still_bails() -> None:
+    """Double quotes DO allow `$()` and `${...}` expansion. So
+    `echo "$(date)"` is just as unsafe to broaden as `echo $(date)` —
+    both bail to literal-only."""
+    out = compute_allow_always_rule_contents(
+        "run_bash", {"command": 'echo "$(date)"'}
+    )
+    assert out == ['echo "$(date)"'], out
+
+    out_var = compute_allow_always_rule_contents(
+        "run_bash", {"command": 'echo "${HOME}"'}
+    )
+    assert out_var == ['echo "${HOME}"'], out_var
+    print("OK test_expansion_inside_double_quotes_still_bails")
+
+
+# --- Quote-aware compound splitter ---------------------------------
+
+
+def test_compound_separator_inside_quotes_is_literal() -> None:
+    """`echo "a && b"` is ONE segment, not two — the `&&` is inside
+    a quoted string. After the quote-aware splitter, `echo` broadens
+    its single segment to `echo *`."""
+    out = compute_allow_always_rule_contents(
+        "run_bash", {"command": 'echo "a && b"'}
+    )
+    assert out == ['echo "a && b"', "echo *"], out
+    print("OK test_compound_separator_inside_quotes_is_literal")
+
+
+def test_compound_with_quoted_segment_broadens_both() -> None:
+    """Real reported case: `cd /home/user/prj/.temp && python3 -c "..."`.
+    Splits cleanly on `&&`. Segment 1 is scope-preserving (`cd` →
+    literal). Segment 2 broadens to `python3 *`."""
+    out = compute_allow_always_rule_contents(
+        "run_bash",
+        {"command": 'cd /home/user/prj/.temp && python3 -c "print(1)"'},
+    )
+    assert len(out) == 2, out
+    assert out[0] == 'cd /home/user/prj/.temp && python3 -c "print(1)"'
+    assert out[1] == "cd /home/user/prj/.temp && python3 *", out[1]
+    # Subsequent same-cd, different python code → auto-allows.
+    assert fnmatch.fnmatch(
+        'cd /home/user/prj/.temp && python3 -c "print(2)"', out[1]
+    )
+    # Different cd directory → DOES NOT match (scope-preserving cd).
+    assert not fnmatch.fnmatch(
+        'cd /etc && python3 -c "print(1)"', out[1]
+    )
+    print("OK test_compound_with_quoted_segment_broadens_both")
+
+
+# --- Scope-preserving binaries -------------------------------------
+
+
+def test_cd_alone_is_literal_only() -> None:
+    """`cd <path>` is scope-preserving — broadened == literal, so we
+    store only ONE rule. The operator who clicked Allow always on
+    `cd /tmp` did NOT thereby allow `cd /etc`."""
+    out = compute_allow_always_rule_contents(
+        "run_bash", {"command": "cd /tmp"}
+    )
+    assert out == ["cd /tmp"], out
+    # `cd /etc` does not match the stored literal.
+    assert not fnmatch.fnmatch("cd /etc", "cd /tmp")
+    print("OK test_cd_alone_is_literal_only")
+
+
+def test_source_preserves_scope() -> None:
+    """`source venv/bin/activate` — activating a specific venv. Broaden
+    would silently let `source /tmp/evil` through; instead the segment
+    stays literal."""
+    out = compute_allow_always_rule_contents(
+        "run_bash",
+        {"command": "source venv/bin/activate && pytest"},
+    )
+    # source stays literal; pytest broadens.
+    assert out[1] == "source venv/bin/activate && pytest *", out[1]
+    print("OK test_source_preserves_scope")
+
+
+def test_export_preserves_scope() -> None:
+    """`export FOO=bar && cmd` — preserves the exact env var name+value
+    in the rule. A subsequent `export FOO=other && cmd` re-prompts."""
+    out = compute_allow_always_rule_contents(
+        "run_bash",
+        {"command": "export DEBUG=1 && python script.py"},
+    )
+    assert out[1] == "export DEBUG=1 && python *", out[1]
+    assert fnmatch.fnmatch(
+        "export DEBUG=1 && python other_script.py", out[1]
+    )
+    assert not fnmatch.fnmatch(
+        "export DEBUG=0 && python script.py", out[1]
+    )
+    print("OK test_export_preserves_scope")
+
+
 # --- End-to-end fnmatch semantics ----------------------------------
 
 
@@ -285,17 +420,20 @@ def test_pip_install_pattern_covers_args_variations() -> None:
 
 def test_compound_pattern_constrains_per_segment() -> None:
     """Compound broadening's value: each segment's binary must still
-    match. Operator who allowed `cd foo && pytest tests` does NOT
-    thereby allow `cd foo && rm -rf /` (rm != pytest)."""
+    match. With scope-preserving cd, the first segment is fully
+    literal — so even more constrained: operator who allowed
+    `cd foo && pytest tests` does NOT thereby allow
+    `cd bar && pytest tests` (different cd) or `cd foo && rm -rf /`
+    (different second-segment binary)."""
     out = compute_allow_always_rule_contents(
         "run_bash", {"command": "cd foo && pytest tests"}
     )
     pattern = out[1]
-    assert pattern == "cd * && pytest *", pattern
-    assert fnmatch.fnmatch("cd bar && pytest other_dir", pattern)
+    assert pattern == "cd foo && pytest *", pattern
+    assert fnmatch.fnmatch("cd foo && pytest other_dir", pattern)
     assert fnmatch.fnmatch("cd foo && pytest -k slow", pattern)
-    assert not fnmatch.fnmatch("cd foo && rm -rf /", pattern)
-    assert not fnmatch.fnmatch("cd foo && cat /etc/shadow", pattern)
+    assert not fnmatch.fnmatch("cd bar && pytest other_dir", pattern)  # scope
+    assert not fnmatch.fnmatch("cd foo && rm -rf /", pattern)          # binary
     print("OK test_compound_pattern_constrains_per_segment")
 
 
@@ -320,6 +458,14 @@ def main() -> None:
     test_unknown_tool_returns_empty_string()
     test_empty_command_returns_empty()
     test_non_string_command_returns_empty()
+    test_metachars_inside_double_quotes_are_safe()
+    test_metachars_inside_single_quotes_are_safe()
+    test_expansion_inside_double_quotes_still_bails()
+    test_compound_separator_inside_quotes_is_literal()
+    test_compound_with_quoted_segment_broadens_both()
+    test_cd_alone_is_literal_only()
+    test_source_preserves_scope()
+    test_export_preserves_scope()
     test_pip_install_pattern_covers_args_variations()
     test_compound_pattern_constrains_per_segment()
     print("\nall broadening tests passed")

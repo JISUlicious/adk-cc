@@ -20,18 +20,26 @@ Unknown binaries fall back to **2 tokens** — slightly safer than 1
 (narrower blast radius if the binary turns out to be a subcommand-
 style CLI we forgot to list).
 
-Compound commands (`a && b`, `a | b`, `a; b`, `a || b`) are split on
-shell operators, each segment broadened independently, then rejoined
-with the original delimiters. So `cd foo && pytest tests` becomes
-`cd foo * && pytest *` — covers `cd other && pytest different`, but
-NOT `cd other && rm -rf /` (the second segment's first token must
-still match).
+Scope-preserving binaries (`_SCOPE_PRESERVING_BINARIES`) — `cd`,
+`source`, `env`, etc. The model often emits compounds like
+`cd /home/user/prj && python3 -c "..."` where the cd path is
+identical across calls and the operator wants to keep approval
+scoped to THAT directory. So scope-preserving binaries keep their
+entire segment literal in the broadened compound: the example above
+broadens to `cd /home/user/prj && python3 *`, not `cd * && python3 *`.
+A subsequent `cd /etc && python3 -c "..."` still re-prompts.
 
-Quote-aware splitting is intentionally NOT attempted: any segment
-that fails `shlex.split` makes the whole command fall back to a
-literal-only rule (no broadening). The cost is a re-prompt on a
-quoted-pipe command; the alternative is a regex that mis-splits
-`echo "a && b"` and broadens the wrong thing.
+Compound commands (`a && b`, `a | b`, `a; b`, `a || b`) are split on
+shell operators (quote-aware), each segment broadened independently
+per its binary's prefix / scope-preservation rules, then rejoined
+with the original delimiters.
+
+Quote-aware splitting and metachar checks are state-machine based:
+operator code like `python3 -c "print(1)"` (parens inside double
+quotes) is recognized as quoted-content and does NOT trigger the
+subshell-bailout. But `echo "$(date)"` (parameter expansion inside
+double quotes — which the shell DOES expand) still bails out, because
+double-quoted `$()` is unsafe to broaden naively.
 
 For path-based tools (`read_file`, `write_file`, etc.) we currently
 return the literal path only — workspace-anchored broadening is a
@@ -54,7 +62,6 @@ For path tools and for malformed commands the list has ONE entry
 
 from __future__ import annotations
 
-import re
 import shlex
 from typing import Optional
 
@@ -135,16 +142,35 @@ _RUN_BASH_PREFIX_TOKENS: dict[str, int] = {
 }
 _DEFAULT_PREFIX_TOKENS = 2
 
-# Recognized shell operators. Split on these to handle compound commands.
-# Naive: doesn't respect quotes (e.g. `echo "a && b"` splits wrongly);
-# segments that fail shlex.split downstream make the whole command
-# fall back to literal-only.
-_COMPOUND_SEP_RE = re.compile(r"\s*(\|\||&&|;|\|)\s*")
+# Binaries whose segment stays literal in the broadened compound.
+# Rationale: model-emitted compounds usually pin the working
+# directory or environment with these (`cd /path && cmd ...`,
+# `source venv/bin/activate && python ...`) — and the operator
+# clicking Allow always typically intends "this exact directory /
+# this exact env" + "any args to the following command". Broadening
+# their args would silently widen scope to other directories /
+# environments.
+_SCOPE_PRESERVING_BINARIES = frozenset({
+    "cd",
+    "source",
+    ".",        # POSIX sh source operator
+    "pushd",
+    "popd",
+    "export",
+    "env",
+    "exec",
+})
 
-# Shell metachars whose presence in a SEGMENT (post-split) is a sign
-# of further compound-ness we didn't catch. Used to bail out to
-# literal — same fail-safe reasoning as the shlex check.
-_SUSPICIOUS_SEGMENT_CHARS = frozenset("$`(){}<>")
+# Metachars whose presence outside of quotes signals shell features
+# the naive broadener can't safely handle:
+#   $, `  → command substitution / parameter expansion
+#   (, )  → command grouping or subshell
+#   {, }  → brace expansion
+#   <, >  → I/O redirects
+# Inside single quotes EVERYTHING is literal — these are safe.
+# Inside double quotes, `$` and backtick still trigger expansion.
+_DANGER_UNQUOTED = frozenset("()$`<>{}")
+_DANGER_DOUBLE_QUOTED = frozenset("$`")
 
 
 def compute_allow_always_rule_contents(tool_name: str, args: dict) -> list[str]:
@@ -205,8 +231,8 @@ def _broaden_run_bash(command: str) -> Optional[str]:
 
     broadened_segments: list[str] = []
     for segment, _sep in segments_with_seps:
-        if any(c in segment for c in _SUSPICIOUS_SEGMENT_CHARS):
-            return None  # subshells, redirects, command substitution — bail
+        if _has_unsafe_shell_metachars(segment):
+            return None  # subshells, redirects, expansion — bail
         broadened = _broaden_segment(segment)
         if broadened is None:
             return None
@@ -214,38 +240,135 @@ def _broaden_run_bash(command: str) -> Optional[str]:
 
     # Rejoin with original delimiters.
     pieces: list[str] = []
-    for (segment_text, sep), broadened in zip(segments_with_seps, broadened_segments):
+    for (_segment_text, sep), broadened in zip(segments_with_seps, broadened_segments):
         pieces.append(broadened)
         if sep:
             pieces.append(f" {sep} ")
     return "".join(pieces)
 
 
+def _has_unsafe_shell_metachars(segment: str) -> bool:
+    """True when the segment contains shell metachars the naive
+    broadener can't handle. State machine: tracks single-quote and
+    double-quote regions so user-data parens / braces inside quotes
+    (e.g. `python3 -c "print(1)"`) don't trigger a false-positive
+    bailout. Returns True on unbalanced quotes too — we can't reason
+    about a malformed segment."""
+    i = 0
+    n = len(segment)
+    state = "unquoted"  # "unquoted" | "single" | "double"
+    while i < n:
+        c = segment[i]
+        if state == "unquoted":
+            if c == "'":
+                state = "single"
+            elif c == '"':
+                state = "double"
+            elif c == "\\" and i + 1 < n:
+                i += 1  # consume the escaped char
+            elif c in _DANGER_UNQUOTED:
+                return True
+        elif state == "single":
+            # Single quotes are literal — nothing inside expands. Even
+            # `$` and `` ` `` are safe. We just need to find the close.
+            if c == "'":
+                state = "unquoted"
+        else:  # state == "double"
+            if c == '"':
+                state = "unquoted"
+            elif c == "\\" and i + 1 < n:
+                i += 1
+            elif c in _DANGER_DOUBLE_QUOTED:
+                return True
+        i += 1
+    # Unbalanced quote → bail (the splitter would have already failed
+    # cleanly in most cases, but defensive).
+    return state != "unquoted"
+
+
 def _split_compound(command: str) -> Optional[list[tuple[str, str]]]:
     """Split a compound command into [(segment, delimiter_to_next)].
-    The last segment's delimiter is empty. Returns None on a
-    degenerate input (e.g. command starts with an operator)."""
+    The last segment's delimiter is empty.
+
+    Quote-aware: separators inside single or double quotes are NOT
+    treated as segment boundaries. So `echo "a && b"` stays one
+    segment. Returns None on degenerate input (empty, leading/trailing
+    separator, unbalanced quotes)."""
     if not command.strip():
         return None
-    parts = _COMPOUND_SEP_RE.split(command)
-    # `re.split` with a capture group returns: [text, sep, text, sep, ..., text]
-    # Always an odd number of elements.
-    if len(parts) % 2 == 0:
-        return None  # split produced an even count → leading/trailing sep
+
     pairs: list[tuple[str, str]] = []
-    for i in range(0, len(parts), 2):
-        segment = parts[i].strip()
-        sep = parts[i + 1].strip() if i + 1 < len(parts) else ""
+    buf: list[str] = []
+    i = 0
+    n = len(command)
+    state = "unquoted"
+
+    def flush(sep: str) -> bool:
+        segment = "".join(buf).strip()
         if not segment:
-            return None  # empty segment → operator at boundary; bail
+            return False  # leading separator or empty segment — bail
         pairs.append((segment, sep))
+        buf.clear()
+        return True
+
+    while i < n:
+        c = command[i]
+        if state == "unquoted":
+            if c == "'":
+                state = "single"
+                buf.append(c)
+            elif c == '"':
+                state = "double"
+                buf.append(c)
+            elif c == "\\" and i + 1 < n:
+                buf.append(c)
+                buf.append(command[i + 1])
+                i += 1
+            elif c == "&" and i + 1 < n and command[i + 1] == "&":
+                if not flush("&&"):
+                    return None
+                i += 1
+            elif c == "|" and i + 1 < n and command[i + 1] == "|":
+                if not flush("||"):
+                    return None
+                i += 1
+            elif c == "|":
+                if not flush("|"):
+                    return None
+            elif c == ";":
+                if not flush(";"):
+                    return None
+            else:
+                buf.append(c)
+        elif state == "single":
+            buf.append(c)
+            if c == "'":
+                state = "unquoted"
+        else:  # state == "double"
+            buf.append(c)
+            if c == '"':
+                state = "unquoted"
+            elif c == "\\" and i + 1 < n:
+                buf.append(command[i + 1])
+                i += 1
+        i += 1
+
+    if state != "unquoted":
+        return None  # unbalanced quote
+
+    trailing = "".join(buf).strip()
+    if not trailing:
+        # Command ended on a separator (`ls &&`).
+        return None
+    pairs.append((trailing, ""))
     return pairs
 
 
 def _broaden_segment(segment: str) -> Optional[str]:
     """Tokenize one segment with shlex, take the first N tokens per
-    the per-binary table, append ` *`. Returns None if shlex fails
-    (the caller bails to literal-only for the whole command)."""
+    the per-binary table, append ` *`. Scope-preserving binaries
+    (`cd`, `source`, etc.) keep the segment literal — see module
+    docstring. Returns None if shlex fails."""
     try:
         tokens = shlex.split(segment, posix=True)
     except ValueError:
@@ -256,6 +379,13 @@ def _broaden_segment(segment: str) -> Optional[str]:
     # Strip a leading path-component for the binary lookup so
     # `/usr/local/bin/pip install pandas` matches the `pip` entry.
     binary_basename = binary.rsplit("/", 1)[-1]
+
+    if binary_basename in _SCOPE_PRESERVING_BINARIES:
+        # Keep the segment fully literal — scope (directory, env, etc.)
+        # would silently widen if we broadened. Use the segment text
+        # verbatim (already trimmed by `_split_compound`).
+        return segment.strip()
+
     n = _RUN_BASH_PREFIX_TOKENS.get(
         binary_basename, _DEFAULT_PREFIX_TOKENS
     )
