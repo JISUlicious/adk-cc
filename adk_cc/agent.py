@@ -349,13 +349,15 @@ def _make_lazy_summarizer_class():
     failure modes (empty input, malformed model response), so the
     failure branch covers both quiet failures and exceptions.
 
-    Limitation: only the dedicated-compaction-model path goes through
-    this wrapper. When `ADK_CC_COMPACTION_MODEL` is unset,
-    `_make_compaction_summarizer` returns `None` and ADK's
-    `_ensure_compaction_summarizer` auto-instantiates a default
-    summarizer that bypasses these hooks. Operators wanting audit
-    coverage for compaction should set
-    `ADK_CC_COMPACTION_MODEL=<their main model id>`.
+    The wrapper is ALWAYS installed when compaction is enabled (any
+    of the COMPACTION env vars set) — `_make_compaction_summarizer`
+    falls back to the main-agent model env vars when
+    `ADK_CC_COMPACTION_MODEL` is unset. Same effective behavior as
+    ADK's default summarizer (which would auto-instantiate
+    `LlmEventSummarizer(llm=agent.canonical_model)`), plus our
+    observability hooks. So operators get audit + DEBUG visibility
+    just by enabling compaction; no extra "set this model env var"
+    gotcha.
     """
     import logging
     import time
@@ -513,13 +515,30 @@ def _summary_bytes(event) -> int:
 
 
 def _make_compaction_summarizer():
-    """Build an env-driven summarizer when a dedicated compaction model is
-    configured. Returns None to let ADK auto-default to the agent's model
-    (its lazy `_ensure_compaction_summarizer` instantiates LlmEventSummarizer
-    just-in-time, so the default path doesn't trip serialization either)."""
-    model_id = os.environ.get("ADK_CC_COMPACTION_MODEL")
-    if not model_id:
-        return None
+    """Build a summarizer instance for `EventsCompactionConfig`.
+
+    Always returns the lazy wrapper so audit + DEBUG hooks fire on
+    every compaction call. Model id resolution:
+
+      1. `ADK_CC_COMPACTION_MODEL` — explicit dedicated compaction model.
+      2. Fall back to `ADK_CC_MODEL` — match the main-agent model so
+         compaction uses the same backend.
+      3. Last-resort `openai/gpt-4` — same fallback LiteLlm uses.
+
+    api_base / api_key follow the same precedence: dedicated env var,
+    then main-agent env var, then None / empty.
+
+    Functionally equivalent to ADK's default summarizer
+    (`_ensure_compaction_summarizer` auto-instantiating
+    `LlmEventSummarizer(llm=agent.canonical_model)`) in the "no
+    dedicated model" case, plus our observability hooks. The
+    operator gets audit coverage just by enabling compaction.
+    """
+    model_id = (
+        os.environ.get("ADK_CC_COMPACTION_MODEL")
+        or os.environ.get("ADK_CC_MODEL")
+        or "openai/gpt-4"
+    )
     api_base = os.environ.get(
         "ADK_CC_COMPACTION_API_BASE", os.environ.get("ADK_CC_API_BASE")
     )

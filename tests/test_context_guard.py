@@ -252,6 +252,12 @@ def test_compaction_config_unset_returns_none():
 
 
 def test_compaction_config_token_threshold():
+    """Threshold + retention set, no dedicated compaction model.
+    Our wrapper is ALWAYS installed (it falls back to the main-agent
+    model env vars), so audit + DEBUG hooks fire regardless of whether
+    the operator set ADK_CC_COMPACTION_MODEL. The summarizer's
+    `model_id` resolves from ADK_CC_MODEL (or the gpt-4 last-resort
+    fallback when both are unset)."""
     print("test_compaction_config_token_threshold: ", end="")
     os.environ["ADK_CC_COMPACTION_TOKEN_THRESHOLD"] = "5000"
     os.environ["ADK_CC_COMPACTION_EVENT_RETENTION"] = "8"
@@ -259,11 +265,16 @@ def test_compaction_config_token_threshold():
                "ADK_CC_COMPACTION_MODEL")
     _reset_modules()
     from adk_cc.agent import app
+    from google.adk.apps.base_events_summarizer import BaseEventsSummarizer
     cc = app.events_compaction_config
     assert cc is not None
     assert cc.token_threshold == 5000
     assert cc.event_retention_size == 8
-    assert cc.summarizer is None  # ADK auto-defaults at first compaction
+    # Wrapper installed even without dedicated compaction model.
+    assert isinstance(cc.summarizer, BaseEventsSummarizer)
+    # Model id falls back to main-agent ADK_CC_MODEL (or gpt-4 if also unset).
+    expected_model = os.environ.get("ADK_CC_MODEL") or "openai/gpt-4"
+    assert cc.summarizer.model_id == expected_model
     print("OK")
 
 
