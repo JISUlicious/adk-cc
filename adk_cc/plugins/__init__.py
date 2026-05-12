@@ -2,6 +2,7 @@ from .ask_user_question_ui import AskUserQuestionUiHintPlugin
 from .audit import AuditPlugin
 from .confirmation_form_ui import ConfirmationFormUiPlugin
 from .context_guard import ContextGuardPlugin
+from .model_io_trace import ModelIOTracePlugin
 from .permissions import PermissionPlugin
 from .plan_mode import PlanModeReminderPlugin
 from .quotas import QuotaPlugin
@@ -16,6 +17,7 @@ __all__ = [
     "AuditPlugin",
     "ConfirmationFormUiPlugin",
     "ContextGuardPlugin",
+    "ModelIOTracePlugin",
     "PermissionPlugin",
     "PlanModeReminderPlugin",
     "QuotaPlugin",
