@@ -344,10 +344,30 @@ def _make_lazy_summarizer_class():
     Audit + DEBUG instrumentation wraps the inner call:
       - `compaction_triggered` before the summarizer runs
       - `compaction_success`   on a non-None return
-      - `compaction_failure`   on a None return or an exception
+      - `compaction_failure`   on a None return, timeout, or exception
     ADK's `LlmEventSummarizer` returns `None` on its own internal
-    failure modes (empty input, malformed model response), so the
-    failure branch covers both quiet failures and exceptions.
+    failure modes (empty input, malformed model response). The wrapper
+    distinguishes the three failure modes via the `reason` field:
+    `empty_summary` / `timeout` / `exception`.
+
+    Timeout + graceful degradation:
+      - `asyncio.wait_for(coro, timeout=timeout_seconds)` wraps the
+        inner call when `timeout_seconds > 0`.
+      - On `asyncio.TimeoutError`, the wrapper logs WARN, emits
+        `compaction_failure` with `reason="timeout"`, and returns
+        `None`. ADK treats `None` the same as "no summary produced"
+        — the turn proceeds with uncompacted history (model sees a
+        larger context once, but the agent does NOT hang waiting for
+        a stuck summarizer).
+      - On any other exception, the wrapper logs WARN, emits
+        `compaction_failure` with `reason="exception"`, and ALSO
+        returns `None` rather than re-raising. Same "agent must
+        survive the failure" reasoning — a broken summarizer can
+        only cost an occasional uncompacted turn, never a stuck
+        session.
+      - `timeout_seconds=0` disables the timeout entirely (preserves
+        the pre-PR-B behavior of indefinite wait). Exceptions still
+        degrade to None.
 
     The wrapper is ALWAYS installed when compaction is enabled (any
     of the COMPACTION env vars set) — `_make_compaction_summarizer`
@@ -359,6 +379,7 @@ def _make_lazy_summarizer_class():
     just by enabling compaction; no extra "set this model env var"
     gotcha.
     """
+    import asyncio
     import logging
     import time
     from google.adk.apps.base_events_summarizer import BaseEventsSummarizer
@@ -377,6 +398,11 @@ def _make_lazy_summarizer_class():
         # if anything serializes the surrounding config.
         api_key: Optional[str] = Field(default=None, exclude=True, repr=False)
         prompt_template: Optional[str] = None
+        # Seconds; 0 disables the timeout entirely (pre-PR-B behavior).
+        # `_make_compaction_summarizer` reads ADK_CC_COMPACTION_TIMEOUT_S
+        # (default 30) once at construction; this field is the resolved
+        # value.
+        timeout_seconds: float = 30.0
 
         async def maybe_summarize_events(self, *, events):
             from google.adk.apps.llm_event_summarizer import LlmEventSummarizer
@@ -390,12 +416,14 @@ def _make_lazy_summarizer_class():
 
             if _compaction_log.isEnabledFor(logging.DEBUG):
                 _compaction_log.debug(
-                    "compaction_triggered model=%s events=%s",
+                    "compaction_triggered model=%s events=%s timeout=%s",
                     self.model_id,
                     event_count,
+                    self.timeout_seconds,
                     extra={
                         "model_id": self.model_id,
                         "event_count": event_count,
+                        "timeout_seconds": self.timeout_seconds,
                     },
                 )
             emit_compaction_event(
@@ -403,6 +431,7 @@ def _make_lazy_summarizer_class():
                 model_id=self.model_id,
                 event_count=event_count,
                 last_event_ts=last_event_ts,
+                timeout_seconds=self.timeout_seconds,
             )
 
             started = time.monotonic()
@@ -415,7 +444,42 @@ def _make_lazy_summarizer_class():
                 inner = LlmEventSummarizer(
                     llm=llm, prompt_template=self.prompt_template
                 )
-                result = await inner.maybe_summarize_events(events=events)
+                # Apply timeout when configured (>0). At 0 we preserve
+                # the original "wait forever" semantics so an operator
+                # who explicitly opts out gets the pre-PR-B behavior.
+                if self.timeout_seconds > 0:
+                    result = await asyncio.wait_for(
+                        inner.maybe_summarize_events(events=events),
+                        timeout=self.timeout_seconds,
+                    )
+                else:
+                    result = await inner.maybe_summarize_events(events=events)
+            except asyncio.TimeoutError:
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                _compaction_log.warning(
+                    "compaction_failure model=%s reason=timeout "
+                    "timeout_seconds=%s elapsed_ms=%s",
+                    self.model_id,
+                    self.timeout_seconds,
+                    elapsed_ms,
+                    extra={
+                        "model_id": self.model_id,
+                        "reason": "timeout",
+                        "timeout_seconds": self.timeout_seconds,
+                        "elapsed_ms": elapsed_ms,
+                    },
+                )
+                emit_compaction_event(
+                    "compaction_failure",
+                    model_id=self.model_id,
+                    reason="timeout",
+                    timeout_seconds=self.timeout_seconds,
+                    elapsed_ms=elapsed_ms,
+                )
+                # Graceful degrade: return None so ADK skips this
+                # compaction. The turn proceeds with uncompacted
+                # history rather than hanging on a stuck summarizer.
+                return None
             except Exception as e:
                 elapsed_ms = int((time.monotonic() - started) * 1000)
                 _compaction_log.warning(
@@ -440,11 +504,10 @@ def _make_lazy_summarizer_class():
                     error_message=str(e),
                     elapsed_ms=elapsed_ms,
                 )
-                # Re-raise so ADK's caller sees the failure exactly as
-                # it would without the wrapper. PR B converts this to
-                # `return None` for graceful degradation; the audit
-                # event is fired either way.
-                raise
+                # Graceful degrade — same reasoning as the timeout
+                # branch. A broken summarizer can only cost an
+                # uncompacted turn, never a stuck session.
+                return None
 
             elapsed_ms = int((time.monotonic() - started) * 1000)
             if result is None:
@@ -545,8 +608,23 @@ def _make_compaction_summarizer():
     api_key = os.environ.get(
         "ADK_CC_COMPACTION_API_KEY", os.environ.get("ADK_CC_API_KEY", "")
     )
+    # Timeout (seconds) — 0 disables. See `_LazyAdkCcSummarizer`'s
+    # docstring for the graceful-degrade contract. Default 30 protects
+    # against hung summarizer LLMs without surprising fast paths.
+    raw_timeout = os.environ.get("ADK_CC_COMPACTION_TIMEOUT_S", "30")
+    try:
+        timeout_seconds = float(raw_timeout)
+    except ValueError:
+        timeout_seconds = 30.0
+    if timeout_seconds < 0:
+        timeout_seconds = 0.0
     cls = _make_lazy_summarizer_class()
-    return cls(model_id=model_id, api_base=api_base, api_key=api_key)
+    return cls(
+        model_id=model_id,
+        api_base=api_base,
+        api_key=api_key,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _make_compaction_config():

@@ -180,11 +180,13 @@ def test_empty_summary_fires_failure_with_empty_summary_reason() -> None:
 # --- Exception path ------------------------------------------------
 
 
-def test_exception_fires_failure_then_reraises() -> None:
-    """An exception from the inner summarizer fires the failure event
-    AND re-raises to the caller — PR A preserves ADK's existing
-    error-propagation semantics. PR B will convert this to graceful
-    None-return."""
+def test_exception_fires_failure_and_returns_none() -> None:
+    """PR B changed this from re-raise to graceful None-return. The
+    wrapper logs WARN + emits `compaction_failure` with
+    `reason=exception` and `error_type`/`error_message`, then returns
+    `None`. ADK treats `None` the same as "no summary produced" — the
+    turn proceeds with uncompacted history instead of the session
+    hanging on a broken summarizer."""
     events, sink = _capture()
     set_global_sink(sink)
     try:
@@ -193,23 +195,19 @@ def test_exception_fires_failure_then_reraises() -> None:
         async def fake_summarize(self, *, events):  # noqa: ANN001
             raise RuntimeError("LLM backend exploded")
 
-        raised = None
         with patch(
             "google.adk.apps.llm_event_summarizer.LlmEventSummarizer.maybe_summarize_events",
             new=fake_summarize,
         ):
-            try:
-                asyncio.run(
-                    summarizer.maybe_summarize_events(
-                        events=[_FakeInputEvent(1.0)]
-                    )
+            result = asyncio.run(
+                summarizer.maybe_summarize_events(
+                    events=[_FakeInputEvent(1.0)]
                 )
-            except RuntimeError as e:
-                raised = e
+            )
     finally:
         clear_global_sink()
-    assert raised is not None
-    assert "exploded" in str(raised)
+    # Returns None instead of re-raising — graceful degrade.
+    assert result is None
     assert [e["event"] for e in events] == [
         "compaction_triggered",
         "compaction_failure",
@@ -219,7 +217,7 @@ def test_exception_fires_failure_then_reraises() -> None:
     assert failure["error_type"] == "RuntimeError"
     assert "exploded" in failure["error_message"]
     assert "elapsed_ms" in failure
-    print("OK test_exception_fires_failure_then_reraises")
+    print("OK test_exception_fires_failure_and_returns_none")
 
 
 # --- No-sink path --------------------------------------------------
@@ -281,15 +279,167 @@ def test_emit_compaction_event_helper() -> None:
     print("OK test_emit_compaction_event_helper")
 
 
+# --- Timeout path (PR B) -------------------------------------------
+
+
+def test_timeout_fires_failure_with_timeout_reason_and_returns_none() -> None:
+    """When the inner summarizer takes longer than `timeout_seconds`,
+    `asyncio.wait_for` raises `TimeoutError`. The wrapper catches it,
+    emits `compaction_failure` with `reason=timeout`, and returns
+    `None` so the turn proceeds with uncompacted history rather than
+    the session hanging on a stuck summarizer."""
+    events, sink = _capture()
+    set_global_sink(sink)
+    try:
+        # 50ms timeout; the fake summarizer sleeps 500ms — guaranteed timeout.
+        summarizer = _make_summarizer()
+        summarizer.timeout_seconds = 0.05
+
+        async def slow_summarize(self, *, events):  # noqa: ANN001
+            await asyncio.sleep(0.5)
+            return _FakeReturnedEvent("never reached")
+
+        with patch(
+            "google.adk.apps.llm_event_summarizer.LlmEventSummarizer.maybe_summarize_events",
+            new=slow_summarize,
+        ):
+            result = asyncio.run(
+                summarizer.maybe_summarize_events(
+                    events=[_FakeInputEvent(1.0)]
+                )
+            )
+    finally:
+        clear_global_sink()
+    assert result is None
+    assert [e["event"] for e in events] == [
+        "compaction_triggered",
+        "compaction_failure",
+    ]
+    failure = events[1]
+    assert failure["reason"] == "timeout"
+    assert failure["timeout_seconds"] == 0.05
+    assert "elapsed_ms" in failure
+    # Triggered event carries the timeout config too, so consumers can
+    # tell from the trail whether the summarizer was running unbounded.
+    assert events[0]["timeout_seconds"] == 0.05
+    print("OK test_timeout_fires_failure_with_timeout_reason_and_returns_none")
+
+
+def test_timeout_zero_disables_wait_for() -> None:
+    """`timeout_seconds=0` opts out of the timeout entirely — the
+    inner call runs unbounded. Verified by a slow summarizer that
+    completes successfully because nothing is interrupting it."""
+    events, sink = _capture()
+    set_global_sink(sink)
+    try:
+        summarizer = _make_summarizer()
+        summarizer.timeout_seconds = 0
+
+        async def slow_but_successful(self, *, events):  # noqa: ANN001
+            await asyncio.sleep(0.05)
+            return _FakeReturnedEvent("eventually succeeded")
+
+        with patch(
+            "google.adk.apps.llm_event_summarizer.LlmEventSummarizer.maybe_summarize_events",
+            new=slow_but_successful,
+        ):
+            result = asyncio.run(
+                summarizer.maybe_summarize_events(
+                    events=[_FakeInputEvent(1.0)]
+                )
+            )
+    finally:
+        clear_global_sink()
+    assert result is not None
+    # Success path, NOT a timeout failure.
+    assert [e["event"] for e in events] == [
+        "compaction_triggered",
+        "compaction_success",
+    ]
+    # The triggered event reports timeout_seconds=0 so audit consumers
+    # can confirm the unbounded-wait config was in effect.
+    assert events[0]["timeout_seconds"] == 0
+    print("OK test_timeout_zero_disables_wait_for")
+
+
+# --- Env-var loading (PR B) ----------------------------------------
+
+
+def test_env_var_loads_timeout_default_30() -> None:
+    """ADK_CC_COMPACTION_TIMEOUT_S unset → default 30s. Verified by
+    constructing through `_make_compaction_summarizer`."""
+    import os
+    from adk_cc.agent import _make_compaction_summarizer
+
+    # Save + clear the env var so the default kicks in.
+    saved = os.environ.pop("ADK_CC_COMPACTION_TIMEOUT_S", None)
+    try:
+        s = _make_compaction_summarizer()
+        assert s.timeout_seconds == 30.0
+    finally:
+        if saved is not None:
+            os.environ["ADK_CC_COMPACTION_TIMEOUT_S"] = saved
+    print("OK test_env_var_loads_timeout_default_30")
+
+
+def test_env_var_loads_timeout_explicit() -> None:
+    """Explicit ADK_CC_COMPACTION_TIMEOUT_S parses cleanly. Values
+    include 0 (disabled), positive ints, and floats."""
+    import os
+    from adk_cc.agent import _make_compaction_summarizer
+
+    saved = os.environ.pop("ADK_CC_COMPACTION_TIMEOUT_S", None)
+    try:
+        for raw, expected in (("0", 0.0), ("60", 60.0), ("0.5", 0.5)):
+            os.environ["ADK_CC_COMPACTION_TIMEOUT_S"] = raw
+            s = _make_compaction_summarizer()
+            assert s.timeout_seconds == expected, (raw, s.timeout_seconds)
+    finally:
+        if saved is not None:
+            os.environ["ADK_CC_COMPACTION_TIMEOUT_S"] = saved
+        else:
+            os.environ.pop("ADK_CC_COMPACTION_TIMEOUT_S", None)
+    print("OK test_env_var_loads_timeout_explicit")
+
+
+def test_env_var_invalid_falls_back_to_default() -> None:
+    """A typo'd value (`"abc"`, negative number) falls back to the
+    default. Agent boot mustn't die on a env-config misspelling."""
+    import os
+    from adk_cc.agent import _make_compaction_summarizer
+
+    saved = os.environ.pop("ADK_CC_COMPACTION_TIMEOUT_S", None)
+    try:
+        # Garbage string → fall back to 30.
+        os.environ["ADK_CC_COMPACTION_TIMEOUT_S"] = "not-a-number"
+        s = _make_compaction_summarizer()
+        assert s.timeout_seconds == 30.0
+        # Negative number → clamped to 0 (disabled).
+        os.environ["ADK_CC_COMPACTION_TIMEOUT_S"] = "-5"
+        s = _make_compaction_summarizer()
+        assert s.timeout_seconds == 0.0
+    finally:
+        if saved is not None:
+            os.environ["ADK_CC_COMPACTION_TIMEOUT_S"] = saved
+        else:
+            os.environ.pop("ADK_CC_COMPACTION_TIMEOUT_S", None)
+    print("OK test_env_var_invalid_falls_back_to_default")
+
+
 # --- Driver --------------------------------------------------------
 
 
 def main() -> None:
     test_success_fires_triggered_then_success()
     test_empty_summary_fires_failure_with_empty_summary_reason()
-    test_exception_fires_failure_then_reraises()
+    test_exception_fires_failure_and_returns_none()
     test_no_sink_runs_silently()
     test_emit_compaction_event_helper()
+    test_timeout_fires_failure_with_timeout_reason_and_returns_none()
+    test_timeout_zero_disables_wait_for()
+    test_env_var_loads_timeout_default_30()
+    test_env_var_loads_timeout_explicit()
+    test_env_var_invalid_falls_back_to_default()
     print("\nall compaction-audit tests passed")
 
 
