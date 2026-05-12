@@ -367,12 +367,25 @@ class ConfirmationFormUiPlugin(BasePlugin):
     ) -> Optional[LlmResponse]:
         """Two jobs:
 
-        1. **Hide deferred bookkeeping** — filter
-           `adk_cc_pending_confirmation` function_responses out of
-           `llm_request.contents` so the LLM never sees them. These are
-           internal stash entries that look like duplicate / orphan tool
-           responses to strict providers (sglang's OpenAI-compatible
-           endpoint, OpenAI tool_calls validation, etc).
+        1. **Hide framework-event bookkeeping** — strip parts whose
+           function_call OR function_response name is one of our
+           sentinels so the LLM never sees them:
+
+             - `adk_cc_confirmation_form` (the outbound rename of
+               `adk_request_confirmation`). ADK's contents.py filter
+               `_is_request_confirmation_event` hides the canonical
+               name by literal match; renaming it breaks that hide.
+               Without re-hiding here, the renamed wrapper function_call
+               leaks into the LLM context with its large schema args
+               AND with no paired tool response (our reshape uses the
+               canonical name which IS filtered), producing an orphan
+               `tool_calls` entry. Strict providers (sglang's
+               OpenAI-compatible endpoint) reject the resulting message
+               history with a 400 BadRequest.
+
+             - `adk_cc_pending_confirmation` (deferred-batch
+               bookkeeping). Internal stash entries that look like
+               duplicate / orphan tool responses to strict providers.
 
         2. **Short-circuit the LLM call when a batch is still in flight**
            — if we're in deferred-batch mode (outstanding wraps that
@@ -387,14 +400,15 @@ class ConfirmationFormUiPlugin(BasePlugin):
         """
         contents = getattr(llm_request, "contents", None) or []
 
-        # Job 1: filter pending sentinels.
+        # Job 1: strip parts whose function_call OR function_response
+        # matches a sentinel name. We hide BOTH directions for symmetry
+        # so a stray pairing can't sneak through either way.
         mutated = False
         new_contents: list[types.Content] = []
         for content in contents:
             kept_parts: list[types.Part] = []
             for part in (content.parts or []):
-                fr = getattr(part, "function_response", None)
-                if fr is not None and fr.name == PENDING_CONFIRMATION_NAME:
+                if _is_framework_sentinel_part(part):
                     mutated = True
                     continue
                 kept_parts.append(part)
@@ -403,7 +417,7 @@ class ConfirmationFormUiPlugin(BasePlugin):
                     types.Content(role=content.role, parts=kept_parts)
                 )
             elif content.parts:
-                # Content had only pending-sentinel parts — drop it.
+                # Content had only sentinel parts — drop it.
                 mutated = True
         if mutated:
             llm_request.contents = new_contents
@@ -427,6 +441,25 @@ class ConfirmationFormUiPlugin(BasePlugin):
                 return LlmResponse()
 
         return None
+
+
+_FRAMEWORK_SENTINEL_NAMES = frozenset(
+    {CONFIRMATION_FORM_FUNCTION_CALL_NAME, PENDING_CONFIRMATION_NAME}
+)
+
+
+def _is_framework_sentinel_part(part: types.Part) -> bool:
+    """True when this part is a function_call OR function_response whose
+    name is one of our internal sentinels. Used by `before_model_callback`
+    to keep framework bookkeeping out of the LLM context — see the
+    callback docstring for why each name is hidden."""
+    fc = getattr(part, "function_call", None)
+    if fc is not None and fc.name in _FRAMEWORK_SENTINEL_NAMES:
+        return True
+    fr = getattr(part, "function_response", None)
+    if fr is not None and fr.name in _FRAMEWORK_SENTINEL_NAMES:
+        return True
+    return False
 
 
 def _session_events(invocation_context) -> list:

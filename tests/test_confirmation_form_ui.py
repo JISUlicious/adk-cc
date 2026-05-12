@@ -1012,6 +1012,65 @@ def test_before_model_handles_empty_contents() -> None:
     print("OK test_before_model_handles_empty_contents")
 
 
+def test_before_model_strips_renamed_wrapper_function_call() -> None:
+    """The outbound rewrite renames `adk_request_confirmation` →
+    `adk_cc_confirmation_form` so the bundled UI takes the form-widget
+    path. ADK's contents.py filter `_is_request_confirmation_event`
+    only matches the canonical name, so the renamed wrapper would
+    otherwise leak into LLM context with its huge schema args and no
+    paired tool response (our reshape uses the canonical name which
+    IS filtered). Strict providers (sglang) reject the orphan
+    tool_call. This filter strips it so the LLM sees the same clean
+    history as stock ADK."""
+    plugin = ConfirmationFormUiPlugin()
+    req = _FakeLlmRequest([
+        types.Content(role="user", parts=[types.Part(text="rm /tmp/foo")]),
+        types.Content(role="model", parts=[
+            types.Part(function_call=types.FunctionCall(
+                id="wrap-1",
+                name=CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+                args={"response_schema": {"type": "object"}, "prompt": "Confirm?"},
+            ))
+        ]),
+        types.Content(role="model", parts=[types.Part(text="done")]),
+    ])
+    _run_before_model(plugin, req)
+    # Sentinel function_call content removed; the surrounding text survives.
+    assert len(req.contents) == 2, req.contents
+    assert req.contents[0].parts[0].text == "rm /tmp/foo"
+    assert req.contents[1].parts[0].text == "done"
+    print("OK test_before_model_strips_renamed_wrapper_function_call")
+
+
+def test_before_model_strips_renamed_wrapper_function_response() -> None:
+    """Defensive: function_responses under the sentinel name shouldn't
+    occur in session (our `on_user_message_callback` always reshapes to
+    the canonical name before persistence), but if one slips through —
+    e.g. via a custom frontend submitting the original form-widget
+    response without going through the reshape — the filter still
+    hides it from the LLM."""
+    plugin = ConfirmationFormUiPlugin()
+    req = _FakeLlmRequest([
+        types.Content(role="user", parts=[
+            types.Part(function_response=types.FunctionResponse(
+                id="wrap-1",
+                name=CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+                response={"approve": True},
+            ))
+        ]),
+        types.Content(role="user", parts=[
+            types.Part(function_response=types.FunctionResponse(
+                id="t1", name="run_bash", response={"status": "ok"},
+            ))
+        ]),
+    ])
+    _run_before_model(plugin, req)
+    # Only the real run_bash response survives.
+    assert len(req.contents) == 1
+    assert req.contents[0].parts[0].function_response.name == "run_bash"
+    print("OK test_before_model_strips_renamed_wrapper_function_response")
+
+
 # --- Driver ---------------------------------------------------------
 
 
@@ -1061,6 +1120,8 @@ def main() -> None:
     test_before_model_filters_pending_confirmation_responses()
     test_before_model_preserves_non_pending_function_responses()
     test_before_model_handles_empty_contents()
+    test_before_model_strips_renamed_wrapper_function_call()
+    test_before_model_strips_renamed_wrapper_function_response()
     print("\nall confirmation_form_ui tests passed")
 
 
