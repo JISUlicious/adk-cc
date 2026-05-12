@@ -9,6 +9,7 @@ straightforward state mutation.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from google.adk.tools.tool_context import ToolContext
@@ -16,6 +17,12 @@ from pydantic import BaseModel, Field
 
 from ..permissions.confirmation import ConfirmOption, ConfirmPrompt
 from .base import AdkCcTool, ToolMeta, _extract_user_comment
+
+# NOTE: `..plugins.audit.emit_state_mutation` is imported lazily inside
+# `_execute` — see the matching NOTE in enter_plan_mode.py for the
+# circular-import reason.
+
+_log = logging.getLogger(__name__)
 
 
 class ExitPlanModeArgs(BaseModel):
@@ -123,6 +130,27 @@ class ExitPlanModeTool(AdkCcTool):
             ctx.state["permission_mode"] = "default"
         except Exception as e:
             return {"status": "error", "error": f"could not update state: {e}"}
+        if _log.isEnabledFor(logging.DEBUG):
+            _log.debug(
+                "state_mutation permission_mode %s -> default",
+                previous,
+                extra={
+                    "mutation_type": "permission_mode_change",
+                    "state_key": "permission_mode",
+                    "previous_value": previous,
+                    "new_value": "default",
+                },
+            )
+        from ..plugins.audit import emit_state_mutation  # deferred — see module-top NOTE
+        emit_state_mutation(
+            mutation_type="permission_mode_change",
+            state_key="permission_mode",
+            details={
+                "previous_value": previous,
+                "new_value": "default",
+            },
+            ctx=ctx,
+        )
         response: dict[str, Any] = {
             "status": "approved",
             "previous_mode": previous,

@@ -23,12 +23,22 @@ typed Pydantic input contract that policy plugins later consume.
 from __future__ import annotations
 
 import inspect
+import logging
 from typing import Any, ClassVar, Optional
 
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 from pydantic import BaseModel, ValidationError
+
+# NOTE: `..plugins.audit.emit_confirmation_resume` is imported lazily
+# inside `run_async` rather than at module-load. permissions/engine.py
+# imports tools.base.AdkCcTool, and tools.base is loaded before
+# plugins/__init__.py — eagerly importing audit here would trigger
+# plugins/__init__.py → plugins.permissions → permissions.engine
+# before engine.py finishes loading.
+
+_log = logging.getLogger(__name__)
 
 
 def _extract_user_comment(confirmation: Any) -> Optional[str]:
@@ -133,7 +143,43 @@ class AdkCcTool(BaseTool):
                         "status": "error",
                         "error": f"could not request confirmation: {e}",
                     }
+                if _log.isEnabledFor(logging.DEBUG):
+                    _log.debug(
+                        "confirmation requested tool=%s",
+                        self.meta.name,
+                        extra={
+                            "tool_name": self.meta.name,
+                            "phase": "request",
+                        },
+                    )
                 return {"status": "awaiting_user_confirmation"}
+            if _log.isEnabledFor(logging.DEBUG):
+                _log.debug(
+                    "confirmation resumed tool=%s confirmed=%s",
+                    self.meta.name,
+                    getattr(confirmation, "confirmed", None),
+                    extra={
+                        "tool_name": self.meta.name,
+                        "phase": "resume",
+                        "confirmed": getattr(confirmation, "confirmed", None),
+                    },
+                )
+            # Audit emit (deferred import — see module-top NOTE on the
+            # plugins.audit cycle).
+            from ..plugins.audit import emit_confirmation_resume
+            payload = getattr(confirmation, "payload", None)
+            chose_id = (
+                payload.get("chose_id")
+                if isinstance(payload, dict)
+                else None
+            )
+            emit_confirmation_resume(
+                tool_name=self.meta.name,
+                chose_id=chose_id if isinstance(chose_id, str) else None,
+                confirmed=getattr(confirmation, "confirmed", None),
+                function_call_id=getattr(tool_context, "function_call_id", None),
+                ctx=tool_context,
+            )
             if not getattr(confirmation, "confirmed", False):
                 # When the bundled UI's form widget includes a comment
                 # field (ConfirmPrompt.with_comment=True), the operator's

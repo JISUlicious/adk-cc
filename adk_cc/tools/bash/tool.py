@@ -62,12 +62,47 @@ class BashTool(AdkCcTool):
             )
 
         if result.timed_out:
+            _log.warning(
+                "run_bash timed out after %ss: %s",
+                args.timeout_seconds,
+                args.command[:200],
+                extra={
+                    "command": args.command,
+                    "timeout_seconds": args.timeout_seconds,
+                    "outcome": "timeout",
+                },
+            )
             return {
                 "status": "timeout",
                 "command": args.command,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
             }
+        # Surface non-zero exits at WARNING — silent failures are
+        # exactly what the user couldn't see before. Zero exits go to
+        # DEBUG so they only show up when an operator opts in.
+        if result.exit_code != 0:
+            _log.warning(
+                "run_bash exit_code=%s command=%s stderr_tail=%s",
+                result.exit_code,
+                args.command[:200],
+                result.stderr[-200:].replace("\n", " "),
+                extra={
+                    "command": args.command,
+                    "exit_code": result.exit_code,
+                    "outcome": "nonzero_exit",
+                },
+            )
+        elif _log.isEnabledFor(logging.DEBUG):
+            _log.debug(
+                "run_bash exit_code=0 command=%s",
+                args.command[:200],
+                extra={
+                    "command": args.command,
+                    "exit_code": 0,
+                    "outcome": "ok",
+                },
+            )
         return {
             "status": "ok",
             "command": args.command,

@@ -103,7 +103,29 @@ def _patch(cls: type) -> None:
             if hasattr(fresh, "event_sequence"):
                 session.event_sequence = fresh.event_sequence
 
-            return await original_append(self, session, event)
+            try:
+                result = await original_append(self, session, event)
+            except Exception as retry_err:
+                _log.error(
+                    "%s.append_event: retry after refresh ALSO failed (%s).",
+                    cls.__name__,
+                    retry_err,
+                    extra={
+                        "session_id": getattr(session, "id", None),
+                        "outcome": "retry_failed",
+                    },
+                )
+                raise
+            _log.info(
+                "%s.append_event: retry after refresh succeeded for session_id=%s.",
+                cls.__name__,
+                getattr(session, "id", "?"),
+                extra={
+                    "session_id": getattr(session, "id", None),
+                    "outcome": "retry_succeeded",
+                },
+            )
+            return result
 
     cls.append_event = append_event_with_retry
     setattr(cls, _PATCHED_FLAG, True)

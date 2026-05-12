@@ -21,6 +21,7 @@ Otherwise → allow.
 
 from __future__ import annotations
 
+import logging
 from typing import Literal, Optional
 
 from pydantic import BaseModel
@@ -29,6 +30,16 @@ from ..tools.base import AdkCcTool
 from .modes import PermissionMode
 from .rules import PermissionRule, RuleBehavior, rule_matches
 from .settings import SettingsHierarchy
+
+# NOTE: `..plugins.audit.emit_permission_decision` is imported lazily
+# inside `decide()` rather than at module-load. permissions/__init__.py
+# imports engine.py, and plugins/__init__.py imports plugins.permissions
+# which imports permissions.engine. Eagerly importing
+# `..plugins.audit` here would trigger plugins/__init__.py, which would
+# then re-enter permissions.engine before this module finishes loading,
+# raising a circular-import error.
+
+_log = logging.getLogger(__name__)
 
 
 class PermissionDecision(BaseModel):
@@ -50,6 +61,54 @@ def _first_match(
 
 
 def decide(
+    *,
+    tool: AdkCcTool,
+    args: dict,
+    mode: PermissionMode,
+    settings: SettingsHierarchy,
+) -> PermissionDecision:
+    decision = _decide_impl(tool=tool, args=args, mode=mode, settings=settings)
+    matched_rule_dump = (
+        decision.matched_rule.model_dump() if decision.matched_rule else None
+    )
+    # DEBUG log every decision so operators can trace *why* a tool was
+    # denied/asked. The matched_rule (if any) carries the rule_content
+    # pattern that matched — load-bearing when debugging "why did my
+    # Allow always rule not fire?".
+    if _log.isEnabledFor(logging.DEBUG):
+        _log.debug(
+            "decide tool=%s behavior=%s reason=%s rule=%s mode=%s args=%s",
+            tool.meta.name,
+            decision.behavior,
+            decision.reason,
+            matched_rule_dump,
+            mode.value,
+            args,
+            extra={
+                "tool_name": tool.meta.name,
+                "behavior": decision.behavior,
+                "reason": decision.reason,
+                "matched_rule": matched_rule_dump,
+                "mode": mode.value,
+            },
+        )
+    # Also emit a structured audit event when audit is configured —
+    # durable record of every decision for post-hoc analysis. No-op
+    # when no AuditPlugin is registered. Deferred import — see module
+    # docstring NOTE.
+    from ..plugins.audit import emit_permission_decision
+    emit_permission_decision(
+        tool_name=tool.meta.name,
+        args=args,
+        behavior=decision.behavior,
+        reason=decision.reason,
+        matched_rule=matched_rule_dump,
+        mode=mode.value,
+    )
+    return decision
+
+
+def _decide_impl(
     *,
     tool: AdkCcTool,
     args: dict,

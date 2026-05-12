@@ -53,10 +53,16 @@ from google.adk.models.lite_llm import LiteLlm
 from google.genai import types
 
 from . import prompts
+from .logging_setup import configure_logging
 from .permissions import PermissionMode, SettingsHierarchy
+
+# Apply env-driven logging config (ADK_CC_LOG_LEVEL, ADK_CC_LOG_FORMAT)
+# before any submodule logger fires. Idempotent — safe across reimports.
+configure_logging()
 from .plugins import (
     AskUserQuestionUiHintPlugin,
     AuditPlugin,
+    ModelIOTracePlugin,
     ConfirmationFormUiPlugin,
     ContextGuardPlugin,
     PermissionPlugin,
@@ -432,6 +438,12 @@ _app_kwargs = dict(
     # written by then.
     plugins=[
         AuditPlugin(),
+        # Raw model request/response trace for debugging model behavior.
+        # Always registered; the plugin no-ops when `ADK_CC_LOG_MODEL_IO`
+        # isn't `1`, so the per-turn cost is a single attribute check.
+        # When enabled: DEBUG log line + `model_request`/`model_response`
+        # audit events (when AuditPlugin's sink is also configured).
+        ModelIOTracePlugin(),
         PermissionPlugin(SETTINGS, default_mode=PERMISSION_MODE),
         # Reminders run on before_model_callback, lifecycle independent of
         # the before_tool chain — order relative to others doesn't matter.
