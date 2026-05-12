@@ -23,6 +23,7 @@ Behavior:
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 from google.adk.plugins.base_plugin import BasePlugin
@@ -41,6 +42,9 @@ from ..permissions.rules import (
 )
 from ..permissions.settings import SettingsHierarchy
 from ..tools.base import AdkCcTool
+from .audit import emit_confirmation_resume, emit_state_mutation
+
+_log = logging.getLogger(__name__)
 
 
 # Session-state keys for runtime-injected ALLOW rules. The first lives
@@ -173,6 +177,25 @@ class PermissionPlugin(BasePlugin):
                 # `allow_once` for back-compat with the first cut of this
                 # protocol.
                 chose_id = _read_choice_id(confirmation)
+                if _log.isEnabledFor(logging.DEBUG):
+                    _log.debug(
+                        "confirmation received tool=%s chose_id=%s confirmed=%s",
+                        tool.meta.name,
+                        chose_id,
+                        getattr(confirmation, "confirmed", None),
+                        extra={
+                            "tool_name": tool.meta.name,
+                            "chose_id": chose_id,
+                            "confirmed": getattr(confirmation, "confirmed", None),
+                        },
+                    )
+                emit_confirmation_resume(
+                    tool_name=tool.meta.name,
+                    chose_id=chose_id,
+                    confirmed=getattr(confirmation, "confirmed", None),
+                    function_call_id=getattr(tool_context, "function_call_id", None),
+                    ctx=tool_context,
+                )
                 if chose_id in ("allow", "allow_once"):
                     return None  # let the tool run
                 if chose_id == "allow_always":
@@ -288,6 +311,7 @@ class PermissionPlugin(BasePlugin):
 
         key = _USER_ALLOW_STATE_KEY if persist_across_sessions else _SESSION_ALLOW_STATE_KEY
         existing = list(tool_context.state.get(key) or [])
+        added: list[dict] = []
         for content in contents:
             rule = PermissionRule(
                 source=RuleSource.SESSION,
@@ -298,8 +322,40 @@ class PermissionPlugin(BasePlugin):
                 # engine's "matches any args" path fires.
                 rule_content=content if content else None,
             )
-            existing.append(rule.model_dump(mode="json"))
+            dumped = rule.model_dump(mode="json")
+            existing.append(dumped)
+            added.append(dumped)
         tool_context.state[key] = existing
+        # State mutation log — load-bearing for debugging "why did my
+        # Allow always not stick". Captures both the scope (session
+        # vs user) and the exact rule_content strings (literal +
+        # broadened) so it pairs naturally with the broadening
+        # heuristics in `compute_allow_always_rule_contents`.
+        if _log.isEnabledFor(logging.DEBUG):
+            _log.debug(
+                "state_mutation key=%s tool=%s added_rules=%s persist=%s",
+                key,
+                tool_name,
+                [r.get("rule_content") for r in added],
+                persist_across_sessions,
+                extra={
+                    "mutation_type": "allow_rule_added",
+                    "state_key": key,
+                    "tool_name": tool_name,
+                    "rule_contents": [r.get("rule_content") for r in added],
+                    "persist_across_sessions": persist_across_sessions,
+                },
+            )
+        emit_state_mutation(
+            mutation_type="allow_rule_added",
+            state_key=key,
+            details={
+                "tool_name": tool_name,
+                "rule_contents": [r.get("rule_content") for r in added],
+                "persist_across_sessions": persist_across_sessions,
+            },
+            ctx=tool_context,
+        )
 
     def _effective_settings(self, tool_context: ToolContext) -> SettingsHierarchy:
         """Merge the static hierarchy with state-backed runtime rules.

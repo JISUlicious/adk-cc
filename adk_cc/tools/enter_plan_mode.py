@@ -19,12 +19,21 @@ and the visibility plugin starts hiding `enter_plan_mode` to surface
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from google.adk.tools.tool_context import ToolContext
 from pydantic import BaseModel, Field
 
 from .base import AdkCcTool, ToolMeta
+
+# NOTE: `..plugins.audit.emit_state_mutation` is imported lazily inside
+# `_execute` rather than at module-load — tools/__init__.py is loaded
+# transitively via permissions/engine.py's `from ..tools.base import
+# AdkCcTool`, so an eager import here would trigger plugins/__init__.py
+# while permissions/engine.py is still loading → circular import.
+
+_log = logging.getLogger(__name__)
 
 
 class EnterPlanModeArgs(BaseModel):
@@ -83,6 +92,30 @@ class EnterPlanModeTool(AdkCcTool):
             ctx.state["permission_mode"] = "plan"
         except Exception as e:
             return {"status": "error", "error": f"could not update state: {e}"}
+        if _log.isEnabledFor(logging.DEBUG):
+            _log.debug(
+                "state_mutation permission_mode %s -> plan (reason=%s)",
+                previous,
+                args.reason,
+                extra={
+                    "mutation_type": "permission_mode_change",
+                    "state_key": "permission_mode",
+                    "previous_value": previous,
+                    "new_value": "plan",
+                    "reason": args.reason,
+                },
+            )
+        from ..plugins.audit import emit_state_mutation  # deferred — see module-top NOTE
+        emit_state_mutation(
+            mutation_type="permission_mode_change",
+            state_key="permission_mode",
+            details={
+                "previous_value": previous,
+                "new_value": "plan",
+                "reason": args.reason,
+            },
+            ctx=ctx,
+        )
         return {
             "status": "ok",
             "previous_mode": previous,
