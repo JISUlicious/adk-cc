@@ -311,19 +311,20 @@ async def test_allow_always_injects_session_rule_and_skips_re_ask() -> None:
         new_message=_confirmation_message(conf_call_id, {"chose_id": "allow_always"}),
     )
     assert _FakeBashTool.invocations == [{"command": "git status"}]
-    # The runtime rule lands in session state now (not the in-memory
-    # hierarchy); read it through the session DB. ADK exposes session
-    # state via `runner.session_service.get_session(...).state`.
+    # The runtime rules land in session state now (not the in-memory
+    # hierarchy); read through the session DB. Two rules per click:
+    # literal + broadened (per `compute_allow_always_rule_contents`).
     session = await runner.session_service.get_session(
         app_name=runner.app_name, user_id="alice", session_id="s-allow-always"
     )
     raw = session.state.get("adk_cc_allow_rules") or []
-    assert len(raw) == 1, raw
-    r = raw[0]
-    assert r["source"] == RuleSource.SESSION.value
-    assert r["behavior"] == RuleBehavior.ALLOW.value
-    assert r["tool_name"] == "run_bash"
-    assert r["rule_content"] == "git status"
+    assert len(raw) == 2, raw
+    for r in raw:
+        assert r["source"] == RuleSource.SESSION.value
+        assert r["behavior"] == RuleBehavior.ALLOW.value
+        assert r["tool_name"] == "run_bash"
+    assert raw[0]["rule_content"] == "git status"     # literal
+    assert raw[1]["rule_content"] == "git status *"   # broadened
     # The static hierarchy stays untouched — only state mutates.
     assert settings.all_rules() == []
 

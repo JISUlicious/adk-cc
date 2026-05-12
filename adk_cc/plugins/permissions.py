@@ -29,6 +29,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
+from ..permissions.broadening import compute_allow_always_rule_contents
 from ..permissions.confirmation import allow_once_always_deny_prompt, extract_subject
 from ..permissions.engine import decide
 from ..permissions.modes import PermissionMode
@@ -199,8 +200,22 @@ class PermissionPlugin(BasePlugin):
                 # can tell concurrent prompts apart when the model emits
                 # multiple gated calls in one turn.
                 subject = extract_subject(tool.meta.name, tool_args)
+                # Show the broadened pattern in the Allow always
+                # description so the operator knows the scope they're
+                # approving (e.g. `pip install *` instead of vague
+                # "this exact operation"). `compute_allow_always_rule_contents`
+                # returns [literal] OR [literal, broadened] — the
+                # broadened entry is what they'd actually be approving
+                # beyond the literal re-run.
+                contents = compute_allow_always_rule_contents(
+                    tool.meta.name, tool_args
+                )
+                preview = contents[-1] if len(contents) >= 2 else None
                 prompt = allow_once_always_deny_prompt(
-                    tool.meta.name, decision.reason, subject=subject
+                    tool.meta.name,
+                    decision.reason,
+                    subject=subject,
+                    allow_always_preview=preview,
                 )
                 tool_context.request_confirmation(
                     hint=decision.reason,            # back-compat for hint-only frontends
@@ -239,15 +254,22 @@ class PermissionPlugin(BasePlugin):
         *,
         persist_across_sessions: bool = False,
     ) -> None:
-        """Inject an ALLOW rule for the (tool, rule key) pair.
+        """Inject ALLOW rule(s) for the (tool, rule key) pair.
 
-        Scope: exact rule-key match (e.g. for `run_bash`, the literal
-        command string; for `write_file`, the literal path). The user
-        explicitly approved THIS operation — broadening (e.g. fnmatch
-        wildcards) would be unsafe. If the tool has no rule-key
-        extractor, the rule omits `rule_content` and applies to all
-        invocations of that tool — a conservative fallback for custom
-        tools.
+        `compute_allow_always_rule_contents` decides how broad the
+        stored rule(s) are:
+
+          - `run_bash` → typically TWO rules: the literal command
+            (catches exact re-run) plus a broadened pattern via
+            per-binary prefix heuristics (e.g. `pip install pandas`
+            also writes `pip install *`). Compound commands like
+            `cd foo && pytest` broaden each segment. See
+            `adk_cc/permissions/broadening.py`.
+          - Path tools (`read_file`/`write_file`/`edit_file`/`grep`/
+            `glob_files`) → ONE rule, the literal path. Workspace-
+            anchored broadening is a separate follow-up PR.
+          - Unknown tool → ONE rule with `rule_content=None`
+            (matches any args for that tool).
 
         Storage:
           - default → `state["adk_cc_allow_rules"]` (per-session,
@@ -262,17 +284,21 @@ class PermissionPlugin(BasePlugin):
         every `decide` call.
         """
         tool_name = tool.meta.name
-        extractor = _RULE_KEY_EXTRACTORS.get(tool_name)
-        rule_content = extractor(args) if extractor is not None else None
-        rule = PermissionRule(
-            source=RuleSource.SESSION,
-            behavior=RuleBehavior.ALLOW,
-            tool_name=tool_name,
-            rule_content=rule_content,
-        )
+        contents = compute_allow_always_rule_contents(tool_name, args)
+
         key = _USER_ALLOW_STATE_KEY if persist_across_sessions else _SESSION_ALLOW_STATE_KEY
         existing = list(tool_context.state.get(key) or [])
-        existing.append(rule.model_dump(mode="json"))
+        for content in contents:
+            rule = PermissionRule(
+                source=RuleSource.SESSION,
+                behavior=RuleBehavior.ALLOW,
+                tool_name=tool_name,
+                # Empty-string contents come from the unknown-tool
+                # fallback in the helper — translate to None so the
+                # engine's "matches any args" path fires.
+                rule_content=content if content else None,
+            )
+            existing.append(rule.model_dump(mode="json"))
         tool_context.state[key] = existing
 
     def _effective_settings(self, tool_context: ToolContext) -> SettingsHierarchy:

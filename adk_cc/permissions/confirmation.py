@@ -173,6 +173,7 @@ def allow_once_always_deny_prompt(
     reason: str,
     *,
     subject: Optional[str] = None,
+    allow_always_preview: Optional[str] = None,
 ) -> ConfirmPrompt:
     """Three-option payload used by the permission plugin's "ask" branch.
 
@@ -188,7 +189,19 @@ def allow_once_always_deny_prompt(
     `"Confirm run_bash: git status?"` instead of `"Confirm run_bash?"`,
     so an operator faced with three pending `write_file` confirmations
     can tell which file each one is gating.
+
+    Pass `allow_always_preview` (e.g. `"pip install *"`) to make the
+    Allow always description show the broadened pattern explicitly —
+    the operator sees the exact rule scope at click time, not a vague
+    "this exact operation" claim that no longer matches the storage
+    behavior since adk-cc started broadening run_bash commands.
     """
+    always_desc = (
+        f"Allow `{allow_always_preview}` (this command + any args) "
+        "for the rest of the session."
+        if allow_always_preview
+        else "Run, and stop asking about this exact operation for the rest of the session."
+    )
     return ConfirmPrompt(
         style="single_select",
         title=_title(tool_name, subject),
@@ -202,7 +215,7 @@ def allow_once_always_deny_prompt(
             ConfirmOption(
                 id="allow_always",
                 label="Allow always",
-                description="Run, and stop asking about this exact operation for the rest of the session.",
+                description=always_desc,
             ),
             ConfirmOption(
                 id="deny",
