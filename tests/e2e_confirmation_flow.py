@@ -311,16 +311,24 @@ async def test_allow_always_injects_session_rule_and_skips_re_ask() -> None:
         new_message=_confirmation_message(conf_call_id, {"chose_id": "allow_always"}),
     )
     assert _FakeBashTool.invocations == [{"command": "git status"}]
-    rules = settings.all_rules()
-    assert len(rules) == 1, rules
-    r = rules[0]
-    assert r.source is RuleSource.SESSION
-    assert r.behavior is RuleBehavior.ALLOW
-    assert r.tool_name == "run_bash"
-    assert r.rule_content == "git status"
+    # The runtime rule lands in session state now (not the in-memory
+    # hierarchy); read it through the session DB. ADK exposes session
+    # state via `runner.session_service.get_session(...).state`.
+    session = await runner.session_service.get_session(
+        app_name=runner.app_name, user_id="alice", session_id="s-allow-always"
+    )
+    raw = session.state.get("adk_cc_allow_rules") or []
+    assert len(raw) == 1, raw
+    r = raw[0]
+    assert r["source"] == RuleSource.SESSION.value
+    assert r["behavior"] == RuleBehavior.ALLOW.value
+    assert r["tool_name"] == "run_bash"
+    assert r["rule_content"] == "git status"
+    # The static hierarchy stays untouched — only state mutates.
+    assert settings.all_rules() == []
 
     # Invocation 3: user asks again; LLM emits same function_call; plugin
-    # checks the session rule first and lets it through with NO gate.
+    # checks the state-backed rule and lets it through with NO gate.
     events3 = await _run_once(
         runner,
         user_id="alice",

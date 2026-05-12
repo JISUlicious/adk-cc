@@ -40,10 +40,12 @@ from google.genai import types
 
 from adk_cc.plugins.confirmation_form_ui import (
     CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+    PERSIST_FIELD_KEY,
     ConfirmationFormUiPlugin,
     _build_choice_schema,
     _extract_chose_id,
     _extract_comment,
+    _extract_persist,
 )
 
 
@@ -339,6 +341,58 @@ def test_build_choice_schema_without_comment_no_textbox() -> None:
     print("OK test_build_choice_schema_without_comment_no_textbox")
 
 
+def test_build_choice_schema_with_persist_toggle_adds_boolean() -> None:
+    """`with_persist_toggle=True` adds a `persist_across_sessions`
+    boolean — the bundled UI renders it as an extra checkbox next to
+    the option boxes. Operator ticks it (only meaningful with
+    'Allow always') to promote the rule to user scope."""
+    options = [
+        {"id": "allow_once", "label": "Allow once", "description": ""},
+        {"id": "allow_always", "label": "Allow always", "description": ""},
+        {"id": "deny", "label": "Deny", "description": ""},
+    ]
+    schema = _build_choice_schema(options, with_persist_toggle=True)
+    assert PERSIST_FIELD_KEY in schema["properties"]
+    prop = schema["properties"][PERSIST_FIELD_KEY]
+    assert prop["type"] == "boolean", prop
+    assert "Allow always" in prop["description"]
+    # The three option booleans are still there alongside the toggle.
+    assert {"allow_once", "allow_always", "deny"}.issubset(schema["properties"].keys())
+    print("OK test_build_choice_schema_with_persist_toggle_adds_boolean")
+
+
+def test_build_choice_schema_without_persist_toggle_no_field() -> None:
+    """Default `with_persist_toggle=False` — exit_plan_mode-style
+    binary prompts shouldn't grow a session-scope toggle."""
+    options = [
+        {"id": "approve", "label": "Approve", "description": ""},
+        {"id": "deny", "label": "Deny", "description": ""},
+    ]
+    schema = _build_choice_schema(options)
+    assert PERSIST_FIELD_KEY not in schema["properties"]
+    print("OK test_build_choice_schema_without_persist_toggle_no_field")
+
+
+def test_extract_persist_helper() -> None:
+    """Strict `is True` semantics — only True (literal) counts, every
+    falsy / missing / wrong-shape variant collapses to False so an
+    operator who hasn't deliberately ticked the box can't accidentally
+    promote a rule to user scope."""
+    assert _extract_persist({PERSIST_FIELD_KEY: True}) is True
+    assert _extract_persist({PERSIST_FIELD_KEY: False}) is False
+    assert _extract_persist({PERSIST_FIELD_KEY: None}) is False
+    # Truthy non-bool must NOT count — defense against the bundled UI
+    # coercing checkbox state to a string somewhere upstream.
+    assert _extract_persist({PERSIST_FIELD_KEY: "true"}) is False
+    assert _extract_persist({PERSIST_FIELD_KEY: 1}) is False
+    # Missing key.
+    assert _extract_persist({}) is False
+    # Garbage shapes.
+    assert _extract_persist(None) is False
+    assert _extract_persist("not a dict") is False
+    print("OK test_extract_persist_helper")
+
+
 def test_extract_comment_helper() -> None:
     """Returns stripped string when present + non-empty; None otherwise."""
     assert _extract_comment({"comment": "hello"}) == "hello"
@@ -625,6 +679,64 @@ def test_inbound_reshape_boolean_per_option_form_submission() -> None:
     assert fr.name == REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
     assert fr.response == {"confirmed": True, "payload": {"chose_id": "allow_always"}}
     print("OK test_inbound_reshape_boolean_per_option_form_submission")
+
+
+def test_inbound_persist_toggle_folds_into_payload() -> None:
+    """When the operator picks `allow_always` AND ticks the persist
+    toggle, the inbound reshape carries `persist_across_sessions: True`
+    through to the `ToolConfirmation.payload` so the permission plugin
+    can promote the resulting rule to user scope."""
+    plugin = ConfirmationFormUiPlugin()
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {
+            "allow_once": False,
+            "allow_always": True,
+            "deny": False,
+            "persist_across_sessions": True,
+        },
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+    fr = out.parts[0].function_response
+    assert fr.response == {
+        "confirmed": True,
+        "payload": {
+            "chose_id": "allow_always",
+            "persist_across_sessions": True,
+        },
+    }
+    print("OK test_inbound_persist_toggle_folds_into_payload")
+
+
+def test_inbound_persist_false_or_missing_omits_field() -> None:
+    """Default unchecked → the reshape must NOT include the
+    `persist_across_sessions` key at all (cleaner than `: false`
+    noise on the tool's view)."""
+    plugin = ConfirmationFormUiPlugin()
+    for persist_value in (False, None, "true", 1):
+        msg = _user_message(
+            CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+            {
+                "allow_once": False,
+                "allow_always": True,
+                "deny": False,
+                "persist_across_sessions": persist_value,
+            },
+        )
+        out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+        fr = out.parts[0].function_response
+        assert "persist_across_sessions" not in fr.response["payload"], (
+            f"unexpected persist key for value {persist_value!r}: {fr.response}"
+        )
+    # Also: missing key entirely.
+    msg = _user_message(
+        CONFIRMATION_FORM_FUNCTION_CALL_NAME,
+        {"allow_once": False, "allow_always": True, "deny": False},
+    )
+    out = _run_user_msg(plugin, msg, invocation_context=_ctx_with_one_outstanding())
+    fr = out.parts[0].function_response
+    assert "persist_across_sessions" not in fr.response["payload"]
+    print("OK test_inbound_persist_false_or_missing_omits_field")
 
 
 def test_inbound_comment_folds_into_payload() -> None:
@@ -1083,6 +1195,9 @@ def main() -> None:
     test_build_choice_schema_binary_no_deny_id_uses_first_as_positive()
     test_build_choice_schema_binary_deny_first_picks_second_as_positive()
     test_build_choice_schema_without_comment_no_textbox()
+    test_build_choice_schema_with_persist_toggle_adds_boolean()
+    test_build_choice_schema_without_persist_toggle_no_field()
+    test_extract_persist_helper()
     test_extract_comment_helper()
     test_extract_chose_id_accepts_all_shapes()
     test_extract_chose_id_binary_unchecked_returns_negative_id()
@@ -1103,6 +1218,8 @@ def main() -> None:
     test_inbound_binary_unchecked_with_comment_attaches_comment_to_deny()
     test_inbound_binary_checked_form_resolves_to_approve()
     test_inbound_three_option_deny_wins_over_multi_check()
+    test_inbound_persist_toggle_folds_into_payload()
+    test_inbound_persist_false_or_missing_omits_field()
     test_inbound_comment_folds_into_payload()
     test_inbound_empty_comment_not_included()
     test_inbound_comment_with_approve_passes_through()

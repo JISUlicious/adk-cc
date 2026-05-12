@@ -159,15 +159,32 @@ CONFIRMATION_FORM_FUNCTION_CALL_NAME = "adk_cc_confirmation_form"
 # can read it from `ctx.tool_confirmation.payload["comment"]`.
 COMMENT_FIELD_KEY = "comment"
 
+# Property key for the optional "persist across sessions" toggle. When
+# the outgoing `ConfirmPrompt` has `with_persist_toggle=True`, the
+# schema adds a boolean property under this key so the bundled UI
+# renders a checkbox alongside the option boxes. On the inbound side,
+# True is folded into the `toolConfirmation.payload` so the permission
+# plugin promotes the resulting allow rule from per-session to
+# per-user scope (USER-prefixed state survives across sessions).
+PERSIST_FIELD_KEY = "persist_across_sessions"
+
 # Keys we should NEVER treat as chose_ids when scanning the response
 # for a True-valued field. Some are part of the ADK ToolConfirmation
 # shape (`confirmed`), others are legacy shapes (`choice`, `chose_id`)
 # that we handle in their own branches. `comment` is the optional
-# free-form text field — it's a string, not a boolean, so the scan
-# wouldn't match anyway, but we list it explicitly to make the intent
-# obvious.
+# free-form text field (a string, not a boolean — wouldn't match the
+# scan anyway, but listed for clarity). `persist_across_sessions` IS
+# a boolean side-channel — without listing it, the chose_id scan
+# would mistake a True toggle for the operator's pick.
 _RESERVED_RESPONSE_KEYS = frozenset(
-    {"confirmed", "choice", "chose_id", "result", COMMENT_FIELD_KEY}
+    {
+        "confirmed",
+        "choice",
+        "chose_id",
+        "result",
+        COMMENT_FIELD_KEY,
+        PERSIST_FIELD_KEY,
+    }
 )
 
 # Sentinel function name for deferred submissions. ADK's
@@ -216,7 +233,9 @@ class ConfirmationFormUiPlugin(BasePlugin):
             if not isinstance(options, list) or not options:
                 continue
             schema = _build_choice_schema(
-                options, with_comment=bool(payload.get("with_comment"))
+                options,
+                with_comment=bool(payload.get("with_comment")),
+                with_persist_toggle=bool(payload.get("with_persist_toggle")),
             )
             if schema is None:
                 continue
@@ -281,6 +300,12 @@ class ConfirmationFormUiPlugin(BasePlugin):
             comment = _extract_comment(fr.response)
             if comment:
                 payload_out["comment"] = comment
+            if _extract_persist(fr.response):
+                # Only meaningful when paired with allow_always — the
+                # PermissionPlugin reads this and writes the resulting
+                # rule under the `user:` prefix so it survives across
+                # sessions. For other chose_ids it's a no-op.
+                payload_out[PERSIST_FIELD_KEY] = True
             reshaped_incoming[fr.id or ""] = {
                 "confirmed": chose_id != "deny",
                 "payload": payload_out,
@@ -529,7 +554,10 @@ def _stashed_pending_responses(events) -> dict[str, dict]:
 
 
 def _build_choice_schema(
-    options: list, *, with_comment: bool = False
+    options: list,
+    *,
+    with_comment: bool = False,
+    with_persist_toggle: bool = False,
 ) -> Optional[dict]:
     """Convert `ConfirmPrompt.options` to a JSON Schema renderable by the
     bundled UI's form widget.
@@ -595,6 +623,15 @@ def _build_choice_schema(
                 "Optional comment / feedback — passed to the tool on "
                 "both approve and deny. Useful for explaining why a "
                 "plan was rejected so the model can revise it."
+            ),
+        }
+    if with_persist_toggle:
+        properties[PERSIST_FIELD_KEY] = {
+            "type": "boolean",
+            "description": (
+                "(Optional, only meaningful with 'Allow always') "
+                "Persist this approval across your future sessions "
+                "too. Leave unchecked for per-session scope."
             ),
         }
     return {"type": "object", "properties": properties}
@@ -732,3 +769,12 @@ def _extract_comment(response: Any) -> Optional[str]:
         return None
     text = raw.strip()
     return text or None
+
+
+def _extract_persist(response: Any) -> bool:
+    """Pull the boolean `persist_across_sessions` toggle. True only
+    when the operator deliberately checked the box; False / missing /
+    wrong type all default to False (per-session scope)."""
+    if not isinstance(response, dict):
+        return False
+    return response.get(PERSIST_FIELD_KEY) is True

@@ -42,6 +42,16 @@ from ..permissions.settings import SettingsHierarchy
 from ..tools.base import AdkCcTool
 
 
+# Session-state keys for runtime-injected ALLOW rules. The first lives
+# under the session record (`state["adk_cc_allow_rules"]`) so it scopes
+# to one session; the second uses ADK's `user:` prefix to persist
+# across all of the same user's future sessions. Both are lists of
+# `PermissionRule.model_dump(mode="json")` dicts so they round-trip
+# cleanly through the session DB serializer.
+_SESSION_ALLOW_STATE_KEY = "adk_cc_allow_rules"
+_USER_ALLOW_STATE_KEY = "user:adk_cc_allow_rules"
+
+
 def _read_choice_id(confirmation: Any) -> Optional[str]:
     """Pull `chose_id` out of `ToolConfirmation.payload` if present.
 
@@ -58,6 +68,39 @@ def _read_choice_id(confirmation: Any) -> Optional[str]:
     if isinstance(chose, str):
         return chose
     return None
+
+
+def _read_persist_toggle(confirmation: Any) -> bool:
+    """True only when the operator deliberately ticked the
+    "Persist across sessions" box on the confirmation form. Missing /
+    non-dict / wrong type all collapse to False (per-session scope)."""
+    payload = getattr(confirmation, "payload", None)
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("persist_across_sessions") is True
+
+
+def _load_state_rules(tool_context: ToolContext) -> list[PermissionRule]:
+    """Load runtime ALLOW rules from session state. Reads both the
+    per-session key and the per-user key; rules are returned in the
+    order the operator added them. Malformed entries are skipped (a
+    broken stash entry shouldn't block the whole turn)."""
+    rules: list[PermissionRule] = []
+    for key in (_SESSION_ALLOW_STATE_KEY, _USER_ALLOW_STATE_KEY):
+        try:
+            raw = tool_context.state.get(key) or []
+        except Exception:
+            continue
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                rules.append(PermissionRule.model_validate(item))
+            except Exception:
+                continue
+    return rules
 
 
 class PermissionPlugin(BasePlugin):
@@ -83,8 +126,18 @@ class PermissionPlugin(BasePlugin):
             return None
 
         mode = self._mode_from_context(tool_context)
+        # Merge the static (POLICY/USER/PROJECT) hierarchy with any
+        # state-backed allow rules added at runtime via "Allow always".
+        # SESSION-scope rules live in `state["adk_cc_allow_rules"]`;
+        # USER-scope rules live in `state["user:adk_cc_allow_rules"]`
+        # (ADK's `user:` prefix persists across the same user's future
+        # sessions when a real session DB is configured). Both go into
+        # the SESSION layer of the merged hierarchy — the layer is
+        # priority-bottom, so operator-declared POLICY/USER/PROJECT
+        # rules still win on conflict.
+        effective = self._effective_settings(tool_context)
         decision = decide(
-            tool=tool, args=tool_args, mode=mode, settings=self._settings
+            tool=tool, args=tool_args, mode=mode, settings=effective
         )
 
         if decision.behavior == "deny":
@@ -122,7 +175,13 @@ class PermissionPlugin(BasePlugin):
                 if chose_id in ("allow", "allow_once"):
                     return None  # let the tool run
                 if chose_id == "allow_always":
-                    self._add_session_allow(tool, tool_args)
+                    persist = _read_persist_toggle(confirmation)
+                    self._add_session_allow(
+                        tool,
+                        tool_args,
+                        tool_context,
+                        persist_across_sessions=persist,
+                    )
                     return None  # let the tool run + skip future re-asks
                 if chose_id is None and getattr(confirmation, "confirmed", False):
                     return None  # legacy back-compat path (bundled `adk web` UI)
@@ -172,28 +231,61 @@ class PermissionPlugin(BasePlugin):
 
         return None
 
-    def _add_session_allow(self, tool: AdkCcTool, args: dict) -> None:
-        """Inject a SESSION-scope ALLOW rule for the (tool, rule key) pair.
+    def _add_session_allow(
+        self,
+        tool: AdkCcTool,
+        args: dict,
+        tool_context: ToolContext,
+        *,
+        persist_across_sessions: bool = False,
+    ) -> None:
+        """Inject an ALLOW rule for the (tool, rule key) pair.
 
         Scope: exact rule-key match (e.g. for `run_bash`, the literal
         command string; for `write_file`, the literal path). The user
         explicitly approved THIS operation — broadening (e.g. fnmatch
         wildcards) would be unsafe. If the tool has no rule-key
         extractor, the rule omits `rule_content` and applies to all
-        invocations of that tool for the session — a conservative
-        fallback for custom tools.
+        invocations of that tool — a conservative fallback for custom
+        tools.
+
+        Storage:
+          - default → `state["adk_cc_allow_rules"]` (per-session,
+            durable across agent restart when a session DB is
+            configured).
+          - `persist_across_sessions=True` →
+            `state["user:adk_cc_allow_rules"]` (the `user:` prefix
+            tells ADK to persist under the user record so the rule
+            survives across the same user's future sessions).
+
+        State-backed rules are loaded by `_effective_settings` on
+        every `decide` call.
         """
         tool_name = tool.meta.name
         extractor = _RULE_KEY_EXTRACTORS.get(tool_name)
         rule_content = extractor(args) if extractor is not None else None
-        self._settings.add_session_rule(
-            PermissionRule(
-                source=RuleSource.SESSION,
-                behavior=RuleBehavior.ALLOW,
-                tool_name=tool_name,
-                rule_content=rule_content,
-            )
+        rule = PermissionRule(
+            source=RuleSource.SESSION,
+            behavior=RuleBehavior.ALLOW,
+            tool_name=tool_name,
+            rule_content=rule_content,
         )
+        key = _USER_ALLOW_STATE_KEY if persist_across_sessions else _SESSION_ALLOW_STATE_KEY
+        existing = list(tool_context.state.get(key) or [])
+        existing.append(rule.model_dump(mode="json"))
+        tool_context.state[key] = existing
+
+    def _effective_settings(self, tool_context: ToolContext) -> SettingsHierarchy:
+        """Merge the static hierarchy with state-backed runtime rules.
+
+        Returns a fresh `SettingsHierarchy` rather than mutating
+        `self._settings` — state-backed rules are per-context and
+        must not leak into the plugin-shared instance.
+        """
+        state_rules = _load_state_rules(tool_context)
+        if not state_rules:
+            return self._settings
+        return SettingsHierarchy(list(self._settings.all_rules()) + state_rules)
 
     def _mode_from_context(self, ctx: ToolContext) -> PermissionMode:
         try:

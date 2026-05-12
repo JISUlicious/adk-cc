@@ -81,6 +81,14 @@ class ConfirmPrompt(BaseModel):
     a denied plan (e.g. `exit_plan_mode`). The destructive-tool gate
     leaves it off — Allow once / Allow always / Deny carry enough
     signal on their own.
+
+    `with_persist_toggle=True` asks the frontend to surface an optional
+    boolean toggle ("Persist across sessions"). Only meaningful when
+    the prompt has an `allow_always` option — the toggle promotes the
+    resulting session-scope rule to a USER-scope rule that survives
+    across the user's future sessions. Default unchecked, so the
+    operator gets the same per-session behavior as before unless they
+    deliberately opt into broader scope.
     """
 
     style: Literal["confirm_deny", "single_select"]
@@ -88,6 +96,7 @@ class ConfirmPrompt(BaseModel):
     detail: str
     options: list[ConfirmOption]
     with_comment: bool = False
+    with_persist_toggle: bool = False
 
 
 def extract_subject(tool_name: str, args: dict) -> Optional[str]:
@@ -201,4 +210,8 @@ def allow_once_always_deny_prompt(
                 description="Cancel; the model will see the denial and adjust.",
             ),
         ],
+        # Surface the optional "persist across sessions" toggle. Default
+        # unchecked — operator gets the same per-session scope as before
+        # unless they deliberately tick it to promote to USER scope.
+        with_persist_toggle=True,
     )
