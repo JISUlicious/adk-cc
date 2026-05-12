@@ -329,7 +329,12 @@ def test_resume_allow_always_injects_session_rule() -> None:
     `state["adk_cc_allow_rules"]` (session-scope) — NOT in the
     in-memory `SettingsHierarchy.SESSION` layer, which is intentionally
     no longer mutated at runtime so we can store via session DB and
-    survive agent restarts."""
+    survive agent restarts.
+
+    Two rules per click: literal (catches exact re-run) + broadened
+    (covers args-only variations per `compute_allow_always_rule_contents`).
+    Here `git status` (2-token in the per-binary table) → `git status`
+    literal + `git status *` broadened."""
     settings = SettingsHierarchy()
     plugin = _make_plugin(settings)
     tool = _FakeBashTool()
@@ -346,14 +351,16 @@ def test_resume_allow_always_injects_session_rule() -> None:
     assert result is None, result
     # In-memory hierarchy is unchanged — runtime rules live in state now.
     assert settings.all_rules() == []
-    # Per-session list has exactly one rule with the right scope.
+    # Per-session list has two rules: literal + broadened.
     raw = ctx.state[_SESSION_ALLOW_STATE_KEY]
-    assert isinstance(raw, list) and len(raw) == 1, raw
-    r = PermissionRule.model_validate(raw[0])
-    assert r.source is RuleSource.SESSION
-    assert r.behavior is RuleBehavior.ALLOW
-    assert r.tool_name == "run_bash"
-    assert r.rule_content == "git status"
+    assert isinstance(raw, list) and len(raw) == 2, raw
+    rules = [PermissionRule.model_validate(r) for r in raw]
+    for r in rules:
+        assert r.source is RuleSource.SESSION
+        assert r.behavior is RuleBehavior.ALLOW
+        assert r.tool_name == "run_bash"
+    assert rules[0].rule_content == "git status"      # literal
+    assert rules[1].rule_content == "git status *"    # broadened
     # No `user:`-prefixed entry — default is per-session only.
     assert _USER_ALLOW_STATE_KEY not in ctx.state, ctx.state
     print("OK test_resume_allow_always_injects_session_rule")
@@ -378,13 +385,15 @@ def test_resume_allow_always_with_persist_toggle_writes_user_state() -> None:
         )
     )
     assert result is None, result
-    # Rule landed in the user-scope key, NOT the session-scope key.
+    # Rules landed in the user-scope key, NOT the session-scope key.
     assert _SESSION_ALLOW_STATE_KEY not in ctx.state, ctx.state
     raw = ctx.state[_USER_ALLOW_STATE_KEY]
-    assert isinstance(raw, list) and len(raw) == 1, raw
-    r = PermissionRule.model_validate(raw[0])
-    assert r.tool_name == "run_bash"
-    assert r.rule_content == "uv run pytest"
+    # Two rules: literal + broadened (per `compute_allow_always_rule_contents`).
+    assert isinstance(raw, list) and len(raw) == 2, raw
+    rules = [PermissionRule.model_validate(r) for r in raw]
+    assert all(r.tool_name == "run_bash" for r in rules)
+    assert rules[0].rule_content == "uv run pytest"   # literal
+    assert rules[1].rule_content == "uv run *"        # broadened (uv is 2-token)
     print("OK test_resume_allow_always_with_persist_toggle_writes_user_state")
 
 
