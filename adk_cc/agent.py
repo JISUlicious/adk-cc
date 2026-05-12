@@ -340,10 +340,32 @@ def _make_lazy_summarizer_class():
     The actual `LlmEventSummarizer` + `LiteLlm` are constructed once per
     compaction call. One extra ~ms object construction; eliminates the
     serialization hazard.
+
+    Audit + DEBUG instrumentation wraps the inner call:
+      - `compaction_triggered` before the summarizer runs
+      - `compaction_success`   on a non-None return
+      - `compaction_failure`   on a None return or an exception
+    ADK's `LlmEventSummarizer` returns `None` on its own internal
+    failure modes (empty input, malformed model response), so the
+    failure branch covers both quiet failures and exceptions.
+
+    Limitation: only the dedicated-compaction-model path goes through
+    this wrapper. When `ADK_CC_COMPACTION_MODEL` is unset,
+    `_make_compaction_summarizer` returns `None` and ADK's
+    `_ensure_compaction_summarizer` auto-instantiates a default
+    summarizer that bypasses these hooks. Operators wanting audit
+    coverage for compaction should set
+    `ADK_CC_COMPACTION_MODEL=<their main model id>`.
     """
+    import logging
+    import time
     from google.adk.apps.base_events_summarizer import BaseEventsSummarizer
     from pydantic import BaseModel, Field
     from typing import Optional
+
+    from .plugins.audit import emit_compaction_event
+
+    _compaction_log = logging.getLogger(__name__ + ".compaction")
 
     class _LazyAdkCcSummarizer(BaseModel, BaseEventsSummarizer):
         # Plain string fields so pydantic dump_json works.
@@ -357,15 +379,137 @@ def _make_lazy_summarizer_class():
         async def maybe_summarize_events(self, *, events):
             from google.adk.apps.llm_event_summarizer import LlmEventSummarizer
 
-            llm = LiteLlm(
-                model=self.model_id,
-                api_base=self.api_base,
-                api_key=self.api_key,
+            event_count = len(events) if events else 0
+            last_event_ts = None
+            if events:
+                # The Event dataclass has `timestamp`; tolerate missing
+                # field (defensive — tests pass mock events).
+                last_event_ts = getattr(events[-1], "timestamp", None)
+
+            if _compaction_log.isEnabledFor(logging.DEBUG):
+                _compaction_log.debug(
+                    "compaction_triggered model=%s events=%s",
+                    self.model_id,
+                    event_count,
+                    extra={
+                        "model_id": self.model_id,
+                        "event_count": event_count,
+                    },
+                )
+            emit_compaction_event(
+                "compaction_triggered",
+                model_id=self.model_id,
+                event_count=event_count,
+                last_event_ts=last_event_ts,
             )
-            inner = LlmEventSummarizer(llm=llm, prompt_template=self.prompt_template)
-            return await inner.maybe_summarize_events(events=events)
+
+            started = time.monotonic()
+            try:
+                llm = LiteLlm(
+                    model=self.model_id,
+                    api_base=self.api_base,
+                    api_key=self.api_key,
+                )
+                inner = LlmEventSummarizer(
+                    llm=llm, prompt_template=self.prompt_template
+                )
+                result = await inner.maybe_summarize_events(events=events)
+            except Exception as e:
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                _compaction_log.warning(
+                    "compaction_failure model=%s reason=exception "
+                    "error_type=%s error=%s elapsed_ms=%s",
+                    self.model_id,
+                    type(e).__name__,
+                    e,
+                    elapsed_ms,
+                    extra={
+                        "model_id": self.model_id,
+                        "reason": "exception",
+                        "error_type": type(e).__name__,
+                        "elapsed_ms": elapsed_ms,
+                    },
+                )
+                emit_compaction_event(
+                    "compaction_failure",
+                    model_id=self.model_id,
+                    reason="exception",
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                    elapsed_ms=elapsed_ms,
+                )
+                # Re-raise so ADK's caller sees the failure exactly as
+                # it would without the wrapper. PR B converts this to
+                # `return None` for graceful degradation; the audit
+                # event is fired either way.
+                raise
+
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            if result is None:
+                _compaction_log.warning(
+                    "compaction_failure model=%s reason=empty_summary elapsed_ms=%s",
+                    self.model_id,
+                    elapsed_ms,
+                    extra={
+                        "model_id": self.model_id,
+                        "reason": "empty_summary",
+                        "elapsed_ms": elapsed_ms,
+                    },
+                )
+                emit_compaction_event(
+                    "compaction_failure",
+                    model_id=self.model_id,
+                    reason="empty_summary",
+                    elapsed_ms=elapsed_ms,
+                )
+                return None
+
+            summary_bytes = _summary_bytes(result)
+            if _compaction_log.isEnabledFor(logging.DEBUG):
+                _compaction_log.debug(
+                    "compaction_success model=%s summary_bytes=%s elapsed_ms=%s",
+                    self.model_id,
+                    summary_bytes,
+                    elapsed_ms,
+                    extra={
+                        "model_id": self.model_id,
+                        "summary_bytes": summary_bytes,
+                        "elapsed_ms": elapsed_ms,
+                    },
+                )
+            emit_compaction_event(
+                "compaction_success",
+                model_id=self.model_id,
+                event_count=event_count,
+                summary_bytes=summary_bytes,
+                elapsed_ms=elapsed_ms,
+            )
+            return result
 
     return _LazyAdkCcSummarizer
+
+
+def _summary_bytes(event) -> int:
+    """Best-effort byte-count of the compaction summary text, for the
+    `summary_bytes` field on `compaction_success`. Tolerates the
+    various shapes ADK might return (Event with EventCompaction
+    action, mock objects in tests)."""
+    try:
+        actions = getattr(event, "actions", None)
+        if actions is None:
+            return 0
+        compaction = getattr(actions, "compaction", None)
+        if compaction is None:
+            return 0
+        text = getattr(compaction, "compacted_content", None)
+        if text is None:
+            return 0
+        if isinstance(text, str):
+            return len(text.encode("utf-8"))
+        # Fall back to repr for non-string payloads.
+        return len(repr(text).encode("utf-8"))
+    except Exception:
+        return 0
 
 
 def _make_compaction_summarizer():
