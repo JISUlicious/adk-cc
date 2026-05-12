@@ -25,12 +25,17 @@ Postgres / DataDog / SQS write a callable that takes the event dict.
   - `permission_decision`   — decide() outcome (allow/deny/ask + rule)
   - `state_mutation`        — permission_mode flip or allow-rule write
   - `confirmation_resume`   — user response received and applied
+  - `model_request`         — full LlmRequest dump (ModelIOTracePlugin)
+  - `model_response`        — full LlmResponse dump (ModelIOTracePlugin)
+  - `compaction_triggered`  — before LlmEventSummarizer fires
+  - `compaction_success`    — summarizer returned a non-None event
+  - `compaction_failure`    — summarizer returned None / raised / timed out
 
-The latter three are emitted from inside other plugins / tools via
-the module-level `emit_audit_event` helper. The helper looks up the
-process-wide AuditPlugin instance set at agent construction (see
-`set_global_sink`). Callsites that fire when no AuditPlugin is
-configured are silent no-ops.
+Events beyond the first three are emitted from inside other plugins /
+tools / wrappers via the module-level `emit_audit_event` helper. The
+helper looks up the process-wide AuditPlugin instance set at agent
+construction (see `set_global_sink`). Callsites that fire when no
+AuditPlugin is configured are silent no-ops.
 """
 
 from __future__ import annotations
@@ -346,4 +351,30 @@ def emit_confirmation_resume(
         event["function_call_id"] = function_call_id
     if ctx is not None:
         event.update(AuditPlugin._ctx_fields(ctx))
+    emit_audit_event(event)
+
+
+def emit_compaction_event(event_type: str, **fields: Any) -> None:
+    """Convenience emitter for the three compaction event types:
+
+      - `compaction_triggered` — before the summarizer is called.
+        Typical fields: `event_count`, `last_event_ts`, `model_id`.
+      - `compaction_success`   — after a non-None return.
+        Typical fields: `event_count`, `summary_bytes`, `elapsed_ms`.
+      - `compaction_failure`   — None return / exception / timeout.
+        Typical fields: `reason` (`"empty_summary"` / `"exception"` /
+        `"timeout"`), `error_type`, `error_message`, `elapsed_ms`.
+
+    Caller is responsible for choosing a stable `event_type` from the
+    three above. Any extra kwargs become top-level fields on the
+    emitted JSONL object.
+
+    No-op when no AuditPlugin sink is registered."""
+    if not is_audit_enabled():
+        return
+    event: dict[str, Any] = {
+        "ts": time.time(),
+        "event": event_type,
+        **fields,
+    }
     emit_audit_event(event)
