@@ -22,10 +22,19 @@ Disabled gracefully when `ADK_CC_MAX_CONTEXT_TOKENS` is unset — the
 plugin attaches but does nothing. Plugin-chain wiring stays uniform
 across deployments.
 
-Token counting uses `litellm.token_counter` for accuracy (handles
-multi-modal content and per-model tokenization). Falls back to the
-chars/4 heuristic on counter failure so the guard remains active even
-when the registry doesn't recognize the model id.
+Token counting: uses the shared `estimate_prompt_tokens` helper
+(`adk_cc/permissions/token_counter.py`) which mirrors ADK's
+`_latest_prompt_token_count` algorithm — prefers the model's own
+`usage_metadata.prompt_token_count` from session events when
+available, falls back to chars/4 across `llm_request.contents`.
+Same algorithm ADK's `EventsCompactionConfig` uses for its
+threshold check, so the two layers can no longer disagree.
+
+A separate `litellm.token_counter` reading is computed when the
+plugin's logger is at DEBUG, for diagnostic comparison only — useful
+when investigating "ADK didn't compact but the plugin REJECTs" /
+vice-versa reports. The threshold decisions themselves use the
+shared estimator exclusively.
 """
 
 from __future__ import annotations
@@ -39,6 +48,8 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
+
+from ..permissions.token_counter import estimate_prompt_tokens
 
 _log = logging.getLogger(__name__)
 
@@ -83,8 +94,28 @@ class ContextGuardPlugin(BasePlugin):
         if self._max is None:
             return None  # disabled
 
-        tokens = self._count_tokens(llm_request)
+        session_events = self._session_events(callback_context)
+        tokens = estimate_prompt_tokens(llm_request, session_events=session_events)
         ratio = tokens / self._max if self._max else 0.0
+
+        # Diagnostic-only: when DEBUG is on, also compute the
+        # litellm-based count so operators investigating an
+        # "ADK didn't compact but plugin REJECTs" / vice-versa report
+        # can see both numbers side-by-side. Threshold decisions
+        # below use the shared estimator only.
+        if _log.isEnabledFor(logging.DEBUG):
+            litellm_tokens = self._count_tokens_via_litellm(llm_request)
+            _log.debug(
+                "ContextGuardPlugin counts: shared=%d litellm=%d delta=%d",
+                tokens,
+                litellm_tokens,
+                litellm_tokens - tokens,
+                extra={
+                    "shared_estimate": tokens,
+                    "litellm_count": litellm_tokens,
+                    "delta": litellm_tokens - tokens,
+                },
+            )
 
         if tokens >= self._reject:
             session_id = self._session_id(callback_context)
@@ -108,8 +139,11 @@ class ContextGuardPlugin(BasePlugin):
 
         return None
 
-    def _count_tokens(self, llm_request: LlmRequest) -> int:
-        """Accurate token count via litellm; chars/4 fallback on failure."""
+    def _count_tokens_via_litellm(self, llm_request: LlmRequest) -> int:
+        """Per-model accurate count via litellm; chars/4 fallback on
+        failure. Used for the DEBUG comparison log line only —
+        threshold decisions use the shared estimator that agrees with
+        ADK's compaction counter."""
         messages = self._to_messages(llm_request)
         model = self._model_id(llm_request)
         try:
@@ -119,6 +153,24 @@ class ContextGuardPlugin(BasePlugin):
         except Exception:
             joined = "\n".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
             return len(joined) // 4
+
+    @staticmethod
+    def _session_events(callback_context: CallbackContext) -> list:
+        """Best-effort session-event fetch for the
+        `usage_metadata.prompt_token_count` lookup. Returns an empty
+        list when the context, session, or events are unavailable —
+        the estimator then falls straight to chars/4 over
+        llm_request.contents."""
+        try:
+            session = getattr(callback_context, "session", None)
+            if session is None:
+                return []
+            events = getattr(session, "events", None)
+            if not events:
+                return []
+            return list(events)
+        except Exception:
+            return []
 
     def _to_messages(self, llm_request: LlmRequest) -> list[dict]:
         """Flatten ADK's LlmRequest into LiteLLM-style messages."""
