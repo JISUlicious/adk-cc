@@ -53,7 +53,12 @@ from google.adk.models.lite_llm import LiteLlm
 from google.genai import types
 
 from . import prompts
+from .logging_setup import configure_logging
 from .permissions import PermissionMode, SettingsHierarchy
+
+# Apply env-driven logging config (ADK_CC_LOG_LEVEL, ADK_CC_LOG_FORMAT)
+# before any submodule logger fires. Idempotent — safe across reimports.
+configure_logging()
 from .plugins import (
     AskUserQuestionUiHintPlugin,
     AuditPlugin,
