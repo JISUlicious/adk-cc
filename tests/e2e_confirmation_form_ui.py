@@ -201,6 +201,10 @@ async def test_outbound_event_has_sentinel_name_and_schema() -> None:
     assert isinstance(schema, dict) and schema.get("type") == "object"
     # One boolean property per option (so the bundled form renders one
     # checkbox per choice — enum strings would render as a text input).
+    # The destructive-tool prompt deliberately omits a
+    # `persist_across_sessions` toggle: cross-session promotion stays
+    # behind a future designated admin UI (the mechanism in the plugin
+    # is still wired and tested in test_confirmation_form_ui.py).
     props = schema["properties"]
     assert list(props.keys()) == ["allow_once", "allow_always", "deny"], list(props)
     for key in props:

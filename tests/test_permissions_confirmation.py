@@ -43,7 +43,15 @@ from adk_cc.permissions.engine import decide
 from adk_cc.permissions.modes import PermissionMode
 from adk_cc.permissions.rules import RuleBehavior, RuleSource
 from adk_cc.permissions.settings import SettingsHierarchy
-from adk_cc.plugins.permissions import PermissionPlugin, _read_choice_id
+from adk_cc.permissions.rules import PermissionRule
+from adk_cc.plugins.permissions import (
+    PermissionPlugin,
+    _SESSION_ALLOW_STATE_KEY,
+    _USER_ALLOW_STATE_KEY,
+    _load_state_rules,
+    _read_choice_id,
+    _read_persist_toggle,
+)
 from adk_cc.tools.base import AdkCcTool, ToolMeta
 
 
@@ -317,7 +325,11 @@ def test_resume_legacy_allow_id_back_compat() -> None:
 
 def test_resume_allow_always_injects_session_rule() -> None:
     """`chose_id=allow_always` runs the tool AND appends a SESSION ALLOW
-    rule scoped to (tool_name, extracted rule key)."""
+    rule scoped to (tool_name, extracted rule key). The rule lands in
+    `state["adk_cc_allow_rules"]` (session-scope) — NOT in the
+    in-memory `SettingsHierarchy.SESSION` layer, which is intentionally
+    no longer mutated at runtime so we can store via session DB and
+    survive agent restarts."""
     settings = SettingsHierarchy()
     plugin = _make_plugin(settings)
     tool = _FakeBashTool()
@@ -332,53 +344,137 @@ def test_resume_allow_always_injects_session_rule() -> None:
     )
     # Tool runs.
     assert result is None, result
-    # Exactly one session rule was injected with the right scope.
-    rules = settings.all_rules()
-    assert len(rules) == 1, rules
-    r = rules[0]
+    # In-memory hierarchy is unchanged — runtime rules live in state now.
+    assert settings.all_rules() == []
+    # Per-session list has exactly one rule with the right scope.
+    raw = ctx.state[_SESSION_ALLOW_STATE_KEY]
+    assert isinstance(raw, list) and len(raw) == 1, raw
+    r = PermissionRule.model_validate(raw[0])
     assert r.source is RuleSource.SESSION
     assert r.behavior is RuleBehavior.ALLOW
     assert r.tool_name == "run_bash"
     assert r.rule_content == "git status"
+    # No `user:`-prefixed entry — default is per-session only.
+    assert _USER_ALLOW_STATE_KEY not in ctx.state, ctx.state
     print("OK test_resume_allow_always_injects_session_rule")
+
+
+def test_resume_allow_always_with_persist_toggle_writes_user_state() -> None:
+    """When the operator ticks the `persist_across_sessions` toggle,
+    the resulting rule is written to the `user:`-prefixed state key
+    so ADK persists it across the same user's future sessions."""
+    settings = SettingsHierarchy()
+    plugin = _make_plugin(settings)
+    tool = _FakeBashTool()
+    ctx = _FakeToolContext(
+        tool_confirmation=_FakeConfirmation(
+            payload={"chose_id": "allow_always", "persist_across_sessions": True}
+        )
+    )
+
+    result = asyncio.run(
+        plugin.before_tool_callback(
+            tool=tool, tool_args={"command": "uv run pytest"}, tool_context=ctx
+        )
+    )
+    assert result is None, result
+    # Rule landed in the user-scope key, NOT the session-scope key.
+    assert _SESSION_ALLOW_STATE_KEY not in ctx.state, ctx.state
+    raw = ctx.state[_USER_ALLOW_STATE_KEY]
+    assert isinstance(raw, list) and len(raw) == 1, raw
+    r = PermissionRule.model_validate(raw[0])
+    assert r.tool_name == "run_bash"
+    assert r.rule_content == "uv run pytest"
+    print("OK test_resume_allow_always_with_persist_toggle_writes_user_state")
 
 
 def test_allow_always_skips_re_ask_on_second_call() -> None:
     """End-to-end: after allow_always, the SAME (tool, command) is
-    auto-allowed by the engine on the next call — no second prompt."""
+    auto-allowed by the engine on the next call — no second prompt.
+
+    The state-backed rule survives because both calls share the same
+    `ToolContext.state` (the session record). A different command in
+    the same session still gates."""
     settings = SettingsHierarchy()
     plugin = _make_plugin(settings)
     tool = _FakeBashTool()
 
-    # First call: user picks allow_always.
+    # Shared state simulates a single session across two tool calls.
+    shared_state: dict = {}
+
+    # First call: user picks allow_always → rule lands in state.
     ctx1 = _FakeToolContext(
-        tool_confirmation=_FakeConfirmation(payload={"chose_id": "allow_always"})
+        tool_confirmation=_FakeConfirmation(payload={"chose_id": "allow_always"}),
+        state=shared_state,
     )
     asyncio.run(
         plugin.before_tool_callback(
             tool=tool, tool_args={"command": "git status"}, tool_context=ctx1
         )
     )
+    assert _SESSION_ALLOW_STATE_KEY in shared_state
 
-    # Second call, same command: engine sees the session rule and returns
-    # `allow` without going through the ask branch at all.
-    decision = decide(
-        tool=tool,
-        args={"command": "git status"},
-        mode=PermissionMode.DEFAULT,
-        settings=settings,
+    # Second call, same command: plugin's `_effective_settings` merges
+    # in the state-backed rule, decide returns `allow`, no re-ask.
+    ctx2 = _FakeToolContext(state=shared_state)
+    result2 = asyncio.run(
+        plugin.before_tool_callback(
+            tool=tool, tool_args={"command": "git status"}, tool_context=ctx2
+        )
     )
-    assert decision.behavior == "allow", decision
+    assert result2 is None, result2  # allowed → no override returned
 
     # Different command (not covered by the rule): still gates.
-    decision_other = decide(
-        tool=tool,
-        args={"command": "rm -rf /"},
-        mode=PermissionMode.DEFAULT,
-        settings=settings,
+    ctx3 = _FakeToolContext(state=shared_state)
+    result3 = asyncio.run(
+        plugin.before_tool_callback(
+            tool=tool, tool_args={"command": "rm -rf /"}, tool_context=ctx3
+        )
     )
-    assert decision_other.behavior == "ask", decision_other
+    assert isinstance(result3, dict), result3
+    assert result3["status"] == "needs_confirmation", result3
     print("OK test_allow_always_skips_re_ask_on_second_call")
+
+
+def test_allow_always_user_scope_survives_across_sessions() -> None:
+    """Symmetric to the per-session test but for the `user:` prefix:
+    after `allow_always` with persist=True in session A, a fresh
+    session B (different state dict, but same user — same `user:`
+    bucket) is auto-allowed.
+
+    We simulate the `user:` persistence by carrying just that key
+    forward to the second session. The session-scoped key is dropped
+    (a new session starts empty), but the user-scoped key persists
+    via ADK's State backend."""
+    settings = SettingsHierarchy()
+    plugin = _make_plugin(settings)
+    tool = _FakeBashTool()
+
+    state_a: dict = {}
+    ctx_a = _FakeToolContext(
+        tool_confirmation=_FakeConfirmation(
+            payload={"chose_id": "allow_always", "persist_across_sessions": True}
+        ),
+        state=state_a,
+    )
+    asyncio.run(
+        plugin.before_tool_callback(
+            tool=tool, tool_args={"command": "uv run pytest"}, tool_context=ctx_a
+        )
+    )
+    # Persisted under user:, not session:.
+    assert _USER_ALLOW_STATE_KEY in state_a
+
+    # New session — carry only the `user:` bucket forward.
+    state_b: dict = {_USER_ALLOW_STATE_KEY: state_a[_USER_ALLOW_STATE_KEY]}
+    ctx_b = _FakeToolContext(state=state_b)
+    result_b = asyncio.run(
+        plugin.before_tool_callback(
+            tool=tool, tool_args={"command": "uv run pytest"}, tool_context=ctx_b
+        )
+    )
+    assert result_b is None, result_b  # auto-allowed — no prompt.
+    print("OK test_allow_always_user_scope_survives_across_sessions")
 
 
 def test_resume_deny_via_payload() -> None:
@@ -434,6 +530,59 @@ def test_resume_legacy_confirmed_false() -> None:
     print("OK test_resume_legacy_confirmed_false")
 
 
+def test_read_persist_toggle_helper() -> None:
+    """True only when `payload['persist_across_sessions'] is True`;
+    everything else (missing, truthy non-bool, wrong shape) → False."""
+    # Confirmed-with-toggle.
+    yes = _FakeConfirmation(payload={"chose_id": "allow_always", "persist_across_sessions": True})
+    assert _read_persist_toggle(yes) is True
+    # Explicit False.
+    no = _FakeConfirmation(payload={"chose_id": "allow_always", "persist_across_sessions": False})
+    assert _read_persist_toggle(no) is False
+    # Missing.
+    missing = _FakeConfirmation(payload={"chose_id": "allow_always"})
+    assert _read_persist_toggle(missing) is False
+    # Truthy non-bool (string "true") — must NOT count; we require strict True.
+    truthy = _FakeConfirmation(payload={"persist_across_sessions": "true"})
+    assert _read_persist_toggle(truthy) is False
+    # Garbage payload shapes don't crash.
+    assert _read_persist_toggle(_FakeConfirmation(payload=None)) is False
+    assert _read_persist_toggle(_FakeConfirmation(payload="not a dict")) is False
+    print("OK test_read_persist_toggle_helper")
+
+
+def test_load_state_rules_helper() -> None:
+    """Pulls + deserializes rules from BOTH state keys, in (session,
+    user) order. Skips malformed entries silently."""
+    rule_s = PermissionRule(
+        source=RuleSource.SESSION, behavior=RuleBehavior.ALLOW,
+        tool_name="run_bash", rule_content="git status",
+    ).model_dump(mode="json")
+    rule_u = PermissionRule(
+        source=RuleSource.SESSION, behavior=RuleBehavior.ALLOW,
+        tool_name="run_bash", rule_content="uv run pytest",
+    ).model_dump(mode="json")
+
+    ctx = _FakeToolContext(state={
+        _SESSION_ALLOW_STATE_KEY: [rule_s, "not a dict", {"missing": "fields"}],
+        _USER_ALLOW_STATE_KEY: [rule_u],
+    })
+    out = _load_state_rules(ctx)
+    # Two valid rules; the two malformed entries are silently skipped.
+    assert len(out) == 2, out
+    assert out[0].rule_content == "git status"  # session first
+    assert out[1].rule_content == "uv run pytest"  # then user
+
+    # Missing keys → empty.
+    empty_ctx = _FakeToolContext(state={})
+    assert _load_state_rules(empty_ctx) == []
+
+    # Non-list values → ignored, not crashed.
+    bad_ctx = _FakeToolContext(state={_SESSION_ALLOW_STATE_KEY: "not a list"})
+    assert _load_state_rules(bad_ctx) == []
+    print("OK test_load_state_rules_helper")
+
+
 def test_resume_malformed_payload_falls_back() -> None:
     """Garbage `chose_id` doesn't crash.
 
@@ -486,7 +635,11 @@ def main() -> None:
     test_resume_allow_once_runs_tool_no_session_rule()
     test_resume_legacy_allow_id_back_compat()
     test_resume_allow_always_injects_session_rule()
+    test_resume_allow_always_with_persist_toggle_writes_user_state()
     test_allow_always_skips_re_ask_on_second_call()
+    test_allow_always_user_scope_survives_across_sessions()
+    test_read_persist_toggle_helper()
+    test_load_state_rules_helper()
     test_resume_deny_via_payload()
     test_resume_legacy_confirmed_true()
     test_resume_legacy_confirmed_false()
