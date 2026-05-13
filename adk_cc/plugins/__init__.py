@@ -5,6 +5,7 @@ from .context_guard import ContextGuardPlugin
 from .model_io_trace import ModelIOTracePlugin
 from .permissions import PermissionPlugin
 from .plan_mode import PlanModeReminderPlugin
+from .project_context import ProjectContextPlugin
 from .quotas import QuotaPlugin
 # session_retry has no exports; importing it triggers the optional
 # retry-on-stale patch on ADK's session services.
@@ -20,6 +21,7 @@ __all__ = [
     "ModelIOTracePlugin",
     "PermissionPlugin",
     "PlanModeReminderPlugin",
+    "ProjectContextPlugin",
     "QuotaPlugin",
     "TaskReminderPlugin",
     "ToolCallValidatorPlugin",

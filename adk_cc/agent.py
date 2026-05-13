@@ -63,6 +63,7 @@ from .plugins import (
     AskUserQuestionUiHintPlugin,
     AuditPlugin,
     ModelIOTracePlugin,
+    ProjectContextPlugin,
     ConfirmationFormUiPlugin,
     ContextGuardPlugin,
     PermissionPlugin,
@@ -679,12 +680,6 @@ _app_kwargs = dict(
     # written by then.
     plugins=[
         AuditPlugin(),
-        # Raw model request/response trace for debugging model behavior.
-        # Always registered; the plugin no-ops when `ADK_CC_LOG_MODEL_IO`
-        # isn't `1`, so the per-turn cost is a single attribute check.
-        # When enabled: DEBUG log line + `model_request`/`model_response`
-        # audit events (when AuditPlugin's sink is also configured).
-        ModelIOTracePlugin(),
         PermissionPlugin(SETTINGS, default_mode=PERMISSION_MODE),
         # Reminders run on before_model_callback, lifecycle independent of
         # the before_tool chain — order relative to others doesn't matter.
@@ -697,6 +692,14 @@ _app_kwargs = dict(
         # PermissionPlugin gates write/exec because IT correctly falls
         # back to its default. The result is a deadlock: write tools
         # blocked, no way to exit plan mode.
+        # Auto-loads CLAUDE.md / .adk-cc/CONTEXT.md (project, tenant,
+        # user, operator-extras) into the system_instruction. MUST
+        # run BEFORE the reminder plugins below so the prepend lands
+        # at the top of the system message and per-turn reminders
+        # (plan mode, active tasks) append after — most-stable info
+        # first, turn-volatile info last. Plugin no-ops when no
+        # discoverable files exist OR when ADK_CC_DISABLE_PROJECT_CONTEXT=1.
+        ProjectContextPlugin(),
         PlanModeReminderPlugin(default_mode=PERMISSION_MODE.value),
         TaskReminderPlugin(default_mode=PERMISSION_MODE.value),
         # Catches "tool not found" errors from ADK's tool dispatch and
@@ -720,6 +723,19 @@ _app_kwargs = dict(
         # REJECT at 95%. ADK's EventsCompactionConfig (set above) is
         # the primary defense; this is the fail-soft safety net.
         ContextGuardPlugin(),
+        # Raw model request/response trace for debugging model behavior.
+        # Always registered; the plugin no-ops when `ADK_CC_LOG_MODEL_IO`
+        # isn't `1`, so the per-turn cost is a single attribute check.
+        # When enabled: DEBUG log line + `model_request`/`model_response`
+        # audit events (when AuditPlugin's sink is also configured).
+        # Placed at the END so before_model_callback captures the
+        # FINAL LlmRequest (after ProjectContextPlugin, the reminder
+        # plugins, and ContextGuardPlugin have all run). Without
+        # this ordering the trace would miss prepended / appended
+        # additions — misleading for "what did the model see?"
+        # debugging. ContextGuard rejecting short-circuits, so the
+        # trace only logs requests that actually went to the model.
+        ModelIOTracePlugin(),
     ],
 )
 if _compaction_config is not None:
