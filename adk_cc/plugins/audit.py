@@ -30,6 +30,9 @@ Postgres / DataDog / SQS write a callable that takes the event dict.
   - `compaction_triggered`  — before LlmEventSummarizer fires
   - `compaction_success`    — summarizer returned a non-None event
   - `compaction_failure`    — summarizer returned None / raised / timed out
+  - `project_context_loaded`— CLAUDE.md / CONTEXT.md files loaded into
+                              the system_instruction (first load + on
+                              every mtime drift)
 
 Events beyond the first three are emitted from inside other plugins /
 tools / wrappers via the module-level `emit_audit_event` helper. The
