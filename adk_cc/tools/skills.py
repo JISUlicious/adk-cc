@@ -9,11 +9,39 @@ ADK ships:
   - `google.adk.tools.skill_toolset.SkillToolset(skills, code_executor=...,
     script_timeout=300, additional_tools=...)`
 
-This module discovers skills under a directory (default:
-`adk_cc/skills/` if it exists, else nothing), loads them, and returns a
-`SkillToolset` with a lenient `load_skill_resource` that adds a
-filesystem-scan fallback for skills that don't strictly follow the
-references/scripts/assets layout.
+This module discovers skills from MULTIPLE directories, in priority
+order, and returns a `SkillToolset` with a lenient
+`load_skill_resource` that adds a filesystem-scan fallback for
+skills that don't strictly follow the references/scripts/assets
+layout.
+
+## Discovery precedence
+
+`_resolve_skills_dirs()` returns an ordered list. When the same
+skill name appears in multiple dirs, the FIRST discovered wins
+(higher-precedence source overrides lower).
+
+  1. **`ADK_CC_SKILLS_DIR`** (operator explicit) — if set and the
+     dir exists, included first.
+  2. **Project walk-up** (cwd up to home / filesystem root):
+       - Per directory, ONE OF (priority order):
+         `.adk-cc/skills/`, `.claude/skills/`. First existing wins
+         for that dir.
+       - Skipped entirely when `ADK_CC_DISABLE_PROJECT_SKILLS=1`.
+  3. **Install fallback** `<install>/adk_cc/skills/` — the dir
+     co-located with the agent module, used when no env var / no
+     project skills are discovered.
+
+Why the pick-one rule for `.adk-cc/skills` vs `.claude/skills`:
+projects adopting both conventions would otherwise double-register
+the same skills (same SKILL.md files copied or symlinked). Picking
+one per directory keeps the tool surface clean; `.adk-cc/skills/`
+wins so adk-cc-specific overrides take precedence over generic
+Claude Code skills in mixed projects.
+
+Mirrors the file-discovery + per-dir pick-one rule from
+`ProjectContextPlugin` (PR #24) — same precedence shape for
+CLAUDE.md / AGENTS.md.
 
 Why the lenient tool: ADK's stock `LoadSkillResourceTool` only resolves
 paths starting with `references/`, `assets/`, or `scripts/`. Anthropic's
@@ -52,26 +80,145 @@ from google.adk.tools.tool_context import ToolContext
 _log = logging.getLogger(__name__)
 
 
-def _default_skills_dir() -> Optional[Path]:
+# Per-directory pick-one rule. Walk-up checks these in priority order;
+# the first existing subdir for a given walked dir is added, the other
+# is skipped. `.adk-cc/skills/` wins so adk-cc-specific overrides take
+# precedence over generic Claude Code skills when both are present.
+_PROJECT_SKILLS_PICK_ONE = (".adk-cc/skills", ".claude/skills")
+
+
+def _resolve_skills_dirs() -> list[Path]:
+    """Ordered list of skills directories to scan. First-found skill
+    name wins across all returned dirs.
+
+    Order:
+      1. `ADK_CC_SKILLS_DIR` (operator explicit, highest precedence).
+      2. Project walk-up (`.adk-cc/skills/` or `.claude/skills/` per
+         directory, walked from cwd up to home / filesystem root).
+         Skipped entirely when `ADK_CC_DISABLE_PROJECT_SKILLS=1`.
+      3. Install fallback `<install>/adk_cc/skills/`.
+
+    Each dir is included at most once (dedup by resolved path). A dir
+    that doesn't exist or isn't a directory is silently dropped.
+    """
+    dirs: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(p: Path) -> None:
+        try:
+            resolved = p.resolve()
+        except OSError:
+            return
+        if resolved in seen:
+            return
+        if not _is_dir_silently(resolved):
+            return
+        seen.add(resolved)
+        dirs.append(resolved)
+
+    # 1. Operator-explicit env var.
     raw = os.environ.get("ADK_CC_SKILLS_DIR")
     if raw:
-        p = Path(raw).expanduser().resolve()
-        return p if p.is_dir() else None
-    # Fallback: an `skills/` folder co-located with the agent module.
+        _add(Path(raw).expanduser())
+
+    # 2. Project walk-up — unless opted out.
+    if os.environ.get("ADK_CC_DISABLE_PROJECT_SKILLS", "").strip() != "1":
+        try:
+            cwd = Path.cwd().resolve()
+        except OSError:
+            cwd = None
+        if cwd is not None:
+            home = Path.home()
+            cursor = cwd
+            while True:
+                for sub in _PROJECT_SKILLS_PICK_ONE:
+                    candidate = cursor / sub
+                    if _is_dir_silently(candidate):
+                        _add(candidate)
+                        break  # pick-one per directory
+                if cursor == home or cursor == cursor.parent:
+                    break
+                cursor = cursor.parent
+
+    # 3. Install fallback.
     here = Path(__file__).resolve().parent.parent / "skills"
-    return here if here.is_dir() else None
+    _add(here)
+
+    return dirs
+
+
+def _is_dir_silently(p: Path) -> bool:
+    """`Path.is_dir()` swallowing OSError — same defensive pattern as
+    `ProjectContextPlugin._exists_silently`."""
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
 
 
 def discover_skills(skills_dir: Optional[Path] = None) -> list[Skill]:
-    """Load every skill under skills_dir. Empty list if no dir or no skills."""
-    base = skills_dir if skills_dir is not None else _default_skills_dir()
-    if base is None:
-        return []
-    out: list[Skill] = []
-    for name in list_skills_in_dir(base).keys():
-        skill_dir = base / name
+    """Load every skill under skills_dir. Empty list if no dir or no
+    skills.
+
+    Backward-compat: when `skills_dir` is None and there are no
+    discoverable dirs (no env var, no project walk hits, no install
+    fallback), returns []. Callers wanting the multi-dir aggregated
+    flow with skill→dir pairs should use
+    `discover_skills_with_sources` directly.
+    """
+    if skills_dir is not None:
+        return [s for s, _ in _load_skills_from_dir(skills_dir)]
+    return [s for s, _ in discover_skills_with_sources()]
+
+
+def discover_skills_with_sources(
+    skills_dirs: Optional[list[Path]] = None,
+) -> list[tuple[Skill, Path]]:
+    """Aggregate skills across all resolved dirs. Returns
+    `(skill, source_dir)` pairs so the lenient resource-loader can
+    map each skill to its actual on-disk location regardless of
+    which root it came from.
+
+    Dedup by skill name: first-discovered wins. With the default
+    resolution order, that means `ADK_CC_SKILLS_DIR` overrides
+    project skills, which override install-fallback skills.
+    """
+    dirs = skills_dirs if skills_dirs is not None else _resolve_skills_dirs()
+    seen_names: set[str] = set()
+    out: list[tuple[Skill, Path]] = []
+    for base in dirs:
+        for skill, skill_dir in _load_skills_from_dir(base):
+            try:
+                name = skill.frontmatter.name
+            except Exception:
+                continue
+            if name in seen_names:
+                _log.info(
+                    "skills: '%s' from %s shadowed by earlier source",
+                    name,
+                    skill_dir,
+                )
+                continue
+            seen_names.add(name)
+            out.append((skill, skill_dir))
+    return out
+
+
+def _load_skills_from_dir(base: Path) -> list[tuple[Skill, Path]]:
+    """Load every skill under one directory. Returns (skill, dir)
+    pairs so callers can build a name→path index across multiple
+    sources."""
+    out: list[tuple[Skill, Path]] = []
+    if not _is_dir_silently(base):
+        return out
+    try:
+        names = list(list_skills_in_dir(base).keys())
+    except Exception:
+        return out
+    for name in names:
+        skill_dir = (base / name).resolve()
         try:
-            out.append(load_skill_from_dir(skill_dir))
+            out.append((load_skill_from_dir(skill_dir), skill_dir))
         except Exception:
             # Skip malformed skills rather than refusing to start.
             continue
@@ -79,32 +226,25 @@ def discover_skills(skills_dir: Optional[Path] = None) -> list[Skill]:
 
 
 def _build_skill_dir_index(
-    skills: list[Skill], base: Optional[Path]
+    skills_with_sources: list[tuple[Skill, Path]],
 ) -> dict[str, str]:
     """Map skill_name → absolute on-disk skill directory.
 
-    Used by `_LenientLoadSkillResourceTool` to scan the real filesystem
-    when ADK's strict path lookup misses. Skipped silently if `base`
-    can't be resolved (e.g. tests with synthesized Skill objects).
+    Used by `_LenientLoadSkillResourceTool` to scan the real
+    filesystem when ADK's strict path lookup misses. Driven by the
+    `(skill, source_dir)` pairs from `discover_skills_with_sources`
+    so each skill points at its actual root regardless of which
+    discovery source contributed it.
     """
-    if base is None:
-        return {}
-    base_resolved = Path(base).resolve()
     out: dict[str, str] = {}
-    for skill in skills:
+    for skill, skill_dir in skills_with_sources:
         try:
             name = skill.frontmatter.name
         except Exception:
             continue
-        candidate = (base_resolved / name).resolve()
-        # Don't index a path outside the skills root — defense-in-depth
-        # against pathologically named skills.
-        try:
-            candidate.relative_to(base_resolved)
-        except ValueError:
+        if not skill_dir.is_dir():
             continue
-        if candidate.is_dir():
-            out[name] = str(candidate)
+        out[name] = str(skill_dir.resolve())
     return out
 
 
@@ -255,15 +395,22 @@ def make_skill_toolset(
     code_executor: Optional[BaseCodeExecutor] = None,
     script_timeout: int = 300,
 ) -> Optional[SkillToolset]:
-    """Build a SkillToolset from a directory of skills, or None if empty.
+    """Build a SkillToolset from discovered skills, or None if empty.
 
-    Returning None lets `agent.py` skip adding the toolset entirely when
-    no skills are configured — keeps the coordinator's tool surface
-    deterministic in the empty case.
+    With `skills_dir=None`, runs the full multi-source aggregation
+    (`_resolve_skills_dirs()` → operator env var, project walk-up,
+    install fallback). With `skills_dir=<Path>`, scans only that
+    one directory — backward-compat for tests passing a fixed dir.
+
+    Returning None lets `agent.py` skip adding the toolset entirely
+    when no skills are configured — keeps the coordinator's tool
+    surface deterministic in the empty case.
     """
-    base = skills_dir if skills_dir is not None else _default_skills_dir()
-    skills = discover_skills(base)
-    if not skills:
+    if skills_dir is not None:
+        pairs = _load_skills_from_dir(skills_dir)
+    else:
+        pairs = discover_skills_with_sources()
+    if not pairs:
         return None
     if code_executor is None:
         # Lazy import keeps `tools/skills.py` importable in tests that
@@ -273,9 +420,9 @@ def make_skill_toolset(
 
         code_executor = SandboxBackedCodeExecutor()
     toolset = SkillToolset(
-        skills=skills,
+        skills=[s for s, _ in pairs],
         code_executor=code_executor,
         script_timeout=script_timeout,
     )
-    _patch_load_skill_resource(toolset, _build_skill_dir_index(skills, base))
+    _patch_load_skill_resource(toolset, _build_skill_dir_index(pairs))
     return toolset
