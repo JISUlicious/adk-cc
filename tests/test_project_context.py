@@ -161,8 +161,10 @@ def test_walks_up_to_parent_dirs() -> None:
 
 
 def test_both_files_in_same_dir_both_loaded() -> None:
-    """CLAUDE.md AND .adk-cc/CONTEXT.md in the same dir → both loaded,
-    CLAUDE.md first (per `_PROJECT_FILENAMES` order)."""
+    """CLAUDE.md AND .adk-cc/CONTEXT.md in the same dir → both loaded.
+    They're at different paths and represent different concerns
+    (upstream-compatible vs adk-cc-namespaced); the "pick one" rule
+    only applies between CLAUDE.md and AGENTS.md (same path)."""
     with tempfile.TemporaryDirectory() as tmp:
         (Path(tmp) / "CLAUDE.md").write_text("CLAUDE-named content")
         (Path(tmp) / ".adk-cc").mkdir()
@@ -180,6 +182,100 @@ def test_both_files_in_same_dir_both_loaded() -> None:
         assert "ADK-CC-named content" in si
         assert si.index("CLAUDE-named content") < si.index("ADK-CC-named content")
     print("OK test_both_files_in_same_dir_both_loaded")
+
+
+# --- AGENTS.md compatibility (pick-one rule) ----------------------
+
+
+def test_agents_md_loaded_when_no_claude_md() -> None:
+    """A project with only AGENTS.md (no CLAUDE.md) → AGENTS.md is
+    picked up at the same project-walk path."""
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "AGENTS.md").write_text("vendor-neutral agent guide")
+        old_cwd = os.getcwd()
+        os.chdir(tmp)
+        try:
+            plugin = ProjectContextPlugin()
+            req = _build_req()
+            _run(plugin, _FakeCallbackContext(), req)
+        finally:
+            os.chdir(old_cwd)
+        assert "vendor-neutral agent guide" in req.config.system_instruction
+    print("OK test_agents_md_loaded_when_no_claude_md")
+
+
+def test_claude_md_priority_over_agents_md_in_same_dir() -> None:
+    """When BOTH CLAUDE.md and AGENTS.md exist in the same dir, only
+    CLAUDE.md is loaded (priority rule). The constraint: never load
+    both — they'd double-count and the prompt would carry
+    conflicting / overlapping context."""
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "CLAUDE.md").write_text("CLAUDE conventions")
+        (Path(tmp) / "AGENTS.md").write_text("AGENTS conventions")
+        old_cwd = os.getcwd()
+        os.chdir(tmp)
+        try:
+            plugin = ProjectContextPlugin()
+            req = _build_req()
+            _run(plugin, _FakeCallbackContext(), req)
+        finally:
+            os.chdir(old_cwd)
+        si = req.config.system_instruction
+        assert "CLAUDE conventions" in si
+        assert "AGENTS conventions" not in si
+    print("OK test_claude_md_priority_over_agents_md_in_same_dir")
+
+
+def test_pick_one_is_per_directory() -> None:
+    """The pick-one rule applies PER DIRECTORY. Parent has only
+    AGENTS.md; child has only CLAUDE.md → child loads CLAUDE.md AND
+    parent loads AGENTS.md. Different dirs, independent decisions."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        (root / "AGENTS.md").write_text("parent vendor-neutral guide")
+        child = root / "sub"
+        child.mkdir()
+        (child / "CLAUDE.md").write_text("child-specific CLAUDE notes")
+        old_cwd = os.getcwd()
+        os.chdir(child)
+        try:
+            plugin = ProjectContextPlugin()
+            req = _build_req()
+            _run(plugin, _FakeCallbackContext(), req)
+        finally:
+            os.chdir(old_cwd)
+        si = req.config.system_instruction
+        # Both dirs contributed via the per-dir pick.
+        assert "child-specific CLAUDE notes" in si
+        assert "parent vendor-neutral guide" in si
+        # Child (CLAUDE.md) appears first — discovered first in the walk.
+        assert si.index("child-specific") < si.index("parent vendor-neutral")
+    print("OK test_pick_one_is_per_directory")
+
+
+def test_user_level_agents_md_picked_when_no_claude() -> None:
+    """User-level pick-one: when `~/.claude/CLAUDE.md` is absent but
+    `~/.agents/AGENTS.md` exists, AGENTS.md is loaded. Verified by
+    redirecting HOME to a temp dir and seeding only AGENTS.md."""
+    with tempfile.TemporaryDirectory() as fake_home:
+        agents_dir = Path(fake_home) / ".agents"
+        agents_dir.mkdir()
+        (agents_dir / "AGENTS.md").write_text("user-level agent guide")
+        with patch.dict(os.environ, {"HOME": fake_home}):
+            # CWD also under fake_home so the project walk doesn't
+            # find unrelated CLAUDE.md anywhere.
+            cwd_dir = Path(fake_home) / "proj"
+            cwd_dir.mkdir()
+            old_cwd = os.getcwd()
+            os.chdir(cwd_dir)
+            try:
+                plugin = ProjectContextPlugin()
+                req = _build_req()
+                _run(plugin, _FakeCallbackContext(), req)
+            finally:
+                os.chdir(old_cwd)
+        assert "user-level agent guide" in req.config.system_instruction
+    print("OK test_user_level_agents_md_picked_when_no_claude")
 
 
 # --- Multi-tenant -------------------------------------------------
@@ -530,6 +626,10 @@ def main() -> None:
     test_adk_cc_context_md_in_cwd_is_loaded()
     test_walks_up_to_parent_dirs()
     test_both_files_in_same_dir_both_loaded()
+    test_agents_md_loaded_when_no_claude_md()
+    test_claude_md_priority_over_agents_md_in_same_dir()
+    test_pick_one_is_per_directory()
+    test_user_level_agents_md_picked_when_no_claude()
     test_tenant_context_paths_resolved()
     test_no_tenant_context_skips_tenant_paths_silently()
     test_operator_extras_appended()

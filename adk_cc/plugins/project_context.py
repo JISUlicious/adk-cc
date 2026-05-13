@@ -12,17 +12,30 @@ The plugin loads files in this order (top-to-bottom in the final
 system_instruction — most project-specific first):
 
   1. Project (walked up from cwd until home or `/`):
-       - `<dir>/CLAUDE.md`          (upstream-compatible name)
-       - `<dir>/.adk-cc/CONTEXT.md` (adk-cc-namespaced)
+       - Per directory, ONE OF (priority order): `CLAUDE.md`,
+         `AGENTS.md`. First existing wins — CLAUDE.md takes priority
+         over AGENTS.md when both are present in the same dir so
+         operators with the upstream-Claude-Code file get the
+         existing behavior unchanged.
+       - PLUS (always, independent): `<dir>/.adk-cc/CONTEXT.md` —
+         adk-cc-namespaced layer; different path, different concern.
   2. Tenant (multi-tenant deploys only; reads `temp:tenant_context`
      from state which `TenancyPlugin` populates):
        - `<tenant_workspace_root>/CONTEXT.md`
        - `<tenant_workspace_root>/<user_id>/CONTEXT.md`
   3. User:
        - `~/.adk-cc/CONTEXT.md`
-       - `~/.claude/CLAUDE.md`
+       - ONE OF (priority order): `~/.claude/CLAUDE.md`,
+         `~/.agents/AGENTS.md`.
   4. Operator extras (absolute paths only):
        - `ADK_CC_CONTEXT_FILES=/path/a,/path/b`
+
+Why the pick-one rule for CLAUDE.md / AGENTS.md: projects that
+adopt both conventions (Claude Code + the vendor-neutral AGENTS.md
+spec) would otherwise have their context double-counted in every
+turn. Picking one per directory keeps the prompt clean; the priority
+order (`CLAUDE.md` first) means existing CLAUDE.md projects don't
+change behavior when AGENTS.md support lands.
 
 Missing / empty files are silently skipped. Files exceeding the
 per-file byte cap (`ADK_CC_CONTEXT_MAX_BYTES`, default 50000) are
@@ -81,14 +94,25 @@ from .audit import AuditPlugin, emit_audit_event
 
 _log = logging.getLogger(__name__)
 
-# Files we look for when walking the project tree. Order matters
-# only when both exist in the same dir — CLAUDE.md surfaces first
-# (upstream-compatible name; operators familiar with Claude Code see
-# it picked up exactly the same way).
-_PROJECT_FILENAMES = ("CLAUDE.md", ".adk-cc/CONTEXT.md")
+# Per project directory, exactly ONE of these is loaded — the first
+# existing wins. `CLAUDE.md` takes priority over `AGENTS.md` so
+# Claude Code projects already using the upstream convention see no
+# behavior change.
+_PROJECT_PICK_ONE_FILENAMES = ("CLAUDE.md", "AGENTS.md")
 
-# User-level files.
-_USER_FILENAMES = ("~/.adk-cc/CONTEXT.md", "~/.claude/CLAUDE.md")
+# Always-loaded adk-cc-namespaced project file. Loaded independently
+# from the pick-one above — different path (`.adk-cc/CONTEXT.md`),
+# different concern (adk-cc-specific notes layered on top of generic
+# CLAUDE.md / AGENTS.md). An operator using both gets both.
+_PROJECT_ADDITIONAL_FILENAMES = (".adk-cc/CONTEXT.md",)
+
+# Always-loaded user-level files.
+_USER_ALWAYS_FILENAMES = ("~/.adk-cc/CONTEXT.md",)
+
+# Per user-level location, ONE OF these — same priority rule as
+# project. `~/.claude/CLAUDE.md` takes priority over
+# `~/.agents/AGENTS.md` for the same reason as the project pair.
+_USER_PICK_ONE_FILENAMES = ("~/.claude/CLAUDE.md", "~/.agents/AGENTS.md")
 
 _DEFAULT_MAX_BYTES = 50_000
 
@@ -142,26 +166,33 @@ class ProjectContextPlugin(BasePlugin):
         """Ordered list of candidate paths to try (top of returned
         list = top of context block in system_instruction).
 
-        Includes paths that don't exist on disk — `_load_all` skips
-        missing files silently. We resolve here without statting so
-        a missing file becoming present mid-session is picked up on
-        the next turn.
+        Per-directory pick-one rule applies for the
+        `CLAUDE.md`/`AGENTS.md` pair (and the user-level
+        `~/.claude/CLAUDE.md`/`~/.agents/AGENTS.md` pair) — that
+        decision requires statting, so we do it inline. The
+        `.adk-cc/CONTEXT.md` track is added unconditionally and
+        `_load_all` handles missing files silently.
         """
         out: list[Path] = []
 
         # 1. Project — walk up from cwd until home dir or filesystem root.
         cwd = Path.cwd()
         home = Path.home()
-        seen_project: set[Path] = set()
         cursor = cwd.resolve()
         # Cap the walk at the home dir AND at the filesystem root to
         # avoid scanning /etc, /var, etc on weird CWDs.
         while True:
-            for filename in _PROJECT_FILENAMES:
+            # Per dir, ONE OF (CLAUDE.md, AGENTS.md) — first existing wins.
+            for filename in _PROJECT_PICK_ONE_FILENAMES:
                 candidate = (cursor / filename).resolve()
-                if candidate not in seen_project:
+                if _exists_silently(candidate):
                     out.append(candidate)
-                    seen_project.add(candidate)
+                    break
+            # PLUS (always) the adk-cc-namespaced file. Separate path,
+            # separate concern from the pick-one above.
+            for filename in _PROJECT_ADDITIONAL_FILENAMES:
+                candidate = (cursor / filename).resolve()
+                out.append(candidate)
             if cursor == home or cursor == cursor.parent:
                 break
             cursor = cursor.parent
@@ -171,8 +202,13 @@ class ProjectContextPlugin(BasePlugin):
         out.extend(tenant_paths)
 
         # 3. User-level.
-        for raw in _USER_FILENAMES:
+        for raw in _USER_ALWAYS_FILENAMES:
             out.append(Path(os.path.expanduser(raw)))
+        for raw in _USER_PICK_ONE_FILENAMES:
+            candidate = Path(os.path.expanduser(raw))
+            if _exists_silently(candidate):
+                out.append(candidate)
+                break
 
         # 4. Operator-specified extras.
         out.extend(self._extra_paths)
@@ -311,6 +347,16 @@ def _prepend_to_system_instruction(req: LlmRequest, text: str) -> None:
             # Defensive — corrupted shape; leave it alone rather than
             # crash the turn.
             pass
+
+
+def _exists_silently(path: Path) -> bool:
+    """`Path.is_file()` swallowing OSError. Permission errors / dead
+    symlinks / unreadable parent dirs all collapse to False so a
+    weird filesystem entry can never crash the turn."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
 
 
 def _tenant_paths(ctx: CallbackContext) -> list[Path]:
