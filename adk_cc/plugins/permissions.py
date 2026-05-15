@@ -24,7 +24,7 @@ Behavior:
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.tools.base_tool import BaseTool
@@ -41,8 +41,24 @@ from ..permissions.rules import (
     RuleSource,
 )
 from ..permissions.settings import SettingsHierarchy
-from ..tools.base import AdkCcTool
 from .audit import emit_confirmation_resume, emit_state_mutation
+
+# `AdkCcTool` is imported LAZILY inside `before_tool_callback` rather
+# than at module-load. Reasons:
+#
+#   1. Plugin tool-independence invariant — operators wiring a bare
+#      LlmAgent without the adk_cc.tools package should still be able
+#      to register PermissionPlugin (it'd no-op on tool callbacks
+#      since no AdkCcTool instances reach it, but the agent boots).
+#   2. Circular-import safety — `adk_cc.tools.base.AdkCcTool` doesn't
+#      depend on `permissions`, but the symmetry across plugins (audit
+#      also defers its AdkCcTool import) avoids reintroducing the
+#      cycle if `tools.base` ever grows a back-reference.
+#
+# `TYPE_CHECKING` guard keeps the symbol available to type checkers
+# without paying the runtime import cost.
+if TYPE_CHECKING:
+    from ..tools.base import AdkCcTool
 
 _log = logging.getLogger(__name__)
 
@@ -127,6 +143,16 @@ class PermissionPlugin(BasePlugin):
         tool_args: dict[str, Any],
         tool_context: ToolContext,
     ) -> Optional[dict]:
+        # Deferred AdkCcTool import — see module-top NOTE on the
+        # plugin tool-independence invariant. When `adk_cc.tools`
+        # isn't installed (bare-agent deployments), this import
+        # fails ImportError and we pass through any incoming
+        # BaseTool unchanged. PermissionPlugin then no-ops on
+        # tool callbacks but stays loadable.
+        try:
+            from ..tools.base import AdkCcTool
+        except ImportError:
+            return None
         if not isinstance(tool, AdkCcTool):
             return None
 
