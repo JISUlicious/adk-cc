@@ -56,12 +56,53 @@ Run:
 .venv/bin/python examples/bare_agent_with_skills.py
 ```
 
-## Regression test
+## data_workflow.py
 
-`tests/test_bare_agent_setup.py` boots both demos via subprocess and
-asserts the expected audit events landed. Run it as part of the unit
-sweep:
+A 5-step filter/sort/summarize pipeline driven by a scripted LLM
+over five plain-ADK `FunctionTool`s. No `adk_cc.tools.*` imports
+— the workflow is hosted entirely on the bare-agent chassis.
+
+Tools (state-threaded via `tool_context.state['temp:employees']`):
+
+  1. `load_employees()` — seeds a 6-row dataset.
+  2. `filter_by_department(department)` — keeps matching rows.
+  3. `filter_by_min_salary(min_salary)` — keeps rows above floor.
+  4. `sort_by_salary(descending)` — sorts in place.
+  5. `summarize_salary(operation)` — count/avg/min/max/sum.
+
+User prompt:
+
+> Find the average salary of engineering employees earning at least
+> $90k, sorted from highest to lowest.
+
+What you should see in the output:
+
+  - `--- TOOL CALL TRAIL ---` listing the 5 `ATTEMPT` / `RESULT`
+    pairs in scripted order, each with `status=ok`.
+  - `--- AUDIT JSONL EVENT TYPES ---` showing
+    `tool_call_attempt: 5`, `tool_call_result: 5`,
+    `model_request: 6`, `model_response: 6`,
+    `project_context_loaded: 1`.
+  - `--- FINAL MODEL TEXT ---` with the agent's plain-text summary.
+
+Run:
+
+```
+.venv/bin/python examples/data_workflow.py
+```
+
+## Regression tests
+
+  - `tests/test_bare_agent_setup.py` — subprocess-boots
+    `bare_agent.py` + `bare_agent_with_skills.py`, asserts plugin
+    chain fires and expected audit events land.
+  - `tests/test_data_workflow.py` — subprocess-boots
+    `data_workflow.py`, asserts the exact tool sequence
+    (ATTEMPT/RESULT interleave) and the exact audit-event counts.
+
+Run both:
 
 ```
 .venv/bin/python tests/test_bare_agent_setup.py
+.venv/bin/python tests/test_data_workflow.py
 ```
