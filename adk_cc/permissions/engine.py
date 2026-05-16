@@ -127,23 +127,14 @@ def _decide_impl(
             reason=f"denied by {deny.source.value} rule",
         )
 
-    # Step 2a: PLAN mode blocks destructive tools.
-    #
-    # Originally this gated `not is_read_only`, but on the
-    # data-science branch the non-read-only tools are loop
-    # bookkeeping (`record_plan`, `mark_step_done`) that MUST fire
-    # while planning. The check is now scoped to genuinely
-    # destructive ops via the explicit `is_destructive` meta flag.
-    # On this branch no tool sets `is_destructive=True`, so PLAN
-    # mode is effectively a no-op here; the actual plan-stage
-    # discipline lives in `StageGuardPlugin`. Future destructive
-    # additions (e.g. a hypothetical `drop_dataset`) would be
-    # gated correctly without code change.
-    if mode is PermissionMode.PLAN and tool.meta.is_destructive:
-        return PermissionDecision(
-            behavior="deny",
-            reason=f"{tool_name} is blocked in plan mode",
-        )
+    # NOTE: the engine used to have a Step 2a here that blocked
+    # tools in `PermissionMode.PLAN`. That made sense for the old
+    # codebase, where PLAN mode meant "hide write/exec tools while
+    # planning." On the data-science branch loop discipline lives
+    # in `StageGuardPlugin` (nudge-only now), and the destructive
+    # ops the engine would gate don't exist on this branch. The
+    # PLAN enum value remains for env-var back-compat — it just
+    # falls through to DEFAULT semantics from here.
 
     # Step 2b: BYPASS skips the rest (the only gate is the deny check above).
     if mode is PermissionMode.BYPASS_PERMISSIONS:

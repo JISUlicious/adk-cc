@@ -1,5 +1,5 @@
-"""Stage-guard plugin — nudges and (selectively) enforces the
-explore → plan → act → verify loop on the coordinator.
+"""Stage-guard plugin — nudges the coordinator through the
+explore → plan → act → verify loop. Soft nudge only; no hard gates.
 
 How the loop is tracked
 -----------------------
@@ -12,8 +12,8 @@ The plugin uses three signals to decide stage transitions and the
 nudge content:
 
   - **Tool stage tags.** Every tool exposed by the data-science agent
-    sets `cls.stage: ClassVar[str]`. `before_tool_callback` reads it
-    to know which loop phase a call belongs to.
+    sets `cls.stage: ClassVar[str]`. `after_tool_callback` reads it
+    to decide whether the just-fired call should advance the stage.
   - **Plan presence + completion.** `state["temp:loop_plan"]` is a
     list of `{step, status, evidence}` dicts written by
     `record_plan` and updated by `mark_step_done`.
@@ -26,24 +26,14 @@ Nudges (soft, `before_model_callback`)
 
 A short `<stage-nudge>` block is prepended to `system_instruction`
 each turn, telling the model where in the loop we are and what's
-acceptable next. The nudges accumulate AS THE STAGE CHANGES — they
-don't force any specific tool, just remind the model of the rule.
+acceptable next. Pure advisory — nothing is blocked.
 
-Enforcement (hard, `before_tool_callback`)
-------------------------------------------
-
-Two rules are STRICTLY enforced (returning a non-None tool result so
-ADK skips the actual tool invocation):
-
-  1. `verify_completion` cannot run before a plan has been recorded
-     AND every plan step is `status=done`. The verifier itself
-     redundantly rule-checks these — but the guard refuses to invoke
-     it at all, so the model gets a clearer "you skipped the loop"
-     signal in the audit trail.
-  2. Acting tools cannot run before a plan is recorded. This catches
-     the common LLM mistake of jumping straight to `aggregate_dataset`
-     after a single `describe_dataset`. Explore tools always work;
-     the agent can revisit explore at any time.
+The contract that REAL enforcement happens IS still meaningful, but
+it lives inside `verify_completion` itself — that tool's rule check
+(plan recorded, every step status=done with evidence, ≥1 acting
+result, conclusion non-empty) plus the LLM judgment decide PASS /
+FAIL. If the model tries to verify prematurely, the verifier
+returns FAIL and the loop continues; we don't refuse the call.
 
 Stage transitions on `after_tool_callback`
 ------------------------------------------
@@ -66,7 +56,6 @@ it was. The nudge text simply notes that re-exploration is fine.
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any, Optional
 
@@ -80,19 +69,8 @@ from google.genai import types
 
 from .audit import emit_audit_event, is_audit_enabled
 
-_log = logging.getLogger(__name__)
-
 _STAGE_KEY = "temp:loop_stage"
 _PLAN_KEY = "temp:loop_plan"
-_RESULTS_KEY = "temp:loop_results"
-
-_STAGES = ("explore", "plan", "act", "verify", "done")
-
-# Specialist sub-agent names by stage. Used by the transfer-gate inside
-# `before_tool_callback` to refuse transfers into ACT-stage specialists
-# until a plan has been recorded.
-_EXPLORE_SPECIALISTS = frozenset({"loader", "explorer"})
-_ACT_SPECIALISTS = frozenset({"processor", "visualizer"})
 
 
 _NUDGE_BY_STAGE = {
@@ -157,69 +135,6 @@ class StageGuardPlugin(BasePlugin):
         _prepend_to_system_instruction(llm_request, block)
         return None
 
-    # --- enforce ------------------------------------------------------
-
-    async def before_tool_callback(
-        self,
-        *,
-        tool: BaseTool,
-        tool_args: dict[str, Any],
-        tool_context: ToolContext,
-    ) -> Optional[dict]:
-        stage_tag = getattr(tool, "stage", None) or getattr(
-            type(tool), "stage", None
-        )
-        plan = _safe_state(tool_context, _PLAN_KEY) or []
-        plan_recorded = bool(plan)
-        all_done = plan_recorded and all(p.get("status") == "done" for p in plan)
-
-        if tool.name == "verify_completion":
-            if not plan_recorded:
-                self._emit_block(tool_context, tool.name, "no plan recorded")
-                return {
-                    "status": "stage_violation",
-                    "rule": "verify_completion needs a recorded plan",
-                    "hint": "Call record_plan(steps=[...]) first.",
-                }
-            if not all_done:
-                pending = [p["step"] for p in plan if p.get("status") != "done"]
-                self._emit_block(tool_context, tool.name, "plan not complete")
-                return {
-                    "status": "stage_violation",
-                    "rule": "verify_completion needs every plan step status=done",
-                    "pending_steps": pending,
-                    "hint": "Finish the remaining steps and mark_step_done before verifying.",
-                }
-
-        if stage_tag == "act" and not plan_recorded and tool.name != "mark_step_done":
-            self._emit_block(tool_context, tool.name, "act before plan")
-            return {
-                "status": "stage_violation",
-                "rule": "acting tools require a recorded plan",
-                "hint": (
-                    "Explore the datasets and then call record_plan(steps=[...]) "
-                    "before invoking any acting tool."
-                ),
-            }
-
-        # Gate transfers to ACT-stage specialists (processor, visualizer)
-        # the same way we gate direct acting tools. Transfers to
-        # EXPLORE-stage specialists (loader, explorer) are always allowed.
-        if tool.name == "transfer_to_agent":
-            target = (tool_args or {}).get("agent_name")
-            if target in _ACT_SPECIALISTS and not plan_recorded:
-                self._emit_block(tool_context, tool.name, f"transfer to {target} before plan")
-                return {
-                    "status": "stage_violation",
-                    "rule": f"transfer to {target!r} requires a recorded plan",
-                    "hint": (
-                        "Finish exploring, then call record_plan(steps=[...]) on "
-                        "the coordinator before dispatching to an acting specialist."
-                    ),
-                }
-
-        return None
-
     # --- advance ------------------------------------------------------
 
     async def after_tool_callback(
@@ -274,20 +189,6 @@ class StageGuardPlugin(BasePlugin):
                     }
                 )
         return None
-
-    # --- audit helper -------------------------------------------------
-
-    def _emit_block(self, ctx: ToolContext, tool_name: str, reason: str) -> None:
-        if not is_audit_enabled():
-            return
-        emit_audit_event(
-            {
-                "ts": time.time(),
-                "event": "loop_stage_block",
-                "tool_name": tool_name,
-                "reason": reason,
-            }
-        )
 
 
 # --- helpers --------------------------------------------------------
