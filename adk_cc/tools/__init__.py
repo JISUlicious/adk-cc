@@ -1,76 +1,27 @@
-"""Tool registry for the data-science agent variant.
+"""Coordinator-side and shared tooling.
 
-The coordinator (main agent) owns only the loop-control tools —
-`record_plan`, `read_plan`, `mark_step_done`, `verify_completion`.
-Specialist sub-agents own the actual data-science surface, split
-along stage lines:
+The coordinator owns four loop-bookkeeping tools (record_plan,
+read_plan, mark_step_done, verify_completion). Specialist tools live
+under `adk_cc/sub_agents/<name>/tools/`. Shared infrastructure that
+specialists' tools build on:
 
-  - EXPLORE: `loader` sub-agent (load_from_*), `explorer` sub-agent
-    (list_datasets, describe_dataset, peek_dataset, profile_dataset)
-  - ACT:     `processor` sub-agent (filter, aggregate, correlate,
-    drop_na, transform_column, select_columns), `visualizer`
-    sub-agent (render_bar_chart, render_table,
-    summarize_distribution)
-  - PLAN, REASON, VERIFY: prompt + state on the coordinator.
-
-The coordinator transfers to a specialist via ADK's built-in
-`transfer_to_agent` and gets control back via
-`_force_coordinator_continuation` set on every specialist's
-`after_agent_callback`. StageGuardPlugin nudges the model through
-the loop and hard-gates the verify call.
+  - `base.py`        — `AdkCcTool` + `ToolMeta` framework.
+  - `datasets.py`    — in-memory dataset registry.
+  - `loop_state.py`  — session-state recorders (`record_load`,
+                       `stash_result`) used by every specialist.
 """
 
 from __future__ import annotations
 
-from .acting import AggregateDatasetTool, CorrelateTool, FilterDatasetTool
 from .base import AdkCcTool, ToolMeta
-from .exploration import (
-    DescribeDatasetTool,
-    ListDatasetsTool,
-    PeekDatasetTool,
-)
-from .loader import (
-    LoadFromDbMockTool,
-    LoadFromFileMockTool,
-    LoadFromRegistryTool,
-)
 from .planning import MarkStepDoneTool, ReadPlanTool, RecordPlanTool
-from .preprocess import DropNaTool, SelectColumnsTool, TransformColumnTool
-from .profile import ProfileDatasetTool
 from .verification import VerifyCompletionTool
-from .visualizer import (
-    RenderBarChartTool,
-    RenderTableTool,
-    SummarizeDistributionTool,
-)
 
 __all__ = [
     "AdkCcTool",
     "ToolMeta",
-    # loader specialist
-    "LoadFromRegistryTool",
-    "LoadFromDbMockTool",
-    "LoadFromFileMockTool",
-    # explorer specialist
-    "ListDatasetsTool",
-    "DescribeDatasetTool",
-    "PeekDatasetTool",
-    "ProfileDatasetTool",
-    # coordinator: planning
-    "RecordPlanTool",
-    "ReadPlanTool",
     "MarkStepDoneTool",
-    # processor specialist
-    "FilterDatasetTool",
-    "AggregateDatasetTool",
-    "CorrelateTool",
-    "DropNaTool",
-    "TransformColumnTool",
-    "SelectColumnsTool",
-    # visualizer specialist
-    "RenderBarChartTool",
-    "RenderTableTool",
-    "SummarizeDistributionTool",
-    # coordinator: verify
+    "ReadPlanTool",
+    "RecordPlanTool",
     "VerifyCompletionTool",
 ]

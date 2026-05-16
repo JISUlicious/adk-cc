@@ -1,27 +1,19 @@
-"""Profiling tool (owned by the `explorer` sub-agent).
-
-`profile_dataset` is the explorer's deeper read: counts, null counts,
-distribution summary (mean / median / stddev / quartiles) per numeric
-column. Cheaper than running aggregate_dataset multiple times during
-EXPLORE.
-"""
+"""ProfileDatasetTool — numeric profile (mean/median/stddev/quartiles +
+null counts) for every column of one dataset."""
 
 from __future__ import annotations
 
-import math
 import statistics
-import time
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field
 
-from . import datasets
-from .base import AdkCcTool, ToolMeta
+from ....tools import datasets
+from ....tools.base import AdkCcTool, ToolMeta
+from ....tools.loop_state import stash_result
 
-_RESULTS_KEY = "temp:loop_results"
 
-
-class _ProfileArgs(BaseModel):
+class _Args(BaseModel):
     name: str = Field(..., description="Dataset name.")
 
 
@@ -43,14 +35,14 @@ class ProfileDatasetTool(AdkCcTool):
         is_read_only=True,
         is_concurrency_safe=True,
     )
-    input_model: ClassVar[type[BaseModel]] = _ProfileArgs
+    input_model: ClassVar[type[BaseModel]] = _Args
     description: ClassVar[str] = (
         "Numeric profile of a dataset: per-column mean / median / stddev "
         "/ quartiles, plus null counts. Use this before planning to "
         "spot data-quality issues or skews you should account for."
     )
 
-    async def _execute(self, args: _ProfileArgs, ctx: Any) -> dict[str, Any]:
+    async def _execute(self, args: _Args, ctx: Any) -> dict[str, Any]:
         if not datasets.exists(args.name):
             return {"status": "not_found", "name": args.name}
         rows = datasets.get(args.name)
@@ -84,16 +76,5 @@ class ProfileDatasetTool(AdkCcTool):
             "row_count": len(rows),
             "columns": cols,
         }
-        # Profile is read-side too; stash so verifier knows what was
-        # checked during explore.
-        log = ctx.state.get(_RESULTS_KEY) or []
-        log.append(
-            {
-                "ts": time.time(),
-                "tool": "profile_dataset",
-                "args": args.model_dump(),
-                "result": result,
-            }
-        )
-        ctx.state[_RESULTS_KEY] = log
+        stash_result(ctx, "profile_dataset", args.model_dump(), result)
         return result
