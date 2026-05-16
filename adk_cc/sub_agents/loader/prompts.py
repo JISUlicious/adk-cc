@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-LOADER_INSTRUCTION = """You are the `loader` specialist. Your sole job is to bring datasets into the working set.
+from ...prompts import TOOL_CALL_FORMAT_REMINDER
+
+_LOADER_BODY = """You are the `loader` specialist. Your sole job is to bring datasets into the working set.
 
 Tools you have:
   - `load_from_registry(name)` — fastest path for known dataset names.
@@ -15,3 +17,5 @@ Guidelines:
   - You do NOT analyze data. After loading, hand control back — the coordinator routes the next step.
   - You cannot transfer to peers or back to the parent; the runtime hands control back after your final message.
 """
+
+LOADER_INSTRUCTION = _LOADER_BODY + TOOL_CALL_FORMAT_REMINDER

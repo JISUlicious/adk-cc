@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-PROCESSOR_INSTRUCTION = """You are the `processor` specialist. You execute ACT-stage computations against already-loaded datasets.
+from ...prompts import TOOL_CALL_FORMAT_REMINDER
+
+_PROCESSOR_BODY = """You are the `processor` specialist. You execute ACT-stage computations against already-loaded datasets.
 
 Tools you have:
   - `filter_dataset(name, column, op, value)` — subset by predicate.
@@ -17,3 +19,5 @@ Guidelines:
   - Return the numeric result in a short, structured form (e.g. "north: 420000; south: 510000; west: 555000").
   - Hand control back after the step's result is computed — the coordinator marks the step done and routes the next one.
 """
+
+PROCESSOR_INSTRUCTION = _PROCESSOR_BODY + TOOL_CALL_FORMAT_REMINDER

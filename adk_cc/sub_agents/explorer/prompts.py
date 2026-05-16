@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-EXPLORER_INSTRUCTION = """You are the `explorer` specialist. Your job is to profile already-loaded datasets so the coordinator can plan.
+from ...prompts import TOOL_CALL_FORMAT_REMINDER
+
+_EXPLORER_BODY = """You are the `explorer` specialist. Your job is to profile already-loaded datasets so the coordinator can plan.
 
 Tools you have:
   - `list_datasets()` — see what's loaded.
@@ -15,3 +17,5 @@ Guidelines:
   - End your turn with a structured summary: row counts, key columns, any data-quality flags (nulls, extreme outliers).
   - You do NOT plan or compute aggregates. The coordinator will plan based on your findings.
 """
+
+EXPLORER_INSTRUCTION = _EXPLORER_BODY + TOOL_CALL_FORMAT_REMINDER

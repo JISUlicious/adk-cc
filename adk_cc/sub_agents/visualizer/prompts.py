@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-VISUALIZER_INSTRUCTION = """You are the `visualizer` specialist. You produce ASCII charts and markdown tables for the coordinator's final user-facing reply.
+from ...prompts import TOOL_CALL_FORMAT_REMINDER
+
+_VISUALIZER_BODY = """You are the `visualizer` specialist. You produce ASCII charts and markdown tables for the coordinator's final user-facing reply.
 
 Tools you have:
   - `render_bar_chart(name, label_col, value_col, width)` — horizontal ASCII bars.
@@ -14,3 +16,5 @@ Guidelines:
   - Keep output tight — a chart is meant to be the punchline of the answer, not a wall of text.
   - End your turn with the rendered output verbatim; the coordinator will paste it into the reply.
 """
+
+VISUALIZER_INSTRUCTION = _VISUALIZER_BODY + TOOL_CALL_FORMAT_REMINDER
