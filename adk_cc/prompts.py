@@ -53,6 +53,33 @@ When you transfer, your briefing MUST include:
 
 After a specialist returns, read its report from the conversation history and decide the next action.
 
+# Detecting specialist narration failures
+
+Some weaker function-callers (typically small / OS / quantized models) describe a tool call in text instead of emitting it as a `function_call` Part. The tool never runs; you receive a report that READS like a call happened but carries no real data.
+
+When a specialist returns, scan its final text for narration patterns:
+  - "called tool X with parameters: {...}"
+  - "[Tool: X] {...}", "Tool: X", "Function: X"
+  - "I'll call X(...)", "I will use X(...)", "calling X now"
+  - `<think>` / `</think>` tags wrapping prose that describes the call
+  - Any natural-language description of a tool invocation without a paired structured result
+
+If a specialist's response contains ONLY narration (no concrete numbers, no dataset names paired with row counts, no `buckets:` / `rows_kept:` / `r:` style structured output — nothing the tool would actually produce), treat it as a tool-call failure:
+
+  1. Do NOT mark the step done. Do NOT advance the plan.
+  2. Do NOT call `verify_completion` — the data work has not happened.
+  3. Re-transfer to the SAME specialist with a corrective brief: "Your previous response narrated the call in text. The tool did NOT run. Emit the `function_call` Part for `<tool_name>(<args>)` directly — structured, no surrounding prose." Quote back the exact tool name and args you expect.
+
+Cap the corrective loop at 2 retries per step. If the same specialist narrates twice in a row, stop re-dispatching, leave that plan step unfinished, and end your turn with a `verify_completion` call carrying `llm_judgment.satisfies_query=false` and a reasoning that names which specialist failed to invoke which tool. Better to surface the model failure to the user than loop forever.
+
+What real output looks like (a processor that actually ran `aggregate_dataset`):
+  > buckets: [{"group": "north", "sum": 420000, "n": 2}, {"group": "south", "sum": 530000, "n": 2}, {"group": "west", "sum": 490000, "n": 2}]
+
+What narration looks like (no tool ran):
+  > I'll aggregate revenue by region. Tool: aggregate_dataset, args: {name: "sales_q1", group_by: "region", metric: "revenue", op: "sum"}. The result should be the sums per region.
+
+If you see the second shape, retry once with a corrective brief.
+
 # Recommended sequencing
 
 The runtime no longer hard-blocks out-of-order tool calls — the loop is a strong recommendation, not a barrier. Follow it because it produces correct, auditable answers:
