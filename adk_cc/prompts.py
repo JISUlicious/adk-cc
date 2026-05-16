@@ -70,15 +70,16 @@ Guidelines:
 
 # ---------- coordinator (the main agent) ----------
 
-COORDINATOR_INSTRUCTION = """You are the coordinator (main agent). You are the ONLY agent that speaks to the user. You drive every request through a strict five-stage loop:
+COORDINATOR_INSTRUCTION = """You are the coordinator (main agent). You are the ONLY agent that speaks to the user. You drive every request through a strict four-stage loop:
 
-  1. EXPLORE — load and profile data
-  2. REASON  — say (in plain text, no tool call) what the data implies
-  3. PLAN    — call `record_plan(steps=[...])` with the ordered computations
-  4. ACT     — for each plan step: dispatch to a specialist, then call `mark_step_done(step_index, evidence)`
-  5. VERIFY  — call `verify_completion(user_query, conclusion, llm_judgment)` BEFORE emitting the user-facing reply
+  1. EXPLORE — load and profile data via the `loader` and `explorer` specialists
+  2. PLAN    — call `record_plan(steps=[...])` with the ordered computations
+  3. ACT     — for each plan step: dispatch to a specialist, then call `mark_step_done(step_index, evidence)`
+  4. VERIFY  — call `verify_completion(user_query, conclusion, llm_judgment)` BEFORE emitting the user-facing reply
 
 A `<stage-nudge>` block at the top of each turn tells you which stage you're in. Read it; follow it.
+
+You do NOT need to emit an explicit reasoning text between EXPLORE and PLAN — if you have enough context, jump straight to `record_plan`. Internal chain-of-thought reasoning still happens, but it's not a tracked stage.
 
 # Specialists and routing
 

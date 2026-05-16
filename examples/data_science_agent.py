@@ -1,9 +1,9 @@
 """End-to-end demo of the data-science agent.
 
 Walks the coordinator + 4 specialists through one full
-explore → reason → plan → act → verify loop with a scripted LLM.
-The dataset, prompt, and expected numbers are all deterministic so
-the audit trail can be machine-checked.
+explore → plan → act → verify loop with a scripted LLM. The dataset,
+prompt, and expected numbers are all deterministic so the audit trail
+can be machine-checked.
 
 User query: "Which region had the highest total revenue in Q1, and
             how does that compare to its Q2 result?"
@@ -14,19 +14,18 @@ Scripted loop:
   3. Loader:      load_from_registry("sales_q2")
   4. Coordinator: transfer to `explorer`      (EXPLORE)
   5. Explorer:    describe_dataset("sales_q1")
-  6. Coordinator: reasoning text  (REASON)
-  7. Coordinator: record_plan([...])          (PLAN)
-  8. Coordinator: transfer to `processor`     (ACT step 1)
-  9. Processor:   aggregate_dataset(...)
- 10. Coordinator: mark_step_done(0, ...)
- 11. Coordinator: transfer to `processor`     (ACT step 2)
- 12. Processor:   aggregate_dataset(...)
- 13. Coordinator: mark_step_done(1, ...)
- 14. Coordinator: transfer to `visualizer`    (ACT step 3)
- 15. Visualizer:  render_bar_chart(...)
- 16. Coordinator: mark_step_done(2, ...)
- 17. Coordinator: verify_completion(...)      (VERIFY)
- 18. Coordinator: final user-facing text
+  6. Coordinator: record_plan([...])          (PLAN)
+  7. Coordinator: transfer to `processor`     (ACT step 1)
+  8. Processor:   aggregate_dataset(...)
+  9. Coordinator: mark_step_done(0, ...)
+ 10. Coordinator: transfer to `processor`     (ACT step 2)
+ 11. Processor:   aggregate_dataset(...)
+ 12. Coordinator: mark_step_done(1, ...)
+ 13. Coordinator: transfer to `visualizer`    (ACT step 3)
+ 14. Visualizer:  render_bar_chart(...)
+ 15. Coordinator: mark_step_done(2, ...)
+ 16. Coordinator: verify_completion(...)      (VERIFY)
+ 17. Coordinator: final user-facing text
 
 Run:
   `.venv/bin/python examples/data_science_agent.py`
@@ -165,40 +164,19 @@ def _build_scripted_llm() -> _Scripted:
                 "transfer_to_agent",
                 {"agent_name": "explorer"},
             ),
-            # REASON + PLAN bundled in one response. ADK ends a turn
-            # when the last event's Content is text-only — emitting the
-            # reasoning text and the record_plan function_call together
-            # keeps the parent flow's while-loop alive AND surfaces the
-            # reasoning into session history alongside the plan.
-            LlmResponse(
-                content=types.Content(
-                    role="model",
-                    parts=[
-                        types.Part(
-                            text=(
-                                "Reasoning: sales_q1 and sales_q2 each have "
-                                "6 rows across three regions. To answer the "
-                                "user I need (1) total revenue by region for "
-                                "Q1, (2) total revenue by region for Q2, "
-                                "then (3) a bar chart contrasting the two."
-                            )
-                        ),
-                        types.Part(
-                            function_call=types.FunctionCall(
-                                id="co-4",
-                                name="record_plan",
-                                args={
-                                    "steps": [
-                                        "Aggregate revenue by region for sales_q1 (sum)",
-                                        "Aggregate revenue by region for sales_q2 (sum)",
-                                        "Render a bar chart of sales_q1 revenue by region",
-                                    ]
-                                },
-                            )
-                        ),
-                    ],
-                ),
-                partial=False,
+            # PLAN — jump straight from explore to record_plan. No
+            # separate REASON step. The coordinator's prompt makes
+            # clear that internal reasoning happens implicitly.
+            _fc(
+                "co-4",
+                "record_plan",
+                {
+                    "steps": [
+                        "Aggregate revenue by region for sales_q1 (sum)",
+                        "Aggregate revenue by region for sales_q2 (sum)",
+                        "Render a bar chart of sales_q1 revenue by region",
+                    ]
+                },
             ),
             # ACT step 0: dispatch to processor
             _fc("co-5", "transfer_to_agent", {"agent_name": "processor"}),

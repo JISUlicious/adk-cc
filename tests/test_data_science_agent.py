@@ -6,7 +6,7 @@ Subprocess-boots the demo and asserts:
   - the six specialist transfers fire in the expected order
     (loader, loader, explorer, processor, processor, visualizer)
   - the five loop-stage transitions land in the audit JSONL
-    (∅→explore→reason→act→verify→done)
+    (∅→explore→plan→act→verify→done)
   - audit event counts match: 17 tool attempts + 17 results, no errors
   - the coordinator's final text includes the conclusion from the
     verify step (proves the run reached and passed VERIFY)
@@ -41,8 +41,8 @@ _EXPECTED_TRANSFERS = [
 # rendered prefix below.
 _EXPECTED_TRANSITIONS = [
     ("∅", "explore"),       # ∅ → explore (None render)
-    ("explore", "reason"),
-    ("reason", "act"),
+    ("explore", "plan"),
+    ("plan", "act"),
     ("act", "verify"),
     ("verify", "done"),
 ]

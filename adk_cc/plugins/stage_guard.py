@@ -1,12 +1,12 @@
 """Stage-guard plugin — nudges and (selectively) enforces the
-explore → reason → plan → act → verify loop on the coordinator.
+explore → plan → act → verify loop on the coordinator.
 
 How the loop is tracked
 -----------------------
 
 `state["temp:loop_stage"]` carries the current stage as one of:
 
-    "explore" | "reason" | "plan" | "act" | "verify" | "done"
+    "explore" | "plan" | "act" | "verify" | "done"
 
 The plugin uses three signals to decide stage transitions and the
 nudge content:
@@ -50,11 +50,14 @@ Stage transitions on `after_tool_callback`
 
 The transition table is intentionally small:
 
-    (any tool, stage=None)            → "explore"
-    explore tool → "reason"   (model should think before planning)
-    record_plan → "act"
-    last mark_step_done done → "verify"
-    verify_completion → "done"
+    (any tool, stage=None)        → "explore"
+    second explore tool (stage was already "explore")
+                                  → "plan"
+    record_plan                   → "act"
+    mark_step_done that finishes the plan
+                                  → "verify"
+    verify_completion (verdict=PASS)
+                                  → "done"
 
 The plugin never moves the stage backward — if the agent re-enters
 explore mid-loop (e.g. to check a value), the stage tag stays where
@@ -83,7 +86,7 @@ _STAGE_KEY = "temp:loop_stage"
 _PLAN_KEY = "temp:loop_plan"
 _RESULTS_KEY = "temp:loop_results"
 
-_STAGES = ("explore", "reason", "plan", "act", "verify", "done")
+_STAGES = ("explore", "plan", "act", "verify", "done")
 
 # Specialist sub-agent names by stage. Used by the transfer-gate inside
 # `before_tool_callback` to refuse transfers into ACT-stage specialists
@@ -94,31 +97,27 @@ _ACT_SPECIALISTS = frozenset({"processor", "visualizer"})
 
 _NUDGE_BY_STAGE = {
     None: (
-        "You are at the START of the explore→reason→plan→act→verify loop. "
-        "First action MUST be `list_datasets` or `describe_dataset` — "
-        "gather context before anything else. Do NOT call acting tools yet."
+        "You are at the START of the explore→plan→act→verify loop. "
+        "First action MUST be a transfer to `loader` or `explorer`, or "
+        "a coordinator-side read of state — gather context before "
+        "planning anything."
     ),
     "explore": (
-        "You are in EXPLORE. Continue listing / describing / peeking "
-        "datasets until you know what's available. When you've seen "
-        "enough, your NEXT response should reason about the user's "
-        "question (no tool call — pure text), then call `record_plan` "
-        "with the ordered steps you'll execute."
-    ),
-    "reason": (
-        "You just finished EXPLORE. Your next message should be a brief "
-        "REASONING text (no tool call) — what does the data suggest? "
-        "Then on the FOLLOWING turn call `record_plan` with the steps."
+        "You are in EXPLORE. Use the loader / explorer specialists "
+        "until you have enough context to plan. When ready, call "
+        "`record_plan(steps=[...])` directly — no separate reasoning "
+        "text is required."
     ),
     "plan": (
-        "You are in PLAN. Call `record_plan(steps=[...])` with an "
-        "ordered list before invoking any acting tool. Each step "
-        "should be a concrete computation you can match to one acting "
-        "tool call."
+        "You have explored. Your next action MUST be "
+        "`record_plan(steps=[...])` with the ordered computations you "
+        "intend to run. Do NOT transfer to acting specialists "
+        "(processor / visualizer) until the plan is recorded."
     ),
     "act": (
-        "You are in ACT. Execute the plan one step at a time. After each "
-        "acting tool returns, call `mark_step_done(step_index, evidence)` "
+        "You are in ACT. Execute the plan one step at a time by "
+        "transferring to `processor` or `visualizer`. After each "
+        "specialist returns, call `mark_step_done(step_index, evidence)` "
         "with a short evidence string. When every step is marked done, "
         "proceed to verify."
     ),
@@ -244,8 +243,11 @@ class StageGuardPlugin(BasePlugin):
             if current is None:
                 new_stage = "explore"
             elif current == "explore":
-                # Hint forward so next-turn nudge tells the model to reason.
-                new_stage = "reason"
+                # Second explore tool — advance the nudge to PLAN so the
+                # model knows the next move is `record_plan`. The plan
+                # stage itself is short-lived; calling `record_plan`
+                # advances to ACT below.
+                new_stage = "plan"
         elif tool.name == "record_plan":
             new_stage = "act"
         elif tool.name == "mark_step_done":
