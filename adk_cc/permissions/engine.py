@@ -127,8 +127,19 @@ def _decide_impl(
             reason=f"denied by {deny.source.value} rule",
         )
 
-    # Step 2a: PLAN mode blocks every non-read-only tool.
-    if mode is PermissionMode.PLAN and not tool.meta.is_read_only:
+    # Step 2a: PLAN mode blocks destructive tools.
+    #
+    # Originally this gated `not is_read_only`, but on the
+    # data-science branch the non-read-only tools are loop
+    # bookkeeping (`record_plan`, `mark_step_done`) that MUST fire
+    # while planning. The check is now scoped to genuinely
+    # destructive ops via the explicit `is_destructive` meta flag.
+    # On this branch no tool sets `is_destructive=True`, so PLAN
+    # mode is effectively a no-op here; the actual plan-stage
+    # discipline lives in `StageGuardPlugin`. Future destructive
+    # additions (e.g. a hypothetical `drop_dataset`) would be
+    # gated correctly without code change.
+    if mode is PermissionMode.PLAN and tool.meta.is_destructive:
         return PermissionDecision(
             behavior="deny",
             reason=f"{tool_name} is blocked in plan mode",
