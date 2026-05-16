@@ -31,9 +31,8 @@ from ..plugins import (
     AuditPlugin,
     ContextGuardPlugin,
     PermissionPlugin,
-    PlanModeReminderPlugin,
     QuotaPlugin,
-    TaskReminderPlugin,
+    StageGuardPlugin,
     ToolCallValidatorPlugin,
 )
 from .tenancy import TenancyPlugin
@@ -63,10 +62,12 @@ def build_plugins(
             default_mode=permission_mode,
         ),
         QuotaPlugin(calls_per_minute=quota_per_minute),
-        # Reminders run at before_model_callback; sit beside the
-        # before_tool chain rather than inside it.
-        PlanModeReminderPlugin(),
-        TaskReminderPlugin(),
+        # Stage guard: nudges the coordinator through
+        # explore→reason→plan→act→verify and hard-gates verify /
+        # acting-transfers until prerequisites are met. Replaces the
+        # old plan-mode / task-reminder plugins, which were bound to
+        # the deleted FS/bash tool surface.
+        StageGuardPlugin(),
         # "Tool not found" recovery — see plugins/tool_call_validator.py.
         ToolCallValidatorPlugin(),
         # Context-length guardrail (pre-flight WARN/REJECT). ADK's

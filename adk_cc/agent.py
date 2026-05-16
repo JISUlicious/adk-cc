@@ -1,45 +1,34 @@
-"""Gather / act / verify agent loop on Google ADK 1.31.1.
+"""Data-science agent on Google ADK 1.31.1.
 
-Mirrors Claude Code's pattern from src/tools/AgentTool/built-in/:
-  - One coordinator (the "main agent") owns user I/O.
-  - Two specialists (Explore, verification) wired as `sub_agents`.
-    Planning is NOT a sub-agent — it's a posture the coordinator takes
-    when `permission_mode == "plan"` (see plugins/plan_mode.py).
-    Delegation is an LLM-driven `transfer_to_agent` call — and because
-    sub-agents share the parent's invocation context, all their tool
-    calls and responses stream into the parent event log (visible in
-    `adk web`), not buried inside an opaque tool result.
+Coordinator + 4 specialists, served over an LLM endpoint with no
+filesystem / bash tools. The coordinator owns the loop
+(explore → reason → plan → act → verify); specialists carry the
+data-science surface and hand control back as soon as they're done.
 
-Forcing "coordinator owns user I/O" requires TWO mechanisms — neither
-alone is enough:
+Architecture
+------------
 
-  1. `disallow_transfer_to_parent=True` on each specialist. ADK's
-     runner._find_agent_to_run walks events backward to pick whose turn
-     it is and only accepts an agent for which
-     _is_transferable_across_agent_tree() is True — which requires
-     disallow_transfer_to_parent=False on the agent and all ancestors.
-     Setting it to True on each specialist makes the runner skip them
-     and fall back to the root (coordinator). This is the HARD guarantee
-     that the next user message always lands on the coordinator.
+  coordinator (the ONLY agent user-facing)
+    │  Tools: record_plan, read_plan, mark_step_done, verify_completion
+    │
+    ├── loader     — load_from_registry / load_from_db_mock / load_from_file_mock
+    ├── explorer   — list_datasets / describe_dataset / peek_dataset / profile_dataset
+    ├── processor  — filter / aggregate / correlate / drop_na / transform / select
+    └── visualizer — render_bar_chart / render_table / summarize_distribution
 
-  2. An after_agent_callback that yields a non-final-response event when
-     the specialist finishes. base_llm_flow.run_async loops until
-     last_event.is_final_response() returns True. A text-only message is
-     final; a Content with a function_call Part is NOT (see Event.is_
-     final_response in events/event.py). Yielding a synthetic function
-     call as the specialist's last event keeps the parent's flow in its
-     while-loop, which triggers another coordinator LLM step. The
-     coordinator then sees the specialist's report in history and
-     produces the user-facing reply.
+Every specialist has:
+  - `disallow_transfer_to_parent=True` AND `disallow_transfer_to_peers=True`
+    so the runtime hands control back to the coordinator automatically.
+  - `after_agent_callback=_force_coordinator_continuation` to keep the
+    coordinator's flow loop alive after the specialist's final message,
+    so the coordinator gets one more LLM turn to synthesize / advance.
 
-  - `disallow_transfer_to_peers=True` blocks specialist→specialist hops.
-  - Tool denylists stay structural: read-only specialists simply don't
-    receive write tools.
-  - The verifier's discipline stays prompt-enforced + parsed: it must end
-    with `VERDICT: PASS|FAIL|PARTIAL`, which the coordinator's prompt
-    tells it to look for.
-
-Discovered by `adk web` / `adk run` via the module-level `root_agent`.
+Loop enforcement lives in `StageGuardPlugin`:
+  - Soft nudges (system-instruction prepend) telling the model which
+    stage it's in.
+  - Hard gates on `before_tool_callback`: refuses to invoke acting
+    tools, transfers to `processor` / `visualizer`, or
+    `verify_completion` before the prerequisite has been met.
 """
 
 from __future__ import annotations
@@ -56,53 +45,52 @@ from . import prompts
 from .logging_setup import configure_logging
 from .permissions import PermissionMode, SettingsHierarchy
 
-# Apply env-driven logging config (ADK_CC_LOG_LEVEL, ADK_CC_LOG_FORMAT)
-# before any submodule logger fires. Idempotent — safe across reimports.
 configure_logging()
+
 from .plugins import (
-    AskUserQuestionUiHintPlugin,
     AuditPlugin,
-    ModelIOTracePlugin,
-    ProjectContextPlugin,
-    ConfirmationFormUiPlugin,
     ContextGuardPlugin,
+    ModelIOTracePlugin,
     PermissionPlugin,
-    PlanModeReminderPlugin,
-    TaskReminderPlugin,
+    ProjectContextPlugin,
+    StageGuardPlugin,
     ToolCallValidatorPlugin,
 )
 from .tools import (
-    AskUserQuestionTool,
-    BashTool,
-    EditFileTool,
-    EnterPlanModeTool,
-    ExitPlanModeTool,
-    GlobFilesTool,
-    GrepTool,
-    ReadCurrentPlanTool,
-    ReadFileTool,
-    TaskCreateTool,
-    TaskGetTool,
-    TaskListTool,
-    TaskUpdateTool,
-    WebFetchTool,
-    WriteFileTool,
-    WritePlanTool,
-    make_skill_toolset,
+    AggregateDatasetTool,
+    CorrelateTool,
+    DescribeDatasetTool,
+    DropNaTool,
+    FilterDatasetTool,
+    ListDatasetsTool,
+    LoadFromDbMockTool,
+    LoadFromFileMockTool,
+    LoadFromRegistryTool,
+    MarkStepDoneTool,
+    PeekDatasetTool,
+    ProfileDatasetTool,
+    ReadPlanTool,
+    RecordPlanTool,
+    RenderBarChartTool,
+    RenderTableTool,
+    SelectColumnsTool,
+    SummarizeDistributionTool,
+    TransformColumnTool,
+    VerifyCompletionTool,
 )
 
 
+# ---------- specialist handback ----------
+
+
 def _force_coordinator_continuation(callback_context: Context) -> types.Content:
-    """Force the parent flow to take another step after a specialist finishes.
+    """Yield a synthetic function-call event so the parent flow doesn't
+    treat the specialist's final text as the turn's final response —
+    keeps `base_llm_flow.run_async`'s while-loop alive for one more
+    coordinator LLM call.
 
-    Returning a Content with a function_call Part makes the wrapping Event
-    fail Event.is_final_response(), which keeps base_llm_flow.run_async in
-    its while-True loop and triggers another coordinator LLM call. The
-    coordinator then synthesizes the user-facing reply from the
-    specialist's output in the conversation history.
-
-    The synthetic call is for a no-op name, never executed; it's a control
-    signal, not a real tool call.
+    The function-call name is never executed; it's a control signal,
+    not a real tool dispatch.
     """
     return types.Content(
         role="model",
@@ -116,629 +104,149 @@ def _force_coordinator_continuation(callback_context: Context) -> types.Content:
         ],
     )
 
-# Local model via LiteLLM, talking to an OpenAI-compatible server (mlx_lm /
-# vLLM / llama.cpp / LM Studio). Defaults target localhost:18000 serving
-# Qwen3.6-35B-A3B-UD-MLX-4bit. ADK_CC_API_KEY is loaded by `adk web` /
-# `adk run` from .env in the agent directory. Override any of:
-#   ADK_CC_MODEL=openai/<model-id>
-#   ADK_CC_API_BASE=http://host:port/v1
-#   ADK_CC_API_KEY=<token>
+
+# ---------- model config ----------
+
 MODEL = LiteLlm(
     model=os.environ.get("ADK_CC_MODEL", "openai/Qwen3.6-35B-A3B-UD-MLX-4bit"),
     api_base=os.environ.get("ADK_CC_API_BASE", "http://localhost:18000/v1"),
     api_key=os.environ["ADK_CC_API_KEY"],
 )
 
-# ---------- permission mode (env-driven) ----------
-# Hoisted above tool instantiation so the plan-mode tools can use it as
-# their `default_mode` fallback (mirroring the plugin-side fix in PR #4).
-# Default `bypassPermissions` preserves the dev experience: permissions
-# plugin is always loaded (so audit/quota/etc can layer on top) but only
-# enforces deny rules. Flip via env to exercise plan/default/acceptEdits/dontAsk.
+
 PERMISSION_MODE = PermissionMode(
     os.environ.get("ADK_CC_PERMISSION_MODE", PermissionMode.BYPASS_PERMISSIONS.value)
 )
-SETTINGS = SettingsHierarchy.empty()  # rules added by operators / Stage G loader
+SETTINGS = SettingsHierarchy.empty()
 
 
-# ---------- shared tool instances ----------
-# Tools are stateless; one instance per tool, reused across agents.
-_read_file = ReadFileTool()
-_glob_files = GlobFilesTool()
-_grep = GrepTool()
-_write_file = WriteFileTool()
-_edit_file = EditFileTool()
-_run_bash = BashTool()
-_web_fetch = WebFetchTool()
-_ask_user = AskUserQuestionTool()
-_task_create = TaskCreateTool()
-_task_get = TaskGetTool()
-_task_list = TaskListTool()
-_task_update = TaskUpdateTool()
-# Plan-mode tools take the env default so their internal "previous mode"
-# check sees the right value on a fresh session booted with
-# ADK_CC_PERMISSION_MODE=plan. Without this fallback, exit_plan_mode reads
-# state["permission_mode"]=None, the `previous != "plan"` guard trips, and
-# state never flips to "default" — the session stays stuck in plan mode.
-_exit_plan_mode = ExitPlanModeTool(default_mode=PERMISSION_MODE.value)
-_enter_plan_mode = EnterPlanModeTool(default_mode=PERMISSION_MODE.value)
-_write_plan = WritePlanTool()
-_read_current_plan = ReadCurrentPlanTool()
-_skills = make_skill_toolset()  # None unless ADK_CC_SKILLS_DIR / skills/ has content
+# ---------- specialist sub-agents ----------
 
-
-def _make_tenant_mcp_toolset():
-    """Construct the per-tenant MCP toolset if env config is present.
-
-    Returns None when this is a single-tenant deployment without per-tenant
-    MCP wiring (the common dev path); the coordinator's tools list then
-    skips this entry. For service deployments, set:
-
-        ADK_CC_TENANT_REGISTRY_DIR=/var/lib/adk-cc/tenants
-        ADK_CC_CREDENTIAL_PROVIDER=encrypted_file
-        ADK_CC_CREDENTIAL_STORE_DIR=/var/lib/adk-cc/credentials
-        ADK_CC_CREDENTIAL_KEY=<fernet-key>
-    """
-    registry_dir = os.environ.get("ADK_CC_TENANT_REGISTRY_DIR")
-    if not registry_dir:
-        return None
-
-    from .credentials import (
-        EncryptedFileCredentialProvider,
-        InMemoryCredentialProvider,
-    )
-    from .service.registry import JsonFileTenantResourceRegistry
-    from .tools.mcp_tenant import McpServerConfig, TenantMcpToolset
-
-    provider_kind = os.environ.get("ADK_CC_CREDENTIAL_PROVIDER", "memory").lower()
-    if provider_kind == "encrypted_file":
-        store_dir = os.environ.get("ADK_CC_CREDENTIAL_STORE_DIR")
-        if not store_dir:
-            raise RuntimeError(
-                "ADK_CC_CREDENTIAL_PROVIDER=encrypted_file requires "
-                "ADK_CC_CREDENTIAL_STORE_DIR to be set"
-            )
-        creds = EncryptedFileCredentialProvider(root=store_dir)
-    elif provider_kind == "memory":
-        creds = InMemoryCredentialProvider()
-    else:
-        raise RuntimeError(
-            f"unknown ADK_CC_CREDENTIAL_PROVIDER={provider_kind!r}; "
-            "valid: memory, encrypted_file"
-        )
-
-    registry = JsonFileTenantResourceRegistry[McpServerConfig](
-        root=registry_dir,
-        kind="mcp",
-        model=McpServerConfig,
-        id_attr="server_name",
-    )
-    return TenantMcpToolset(registry=registry, credentials=creds)
-
-
-_tenant_mcp = _make_tenant_mcp_toolset()
-
-
-def _make_tenant_skill_toolset():
-    """Construct the per-tenant skill toolset if env config is present.
-
-    Returns None when this is a single-tenant deployment using the
-    static `make_skill_toolset` factory above. For service deployments
-    set:
-
-        ADK_CC_TENANT_SKILLS_DIR=/var/lib/adk-cc/skills
-
-    Skills land at `<root>/<tenant_id>/<skill_name>/`. Skill scripts run
-    inside the active session's sandbox via `SandboxBackedCodeExecutor`.
-    """
-    skill_root = os.environ.get("ADK_CC_TENANT_SKILLS_DIR")
-    if not skill_root:
-        return None
-
-    from .sandbox.code_executor import SandboxBackedCodeExecutor
-    from .tools.skills_tenant import TenantSkillToolset
-
-    return TenantSkillToolset(
-        skill_root=skill_root,
-        code_executor=SandboxBackedCodeExecutor(),
-    )
-
-
-_tenant_skills = _make_tenant_skill_toolset()
-
-
-# ---------- specialist agents (read-only) ----------
-
-explore_agent = LlmAgent(
-    name="Explore",
+loader_agent = LlmAgent(
+    name="loader",
     model=MODEL,
     description=(
-        "Fast read-only codebase explorer. Use for broad searches across files "
-        "or when a question will take more than ~3 directed queries to answer. "
-        "Returns a written report; does not modify files."
+        "Brings datasets into the working set from the in-memory registry, "
+        "a mock DB backend, or a mock file backend. Read-only with respect "
+        "to the source — only reports row counts and column names."
     ),
-    instruction=prompts.EXPLORE_INSTRUCTION,
-    tools=[_read_file, _glob_files, _grep, _web_fetch],
+    instruction=prompts.LOADER_INSTRUCTION,
+    tools=[
+        LoadFromRegistryTool(),
+        LoadFromDbMockTool(),
+        LoadFromFileMockTool(),
+    ],
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
     after_agent_callback=_force_coordinator_continuation,
 )
 
-verify_agent = LlmAgent(
-    name="verification",
+explorer_agent = LlmAgent(
+    name="explorer",
     model=MODEL,
     description=(
-        "Adversarial verifier. Runs builds, tests, linters, and adversarial "
-        "probes against changes. Cannot modify the project (writes to /tmp "
-        "only via run_bash). Always ends with a literal "
-        "'VERDICT: PASS|FAIL|PARTIAL' line. Invoke after non-trivial "
-        "implementation (3+ file edits, backend/API, or infra changes)."
+        "Profiles already-loaded datasets: row counts, column types, value "
+        "ranges, null counts, distribution stats. Cannot modify data."
     ),
-    instruction=prompts.VERIFY_INSTRUCTION,
-    tools=[_read_file, _glob_files, _grep, _run_bash, _web_fetch, _read_current_plan],
+    instruction=prompts.EXPLORER_INSTRUCTION,
+    tools=[
+        ListDatasetsTool(),
+        DescribeDatasetTool(),
+        PeekDatasetTool(),
+        ProfileDatasetTool(),
+    ],
+    disallow_transfer_to_parent=True,
+    disallow_transfer_to_peers=True,
+    after_agent_callback=_force_coordinator_continuation,
+)
+
+processor_agent = LlmAgent(
+    name="processor",
+    model=MODEL,
+    description=(
+        "Executes one ACT-stage computation per invocation: filter, "
+        "aggregate, correlate, drop nulls, transform column, project "
+        "columns. Returns the numeric result; never mutates the registry."
+    ),
+    instruction=prompts.PROCESSOR_INSTRUCTION,
+    tools=[
+        FilterDatasetTool(),
+        AggregateDatasetTool(),
+        CorrelateTool(),
+        DropNaTool(),
+        TransformColumnTool(),
+        SelectColumnsTool(),
+    ],
+    disallow_transfer_to_parent=True,
+    disallow_transfer_to_peers=True,
+    after_agent_callback=_force_coordinator_continuation,
+)
+
+visualizer_agent = LlmAgent(
+    name="visualizer",
+    model=MODEL,
+    description=(
+        "Renders ASCII charts and markdown tables for the coordinator's "
+        "final user-facing reply."
+    ),
+    instruction=prompts.VISUALIZER_INSTRUCTION,
+    tools=[
+        RenderBarChartTool(),
+        RenderTableTool(),
+        SummarizeDistributionTool(),
+    ],
     disallow_transfer_to_parent=True,
     disallow_transfer_to_peers=True,
     after_agent_callback=_force_coordinator_continuation,
 )
 
 
-# ---------- coordinator (the "main agent") ----------
+# ---------- coordinator (the main agent) ----------
 
-_coordinator_tools: list = [
-    _read_file,
-    _glob_files,
-    _grep,
-    _write_file,
-    _edit_file,
-    _run_bash,
-    _web_fetch,
-    _ask_user,
-    _task_create,
-    _task_get,
-    _task_list,
-    _task_update,
-    _exit_plan_mode,
-    _enter_plan_mode,
-    _write_plan,
-    _read_current_plan,
+_coordinator_tools = [
+    RecordPlanTool(),
+    ReadPlanTool(),
+    MarkStepDoneTool(),
+    VerifyCompletionTool(),
 ]
-if _skills is not None:
-    _coordinator_tools.append(_skills)
-if _tenant_mcp is not None:
-    _coordinator_tools.append(_tenant_mcp)
-if _tenant_skills is not None:
-    _coordinator_tools.append(_tenant_skills)
 
 root_agent = LlmAgent(
     name="coordinator",
     model=MODEL,
-    description="Coordinator agent: handles user requests with a gather → act → verify loop.",
+    description=(
+        "Coordinator: drives every data-science request through "
+        "explore → reason → plan → act → verify. Owns user I/O; "
+        "dispatches to loader / explorer / processor / visualizer."
+    ),
     instruction=prompts.COORDINATOR_INSTRUCTION,
     tools=_coordinator_tools,
-    sub_agents=[explore_agent, verify_agent],
+    sub_agents=[loader_agent, explorer_agent, processor_agent, visualizer_agent],
 )
 
 
-# ---------- ADK events compaction (primary context-length defense) ----------
-# When configured via env, ADK runs token-threshold or sliding-window
-# compaction post-invocation via LlmEventSummarizer. The thin
-# ContextGuardPlugin below adds pre-flight WARN logging and fail-soft
-# REJECT for the case where a single turn jumps past the window before
-# ADK can react. See plan-mode plan + docs/05-production-deployment.md.
+# ---------- App + plugin chain ----------
 
-
-def _make_lazy_summarizer_class():
-    """Build the lazy summarizer class with deferred BaseEventsSummarizer import.
-
-    Returns a `BaseEventsSummarizer` + `BaseModel` subclass that stores config
-    strings as pydantic fields only — never a live `LiteLlm` — so the
-    surrounding `EventsCompactionConfig` stays JSON-serializable. ADK's
-    flow / OTel / FastAPI paths walk the InvocationContext (which carries
-    the config); a `LiteLlm` sitting on `summarizer._llm` leaks
-    `LiteLLMClient` into pydantic's `dump_json` step and trips with
-    `PydanticSerializationError: Unable to serialize unknown type`.
-
-    The actual `LlmEventSummarizer` + `LiteLlm` are constructed once per
-    compaction call. One extra ~ms object construction; eliminates the
-    serialization hazard.
-
-    Audit + DEBUG instrumentation wraps the inner call:
-      - `compaction_triggered` before the summarizer runs
-      - `compaction_success`   on a non-None return
-      - `compaction_failure`   on a None return, timeout, or exception
-    ADK's `LlmEventSummarizer` returns `None` on its own internal
-    failure modes (empty input, malformed model response). The wrapper
-    distinguishes the three failure modes via the `reason` field:
-    `empty_summary` / `timeout` / `exception`.
-
-    Timeout + graceful degradation:
-      - `asyncio.wait_for(coro, timeout=timeout_seconds)` wraps the
-        inner call when `timeout_seconds > 0`.
-      - On `asyncio.TimeoutError`, the wrapper logs WARN, emits
-        `compaction_failure` with `reason="timeout"`, and returns
-        `None`. ADK treats `None` the same as "no summary produced"
-        — the turn proceeds with uncompacted history (model sees a
-        larger context once, but the agent does NOT hang waiting for
-        a stuck summarizer).
-      - On any other exception, the wrapper logs WARN, emits
-        `compaction_failure` with `reason="exception"`, and ALSO
-        returns `None` rather than re-raising. Same "agent must
-        survive the failure" reasoning — a broken summarizer can
-        only cost an occasional uncompacted turn, never a stuck
-        session.
-      - `timeout_seconds=0` disables the timeout entirely (preserves
-        the pre-PR-B behavior of indefinite wait). Exceptions still
-        degrade to None.
-
-    The wrapper is ALWAYS installed when compaction is enabled (any
-    of the COMPACTION env vars set) — `_make_compaction_summarizer`
-    falls back to the main-agent model env vars when
-    `ADK_CC_COMPACTION_MODEL` is unset. Same effective behavior as
-    ADK's default summarizer (which would auto-instantiate
-    `LlmEventSummarizer(llm=agent.canonical_model)`), plus our
-    observability hooks. So operators get audit + DEBUG visibility
-    just by enabling compaction; no extra "set this model env var"
-    gotcha.
-    """
-    import asyncio
-    import logging
-    import time
-    from google.adk.apps.base_events_summarizer import BaseEventsSummarizer
-    from pydantic import BaseModel, Field
-    from typing import Optional
-
-    from .plugins.audit import emit_compaction_event
-
-    _compaction_log = logging.getLogger(__name__ + ".compaction")
-
-    class _LazyAdkCcSummarizer(BaseModel, BaseEventsSummarizer):
-        # Plain string fields so pydantic dump_json works.
-        model_id: str
-        api_base: Optional[str] = None
-        # Exclude api_key from dumps so it doesn't leak into logs / traces
-        # if anything serializes the surrounding config.
-        api_key: Optional[str] = Field(default=None, exclude=True, repr=False)
-        prompt_template: Optional[str] = None
-        # Seconds; 0 disables the timeout entirely (pre-PR-B behavior).
-        # `_make_compaction_summarizer` reads ADK_CC_COMPACTION_TIMEOUT_S
-        # (default 30) once at construction; this field is the resolved
-        # value.
-        timeout_seconds: float = 30.0
-
-        async def maybe_summarize_events(self, *, events):
-            from google.adk.apps.llm_event_summarizer import LlmEventSummarizer
-
-            event_count = len(events) if events else 0
-            last_event_ts = None
-            if events:
-                # The Event dataclass has `timestamp`; tolerate missing
-                # field (defensive — tests pass mock events).
-                last_event_ts = getattr(events[-1], "timestamp", None)
-
-            if _compaction_log.isEnabledFor(logging.DEBUG):
-                _compaction_log.debug(
-                    "compaction_triggered model=%s events=%s timeout=%s",
-                    self.model_id,
-                    event_count,
-                    self.timeout_seconds,
-                    extra={
-                        "model_id": self.model_id,
-                        "event_count": event_count,
-                        "timeout_seconds": self.timeout_seconds,
-                    },
-                )
-            emit_compaction_event(
-                "compaction_triggered",
-                model_id=self.model_id,
-                event_count=event_count,
-                last_event_ts=last_event_ts,
-                timeout_seconds=self.timeout_seconds,
-            )
-
-            started = time.monotonic()
-            try:
-                llm = LiteLlm(
-                    model=self.model_id,
-                    api_base=self.api_base,
-                    api_key=self.api_key,
-                )
-                inner = LlmEventSummarizer(
-                    llm=llm, prompt_template=self.prompt_template
-                )
-                # Apply timeout when configured (>0). At 0 we preserve
-                # the original "wait forever" semantics so an operator
-                # who explicitly opts out gets the pre-PR-B behavior.
-                if self.timeout_seconds > 0:
-                    result = await asyncio.wait_for(
-                        inner.maybe_summarize_events(events=events),
-                        timeout=self.timeout_seconds,
-                    )
-                else:
-                    result = await inner.maybe_summarize_events(events=events)
-            except asyncio.TimeoutError:
-                elapsed_ms = int((time.monotonic() - started) * 1000)
-                _compaction_log.warning(
-                    "compaction_failure model=%s reason=timeout "
-                    "timeout_seconds=%s elapsed_ms=%s",
-                    self.model_id,
-                    self.timeout_seconds,
-                    elapsed_ms,
-                    extra={
-                        "model_id": self.model_id,
-                        "reason": "timeout",
-                        "timeout_seconds": self.timeout_seconds,
-                        "elapsed_ms": elapsed_ms,
-                    },
-                )
-                emit_compaction_event(
-                    "compaction_failure",
-                    model_id=self.model_id,
-                    reason="timeout",
-                    timeout_seconds=self.timeout_seconds,
-                    elapsed_ms=elapsed_ms,
-                )
-                # Graceful degrade: return None so ADK skips this
-                # compaction. The turn proceeds with uncompacted
-                # history rather than hanging on a stuck summarizer.
-                return None
-            except Exception as e:
-                elapsed_ms = int((time.monotonic() - started) * 1000)
-                _compaction_log.warning(
-                    "compaction_failure model=%s reason=exception "
-                    "error_type=%s error=%s elapsed_ms=%s",
-                    self.model_id,
-                    type(e).__name__,
-                    e,
-                    elapsed_ms,
-                    extra={
-                        "model_id": self.model_id,
-                        "reason": "exception",
-                        "error_type": type(e).__name__,
-                        "elapsed_ms": elapsed_ms,
-                    },
-                )
-                emit_compaction_event(
-                    "compaction_failure",
-                    model_id=self.model_id,
-                    reason="exception",
-                    error_type=type(e).__name__,
-                    error_message=str(e),
-                    elapsed_ms=elapsed_ms,
-                )
-                # Graceful degrade — same reasoning as the timeout
-                # branch. A broken summarizer can only cost an
-                # uncompacted turn, never a stuck session.
-                return None
-
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            if result is None:
-                _compaction_log.warning(
-                    "compaction_failure model=%s reason=empty_summary elapsed_ms=%s",
-                    self.model_id,
-                    elapsed_ms,
-                    extra={
-                        "model_id": self.model_id,
-                        "reason": "empty_summary",
-                        "elapsed_ms": elapsed_ms,
-                    },
-                )
-                emit_compaction_event(
-                    "compaction_failure",
-                    model_id=self.model_id,
-                    reason="empty_summary",
-                    elapsed_ms=elapsed_ms,
-                )
-                return None
-
-            summary_bytes = _summary_bytes(result)
-            if _compaction_log.isEnabledFor(logging.DEBUG):
-                _compaction_log.debug(
-                    "compaction_success model=%s summary_bytes=%s elapsed_ms=%s",
-                    self.model_id,
-                    summary_bytes,
-                    elapsed_ms,
-                    extra={
-                        "model_id": self.model_id,
-                        "summary_bytes": summary_bytes,
-                        "elapsed_ms": elapsed_ms,
-                    },
-                )
-            emit_compaction_event(
-                "compaction_success",
-                model_id=self.model_id,
-                event_count=event_count,
-                summary_bytes=summary_bytes,
-                elapsed_ms=elapsed_ms,
-            )
-            return result
-
-    return _LazyAdkCcSummarizer
-
-
-def _summary_bytes(event) -> int:
-    """Best-effort byte-count of the compaction summary text, for the
-    `summary_bytes` field on `compaction_success`. Tolerates the
-    various shapes ADK might return (Event with EventCompaction
-    action, mock objects in tests)."""
-    try:
-        actions = getattr(event, "actions", None)
-        if actions is None:
-            return 0
-        compaction = getattr(actions, "compaction", None)
-        if compaction is None:
-            return 0
-        text = getattr(compaction, "compacted_content", None)
-        if text is None:
-            return 0
-        if isinstance(text, str):
-            return len(text.encode("utf-8"))
-        # Fall back to repr for non-string payloads.
-        return len(repr(text).encode("utf-8"))
-    except Exception:
-        return 0
-
-
-def _make_compaction_summarizer():
-    """Build a summarizer instance for `EventsCompactionConfig`.
-
-    Always returns the lazy wrapper so audit + DEBUG hooks fire on
-    every compaction call. Model id resolution:
-
-      1. `ADK_CC_COMPACTION_MODEL` — explicit dedicated compaction model.
-      2. Fall back to `ADK_CC_MODEL` — match the main-agent model so
-         compaction uses the same backend.
-      3. Last-resort `openai/gpt-4` — same fallback LiteLlm uses.
-
-    api_base / api_key follow the same precedence: dedicated env var,
-    then main-agent env var, then None / empty.
-
-    Functionally equivalent to ADK's default summarizer
-    (`_ensure_compaction_summarizer` auto-instantiating
-    `LlmEventSummarizer(llm=agent.canonical_model)`) in the "no
-    dedicated model" case, plus our observability hooks. The
-    operator gets audit coverage just by enabling compaction.
-    """
-    model_id = (
-        os.environ.get("ADK_CC_COMPACTION_MODEL")
-        or os.environ.get("ADK_CC_MODEL")
-        or "openai/gpt-4"
-    )
-    api_base = os.environ.get(
-        "ADK_CC_COMPACTION_API_BASE", os.environ.get("ADK_CC_API_BASE")
-    )
-    api_key = os.environ.get(
-        "ADK_CC_COMPACTION_API_KEY", os.environ.get("ADK_CC_API_KEY", "")
-    )
-    # Timeout (seconds) — 0 disables. See `_LazyAdkCcSummarizer`'s
-    # docstring for the graceful-degrade contract. Default 30 protects
-    # against hung summarizer LLMs without surprising fast paths.
-    raw_timeout = os.environ.get("ADK_CC_COMPACTION_TIMEOUT_S", "30")
-    try:
-        timeout_seconds = float(raw_timeout)
-    except ValueError:
-        timeout_seconds = 30.0
-    if timeout_seconds < 0:
-        timeout_seconds = 0.0
-    cls = _make_lazy_summarizer_class()
-    return cls(
-        model_id=model_id,
-        api_base=api_base,
-        api_key=api_key,
-        timeout_seconds=timeout_seconds,
-    )
-
-
-def _make_compaction_config():
-    """Construct EventsCompactionConfig from env. Returns None if disabled."""
-    threshold = os.environ.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD")
-    retention = os.environ.get("ADK_CC_COMPACTION_EVENT_RETENTION")
-    interval = os.environ.get("ADK_CC_COMPACTION_INTERVAL")
-    overlap = os.environ.get("ADK_CC_COMPACTION_OVERLAP")
-    if not (threshold or interval):
-        return None  # compaction disabled
-    if bool(threshold) != bool(retention):
-        raise RuntimeError(
-            "ADK_CC_COMPACTION_TOKEN_THRESHOLD and ADK_CC_COMPACTION_EVENT_RETENTION "
-            "must be set together (ADK's EventsCompactionConfig validator requires both or neither)."
-        )
-    try:
-        from google.adk.apps.app import EventsCompactionConfig
-    except ImportError:
-        # ADK's compaction is @experimental; tolerate import breakage.
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "ADK EventsCompactionConfig unavailable; skipping compaction wiring."
-        )
-        return None
-    return EventsCompactionConfig(
-        token_threshold=int(threshold) if threshold else None,
-        event_retention_size=int(retention) if retention else None,
-        # Required fields even when only token-threshold is wanted.
-        compaction_interval=int(interval) if interval else 10,
-        overlap_size=int(overlap) if overlap else 2,
-        summarizer=_make_compaction_summarizer(),
-    )
-
-
-_compaction_config = _make_compaction_config()
-
-
-# ---------- App with permission plugin ----------
-# `adk web` / `adk run` look for `app` first, then `root_agent`. Exposing
-# both keeps direct-test imports of `root_agent` working while letting the
-# CLI wire the plugin chain automatically. `PERMISSION_MODE` / `SETTINGS`
-# are defined above (near tool instantiation) so plan-mode tools can use
-# the env default for their internal mode check.
-
-_app_kwargs = dict(
+app = App(
     name="adk_cc",
     root_agent=root_agent,
-    # Order matters. Audit goes first so before_tool_callback records every
-    # attempt — including ones the permission plugin denies. Permission's
-    # short-circuit only stops the *chain*, but audit's row is already
-    # written by then.
     plugins=[
+        # Audit must be first so it observes every tool attempt.
         AuditPlugin(),
         PermissionPlugin(SETTINGS, default_mode=PERMISSION_MODE),
-        # Reminders run on before_model_callback, lifecycle independent of
-        # the before_tool chain — order relative to others doesn't matter.
-        # Pass the env-set default to every plugin that reads
-        # `state["permission_mode"]` — without this, a fresh session
-        # booted with `ADK_CC_PERMISSION_MODE=plan` has state=None at
-        # the time these plugins fire, so they treat the session as
-        # NORMAL mode (hiding `exit_plan_mode`, emitting task reminders,
-        # not mentioning plan mode in error hints) — while
-        # PermissionPlugin gates write/exec because IT correctly falls
-        # back to its default. The result is a deadlock: write tools
-        # blocked, no way to exit plan mode.
-        # Auto-loads CLAUDE.md / .adk-cc/CONTEXT.md (project, tenant,
-        # user, operator-extras) into the system_instruction. MUST
-        # run BEFORE the reminder plugins below so the prepend lands
-        # at the top of the system message and per-turn reminders
-        # (plan mode, active tasks) append after — most-stable info
-        # first, turn-volatile info last. Plugin no-ops when no
-        # discoverable files exist OR when ADK_CC_DISABLE_PROJECT_CONTEXT=1.
+        # Project context auto-load (CLAUDE.md / CONTEXT.md). Runs early
+        # so its prepend lands above the stage-guard nudge.
         ProjectContextPlugin(),
-        PlanModeReminderPlugin(default_mode=PERMISSION_MODE.value),
-        TaskReminderPlugin(default_mode=PERMISSION_MODE.value),
-        # Catches "tool not found" errors from ADK's tool dispatch and
-        # turns them into corrective tool responses so the model can
-        # self-correct on the next iteration instead of aborting the run.
+        # Pushes the model through the loop. After ProjectContextPlugin
+        # so the per-turn stage nudge appears AFTER the stable project
+        # context block — most-stable info first, turn-volatile last.
+        StageGuardPlugin(),
+        # Catches "tool X not found" errors and turns them into a
+        # structured corrective response. Generic; tool-set-agnostic.
         ToolCallValidatorPlugin(default_mode=PERMISSION_MODE.value),
-        # Injects a UI-side response_schema into ask_user_question
-        # function-call args so adk web's bundled UI renders a structured
-        # form per question (instead of falling back to a free-form
-        # textarea). after_model_callback runs after the LLM emits the
-        # call but before ADK builds the event the UI consumes.
-        AskUserQuestionUiHintPlugin(),
-        # Rewrites adk_request_confirmation events so adk web's bundled
-        # UI renders an N-option dropdown form instead of its hardcoded
-        # binary checkbox widget. Inbound user submissions are reshaped
-        # back to ADK's expected ToolConfirmation shape so the existing
-        # request_confirmation resume processor handles them unchanged.
-        # Disable to fall back to the binary widget.
-        ConfirmationFormUiPlugin(),
-        # Pre-flight context-length guardrail: WARN at 75% of MAX,
-        # REJECT at 95%. ADK's EventsCompactionConfig (set above) is
-        # the primary defense; this is the fail-soft safety net.
+        # Pre-flight context-length guardrail.
         ContextGuardPlugin(),
-        # Raw model request/response trace for debugging model behavior.
-        # Always registered; the plugin no-ops when `ADK_CC_LOG_MODEL_IO`
-        # isn't `1`, so the per-turn cost is a single attribute check.
-        # When enabled: DEBUG log line + `model_request`/`model_response`
-        # audit events (when AuditPlugin's sink is also configured).
-        # Placed at the END so before_model_callback captures the
-        # FINAL LlmRequest (after ProjectContextPlugin, the reminder
-        # plugins, and ContextGuardPlugin have all run). Without
-        # this ordering the trace would miss prepended / appended
-        # additions — misleading for "what did the model see?"
-        # debugging. ContextGuard rejecting short-circuits, so the
-        # trace only logs requests that actually went to the model.
+        # Raw model I/O trace. Last so it captures the final LlmRequest
+        # after every other mutator has run.
         ModelIOTracePlugin(),
     ],
 )
-if _compaction_config is not None:
-    _app_kwargs["events_compaction_config"] = _compaction_config
-
-app = App(**_app_kwargs)

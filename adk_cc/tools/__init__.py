@@ -1,53 +1,76 @@
-"""Tool registry for adk-cc.
+"""Tool registry for the data-science agent variant.
 
-Stage A: each tool is an `AdkCcTool` subclass with a `ToolMeta` describing
-its policy-relevant flags. `agent.py` imports the classes directly and
-instantiates one per agent's tool surface.
+The coordinator (main agent) owns only the loop-control tools —
+`record_plan`, `read_plan`, `mark_step_done`, `verify_completion`.
+Specialist sub-agents own the actual data-science surface, split
+along stage lines:
+
+  - EXPLORE: `loader` sub-agent (load_from_*), `explorer` sub-agent
+    (list_datasets, describe_dataset, peek_dataset, profile_dataset)
+  - ACT:     `processor` sub-agent (filter, aggregate, correlate,
+    drop_na, transform_column, select_columns), `visualizer`
+    sub-agent (render_bar_chart, render_table,
+    summarize_distribution)
+  - PLAN, REASON, VERIFY: prompt + state on the coordinator.
+
+The coordinator transfers to a specialist via ADK's built-in
+`transfer_to_agent` and gets control back via
+`_force_coordinator_continuation` set on every specialist's
+`after_agent_callback`. StageGuardPlugin nudges the model through
+the loop and hard-gates the verify call.
 """
 
 from __future__ import annotations
 
-from .ask_user_question import AskUserQuestionTool
-from .bash import BashTool
+from .acting import AggregateDatasetTool, CorrelateTool, FilterDatasetTool
 from .base import AdkCcTool, ToolMeta
-from .edit_file import EditFileTool
-from .enter_plan_mode import EnterPlanModeTool
-from .exit_plan_mode import ExitPlanModeTool
-from .glob_files import GlobFilesTool
-from .grep import GrepTool
-from .mcp import make_mcp_toolset
-from .read_current_plan import ReadCurrentPlanTool
-from .read_file import ReadFileTool
-from .skills import make_skill_toolset
-from .task import (
-    TaskCreateTool,
-    TaskGetTool,
-    TaskListTool,
-    TaskUpdateTool,
+from .exploration import (
+    DescribeDatasetTool,
+    ListDatasetsTool,
+    PeekDatasetTool,
 )
-from .web_fetch import WebFetchTool
-from .write_file import WriteFileTool
-from .write_plan import WritePlanTool
+from .loader import (
+    LoadFromDbMockTool,
+    LoadFromFileMockTool,
+    LoadFromRegistryTool,
+)
+from .planning import MarkStepDoneTool, ReadPlanTool, RecordPlanTool
+from .preprocess import DropNaTool, SelectColumnsTool, TransformColumnTool
+from .profile import ProfileDatasetTool
+from .verification import VerifyCompletionTool
+from .visualizer import (
+    RenderBarChartTool,
+    RenderTableTool,
+    SummarizeDistributionTool,
+)
 
 __all__ = [
     "AdkCcTool",
     "ToolMeta",
-    "AskUserQuestionTool",
-    "BashTool",
-    "EditFileTool",
-    "EnterPlanModeTool",
-    "ExitPlanModeTool",
-    "GlobFilesTool",
-    "GrepTool",
-    "ReadCurrentPlanTool",
-    "ReadFileTool",
-    "TaskCreateTool",
-    "TaskGetTool",
-    "TaskListTool",
-    "TaskUpdateTool",
-    "WebFetchTool",
-    "WriteFileTool",
-    "WritePlanTool",
-    "make_mcp_toolset",
-    "make_skill_toolset",
+    # loader specialist
+    "LoadFromRegistryTool",
+    "LoadFromDbMockTool",
+    "LoadFromFileMockTool",
+    # explorer specialist
+    "ListDatasetsTool",
+    "DescribeDatasetTool",
+    "PeekDatasetTool",
+    "ProfileDatasetTool",
+    # coordinator: planning
+    "RecordPlanTool",
+    "ReadPlanTool",
+    "MarkStepDoneTool",
+    # processor specialist
+    "FilterDatasetTool",
+    "AggregateDatasetTool",
+    "CorrelateTool",
+    "DropNaTool",
+    "TransformColumnTool",
+    "SelectColumnsTool",
+    # visualizer specialist
+    "RenderBarChartTool",
+    "RenderTableTool",
+    "SummarizeDistributionTool",
+    # coordinator: verify
+    "VerifyCompletionTool",
 ]
