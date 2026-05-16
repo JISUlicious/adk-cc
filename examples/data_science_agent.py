@@ -21,11 +21,17 @@ Scripted loop:
  10. Processor:   aggregate_dataset(...)
  11. Coordinator: transfer to `visualizer`    (ACT step 3)
  12. Visualizer:  render_bar_chart(...)
- 13. Coordinator: verify_completion(...)      (VERIFY)
- 14. Coordinator: final user-facing text
+ 13. Coordinator: transfer to `critic`        (VERIFY — independent judge)
+ 14. Critic:      structured JSON CriticVerdict (PASS, evidence_quality=strong)
+ 15. Coordinator: verify_completion(... critic_verdict)
+ 16. Coordinator: final user-facing text
 
 No explicit `mark_step_done` calls — step completion is inferred
-from the acting-tool result count vs the plan length.
+from the acting-tool result count vs the plan length. The critic's
+verdict is read from session history and passed verbatim to
+verify_completion as the `critic_verdict` arg; coordinator
+self-judgment is GONE (a model grading its own work has near-zero
+independence).
 
 Run:
   `.venv/bin/python examples/data_science_agent.py`
@@ -81,6 +87,7 @@ class _Scripted(BaseLlm):
     explorer_queue: list[LlmResponse] = Field(default_factory=list)
     processor_queue: list[LlmResponse] = Field(default_factory=list)
     visualizer_queue: list[LlmResponse] = Field(default_factory=list)
+    critic_queue: list[LlmResponse] = Field(default_factory=list)
 
     @classmethod
     def supported_models(cls) -> list[str]:
@@ -102,6 +109,8 @@ class _Scripted(BaseLlm):
             return self.processor_queue
         if "You are the `visualizer`" in si:
             return self.visualizer_queue
+        if "You are the `critic`" in si:
+            return self.critic_queue
         return self.coord_queue
 
     async def generate_content_async(
@@ -184,9 +193,11 @@ def _build_scripted_llm() -> _Scripted:
             _fc("co-6", "transfer_to_agent", {"agent_name": "processor"}),
             # ACT step 2: dispatch to visualizer
             _fc("co-7", "transfer_to_agent", {"agent_name": "visualizer"}),
-            # VERIFY
+            # VERIFY step 1: dispatch to the critic for an independent judgment.
+            _fc("co-8", "transfer_to_agent", {"agent_name": "critic"}),
+            # VERIFY step 2: call verify_completion with the critic's verdict.
             _fc(
-                "co-8",
+                "co-9",
                 "verify_completion",
                 {
                     "user_query": (
@@ -198,13 +209,19 @@ def _build_scripted_llm() -> _Scripted:
                         "extended its lead in Q2 with $545,000 — a 2.8% "
                         "quarter-over-quarter increase."
                     ),
-                    "llm_judgment": {
-                        "satisfies_query": True,
+                    "critic_verdict": {
+                        "verdict": "PASS",
+                        "addressed_aspects": [
+                            "highest Q1 region by total revenue",
+                            "comparison to Q2 for that region",
+                        ],
+                        "missing_aspects": [],
+                        "evidence_quality": "strong",
                         "reasoning": (
-                            "Q1 aggregate confirmed south as the highest "
-                            "region. Q2 aggregate confirmed south's "
-                            "follow-through. The numbers and direction "
-                            "directly answer the user's two-part question."
+                            "aggregate_dataset on sales_q1 returned south=530k as "
+                            "the top region; aggregate_dataset on sales_q2 returned "
+                            "south=545k, supporting the QoQ comparison. Both numeric "
+                            "claims in the conclusion match the recorded results."
                         ),
                     },
                 },
@@ -270,6 +287,22 @@ def _build_scripted_llm() -> _Scripted:
             ),
             _txt("bar chart rendered for sales_q1 revenue by region"),
         ],
+        critic_queue=[
+            # The critic agent has `output_schema=CriticVerdict`, so its
+            # response is a single text part containing JSON matching
+            # the schema. The scripted LLM yields the bytes directly.
+            _txt(
+                '{"verdict": "PASS", '
+                '"addressed_aspects": ["highest Q1 region by total revenue", '
+                '"comparison to Q2 for that region"], '
+                '"missing_aspects": [], '
+                '"evidence_quality": "strong", '
+                '"reasoning": "aggregate_dataset on sales_q1 returned south=530k '
+                'as the top region; aggregate_dataset on sales_q2 returned '
+                'south=545k, supporting the QoQ comparison. Both numeric claims '
+                'in the conclusion match the recorded results."}'
+            ),
+        ],
     )
 
 
@@ -285,6 +318,7 @@ async def run() -> int:
         ds_agent.explorer_agent,
         ds_agent.processor_agent,
         ds_agent.visualizer_agent,
+        ds_agent.critic_agent,
     ]:
         ag.model = scripted
 

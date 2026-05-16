@@ -37,6 +37,31 @@ def make_specialist_model() -> LiteLlm:
     )
 
 
+def make_critic_model() -> LiteLlm:
+    """Build the LiteLlm instance for the `critic` sub-agent.
+
+    The critic is intentionally model-independent from the rest of
+    the pipeline. Same-model-as-coordinator grading has limited
+    independence (shared priors, shared blind spots), so operators
+    can wire a different model here via the `ADK_CC_CRITIC_*` env
+    triplet. When those are unset, falls back to the main agent's
+    config — same model, but the critic's invocation context is
+    fresh so there's still SOME independence.
+    """
+    return LiteLlm(
+        model=os.environ.get(
+            "ADK_CC_CRITIC_MODEL",
+            os.environ.get("ADK_CC_MODEL", "openai/Qwen3.6-35B-A3B-UD-MLX-4bit"),
+        ),
+        api_base=os.environ.get(
+            "ADK_CC_CRITIC_API_BASE",
+            os.environ.get("ADK_CC_API_BASE", "http://localhost:18000/v1"),
+        ),
+        api_key=os.environ.get("ADK_CC_CRITIC_API_KEY")
+        or os.environ["ADK_CC_API_KEY"],
+    )
+
+
 def force_coordinator_continuation(callback_context: Context) -> types.Content:
     """Yield a synthetic function-call event so the parent flow doesn't
     treat the specialist's final text as the turn's final response —

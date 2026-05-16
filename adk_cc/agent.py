@@ -39,6 +39,7 @@ from .plugins import (
     ToolCallValidatorPlugin,
 )
 from .sub_agents import (
+    critic_agent,
     explorer_agent,
     loader_agent,
     processor_agent,
@@ -84,7 +85,13 @@ root_agent = LlmAgent(
     ),
     instruction=prompts.COORDINATOR_INSTRUCTION,
     tools=_coordinator_tools,
-    sub_agents=[loader_agent, explorer_agent, processor_agent, visualizer_agent],
+    sub_agents=[
+        loader_agent,
+        explorer_agent,
+        processor_agent,
+        visualizer_agent,
+        critic_agent,
+    ],
 )
 
 

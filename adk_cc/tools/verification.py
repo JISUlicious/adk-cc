@@ -1,26 +1,23 @@
-"""VERIFY-stage tool: rule-checks + an LLM judgment over the agent's work.
+"""VERIFY-stage tool: rule-checks + an independent critic's verdict.
 
-`verify_completion` is the agent's exit gate. It takes:
+`verify_completion` is the durable PASS/FAIL gate. It combines two
+sources of evidence:
 
-  - `user_query`: the original ask, restated by the agent.
-  - `conclusion`: the agent's final, user-facing answer (still inside
-    the tool call — not yet emitted as text).
-  - `llm_judgment`: a structured dict the agent produces from its own
-    reasoning about whether the conclusion answers the query. Carrying
-    this through the tool args (rather than spawning a second model
-    call) keeps the verifier deterministic in tests while still
-    capturing the model's own self-assessment.
+  - RULE side (deterministic, fast): plan was recorded, result count
+    >= plan length, conclusion is non-empty. Catches obvious skips.
+  - CRITIC side (LLM, independent context): the `critic` sub-agent's
+    structured verdict, passed in by the coordinator as the
+    `critic_verdict` arg. Catches semantic gaps the rule check
+    can't see (missing aspects of the query, weak evidence, etc.).
 
-The tool combines that with:
+Final verdict is PASS only when BOTH agree. The breakdown is
+returned so the caller can see which side rejected — when only one
+fails, the coordinator can re-dispatch work to address it and
+re-critic without restarting the whole loop.
 
-  - RULE-side checks against session state — plan exists, every step
-    has status=done, at least one acting-tool result was recorded,
-    conclusion is non-empty, every plan step's `evidence` field is set.
-  - The LLM judgment's `satisfies_query: bool` field.
-
-The verdict is `PASS` only when rules AND LLM agree. Either side's
-failure produces `FAIL`. The breakdown is returned so the caller can
-see which side rejected.
+The coordinator's earlier `llm_judgment` self-grading is GONE. A
+model grading its own work in the same context has near-zero
+independence; the critic sub-agent is the replacement.
 """
 
 from __future__ import annotations
@@ -30,47 +27,37 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field, field_validator
 
+from ..sub_agents.critic.schema import CriticVerdict
 from .base import AdkCcTool, ToolMeta
 
 _PLAN_KEY = "temp:loop_plan"
 _RESULTS_KEY = "temp:loop_results"
 
 
-class _LlmJudgment(BaseModel):
-    satisfies_query: bool = Field(
-        ...,
-        description=(
-            "Your assessment: does the conclusion actually answer the "
-            "original user_query? True only if the data behind the "
-            "conclusion is correct AND directly responsive."
-        ),
-    )
-    reasoning: str = Field(
-        ...,
-        min_length=10,
-        description=(
-            "One or two sentences explaining the assessment. Used as "
-            "evidence in the audit trail and shown back to the user "
-            "if the verifier rejects."
-        ),
-    )
-
-
 class _VerifyArgs(BaseModel):
     user_query: str = Field(..., min_length=1)
     conclusion: str = Field(..., min_length=1)
-    llm_judgment: _LlmJudgment
+    critic_verdict: CriticVerdict = Field(
+        ...,
+        description=(
+            "The `critic` sub-agent's structured verdict from its most "
+            "recent invocation in this session. Pass the JSON object "
+            "verbatim — do not paraphrase it or invent fields. The "
+            "coordinator should obtain this by dispatching to `critic` "
+            "and reading the critic's structured output from the "
+            "conversation history."
+        ),
+    )
 
-    @field_validator("llm_judgment", mode="before")
+    @field_validator("critic_verdict", mode="before")
     @classmethod
-    def _accept_stringified_judgment(cls, v: Any) -> Any:
-        """Some smaller / OS function-callers (observed on
-        stepfun-ai/step-3.5-flash) emit nested-object args as a
-        JSON-encoded STRING instead of a real nested object. Parse
-        the string here so Pydantic sees the right shape downstream.
-        Failures fall through to the standard validator and surface
-        the real schema error to the model.
-        """
+    def _accept_stringified_verdict(cls, v: Any) -> Any:
+        """Some smaller / OS function-callers emit nested-object args as
+        JSON-encoded strings instead of real nested objects (we hit
+        this on stepfun-ai/step-3.5-flash and minimax-m2.7). Parse the
+        string here so Pydantic sees the right shape downstream;
+        validation failures fall through to surface the real schema
+        error to the model."""
         if isinstance(v, str):
             try:
                 return json.loads(v)
@@ -88,27 +75,23 @@ class VerifyCompletionTool(AdkCcTool):
     )
     input_model: ClassVar[type[BaseModel]] = _VerifyArgs
     description: ClassVar[str] = (
-        "Final gate. Combines rule-checks (plan complete, evidence "
-        "recorded, results present) with your own LLM judgment to "
-        "decide PASS / FAIL. Call this exactly once, AFTER every plan "
-        "step is marked done and BEFORE you emit the user-facing reply.\n\n"
-        "IMPORTANT: `llm_judgment` is a nested object with fields "
-        "`satisfies_query` (bool) and `reasoning` (string), passed "
-        "directly as args — NOT a JSON-encoded string. Emit it as a "
-        'real object: `llm_judgment: {"satisfies_query": true, '
-        '"reasoning": "..."}`, not `llm_judgment: "{...}"`.'
+        "Final gate. Combines deterministic rule-checks (plan complete, "
+        "results present, conclusion non-empty) with an INDEPENDENT "
+        "critic's structured verdict to decide PASS / FAIL. Call this "
+        "AFTER dispatching to the `critic` sub-agent and reading its "
+        "verdict from conversation history.\n\n"
+        "IMPORTANT: `critic_verdict` is a nested object with five "
+        "fields (verdict, addressed_aspects, missing_aspects, "
+        "evidence_quality, reasoning). Pass it as a real JSON object, "
+        'NOT as a string: `critic_verdict: {"verdict": "PASS", ...}`. '
+        "Use the critic's verdict verbatim — do not invent values."
     )
 
     async def _execute(self, args: _VerifyArgs, ctx: Any) -> dict[str, Any]:
         plan = ctx.state.get(_PLAN_KEY) or []
         results = ctx.state.get(_RESULTS_KEY) or []
 
-        # --- Rule checks ---
-        # Step completion is INFERRED from result count vs plan length —
-        # one acting-tool result per plan step is the contract. There's
-        # no per-step `status` to inspect because there's no
-        # `mark_step_done` tool anymore. The specialist's handback IS
-        # the step-done signal; the framework counts results.
+        # --- Rule check (deterministic) ---
         rule_failures: list[str] = []
         if not plan:
             rule_failures.append("no plan was recorded")
@@ -122,12 +105,12 @@ class VerifyCompletionTool(AdkCcTool):
             rule_failures.append("no acting-tool results recorded")
         if not args.conclusion.strip():
             rule_failures.append("conclusion is empty")
-
         rule_pass = not rule_failures
 
-        # --- LLM check ---
-        llm_pass = args.llm_judgment.satisfies_query
-        verdict = "PASS" if (rule_pass and llm_pass) else "FAIL"
+        # --- Critic check (independent LLM judgment) ---
+        critic_pass = args.critic_verdict.verdict == "PASS"
+
+        verdict = "PASS" if (rule_pass and critic_pass) else "FAIL"
 
         return {
             "status": "ok",
@@ -140,8 +123,11 @@ class VerifyCompletionTool(AdkCcTool):
                 "plan_steps": len(plan),
                 "results_recorded": len(results),
             },
-            "llm_check": {
-                "pass": llm_pass,
-                "reasoning": args.llm_judgment.reasoning,
+            "critic_check": {
+                "pass": critic_pass,
+                "verdict": args.critic_verdict.verdict,
+                "missing_aspects": args.critic_verdict.missing_aspects,
+                "evidence_quality": args.critic_verdict.evidence_quality,
+                "reasoning": args.critic_verdict.reasoning,
             },
         }

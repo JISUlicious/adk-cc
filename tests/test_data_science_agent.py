@@ -3,11 +3,11 @@
 Subprocess-boots the demo and asserts:
 
   - exit code == 0
-  - the six specialist transfers fire in the expected order
-    (loader, loader, explorer, processor, processor, visualizer)
+  - the seven specialist transfers fire in the expected order
+    (loader, loader, explorer, processor, processor, visualizer, critic)
   - the five loop-stage transitions land in the audit JSONL
     (∅→explore→plan→act→verify→done)
-  - audit event counts match: 17 tool attempts + 17 results, no errors
+  - audit event counts match: 15 tool attempts + 15 results, no errors
   - the coordinator's final text includes the conclusion from the
     verify step (proves the run reached and passed VERIFY)
 
@@ -34,6 +34,7 @@ _EXPECTED_TRANSFERS = [
     "processor",
     "processor",
     "visualizer",
+    "critic",
 ]
 
 # (from_stage, to_stage) — `None` from the JSON serializes to the
@@ -151,15 +152,16 @@ def test_audit_event_counts() -> None:
         f"{counts.get('loop_stage_transition')!r}"
     )
     # Strict equality on the observed-from-demo value keeps us honest
-    # about regressions. Post-redesign (no `mark_step_done` tool):
-    # 14 tool calls = 6 transfers + 2 loader + 1 describe + 1
-    # record_plan + 2 aggregate + 1 render_bar_chart + 1 verify.
-    assert counts.get("tool_call_attempt") == 14, (
-        f"expected 14 tool_call_attempt events, got "
+    # about regressions. Post-critic-gate: 15 tool calls = 7 transfers
+    # (loader×2, explorer, processor×2, visualizer, critic) + 2 loader
+    # + 1 describe + 1 record_plan + 2 aggregate + 1 render_bar_chart
+    # + 1 verify_completion.
+    assert counts.get("tool_call_attempt") == 15, (
+        f"expected 15 tool_call_attempt events, got "
         f"{counts.get('tool_call_attempt')!r}\n  counts={counts}"
     )
-    assert counts.get("tool_call_result") == 14, (
-        f"expected 14 tool_call_result events, got "
+    assert counts.get("tool_call_result") == 15, (
+        f"expected 15 tool_call_result events, got "
         f"{counts.get('tool_call_result')!r}\n  counts={counts}"
     )
     assert counts.get("tool_call_error", 0) == 0, (
