@@ -1,10 +1,8 @@
 """Base contract for adk-cc tools.
 
 Every tool subclasses `AdkCcTool` and declares:
-  - `meta`: a `ToolMeta` instance carrying the upstream-style flags
-    (is_read_only, is_concurrency_safe, is_destructive, needs_sandbox,
-    long_running) that later stages' policy plugins read to decide
-    permission, sandboxing, and concurrency.
+  - `meta`: a `ToolMeta` instance carrying a small set of flags
+    (`is_read_only`, `is_concurrency_safe`, `long_running`).
   - `input_model`: a Pydantic model class describing the tool's args.
   - `_execute(args, ctx)`: the actual handler.
 
@@ -15,70 +13,40 @@ The base class:
     `_execute`, surfacing validation errors back to the model as a
     structured tool result rather than a Python exception.
 
-We deliberately do not subclass `FunctionTool` — `FunctionTool` introspects
-a Python function's signature, but we want the metadata flags and the
-typed Pydantic input contract that policy plugins later consume.
+We deliberately do not subclass `FunctionTool` — `FunctionTool`
+introspects a Python function's signature, but we want the typed
+Pydantic input contract and explicit meta flags.
+
+Earlier revisions of this base carried `is_destructive`,
+`needs_sandbox`, and `requires_user_approval` flags along with a HITL
+approval-gate flow in `run_async`. The data-science variant has zero
+tools that opt into any of those, so the supporting infrastructure
+(permission engine, sandbox backends, confirmation flow) was removed,
+and this base trimmed to match. Git history has the previous shape if
+ever needed.
 """
 
 from __future__ import annotations
 
 import inspect
 import logging
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar
 
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 from pydantic import BaseModel, ValidationError
 
-# NOTE: `..plugins.audit.emit_confirmation_resume` is imported lazily
-# inside `run_async` rather than at module-load. permissions/engine.py
-# imports tools.base.AdkCcTool, and tools.base is loaded before
-# plugins/__init__.py — eagerly importing audit here would trigger
-# plugins/__init__.py → plugins.permissions → permissions.engine
-# before engine.py finishes loading.
-
 _log = logging.getLogger(__name__)
 
 
-def _extract_user_comment(confirmation: Any) -> Optional[str]:
-    """Read the optional `comment` field from a ToolConfirmation's
-    `payload` dict. Populated by `ConfirmationFormUiPlugin` when the
-    `ConfirmPrompt` was sent with `with_comment=True` and the operator
-    typed something into the form's comment textbox. Returns None when
-    absent or empty."""
-    payload = getattr(confirmation, "payload", None)
-    if not isinstance(payload, dict):
-        return None
-    raw = payload.get("comment")
-    if not isinstance(raw, str):
-        return None
-    text = raw.strip()
-    return text or None
-
-
 class ToolMeta(BaseModel):
-    """Static metadata declared by every adk-cc tool.
-
-    Read by:
-      - The permission plugin (Stage B) — `is_destructive` and per-tool
-        rules drive deny/ask/allow decisions.
-      - The sandbox layer (Stage C) — `needs_sandbox` decides whether
-        execution must go through `SandboxBackend`.
-      - The audit plugin (Stage D) — `is_read_only` decides log verbosity.
-      - ADK itself — `long_running` maps to `BaseTool.is_long_running`.
-      - `AdkCcTool.run_async` — `requires_user_approval` triggers a
-        request_confirmation gate before _execute runs. Mirrors upstream
-        Claude Code's `checkPermissions: 'ask'` semantic.
-    """
+    """Static metadata declared by every adk-cc tool."""
 
     name: str
     is_read_only: bool
     is_concurrency_safe: bool
-    is_destructive: bool = False
-    needs_sandbox: bool = False
     long_running: bool = False
-    requires_user_approval: bool = False
 
 
 class AdkCcTool(BaseTool):
@@ -125,91 +93,18 @@ class AdkCcTool(BaseTool):
         except ValidationError as e:
             return {"status": "input_validation_error", "errors": e.errors()}
 
-        # Approval gate — opted in by ToolMeta.requires_user_approval.
-        # Two-call pattern (mirrors google/adk/tools/bash_tool.py:163-174):
-        # first call requests, ADK pauses, user responds, ADK re-invokes
-        # with tool_confirmation populated.
-        if self.meta.requires_user_approval:
-            confirmation = getattr(tool_context, "tool_confirmation", None)
-            if confirmation is None:
-                try:
-                    tool_context.request_confirmation(
-                        hint=self._approval_hint(validated),
-                        payload=self._approval_payload(validated),
-                    )
-                    tool_context.actions.skip_summarization = True
-                except Exception as e:
-                    return {
-                        "status": "error",
-                        "error": f"could not request confirmation: {e}",
-                    }
-                if _log.isEnabledFor(logging.DEBUG):
-                    _log.debug(
-                        "confirmation requested tool=%s",
-                        self.meta.name,
-                        extra={
-                            "tool_name": self.meta.name,
-                            "phase": "request",
-                        },
-                    )
-                return {"status": "awaiting_user_confirmation"}
-            if _log.isEnabledFor(logging.DEBUG):
-                _log.debug(
-                    "confirmation resumed tool=%s confirmed=%s",
-                    self.meta.name,
-                    getattr(confirmation, "confirmed", None),
-                    extra={
-                        "tool_name": self.meta.name,
-                        "phase": "resume",
-                        "confirmed": getattr(confirmation, "confirmed", None),
-                    },
-                )
-            # Audit emit (deferred import — see module-top NOTE on the
-            # plugins.audit cycle).
-            from ..plugins.audit import emit_confirmation_resume
-            payload = getattr(confirmation, "payload", None)
-            chose_id = (
-                payload.get("chose_id")
-                if isinstance(payload, dict)
-                else None
-            )
-            emit_confirmation_resume(
-                tool_name=self.meta.name,
-                chose_id=chose_id if isinstance(chose_id, str) else None,
-                confirmed=getattr(confirmation, "confirmed", None),
-                function_call_id=getattr(tool_context, "function_call_id", None),
-                ctx=tool_context,
-            )
-            if not getattr(confirmation, "confirmed", False):
-                # When the bundled UI's form widget includes a comment
-                # field (ConfirmPrompt.with_comment=True), the operator's
-                # feedback is in `confirmation.payload["comment"]`.
-                # Surface it on the denied response so the model can
-                # read it and adjust (e.g. revise the plan after deny).
-                response: dict[str, Any] = {
-                    "status": "denied",
-                    "reason": "user did not approve",
-                }
-                comment = _extract_user_comment(confirmation)
-                if comment:
-                    response["user_comment"] = comment
-                return response
-
         result = self._execute(validated, tool_context)
         if inspect.isawaitable(result):
             result = await result
 
-        # Long-running tools (e.g. ask_user_question) pause the agent loop
-        # while waiting for an asynchronous user/system response. ADK marks
-        # the function-CALL event as final via `long_running_tool_ids`
-        # (base_llm_flow.py:106), but the function-RESPONSE event built
-        # afterwards in `__build_response_event` (functions.py:1120) carries
-        # only `actions` — not `long_running_tool_ids`. Without
-        # `skip_summarization`, the response event's `is_final_response()`
-        # returns False, the runner re-invokes the LLM with our
-        # `{"status": "awaiting_user_input"}` as a normal tool result, and
-        # the model cascades into more questions before the user has
-        # answered. Same root cause as the PermissionPlugin "ask" branch.
+        # Long-running tools pause the agent loop while waiting for an
+        # asynchronous user/system response. ADK marks the function-CALL
+        # event as final via `long_running_tool_ids`, but the function-
+        # RESPONSE event built afterwards carries only `actions` — not
+        # `long_running_tool_ids`. Without `skip_summarization`, the
+        # runner re-invokes the LLM with the awaiting-response status as
+        # a normal tool result and cascades into more turns before the
+        # asynchronous response actually arrives.
         if self.meta.long_running:
             tool_context.actions.skip_summarization = True
 
@@ -219,13 +114,3 @@ class AdkCcTool(BaseTool):
         self, args: BaseModel, ctx: ToolContext
     ) -> dict[str, Any]:
         raise NotImplementedError(f"{type(self).__name__}._execute")
-
-    # --- Approval-gate hooks (override in subclasses with requires_user_approval=True) ---
-
-    def _approval_hint(self, args: BaseModel) -> str:
-        """User-facing prompt shown in the confirmation dialog."""
-        return f"Approve {self.meta.name}?"
-
-    def _approval_payload(self, args: BaseModel) -> Any:
-        """Structured data the frontend can render alongside the prompt."""
-        return None

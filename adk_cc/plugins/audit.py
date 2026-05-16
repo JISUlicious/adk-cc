@@ -1,44 +1,32 @@
 """Audit plugin — observes every tool call.
 
 Routes through ADK's existing plugin surface directly:
-  - `before_tool_callback`  → records the attempt (including denied)
+  - `before_tool_callback`  → records the attempt
   - `after_tool_callback`   → records the result (only fires on executed)
   - `on_tool_error_callback`→ records errors
 
 All callbacks return None so audit observes without mutating the chain.
 
-Plugin chain ordering matters: register `AuditPlugin` BEFORE
-`PermissionPlugin`. That way audit's `before_tool_callback` fires on the
-attempt before permission's potential short-circuit; both denied and
-allowed attempts get logged. Audit's `after_tool_callback` only fires
-when execution actually happened — correct, since denied calls have no
-result to record.
+Plugin chain ordering matters: register `AuditPlugin` FIRST so its
+`before_tool_callback` fires before any other plugin can short-circuit.
 
 Sink is pluggable: either a path (JSONL) or a callable. Operators wanting
 Postgres / DataDog / SQS write a callable that takes the event dict.
 
 ## Event schema (versioned by `event` field)
 
-  - `tool_call_attempt`     — before permission check
-  - `tool_call_result`      — after execution
-  - `tool_call_error`       — execution raised
-  - `permission_decision`   — decide() outcome (allow/deny/ask + rule)
-  - `state_mutation`        — permission_mode flip or allow-rule write
-  - `confirmation_resume`   — user response received and applied
-  - `model_request`         — full LlmRequest dump (ModelIOTracePlugin)
-  - `model_response`        — full LlmResponse dump (ModelIOTracePlugin)
-  - `compaction_triggered`  — before LlmEventSummarizer fires
-  - `compaction_success`    — summarizer returned a non-None event
-  - `compaction_failure`    — summarizer returned None / raised / timed out
-  - `project_context_loaded`— CLAUDE.md / CONTEXT.md files loaded into
-                              the system_instruction (first load + on
-                              every mtime drift)
+  - `tool_call_attempt`        — every dispatched tool call
+  - `tool_call_result`         — after execution
+  - `tool_call_error`          — execution raised
+  - `model_request`            — full LlmRequest dump (ModelIOTracePlugin)
+  - `model_response`           — full LlmResponse dump (ModelIOTracePlugin)
+  - `loop_stage_transition`    — stage advance via StageGuardPlugin
 
-Events beyond the first three are emitted from inside other plugins /
-tools / wrappers via the module-level `emit_audit_event` helper. The
-helper looks up the process-wide AuditPlugin instance set at agent
-construction (see `set_global_sink`). Callsites that fire when no
-AuditPlugin is configured are silent no-ops.
+Events beyond the first three are emitted from inside other plugins via
+the module-level `emit_audit_event` helper. The helper looks up the
+process-wide AuditPlugin instance set at agent construction (see
+`set_global_sink`). Callsites that fire when no AuditPlugin is
+configured are silent no-ops.
 """
 
 from __future__ import annotations
@@ -53,16 +41,9 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
-# NOTE: `..tools.base.AdkCcTool` is imported lazily inside `_tool_fields`
-# rather than at module-load. `tools/base.py` imports this module
-# (`emit_confirmation_resume`), so an eager import here would form a
-# circular import: tools.base → plugins.audit → tools.base.
-
 # Process-wide sink registered by the AuditPlugin instance at __init__.
-# Callsites in other modules (engine.decide, permissions._add_session_allow,
-# plan-mode tools' state writes, confirmation resume) emit through here
-# instead of holding a direct reference to the plugin instance. When no
-# plugin is configured, `_GLOBAL_SINK` stays None and emits are no-ops.
+# When no plugin is configured, `_GLOBAL_SINK` stays None and emits are
+# no-ops.
 _GLOBAL_SINK: Optional[Callable[[dict[str, Any]], None]] = None
 
 Sink = Union[str, Path, Callable[[dict], None]]
@@ -99,12 +80,10 @@ class AuditPlugin(BasePlugin):
         else:
             self._sink_path = Path(sink)
         # Register this instance as the process-wide sink so non-plugin
-        # callsites (engine.decide, _add_session_allow, plan-mode tools)
-        # can route audit events here via `emit_audit_event`. Last
-        # instance wins — operators registering a second AuditPlugin
-        # are responsible for ordering. Unit tests that build many
-        # instances should call `clear_global_sink()` between cases
-        # or accept that the latest one is active.
+        # callsites (StageGuardPlugin transitions, ModelIOTrace dumps,
+        # etc.) can route audit events here via `emit_audit_event`. Last
+        # instance wins — operators registering a second AuditPlugin are
+        # responsible for ordering.
         set_global_sink(self._emit)
 
     def _emit(self, event: dict[str, Any]) -> None:
@@ -112,8 +91,8 @@ class AuditPlugin(BasePlugin):
             try:
                 self._sink_callable(event)
             except Exception:
-                # Audit must never raise — losing a record is preferable to
-                # crashing the agent loop.
+                # Audit must never raise — losing a record is preferable
+                # to crashing the agent loop.
                 pass
             return
 
@@ -149,11 +128,17 @@ class AuditPlugin(BasePlugin):
 
     @staticmethod
     def _tool_fields(tool: BaseTool) -> dict[str, Any]:
-        # Deferred import — see module docstring NOTE.
-        from ..tools.base import AdkCcTool
+        # AdkCcTool carries a `meta` attribute; plain BaseTool does not.
+        # Use duck-typing rather than an isinstance check so this avoids
+        # a circular import between `plugins.audit` and `tools.base`.
         out: dict[str, Any] = {"tool_name": tool.name}
-        if isinstance(tool, AdkCcTool):
-            out["tool_meta"] = tool.meta.model_dump()
+        meta = getattr(tool, "meta", None)
+        dump = getattr(meta, "model_dump", None) if meta is not None else None
+        if callable(dump):
+            try:
+                out["tool_meta"] = dump()
+            except Exception:
+                pass
         return out
 
     async def before_tool_callback(
@@ -182,9 +167,10 @@ class AuditPlugin(BasePlugin):
         tool_context: ToolContext,
         result: Any,
     ) -> Optional[dict]:
-        # ADK's after_tool_callback signature types `result` as `dict`, but
-        # in practice tools can return strings (MCP tools, some BaseTool
-        # impls). Defensive: only pull `status` when the result is dict-shaped.
+        # ADK's after_tool_callback signature types `result` as `dict`,
+        # but in practice tools can return strings (MCP tools, some
+        # BaseTool impls). Defensive: only pull `status` when the result
+        # is dict-shaped.
         result_status = result.get("status") if isinstance(result, dict) else None
         self._emit(
             {
@@ -220,16 +206,11 @@ class AuditPlugin(BasePlugin):
         return None
 
 
-# --- Module-level emit helpers for non-plugin callsites ---------------
+# --- Module-level helpers for non-plugin callsites --------------------
 #
-# Permission-decision logging, state-mutation logging, and confirmation
-# resume logging fire from inside ADK plugin callbacks / tool methods
-# that don't hold a reference to the AuditPlugin instance. Rather than
-# weaving the plugin through every layer, callsites use these helpers;
-# the AuditPlugin registers its sink at __init__.
-#
-# If no plugin is registered, `emit_audit_event` is a no-op — operators
-# who haven't configured audit get zero overhead.
+# Other plugins emit structured events via `emit_audit_event` rather
+# than holding a reference to the AuditPlugin instance. When no plugin
+# is registered, all emits are silent no-ops.
 
 
 def set_global_sink(sink: Callable[[dict[str, Any]], None]) -> None:
@@ -241,23 +222,14 @@ def set_global_sink(sink: Callable[[dict[str, Any]], None]) -> None:
 
 
 def clear_global_sink() -> None:
-    """Test helper — drop the registered sink. Use between tests that
-    construct AuditPlugin instances to avoid leakage."""
+    """Test helper — drop the registered sink."""
     global _GLOBAL_SINK
     _GLOBAL_SINK = None
 
 
 def emit_audit_event(event: dict[str, Any]) -> None:
-    """Send a structured event to the registered audit sink. No-op
-    when no AuditPlugin has been constructed in this process.
-
-    The caller is responsible for setting `event["event"]` to one of
-    the documented event types and including a `ts` timestamp.
-
-    Caller-side guard: most callsites should still gate themselves with
-    `if not is_audit_enabled(): return` to skip expensive payload
-    construction when audit is off. This helper handles the no-sink
-    case but doesn't help with prep-work cost."""
+    """Send a structured event to the registered audit sink. No-op when
+    no AuditPlugin has been constructed in this process."""
     sink = _GLOBAL_SINK
     if sink is None:
         return
@@ -265,119 +237,10 @@ def emit_audit_event(event: dict[str, Any]) -> None:
         sink(event)
     except Exception:
         # Audit must never raise — losing a record is preferable to
-        # crashing the agent loop. Mirrors the same fail-silent
-        # discipline as AuditPlugin._emit.
+        # crashing the agent loop.
         pass
 
 
 def is_audit_enabled() -> bool:
-    """True when an AuditPlugin sink is registered. Lets callers skip
-    payload-construction work entirely when audit is off."""
+    """True when an AuditPlugin sink is registered."""
     return _GLOBAL_SINK is not None
-
-
-def emit_permission_decision(
-    *,
-    tool_name: str,
-    args: dict[str, Any],
-    behavior: str,
-    reason: str,
-    matched_rule: Optional[dict[str, Any]],
-    mode: str,
-    ctx: Optional[ToolContext] = None,
-) -> None:
-    """Convenience emitter for the `permission_decision` event."""
-    if not is_audit_enabled():
-        return
-    event: dict[str, Any] = {
-        "ts": time.time(),
-        "event": "permission_decision",
-        "tool_name": tool_name,
-        "tool_args": args,
-        "behavior": behavior,
-        "reason": reason,
-        "matched_rule": matched_rule,
-        "mode": mode,
-    }
-    if ctx is not None:
-        event.update(AuditPlugin._ctx_fields(ctx))
-    emit_audit_event(event)
-
-
-def emit_state_mutation(
-    *,
-    mutation_type: str,
-    state_key: str,
-    details: dict[str, Any],
-    ctx: Optional[ToolContext] = None,
-) -> None:
-    """Convenience emitter for the `state_mutation` event.
-
-    `mutation_type` is one of: `permission_mode_change`,
-    `allow_rule_added`. `details` carries type-specific fields
-    (previous_value / new_value, or rule_contents / persist_across_sessions).
-    """
-    if not is_audit_enabled():
-        return
-    event: dict[str, Any] = {
-        "ts": time.time(),
-        "event": "state_mutation",
-        "mutation_type": mutation_type,
-        "state_key": state_key,
-        **details,
-    }
-    if ctx is not None:
-        event.update(AuditPlugin._ctx_fields(ctx))
-    emit_audit_event(event)
-
-
-def emit_confirmation_resume(
-    *,
-    tool_name: str,
-    chose_id: Optional[str],
-    confirmed: Optional[bool],
-    function_call_id: Optional[str] = None,
-    ctx: Optional[ToolContext] = None,
-) -> None:
-    """Convenience emitter for the `confirmation_resume` event —
-    records when a user response lands on a gated tool call."""
-    if not is_audit_enabled():
-        return
-    event: dict[str, Any] = {
-        "ts": time.time(),
-        "event": "confirmation_resume",
-        "tool_name": tool_name,
-        "chose_id": chose_id,
-        "confirmed": confirmed,
-    }
-    if function_call_id is not None:
-        event["function_call_id"] = function_call_id
-    if ctx is not None:
-        event.update(AuditPlugin._ctx_fields(ctx))
-    emit_audit_event(event)
-
-
-def emit_compaction_event(event_type: str, **fields: Any) -> None:
-    """Convenience emitter for the three compaction event types:
-
-      - `compaction_triggered` — before the summarizer is called.
-        Typical fields: `event_count`, `last_event_ts`, `model_id`.
-      - `compaction_success`   — after a non-None return.
-        Typical fields: `event_count`, `summary_bytes`, `elapsed_ms`.
-      - `compaction_failure`   — None return / exception / timeout.
-        Typical fields: `reason` (`"empty_summary"` / `"exception"` /
-        `"timeout"`), `error_type`, `error_message`, `elapsed_ms`.
-
-    Caller is responsible for choosing a stable `event_type` from the
-    three above. Any extra kwargs become top-level fields on the
-    emitted JSONL object.
-
-    No-op when no AuditPlugin sink is registered."""
-    if not is_audit_enabled():
-        return
-    event: dict[str, Any] = {
-        "ts": time.time(),
-        "event": event_type,
-        **fields,
-    }
-    emit_audit_event(event)

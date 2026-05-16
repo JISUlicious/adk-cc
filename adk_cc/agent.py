@@ -6,13 +6,10 @@ loop: explore → plan → act → verify. Specialists live under
 carries its own prompt and tool surface and hands control back via
 `force_coordinator_continuation`.
 
-Loop enforcement lives in `StageGuardPlugin`:
-  - Soft nudges (system-instruction prepend) telling the model which
-    stage it's in.
-  - Hard gates on `before_tool_callback`: refuses acting tools and
-    transfers to `processor` / `visualizer` before a plan is
-    recorded, and refuses `verify_completion` until every plan step
-    is `status=done`.
+Loop discipline lives in `StageGuardPlugin` — nudges via
+`before_model_callback`, stage transitions via `after_tool_callback`.
+No hard gates; the `verify_completion` rule check + `critic`
+sub-agent verdict are the durable PASS/FAIL gate.
 """
 
 from __future__ import annotations
@@ -25,7 +22,6 @@ from google.adk.models.lite_llm import LiteLlm
 
 from . import prompts
 from .logging_setup import configure_logging
-from .permissions import PermissionMode, SettingsHierarchy
 
 configure_logging()
 
@@ -33,8 +29,6 @@ from .plugins import (
     AuditPlugin,
     ContextGuardPlugin,
     ModelIOTracePlugin,
-    PermissionPlugin,
-    ProjectContextPlugin,
     StageGuardPlugin,
     ToolCallValidatorPlugin,
 )
@@ -61,12 +55,6 @@ MODEL = LiteLlm(
 )
 
 
-PERMISSION_MODE = PermissionMode(
-    os.environ.get("ADK_CC_PERMISSION_MODE", PermissionMode.BYPASS_PERMISSIONS.value)
-)
-SETTINGS = SettingsHierarchy.empty()
-
-
 # ---------- coordinator (the main agent) ----------
 
 _coordinator_tools = [
@@ -81,7 +69,7 @@ root_agent = LlmAgent(
     description=(
         "Coordinator: drives every data-science request through "
         "explore → plan → act → verify. Owns user I/O; dispatches to "
-        "loader / explorer / processor / visualizer."
+        "loader / explorer / processor / visualizer / critic."
     ),
     instruction=prompts.COORDINATOR_INSTRUCTION,
     tools=_coordinator_tools,
@@ -103,21 +91,16 @@ app = App(
     plugins=[
         # Audit must be first so it observes every tool attempt.
         AuditPlugin(),
-        PermissionPlugin(SETTINGS, default_mode=PERMISSION_MODE),
-        # Project context auto-load (CLAUDE.md / CONTEXT.md). Runs early
-        # so its prepend lands above the stage-guard nudge.
-        ProjectContextPlugin(),
-        # Pushes the model through the loop. After ProjectContextPlugin
-        # so the per-turn stage nudge appears AFTER the stable project
-        # context block — most-stable info first, turn-volatile last.
+        # Pushes the model through the loop via system-instruction nudges
+        # + tracks stage transitions in session state.
         StageGuardPlugin(),
         # Catches "tool X not found" errors and turns them into a
-        # structured corrective response.
-        ToolCallValidatorPlugin(default_mode=PERMISSION_MODE.value),
-        # Pre-flight context-length guardrail.
+        # structured corrective response so the model can self-correct.
+        ToolCallValidatorPlugin(),
+        # Pre-flight context-length guardrail (WARN at 75%, REJECT at 95%).
         ContextGuardPlugin(),
-        # Raw model I/O trace. Last so it captures the final LlmRequest
-        # after every other mutator has run.
+        # Raw model I/O trace, opt-in via ADK_CC_LOG_MODEL_IO=1. Last so
+        # it captures the final LlmRequest after every other mutator.
         ModelIOTracePlugin(),
     ],
 )

@@ -6,10 +6,11 @@ raises `ValueError` when a function_call names a tool not in the agent's
 tools_dict. That error is offered to plugins via `on_tool_error_callback`;
 if no plugin intervenes, ADK re-raises and the run aborts.
 
-The motivating failure: a sub-agent (e.g. `Plan`) does not have `run_bash`,
-but the model called it anyway (prompt drift, or seeing the tool on the
-coordinator's surface and assuming it's universal). Without this plugin,
-the user sees a stack trace and the conversation gets stuck.
+The motivating failure on the data-science branch: a sub-agent (e.g.
+`processor`) does not have `mark_step_done` (a coordinator-only tool that
+used to exist and has since been removed), but a model trained on
+similar patterns calls it anyway. Without this plugin, the user sees a
+stack trace and the conversation gets stuck.
 
 With this plugin, the model receives a structured `function_response` that
 names what it tried, lists what is available on this agent, and tells it
@@ -33,19 +34,8 @@ _NOT_FOUND_MARKER = "not found.\nAvailable tools:"
 class ToolCallValidatorPlugin(BasePlugin):
     """Convert "tool not found" ValueErrors into corrective tool responses."""
 
-    def __init__(
-        self,
-        *,
-        default_mode: str = "default",
-        name: str = "adk_cc_tool_call_validator",
-    ) -> None:
+    def __init__(self, name: str = "adk_cc_tool_call_validator") -> None:
         super().__init__(name=name)
-        # See `PlanModeReminderPlugin.__init__` for why each plugin
-        # reading `state["permission_mode"]` needs an env-default
-        # fallback: a fresh session has empty state, and without the
-        # fallback the hint won't mention plan mode even when plan mode
-        # is active by env default.
-        self._default_mode = (default_mode or "default").lower()
 
     async def on_tool_error_callback(
         self,
@@ -62,29 +52,17 @@ class ToolCallValidatorPlugin(BasePlugin):
         available = self._extract_available(message)
         agent_name = self._current_agent_name(tool_context)
 
-        # The tool may be genuinely missing from this agent OR filtered
-        # out by a runtime policy (e.g. plan mode hides write tools).
-        # The model can't tell the difference from the error alone, so
-        # the hint covers both cases without prescribing the wrong fix.
-        in_plan_mode = self._in_plan_mode(tool_context)
-        hint_lines = [
-            "<system-reminder>",
+        hint = (
+            "<system-reminder>\n"
             f"You called `{tool.name}`, which is NOT available in "
-            f"{f'agent `{agent_name}`' if agent_name else 'this agent'}"
-            f"{' (currently in plan mode)' if in_plan_mode else ''}.",
-            f"Available tools here: {', '.join(available) or '(none)'}.",
-            "",
-            "Pick an available tool that fits. Do NOT retry "
-            f"`{tool.name}` — it will fail again.",
-        ]
-        if in_plan_mode:
-            hint_lines.append(
-                "If your goal requires a write/exec tool that's hidden in "
-                "plan mode, finish the plan with `write_plan` and call "
-                "`exit_plan_mode` to request approval."
-            )
-        hint_lines.append("</system-reminder>")
-        hint = "\n".join(hint_lines)
+            f"{f'agent `{agent_name}`' if agent_name else 'this agent'}.\n"
+            f"Available tools here: {', '.join(available) or '(none)'}.\n\n"
+            f"Pick an available tool that fits. Do NOT retry `{tool.name}` "
+            "— it will fail again. If your goal needs a tool that lives on "
+            "a different sub-agent, `transfer_to_agent(agent_name=...)` to "
+            "that one instead.\n"
+            "</system-reminder>"
+        )
         return {
             "status": "tool_unavailable",
             "tool_name": tool.name,
@@ -109,10 +87,3 @@ class ToolCallValidatorPlugin(BasePlugin):
             return tool_context._invocation_context.agent.name
         except Exception:
             return None
-
-    def _in_plan_mode(self, tool_context: ToolContext) -> bool:
-        try:
-            mode = tool_context.state.get("permission_mode")
-        except Exception:
-            mode = None
-        return (mode or self._default_mode) == "plan"
