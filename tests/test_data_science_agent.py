@@ -150,18 +150,16 @@ def test_audit_event_counts() -> None:
         f"expected 5 loop_stage_transition events, got "
         f"{counts.get('loop_stage_transition')!r}"
     )
-    # The exact tool-call count depends on ADK's `_handback_to_coordinator`
-    # synthetic events too. Lower-bound: 11 actual tool calls
-    # (3 loader+explorer + 2 plan steps + 3 acting + 3 marks + 1 verify
-    # + 1 record_plan — sums vary by how ADK counts transfer-tool calls).
-    # Strict equality on the observed-from-demo value (17) keeps us
-    # honest about regressions.
-    assert counts.get("tool_call_attempt") == 17, (
-        f"expected 17 tool_call_attempt events, got "
+    # Strict equality on the observed-from-demo value keeps us honest
+    # about regressions. Post-redesign (no `mark_step_done` tool):
+    # 14 tool calls = 6 transfers + 2 loader + 1 describe + 1
+    # record_plan + 2 aggregate + 1 render_bar_chart + 1 verify.
+    assert counts.get("tool_call_attempt") == 14, (
+        f"expected 14 tool_call_attempt events, got "
         f"{counts.get('tool_call_attempt')!r}\n  counts={counts}"
     )
-    assert counts.get("tool_call_result") == 17, (
-        f"expected 17 tool_call_result events, got "
+    assert counts.get("tool_call_result") == 14, (
+        f"expected 14 tool_call_result events, got "
         f"{counts.get('tool_call_result')!r}\n  counts={counts}"
     )
     assert counts.get("tool_call_error", 0) == 0, (

@@ -17,15 +17,15 @@ Scripted loop:
   6. Coordinator: record_plan([...])          (PLAN)
   7. Coordinator: transfer to `processor`     (ACT step 1)
   8. Processor:   aggregate_dataset(...)
-  9. Coordinator: mark_step_done(0, ...)
- 10. Coordinator: transfer to `processor`     (ACT step 2)
- 11. Processor:   aggregate_dataset(...)
- 12. Coordinator: mark_step_done(1, ...)
- 13. Coordinator: transfer to `visualizer`    (ACT step 3)
- 14. Visualizer:  render_bar_chart(...)
- 15. Coordinator: mark_step_done(2, ...)
- 16. Coordinator: verify_completion(...)      (VERIFY)
- 17. Coordinator: final user-facing text
+  9. Coordinator: transfer to `processor`     (ACT step 2)
+ 10. Processor:   aggregate_dataset(...)
+ 11. Coordinator: transfer to `visualizer`    (ACT step 3)
+ 12. Visualizer:  render_bar_chart(...)
+ 13. Coordinator: verify_completion(...)      (VERIFY)
+ 14. Coordinator: final user-facing text
+
+No explicit `mark_step_done` calls — step completion is inferred
+from the acting-tool result count vs the plan length.
 
 Run:
   `.venv/bin/python examples/data_science_agent.py`
@@ -178,30 +178,15 @@ def _build_scripted_llm() -> _Scripted:
                     ]
                 },
             ),
-            # ACT step 0: dispatch to processor
+            # ACT step 0: dispatch to processor (step auto-marked on handback)
             _fc("co-5", "transfer_to_agent", {"agent_name": "processor"}),
-            _fc(
-                "co-6",
-                "mark_step_done",
-                {"step_index": 0, "evidence": "south=530000 highest in Q1"},
-            ),
             # ACT step 1: dispatch to processor again
-            _fc("co-7", "transfer_to_agent", {"agent_name": "processor"}),
-            _fc(
-                "co-8",
-                "mark_step_done",
-                {"step_index": 1, "evidence": "south=545000 in Q2"},
-            ),
+            _fc("co-6", "transfer_to_agent", {"agent_name": "processor"}),
             # ACT step 2: dispatch to visualizer
-            _fc("co-9", "transfer_to_agent", {"agent_name": "visualizer"}),
-            _fc(
-                "co-10",
-                "mark_step_done",
-                {"step_index": 2, "evidence": "bar chart rendered"},
-            ),
+            _fc("co-7", "transfer_to_agent", {"agent_name": "visualizer"}),
             # VERIFY
             _fc(
-                "co-11",
+                "co-8",
                 "verify_completion",
                 {
                     "user_query": (

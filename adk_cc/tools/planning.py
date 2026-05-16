@@ -1,15 +1,25 @@
 """PLAN-stage tools: record and inspect the agent's analysis plan.
 
 The plan lives in `tool_context.state["temp:loop_plan"]` as a list of
-`{step: str, status: 'pending'|'done', evidence: Optional[str]}` dicts.
-StageGuardPlugin reads this to (a) advance the loop stage to "act"
-once a plan has been recorded, and (b) gate `verify_completion` so it
-can't run before any plan exists.
+step strings — that's it. There's no per-step `status` or `evidence`
+field; step completion is INFERRED from the number of acting-tool
+results recorded in `temp:loop_results`. When that count reaches the
+plan length, `StageGuardPlugin` advances `act → verify` and
+`verify_completion`'s rule check passes the "all steps done"
+condition.
+
+This shape exists because earlier designs had a `mark_step_done`
+tool the coordinator was supposed to call between specialist
+dispatches. On real-LLM runs (minimax-m2.7) specialists kept trying
+to call `mark_step_done` themselves — it wasn't on their tool list,
+so it tripped a "tool not found" error every time. Removing the
+tool entirely removed the failure mode: now a specialist's handback
+IS the step-done signal, and the framework counts results.
 """
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field
 
@@ -28,7 +38,9 @@ class _RecordPlanArgs(BaseModel):
         description=(
             "Ordered list of analysis steps. Each entry is an imperative "
             "sentence describing what you will compute next (e.g. "
-            "'Aggregate revenue by region for sales_q1')."
+            "'Aggregate revenue by region for sales_q1'). Each step "
+            "should correspond to ONE specialist dispatch — when the "
+            "specialist's tool returns, that step is considered done."
         ),
     )
 
@@ -44,16 +56,12 @@ class RecordPlanTool(AdkCcTool):
     description: ClassVar[str] = (
         "Persist the analysis plan (ordered list of steps) into session "
         "state. PLAN-stage tool: call this AFTER you have explored the "
-        "data and BEFORE invoking any acting tool. Replaces any prior "
-        "plan in this session."
+        "data and BEFORE invoking any acting specialist. Each step in "
+        "the list should correspond to ONE acting-specialist dispatch."
     )
 
     async def _execute(self, args: _RecordPlanArgs, ctx: Any) -> dict[str, Any]:
-        plan = [
-            {"step": step.strip(), "status": "pending", "evidence": None}
-            for step in args.steps
-            if step.strip()
-        ]
+        plan = [step.strip() for step in args.steps if step.strip()]
         if not plan:
             return {"status": "error", "error": "no non-empty steps provided"}
         ctx.state[_PLAN_KEY] = plan
@@ -76,60 +84,12 @@ class ReadPlanTool(AdkCcTool):
     )
     input_model: ClassVar[type[BaseModel]] = _NoArgs
     description: ClassVar[str] = (
-        "Return the current plan (steps + status). Call this whenever "
-        "you want to remind yourself what's pending / done."
+        "Return the current plan (list of step strings). Call this "
+        "whenever you want to remind yourself what's pending. Step "
+        "completion is tracked by the framework, not stored on the "
+        "plan itself."
     )
 
     async def _execute(self, args: _NoArgs, ctx: Any) -> dict[str, Any]:
         plan = ctx.state.get(_PLAN_KEY) or []
-        return {"status": "ok", "plan": plan, "exists": bool(plan)}
-
-
-# --- mark_step_done ------------------------------------------------
-
-
-class _MarkArgs(BaseModel):
-    step_index: int = Field(..., ge=0, description="0-based plan step index.")
-    evidence: Optional[str] = Field(
-        None,
-        description=(
-            "Short string capturing what this step produced — a number, "
-            "tool name, or summary. Used by `verify_completion` later."
-        ),
-    )
-
-
-class MarkStepDoneTool(AdkCcTool):
-    stage: ClassVar[str] = "act"
-    meta: ClassVar[ToolMeta] = ToolMeta(
-        name="mark_step_done",
-        is_read_only=False,
-        is_concurrency_safe=False,
-    )
-    input_model: ClassVar[type[BaseModel]] = _MarkArgs
-    description: ClassVar[str] = (
-        "Flip a plan step to status=done with optional evidence string. "
-        "ACT-stage bookkeeping: call this after each acting tool returns "
-        "the value the step asked for."
-    )
-
-    async def _execute(self, args: _MarkArgs, ctx: Any) -> dict[str, Any]:
-        plan = ctx.state.get(_PLAN_KEY) or []
-        if args.step_index >= len(plan):
-            return {
-                "status": "error",
-                "error": f"step_index {args.step_index} out of range (plan has {len(plan)} steps)",
-            }
-        plan[args.step_index] = {
-            **plan[args.step_index],
-            "status": "done",
-            "evidence": args.evidence,
-        }
-        ctx.state[_PLAN_KEY] = plan
-        remaining = sum(1 for p in plan if p["status"] != "done")
-        return {
-            "status": "ok",
-            "step_index": args.step_index,
-            "remaining": remaining,
-            "all_done": remaining == 0,
-        }
+        return {"status": "ok", "plan": plan, "step_count": len(plan)}

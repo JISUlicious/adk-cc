@@ -44,10 +44,16 @@ The transition table is intentionally small:
     second explore tool (stage was already "explore")
                                   → "plan"
     record_plan                   → "act"
-    mark_step_done that finishes the plan
+    acting-tool result, and
+      len(temp:loop_results) >= len(temp:loop_plan)
                                   → "verify"
     verify_completion (verdict=PASS)
                                   → "done"
+
+The act → verify rule is the post-redesign shape: there's no
+`mark_step_done` tool anymore; the specialist's handback is the
+step-done signal, and the framework infers completion from result
+count. One acting-tool result per plan step is the contract.
 
 The plugin never moves the stage backward — if the agent re-enters
 explore mid-loop (e.g. to check a value), the stage tag stays where
@@ -71,6 +77,7 @@ from .audit import emit_audit_event, is_audit_enabled
 
 _STAGE_KEY = "temp:loop_stage"
 _PLAN_KEY = "temp:loop_plan"
+_RESULTS_KEY = "temp:loop_results"
 
 
 _NUDGE_BY_STAGE = {
@@ -94,10 +101,11 @@ _NUDGE_BY_STAGE = {
     ),
     "act": (
         "You are in ACT. Execute the plan one step at a time by "
-        "transferring to `processor` or `visualizer`. After each "
-        "specialist returns, call `mark_step_done(step_index, evidence)` "
-        "with a short evidence string. When every step is marked done, "
-        "proceed to verify."
+        "transferring to `processor` or `visualizer`. The framework "
+        "infers step completion from the specialist's handback — you "
+        "do NOT need to mark steps done. When the count of acting-tool "
+        "results reaches the plan length, the stage advances to verify "
+        "automatically and you should call `verify_completion`."
     ),
     "verify": (
         "Every plan step is done. Call `verify_completion(user_query, "
@@ -165,9 +173,14 @@ class StageGuardPlugin(BasePlugin):
                 new_stage = "plan"
         elif tool.name == "record_plan":
             new_stage = "act"
-        elif tool.name == "mark_step_done":
+        elif stage_tag == "act":
+            # Acting-tool result. Step completion is inferred from the
+            # result count reaching the plan length — there's no
+            # `mark_step_done` tool anymore (the specialist's handback
+            # IS the step-done signal).
             plan = _safe_state(tool_context, _PLAN_KEY) or []
-            if plan and all(p.get("status") == "done" for p in plan):
+            results = _safe_state(tool_context, _RESULTS_KEY) or []
+            if plan and len(results) >= len(plan):
                 new_stage = "verify"
         elif tool.name == "verify_completion":
             if isinstance(result, dict) and result.get("verdict") == "PASS":

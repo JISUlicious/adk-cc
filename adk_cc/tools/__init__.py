@@ -14,13 +14,12 @@ specialists' tools build on:
 from __future__ import annotations
 
 from .base import AdkCcTool, ToolMeta
-from .planning import MarkStepDoneTool, ReadPlanTool, RecordPlanTool
+from .planning import ReadPlanTool, RecordPlanTool
 from .verification import VerifyCompletionTool
 
 __all__ = [
     "AdkCcTool",
     "ToolMeta",
-    "MarkStepDoneTool",
     "ReadPlanTool",
     "RecordPlanTool",
     "VerifyCompletionTool",

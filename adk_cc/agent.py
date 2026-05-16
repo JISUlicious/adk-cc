@@ -45,7 +45,6 @@ from .sub_agents import (
     visualizer_agent,
 )
 from .tools import (
-    MarkStepDoneTool,
     ReadPlanTool,
     RecordPlanTool,
     VerifyCompletionTool,
@@ -72,7 +71,6 @@ SETTINGS = SettingsHierarchy.empty()
 _coordinator_tools = [
     RecordPlanTool(),
     ReadPlanTool(),
-    MarkStepDoneTool(),
     VerifyCompletionTool(),
 ]
 

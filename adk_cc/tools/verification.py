@@ -25,9 +25,10 @@ see which side rejected.
 
 from __future__ import annotations
 
+import json
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .base import AdkCcTool, ToolMeta
 
@@ -60,6 +61,23 @@ class _VerifyArgs(BaseModel):
     conclusion: str = Field(..., min_length=1)
     llm_judgment: _LlmJudgment
 
+    @field_validator("llm_judgment", mode="before")
+    @classmethod
+    def _accept_stringified_judgment(cls, v: Any) -> Any:
+        """Some smaller / OS function-callers (observed on
+        stepfun-ai/step-3.5-flash) emit nested-object args as a
+        JSON-encoded STRING instead of a real nested object. Parse
+        the string here so Pydantic sees the right shape downstream.
+        Failures fall through to the standard validator and surface
+        the real schema error to the model.
+        """
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except (json.JSONDecodeError, ValueError):
+                return v
+        return v
+
 
 class VerifyCompletionTool(AdkCcTool):
     stage: ClassVar[str] = "verify"
@@ -73,7 +91,12 @@ class VerifyCompletionTool(AdkCcTool):
         "Final gate. Combines rule-checks (plan complete, evidence "
         "recorded, results present) with your own LLM judgment to "
         "decide PASS / FAIL. Call this exactly once, AFTER every plan "
-        "step is marked done and BEFORE you emit the user-facing reply."
+        "step is marked done and BEFORE you emit the user-facing reply.\n\n"
+        "IMPORTANT: `llm_judgment` is a nested object with fields "
+        "`satisfies_query` (bool) and `reasoning` (string), passed "
+        "directly as args — NOT a JSON-encoded string. Emit it as a "
+        'real object: `llm_judgment: {"satisfies_query": true, '
+        '"reasoning": "..."}`, not `llm_judgment: "{...}"`.'
     )
 
     async def _execute(self, args: _VerifyArgs, ctx: Any) -> dict[str, Any]:
@@ -81,24 +104,20 @@ class VerifyCompletionTool(AdkCcTool):
         results = ctx.state.get(_RESULTS_KEY) or []
 
         # --- Rule checks ---
+        # Step completion is INFERRED from result count vs plan length —
+        # one acting-tool result per plan step is the contract. There's
+        # no per-step `status` to inspect because there's no
+        # `mark_step_done` tool anymore. The specialist's handback IS
+        # the step-done signal; the framework counts results.
         rule_failures: list[str] = []
         if not plan:
             rule_failures.append("no plan was recorded")
-        else:
-            pending = [p for p in plan if p.get("status") != "done"]
-            if pending:
-                rule_failures.append(
-                    f"{len(pending)} plan step(s) still pending: "
-                    f"{[p['step'] for p in pending]}"
-                )
-            missing_evidence = [
-                p["step"] for p in plan
-                if p.get("status") == "done" and not p.get("evidence")
-            ]
-            if missing_evidence:
-                rule_failures.append(
-                    f"done steps without evidence: {missing_evidence}"
-                )
+        elif len(results) < len(plan):
+            rule_failures.append(
+                f"plan has {len(plan)} step(s) but only {len(results)} "
+                f"acting-tool result(s) recorded — at least one specialist "
+                f"dispatch is missing"
+            )
         if not results:
             rule_failures.append("no acting-tool results recorded")
         if not args.conclusion.strip():
