@@ -1,284 +1,163 @@
-# adk-cc
+# adk-cc — data-science agent variant
 
-A minimal Claude-Code-style **gather → plan → act → verify** agent loop, implemented as a single ADK agent module loadable by `adk web` / `adk run`, plus an opt-in FastAPI factory for single-instance server deployment.
+A small **explore → plan → act → verify** agent loop built on Google ADK 1.31.1, scoped to the data-science use case: a coordinator dispatches to five specialist sub-agents (loader, explorer, processor, visualizer, critic) and gates its final answer through an independent critic.
 
-Deeper docs in [`docs/`](./docs/): [specification](./docs/01-specification.md), [architecture](./docs/02-architecture.md), [prompts](./docs/03-prompts.md), [sandbox runbook](./docs/04-deployment-sandbox.md), [production runbook](./docs/05-production-deployment.md).
+This is the `feat/data-science-agent` branch — a focused fork of `main`. It has zero filesystem / shell / web tools; the agent runs in environments where those surfaces aren't available. Tools are in-memory data operations.
+
+Deeper detail in [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
 
 ## What it is
 
-- One **coordinator** (the only agent that talks to the user). Acts directly with read tools (`read_file`, `glob_files`, `grep`, `web_fetch`, `read_current_plan`), write/exec tools (`write_file`, `edit_file`, `run_bash`), task tools (`task_create` / `task_get` / `task_list` / `task_update`), HITL tools (`ask_user_question`), plan-mode tools (`enter_plan_mode`, `exit_plan_mode`, `write_plan`), and any auto-loaded skills/MCP toolsets.
-- Two specialists wired as ADK `sub_agents`: **`Explore`** (broad codebase search returning a written report) and **`verification`** (adversarial post-implementation gate ending with `VERDICT: PASS|FAIL|PARTIAL`). Delegation is `transfer_to_agent`; sub-agents share the parent's invocation context, so all tool calls/responses stream into `adk web` rather than being buried in an opaque tool result.
-- **Planning is not a sub-agent.** When the user wants a written plan with approval before any change, the coordinator calls `enter_plan_mode` — a posture the coordinator takes. `PlanModeReminderPlugin` then dynamically filters write/exec tools out of the LLM's tool surface and injects a planning instruction. The plan persists via `write_plan`; `exit_plan_mode` gates re-entry to the unrestricted surface on user approval.
-- Hub-and-spoke + "coordinator-owns-user-I/O" is enforced by **two** ADK mechanisms — neither alone is enough:
-  1. **`disallow_transfer_to_parent=True`** on each specialist (cross-turn structural guarantee — the runner skips specialists when picking whose turn it is on the next user message).
-  2. **`after_agent_callback`** that returns a synthetic `function_call` part — `Event.is_final_response()` returns False, so the LLM flow iterates again and the coordinator delivers the same-turn final reply.
-- `disallow_transfer_to_peers=True` blocks specialist→specialist hops.
-- Specialists' tool denylists are enforced **structurally** by simply not handing them write tools.
-- A `ToolCallValidatorPlugin` catches "Tool not found" errors at runtime (e.g. when the model calls a tool filtered by plan mode) and returns a corrective response so the model self-corrects on the next iteration instead of aborting the turn.
+- **Coordinator** (the only agent that talks to the user) owns four loop-control tools: `record_plan`, `read_plan`, `verify_completion`. No analysis tools of its own — all data work happens in specialists.
+- **Five sub-agents** wired via `transfer_to_agent`, each `disallow_transfer_to_parent=True` + `disallow_transfer_to_peers=True`, hand control back via an `after_agent_callback` that yields a synthetic function-call so the parent flow loop survives the specialist's final text:
+    - `loader` — `load_from_registry`, `load_from_db_mock`, `load_from_file_mock`
+    - `explorer` — `list_datasets`, `describe_dataset`, `peek_dataset`, `profile_dataset`
+    - `processor` — `filter_dataset`, `aggregate_dataset`, `correlate`, `drop_na`, `transform_column`, `select_columns`
+    - `visualizer` — `render_bar_chart`, `render_table`, `summarize_distribution`
+    - `critic` — independent verifier; no tools; emits a structured `CriticVerdict` (verdict / addressed_aspects / missing_aspects / evidence_quality / reasoning) via ADK's `output_schema` enforcement
+- **Loop discipline** lives in `StageGuardPlugin`: soft nudges via `before_model_callback` (a `<stage-nudge>` block prepended to system_instruction telling the model which stage it's in), stage transitions emitted as audit events on `after_tool_callback`. No hard gates — the durable PASS/FAIL gate is `verify_completion`'s rule check + critic verdict combined.
+- **Plugin chain (5)**: AuditPlugin → StageGuardPlugin → ToolCallValidatorPlugin → ContextGuardPlugin → ModelIOTracePlugin. AuditPlugin always observes; ToolCallValidatorPlugin catches "tool not found" errors and synthesizes a corrective response so the model self-corrects; ContextGuardPlugin pre-flights token budget; ModelIOTracePlugin is opt-in (`ADK_CC_LOG_MODEL_IO=1`).
+- **Independent verification**: `verify_completion` combines a deterministic rule-check (plan recorded, result count ≥ plan length, conclusion non-empty) with the critic's structured judgment. PASS requires BOTH to agree. The critic optionally runs on a different model via `ADK_CC_CRITIC_*` env vars.
 
 ## Layout
 
 ```
-adk-cc/                           ← AGENTS_DIR (parent of adk_cc/)
+adk-cc/                              ← repo root
 ├── pyproject.toml
-├── Dockerfile.sandbox            ← per-session sandbox image (Stage C)
-├── docs/                         ← architecture, prompts, deployment runbooks
-├── scripts/
-│   ├── scratch_reaper.py         ← cron-style cleanup of session scratch dirs
-│   └── sandbox_destroy.py        ← operator CLI for sandbox session teardown
-├── tests/                        ← unit tests + e2e suites (see "Tests" below)
-└── adk_cc/                       ← agent subdirectory
-    ├── __init__.py               ← `from . import agent`
-    ├── agent.py                  ← exposes `app` (preferred) and `root_agent`
-    ├── prompts.py                ← per-agent instructions
-    ├── tools/                    ← AdkCcTool subclasses
-    ├── plugins/                  ← ADK BasePlugin integrations
-    ├── permissions/              ← rule engine (Stage B)
-    ├── sandbox/                  ← SandboxBackend ABC + impls (Stage C)
-    │   ├── backends/
-    │   │   ├── noop_backend.py            ← host execution, dev only
-    │   │   ├── docker_backend.py          ← per-session container, prod-grade
-    │   │   ├── sandbox_service_backend.py ← REST client for an external
-    │   │   │                                 sandbox service (gVisor isolation)
-    │   │   └── e2b_backend.py             ← stub (microVM, future)
-    │   └── code_executor.py      ← BaseCodeExecutor adapter for skill scripts
-    ├── tasks/                    ← task tracking + storage (Stage F)
-    ├── credentials/              ← per-tenant secret storage
-    └── service/                  ← FastAPI factory + auth + tenancy
+├── .env.example                     ← env-var reference
+├── README.md
+├── docs/ARCHITECTURE.md             ← deeper architecture write-up
+├── examples/
+│   ├── data_science_agent.py        ← happy-path scripted demo
+│   └── data_science_agent_recovery.py ← critic-FAIL → recovery scripted demo
+├── tests/                           ← 6 surviving suites (see "Tests" below)
+└── adk_cc/                          ← agent package (3.7k LoC total)
+    ├── __init__.py                  ← `from . import agent`
+    ├── agent.py                     ← coordinator + plugin chain + App
+    ├── prompts.py                   ← coordinator instruction
+    ├── logging_setup.py             ← env-driven logging config
+    ├── permissions/                 ← just `token_counter.py` (used by ContextGuardPlugin)
+    ├── plugins/                     ← 6 plugins (audit, stage_guard, tool_call_validator,
+    │                                  context_guard, model_io_trace, session_retry)
+    ├── sub_agents/                  ← one subpackage per specialist
+    │   ├── _shared.py               ← `make_specialist_model`, `make_critic_model`,
+    │   │                              `force_coordinator_continuation`
+    │   ├── loader/  · agent.py · prompts.py · tools/{load_from_registry, db_mock, file_mock}.py
+    │   ├── explorer/                · tools/{list_datasets, describe, peek, profile}.py
+    │   ├── processor/               · tools/{filter, aggregate, correlate, drop_na, transform, select}.py
+    │   ├── visualizer/              · tools/{render_bar_chart, render_table, summarize_distribution}.py
+    │   └── critic/                  · agent.py · prompts.py · schema.py (CriticVerdict)
+    └── tools/                       ← coordinator tools + shared infrastructure
+        ├── base.py                  ← AdkCcTool + ToolMeta
+        ├── datasets.py              ← in-memory dataset registry
+        ├── loop_state.py            ← `record_load`, `stash_result` helpers
+        ├── planning.py              ← RecordPlanTool, ReadPlanTool
+        └── verification.py          ← VerifyCompletionTool (rule-check + critic combiner)
 ```
 
 ## Quick start
 
 ```bash
 cd adk-cc
+
+# Install dependencies (uv recommended; `uv pip install -e .` also works).
 uv venv .venv && source .venv/bin/activate
 uv pip install -e .
 
-# .env file — the API key for your model server
-echo 'ADK_CC_API_KEY=sk-your-model-server-key' > .env
+# Copy env reference and fill in your model server config.
+cp .env.example .env
+$EDITOR .env  # set at minimum ADK_CC_API_KEY
 
-# Point adk web at this directory (the parent of adk_cc/)
-adk web .
-# or one-shot:
-adk run adk_cc
+# Run the api_server. ADK CLI discovers `adk_cc.agent.root_agent` automatically.
+uv run adk api_server . --host 127.0.0.1 --port 8765
 ```
 
-## Local model
-
-Uses LiteLLM under ADK's `LiteLlm` wrapper, pointed at an OpenAI-compatible server.
-
-**Defaults**:
-- model: `openai/Qwen3.6-35B-A3B-UD-MLX-4bit`
-- api base: `http://localhost:18000/v1`
-- api key: read from `ADK_CC_API_KEY` (required)
-
-Override any of these via env without code changes:
+In a second shell:
 
 ```bash
-ADK_CC_MODEL=openai/<model-id>          # e.g. openai/qwen2.5-coder-32b
-ADK_CC_API_BASE=http://host:port/v1
-ADK_CC_API_KEY=<token>
+SESSION=$(curl -s -X POST http://127.0.0.1:8765/apps/adk_cc/users/alice/sessions \
+  -H 'Content-Type: application/json' -d '{}' | jq -r '.id')
+
+curl -s -X POST http://127.0.0.1:8765/run -H 'Content-Type: application/json' -d '{
+  "appName": "adk_cc",
+  "userId": "alice",
+  "sessionId": "'"$SESSION"'",
+  "newMessage": {"role":"user","parts":[{"text":"List the datasets available, then tell me which sales_q1 region had the highest total revenue."}]}
+}' | jq '.[-1].content.parts[].text // empty'
 ```
 
-Pick a model with **function-calling support** — this loop relies on tool use. Qwen 2.5+, Llama 3.1/3.2, and Mistral families all work. Small (1B–3B) models often handle tool calls poorly.
+The agent walks `explore → plan → act → verify → done` and returns a markdown reply naming `south` as the highest-revenue region.
 
-See [`.env.example`](./.env.example) for the full configuration surface.
+### Without a server
 
-## Sandbox backends
-
-All host-touching tools (`run_bash`, `read_file`, `write_file`, `edit_file`, skill scripts) route through a `SandboxBackend`. Pick one with `ADK_CC_SANDBOX_BACKEND`:
-
-| Backend | When to use | Isolation |
-|---|---|---|
-| `noop` (default) | `adk web .` dev on your laptop | None — runs on the host. Safety guard refuses prod-shaped paths unless `ADK_CC_NOOP_ACK_HOST_EXEC=1` |
-| `docker` | Single-instance production with your own Docker daemon | Per-session container, read-only rootfs, dropped caps, mem/cpu/pids limits, `network_mode=none` by default |
-| `sandbox_service` | When you'd rather not give the agent process Docker daemon access | Delegates to an external REST sandbox service ([JISUlicious/sandboxing](https://github.com/JISUlicious/sandboxing) or compatible) — gVisor + cap-drop + read-only rootfs + userns-remap + Squid egress allowlist |
-| `e2b` | (stub) | Future: hosted Firecracker microVMs |
-
-For `docker` and `sandbox_service`, see [`docs/04-deployment-sandbox.md`](./docs/04-deployment-sandbox.md) for the operator setup. The `sandbox_service` path is the lighter-touch option (no Docker daemon on your agent host); the `docker` path keeps everything in-process.
-
-### Streaming exec (operator-side observability)
-
-Set `ADK_CC_BASH_STREAM=1` to log `run_bash` chunks at INFO as they arrive instead of waiting for the command to finish. The model still receives one aggregated final result; the streaming is for the operator tailing the agent log. Currently only `sandbox_service` actually streams chunks live; `noop` / `docker` use the ABC default (one chunk at end). See `adk_cc/sandbox/backends/base.py` for the `exec_stream()` contract.
-
-## Skills
-
-Skills are operator-defined parameterized prompts (Anthropic skill format). adk-cc auto-loads skills from `adk_cc/skills/` (or `ADK_CC_SKILLS_DIR`) at boot and exposes them via four model-callable tools: `list_skills`, `load_skill`, `load_skill_resource`, `run_skill_script`.
-
-Skill scripts execute through the same `SandboxBackend` as `run_bash` — so a skill's Python script runs inside the per-session container on `docker` / `sandbox_service`, and on the host (sandbox-bypassed) only on `noop`.
+For a scripted-LLM walkthrough with no external model, the two demo files in `examples/` boot an in-process `InMemoryRunner` with a `BaseLlm` subclass that replays canned responses:
 
 ```bash
-ADK_CC_SKILLS_DIR=/path/to/skill-folders   # default: adk_cc/skills/ if it exists
+.venv/bin/python examples/data_science_agent.py            # happy path
+.venv/bin/python examples/data_science_agent_recovery.py   # critic-FAIL → recovery
 ```
 
-A non-canonical skill layout (e.g. doc files at the skill root, not under `references/`) is handled by a fallback `load_skill_resource` that does a filesystem scan when ADK's strict path lookup misses.
+Each demo prints the transfer sequence, audit event counts, stage transitions, and the final coordinator reply. Useful for understanding the loop shape without spending model tokens.
 
-## MCP servers
+## Configuration
 
-Connect external MCP servers via the per-tenant registry. Set `ADK_CC_TENANT_REGISTRY_DIR` and store one `mcp.json` per tenant. The `TenantMcpToolset` resolves servers per-invocation from the active tenant's config; credentials substitute from the credential provider.
+11 env vars. Full list with defaults and rationale in [`.env.example`](./.env.example). Common ones:
 
-For single-tenant deployments, you can use one tenant_id (defaults to `"local"` in dev). See [`.env.example`](./.env.example) for the registry / credential env vars.
-
-## Single-instance server deployment
-
-`adk web .` is great for dev. For a long-running single-instance server (e.g. a dev VM, a trusted internal team, a one-tenant deployment), use the FastAPI factory:
-
-```bash
-uvicorn adk_cc.service.server:make_app --factory --host 0.0.0.0 --port 8000
-```
-
-`make_app` reads everything from env (see [`.env.example`](./.env.example)) and wires the full plugin chain — `[Audit, Tenancy, Permission, Quota, PlanModeReminder, TaskReminder, ToolCallValidator]` — plus an auth middleware. It **fails closed on auth**: refuses to start unless one of these is set:
-
-- `ADK_CC_AUTH_TOKENS=tok1=alice:tenant_a,tok2=bob:tenant_b` — static token map (single-instance, simple)
-- `ADK_CC_JWT_JWKS_URL=...` + `ADK_CC_JWT_ISSUER=...` etc. — JWT validation
-- `ADK_CC_ALLOW_NO_AUTH=1` — explicit dev escape (don't use in production)
-
-### Minimal single-tenant production-ish recipe
-
-For "I just want one server, one team, persistent sessions, real isolation":
-
-```bash
-# .env (or process env vars)
-ADK_CC_API_KEY=sk-your-model-key
-ADK_CC_MODEL=openai/<your-model>
-ADK_CC_API_BASE=http://your-model-server:18000/v1
-
-# Static token map: everyone is in tenant=internal
-ADK_CC_AUTH_TOKENS=alice_token=alice:internal,bob_token=bob:internal
-
-# Sandbox: pick one
-ADK_CC_SANDBOX_BACKEND=docker
-ADK_CC_DOCKER_HOST=unix:///var/run/docker.sock        # local Docker
-# OR
-ADK_CC_SANDBOX_BACKEND=sandbox_service
-ADK_CC_SANDBOX_SERVICE_URL=http://localhost:8000      # JISUlicious/sandboxing
-ADK_CC_SANDBOX_SERVICE_SHARED_TOKEN=<bearer>
-
-# Per-user persistent workspaces under <root>/<tenant>/<user>/
-ADK_CC_WORKSPACE_ROOT=/var/lib/adk-cc/wks
-
-# Persistent sessions (sqlite is enough for one-instance)
-ADK_CC_SESSION_DSN=sqlite:////var/lib/adk-cc/sessions.db
-
-# Audit log
-ADK_CC_AUDIT_LOG=/var/log/adk-cc/audit.jsonl
-
-# Permissions YAML (optional but recommended)
-ADK_CC_PERMISSIONS_YAML=/etc/adk-cc/permissions.yaml
-```
-
-Then:
-
-```bash
-uvicorn adk_cc.service.server:make_app --factory --host 0.0.0.0 --port 8000
-```
-
-That's a fully working single-instance deployment with:
-- Real sandbox isolation per session
-- Per-user persistent workspaces (alice's files survive her next session)
-- Persistent sessions (the conversation history survives a process restart)
-- Static-token auth with one tenant
-- Audit log of every tool call
-
-For multi-tenant deployments and the full readiness checklist (security / reliability / observability / ops gaps), see [`docs/05-production-deployment.md`](./docs/05-production-deployment.md).
-
-## Tenancy
-
-`tenant_id` is read from auth (JWT claim or static token map). The `TenancyPlugin` lazy-seeds session state on the first tool call:
-
-```
-state["temp:tenant_context"]    →  TenantContext(tenant_id, user_id, root)
-state["temp:sandbox_workspace"] →  WorkspaceRoot(<root>/<tenant>/<user>/)
-state["temp:sandbox_backend"]   →  per-session backend instance
-```
-
-The default resolver bridges the auth-extracted tenant_id into the plugin layer via a ContextVar. So `ADK_CC_AUTH_TOKENS=tok=alice:acme` actually scopes alice into `tenant=acme` — no custom resolver needed. Operators with bespoke `user_id → tenant_id` mapping logic can supply a `tenant_resolver=callable` to `TenancyPlugin`.
-
-`adk web .` always runs as `tenant_id="local"` (no auth = single-tenant dev).
-
-See [`docs/02-architecture.md`](./docs/02-architecture.md) §7.6 (workspace layout) for how persistence works per (tenant, user, session).
-
-## Plan mode
-
-When the work warrants a written plan with user approval before any change, the coordinator calls `enter_plan_mode(reason=...)` and the session enters plan mode (`permission_mode="plan"`). `PlanModeReminderPlugin` then:
-
-- Filters write/exec tools (`write_file`, `edit_file`, `run_bash`, `task_create`, `task_update`, `enter_plan_mode`) out of the LLM's tool surface.
-- Keeps read tools, `write_plan` / `read_current_plan` / `exit_plan_mode` / `ask_user_question`, and the `Explore` sub-agent visible.
-- Injects a planning instruction (4-step process: understand → explore → design → detail; required output format for `write_plan`).
-
-The coordinator produces the plan via `write_plan` (each call creates a new timestamped file under `<workspace>/.adk-cc/plans/`) and ends its turn with `exit_plan_mode`, which prompts the user for explicit approval. Approval flips `permission_mode` back and write tools reappear.
-
-Plan mode is asymmetric with `exit_plan_mode`: entering tightens posture (no confirmation), exiting relaxes (user must approve).
-
-## Confirmations
-
-Destructive tool calls (and any ASK-rule match) pause for human confirmation via ADK's `request_confirmation` seam. `PermissionPlugin` sends a structured `ConfirmPrompt` payload with three options — **Allow once / Allow always / Deny**. "Allow always" injects a SESSION-scope ALLOW rule keyed by `(tool, extracted rule key)` so the same operation isn't re-asked for the rest of the session; scope is intentionally narrow (exact rule-key match, no wildcards).
-
-`ConfirmationFormUiPlugin` (registered by default) bridges this to bundled `adk web` so the options actually render as a selectable form instead of a hardcoded binary checkbox: it rewrites the wrapper event's name to a sentinel, injects a `response_schema` derived from the options, then reshapes the user's submission back to ADK's standard `ToolConfirmation` shape on the way in. Disable the plugin to revert to bundled UI's binary checkbox; both `PermissionPlugin` and the underlying ADK flow keep working. Custom payload-aware frontends can read the original `ConfirmPrompt` from the rewritten event's args.
-
-Wire contract: [`docs/06-confirmation-protocol.md`](./docs/06-confirmation-protocol.md).
-
-## Tasks
-
-Four `task_*` tools (`task_create` / `task_get` / `task_list` / `task_update`) for pure tracking — no execution semantics. Tasks persist as JSON files under `<workspace>/.adk-cc/tasks/<session_id>/<task_id>.json` (override the root via `ADK_CC_TASKS_DIR`). Tasks survive process restarts; multi-worker deployments are safe via `filelock` writes.
-
-Three statuses: `pending`, `in_progress`, `completed`. Task tools are filtered out in plan mode (tasks are an act-time progress checklist, not a planning surface).
-
-A `TaskReminderPlugin` injects the active task list into the model's context periodically — fires when the model has gone too many turns without using `task_create`/`task_update` (default 10) and at least that many turns have passed since the last reminder (default 10):
-
-```bash
-ADK_CC_TASK_REMINDER_TURNS_SINCE_WRITE=10
-ADK_CC_TASK_REMINDER_TURNS_BETWEEN=10
-```
+| Var | Required? | Default | Meaning |
+|---|---|---|---|
+| `ADK_CC_API_KEY` | yes | — | Main model API key (read at module-load) |
+| `ADK_CC_MODEL` | no | `openai/Qwen3.6-35B-A3B-UD-MLX-4bit` | LiteLLM model id |
+| `ADK_CC_API_BASE` | no | `http://localhost:18000/v1` | OpenAI-compatible base URL |
+| `ADK_CC_CRITIC_MODEL` | no | falls back to `ADK_CC_MODEL` | Independent model for the critic sub-agent |
+| `ADK_CC_AUDIT_LOG` | no | `~/.adk-cc/audit.jsonl` | JSONL audit sink path |
+| `ADK_CC_LOG_MODEL_IO` | no | unset (off) | Set `1` to dump LlmRequest/LlmResponse to audit |
+| `ADK_CC_MAX_CONTEXT_TOKENS` | no | unset (off) | Enable ContextGuardPlugin's pre-flight budget |
+| `ADK_CC_SESSION_RETRY_ON_STALE` | no | unset (off) | Set `1` to monkey-patch ADK session services with retry-on-stale |
+| `ADK_CC_LOG_LEVEL` | no | `INFO` | Python log level for `adk_cc.*` |
+| `ADK_CC_LOG_FORMAT` | no | `text` | `text` or `json` |
 
 ## Tests
 
-```
-tests/
-├── test_*.py                       ← unit tests (mocked I/O, fast)
-│   ├── test_sandbox_service_backend.py   24 tests
-│   ├── test_workspace_layout.py          11 tests
-│   ├── test_skill_resource_fallback.py    6 tests
-│   ├── test_session_retry.py              7 tests
-│   ├── test_context_guard.py             10 tests
-│   ├── test_tenancy_resolver.py             7 tests
-│   ├── test_permissions_confirmation.py    12 tests
-│   ├── test_ask_user_question_ui_hint.py   11 tests
-│   ├── test_confirmation_form_ui.py        14 tests
-│   ├── test_plan_mode_env_default.py        9 tests
-│   └── test_read_file_limits.py            15 tests   ── 126 unit tests total
-│
-├── e2e_features.py                 ← in-process FastAPI e2e (auth + admin + skill upload)
-├── e2e_confirmation_flow.py        ← in-process ADK Runner e2e (4 tests) — confirmation gate, allow_always session rule, deny path, scope-narrow check
-├── e2e_confirmation_form_ui.py     ← in-process ADK Runner e2e (3 tests) — sentinel-name rewrite, form-shaped resume, deny path with form widget
-├── e2e_ask_user_question.py        ← in-process ADK Runner e2e (4 tests) — long_running pause, no premature response event, resume with user answer, long_running_tool_ids on call event
-│
-└── e2e against a live sandbox service:
-    ├── e2e_sandbox_service.py            9 contract checks + 6 bug-fix verifications
-    ├── e2e_sandbox_comprehensive.py     53 checks across 9 categories
-    ├── e2e_skills.py                     6 — full skill chain
-    ├── e2e_streaming_adapter.py          9 — exec_stream + BashTool stream
-    └── diag_streaming_timing.py          diagnostic (always-on probe)
-```
-
-Run unit tests with no env config required:
+Six suites, all green. Run individually or all at once:
 
 ```bash
-.venv/bin/python tests/test_sandbox_service_backend.py
-.venv/bin/python tests/test_workspace_layout.py
-# ... etc.
+.venv/bin/python tests/test_data_science_agent.py             # happy-path e2e (scripted)
+.venv/bin/python tests/test_data_science_agent_recovery.py    # critic-FAIL → recovery e2e (scripted)
+.venv/bin/python tests/test_logging_setup.py
+.venv/bin/python tests/test_model_io_trace.py
+.venv/bin/python tests/test_session_retry.py
+.venv/bin/python tests/test_token_counter.py
 ```
 
-Run e2e tests against a live sandbox service (point at a running JISUlicious/sandboxing instance):
+The two e2e suites subprocess-boot the corresponding `examples/` demo and assert the transfer sequence, stage transitions, audit event counts, and final reply against a fixed reference.
+
+## Audit trail
+
+Every tool call lands in `~/.adk-cc/audit.jsonl` (override via `ADK_CC_AUDIT_LOG`) as one JSON object per line. Event types this branch emits:
+
+- `tool_call_attempt` — every dispatched tool call (incl. transfers)
+- `tool_call_result` — after the tool returns
+- `tool_call_error` — execution raised (ToolCallValidatorPlugin recovers from "tool not found")
+- `loop_stage_transition` — `null→explore`, `explore→plan`, `plan→act`, `act→verify`, `verify→done`
+- `model_request` / `model_response` — when `ADK_CC_LOG_MODEL_IO=1`, full LlmRequest / LlmResponse dumps
+
+Tail it during a run to see the agent's behavior in real time:
 
 ```bash
-ADK_CC_SANDBOX_SERVICE_URL=http://127.0.0.1:8000 \
-SANDBOX_API_TOKEN=<token> \
-  .venv/bin/python tests/e2e_sandbox_comprehensive.py
+tail -F .audit/audit.jsonl | jq -c '{event, tool_name, from, to}'
 ```
 
-Both `e2e_skills.py` and `e2e_streaming_adapter.py` need Python 3.12+ and adk-cc importable; they preflight reachability and skip cleanly if not.
+## Diverged from `main`
 
-## Status
+This branch is a deliberate fork of `main` with ~5.6k LoC removed (60% smaller). Compared to `main`:
 
-**Alpha.** Functional and exercised end-to-end (~206 unit + e2e checks across 19 test files). Has known operational gaps documented in [`docs/05-production-deployment.md`](./docs/05-production-deployment.md)'s readiness checklist (security / reliability / observability / ops / multi-tenancy / config / tests). Close the ✗ items appropriate to your threat model and SLO before serving real users.
+- No filesystem tools (`read_file`, `glob_files`, `grep`, `write_file`, `edit_file`)
+- No shell or web tools (`run_bash`, `web_fetch`)
+- No task tracking, no skills, no MCP, no project context auto-load
+- No HITL confirmation flow, no permission engine, no sandbox backends
+- No multi-tenant tenancy, no JWT/Bearer auth, no quota plugin
+- No production FastAPI factory beyond what `adk api_server` provides natively
+
+What's gained: a small focused tree where every file has a live importer and the live-run path (~140s on minimax-m2.7) is verifiable end-to-end against a real LLM.
+
+If you want the production-grade scaffolding (sandboxing, multi-tenancy, permission gating), see `main` branch.
