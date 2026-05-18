@@ -15,6 +15,7 @@ from typing import Any
 from google.adk.tools.tool_context import ToolContext
 
 from .backends import (
+    DaytonaBackend,
     DockerBackend,
     E2BBackend,
     NoopBackend,
@@ -50,10 +51,11 @@ def make_default_backend(
     resource per session (DockerBackend's container, SandboxServiceBackend's
     upstream session). NoopBackend / E2BBackend ignore them.
 
-    `credentials` is passed to `SandboxServiceBackend` for per-tenant token
-    lookup (production multi-tenant). When None and
-    `ADK_CC_SANDBOX_SERVICE_SHARED_TOKEN` is set, the backend uses the
-    static token (dev / single-tenant). Other backends ignore it.
+    `credentials` is passed to `SandboxServiceBackend` and `DaytonaBackend`
+    for per-tenant token lookup (production multi-tenant). When None
+    and the corresponding `_SHARED_TOKEN` / `_API_KEY` env var is set,
+    the backend uses the static token (dev / single-tenant). Other
+    backends ignore it.
     """
     name = os.environ.get("ADK_CC_SANDBOX_BACKEND", "noop").lower()
     if name == "noop":
@@ -68,6 +70,14 @@ def make_default_backend(
         )
 
         return make_sandbox_service_backend_from_env(
+            session_id=session_id,
+            tenant_id=tenant_id,
+            credentials=credentials,
+        )
+    if name == "daytona":
+        from .backends.daytona_backend import make_daytona_backend_from_env
+
+        return make_daytona_backend_from_env(
             session_id=session_id,
             tenant_id=tenant_id,
             credentials=credentials,
@@ -110,6 +120,7 @@ __all__ = [
     "DockerBackend",
     "E2BBackend",
     "SandboxServiceBackend",
+    "DaytonaBackend",
     "ExecResult",
     "FsReadConfig",
     "FsWriteConfig",
