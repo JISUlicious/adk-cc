@@ -1,0 +1,43 @@
+# Adk-cc agent snapshot for Daytona.
+#
+# Layered on top of `daytonaio/sandbox:0.5.0-slim` (the stock default
+# snapshot Daytona ships) so we inherit Daytona's bash / linux base
+# and only add the agent-side tooling.
+#
+# Build + push:
+#   docker build -f Dockerfile.daytona-snapshot -t <registry>/adk-cc-daytona:latest .
+#   docker push <registry>/adk-cc-daytona:latest
+#
+# Then register a snapshot in Daytona pointing at this image (via
+# `POST /api/snapshots` or the dashboard), and set
+# `ADK_CC_DAYTONA_SNAPSHOT=<snapshot-name>` on the agent host. See
+# `docs/04-deployment-sandbox.md` Path D for the full operator flow.
+#
+# Resources (cpu / memory / disk) are dictated by the snapshot.
+# Daytona's API rejects request-time resource fields when a snapshot
+# is in play; pick a snapshot class that matches your needs at the
+# snapshot-creation step.
+
+FROM daytonaio/sandbox:0.5.0-slim
+
+# `daytonaio/sandbox:0.5.0-slim` runs as the `daytona` non-root user
+# by default. Switch to root briefly for apt installs, then back.
+USER root
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
+        git \
+        curl \
+        ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# uv — fast Python package manager. Adk-cc tools default to uv-driven
+# venvs for skill execution.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+ && mv /root/.local/bin/uv /usr/local/bin/uv \
+ && chmod +x /usr/local/bin/uv
+
+USER daytona
+WORKDIR /home/daytona

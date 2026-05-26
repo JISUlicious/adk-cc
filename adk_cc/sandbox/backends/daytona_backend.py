@@ -1,0 +1,659 @@
+"""Backend that delegates to a self-hosted Daytona compute plane.
+
+Targets Daytona's two-service HTTP surface — the NestJS control plane
+(sandbox lifecycle) and the Go toolbox proxy (per-operation exec / file
+IO). One adk-cc session maps to one Daytona sandbox.
+
+  agent process                            Daytona deployment
+  ─────────────────                        ────────────────────────────
+  DaytonaBackend
+    │
+    ├── control plane ───────────────────► <api_url>:3000
+    │   (sandbox lifecycle)                 - POST /api/sandbox
+    │                                       - GET  /api/sandbox/{id}
+    │                                       - POST /api/sandbox/{id}/stop
+    │                                       - DELETE /api/sandbox/{id}
+    │
+    └── toolbox proxy ───────────────────► <proxy_url>:4000
+        (per-op exec / file IO)             - POST /toolbox/{id}/process/execute
+                                            - POST /toolbox/{id}/files/upload
+                                            - GET  /toolbox/{id}/files/download
+
+Same Bearer token authenticates both services.
+
+Routes we DO NOT take
+---------------------
+
+1. **`/api/toolbox/{id}/toolbox/*` on the control plane (port 3000)**.
+   These are the `[DEPRECATED]` NestJS wrapper routes — they work but
+   relay every byte through the API server, which doesn't scale. The
+   doubled `/toolbox/` segment in the path is an artifact of how the
+   Nest controller is namespaced (controller at `/api/toolbox`, routes
+   start with `:sandboxId/toolbox/...`). Confirmed deprecation status
+   with Daytona maintainers (2026-05-18, against self-hosted v0.176.0).
+   Use the Go proxy on :4000 instead — canonical path is
+   `/toolbox/{id}/<route>` with NO doubled `/toolbox/`.
+
+2. **`GET /api/sandbox/{id}/toolbox-proxy-url`**. On self-hosted
+   docker-compose this endpoint returns `http://proxy.localhost:4000/toolbox`
+   — `proxy.localhost` is host-insensitive cosmetic (the Go proxy
+   dispatches purely by URL path), so we accept the proxy base URL via
+   `ADK_CC_DAYTONA_PROXY_URL` directly rather than dereferencing.
+   Operators with custom routing can override the literal returned by
+   this endpoint via the (undocumented) `PROXY_TOOLBOX_BASE_URL` env on
+   the API container — relevant for in-cluster clients only.
+
+Snapshot vs resources
+---------------------
+
+`POST /api/sandbox` rejects `cpu`/`memory`/`disk` request fields when a
+`snapshot` is set (validated at
+`apps/api/src/sandbox/controllers/sandbox.controller.ts:304-306` in
+upstream). The snapshot dictates resources; resource overrides only
+apply via a custom `buildInfo` build. Our request builder elides
+resource fields whenever a snapshot is in play. The
+`ADK_CC_DAYTONA_SNAPSHOT` env knob is the recommended path for v1; a
+`buildInfo` path is a v2 follow-up.
+
+Exec response shape
+-------------------
+
+`POST /toolbox/{id}/process/execute` returns `{exitCode: int, result:
+str}` where `result` is stdout + stderr merged. We surface `result` on
+`ExecResult.stdout` with `stderr=""`. Callers can't reliably split the
+streams. The session-based exec API (`POST /toolbox/{id}/process/session`)
+gives per-stream output and is the v2 route to streaming exec.
+
+Idempotency
+-----------
+
+Every mutating control-plane request (POST /api/sandbox, POST stop,
+DELETE) sends an `Idempotency-Key` header so transient network glitches
+retry safely. Daytona's current API may not honor the header; sending
+it is harmless and matches `SandboxServiceBackend`'s convention. Toolbox
+proxy calls (exec, files) are stateless from Daytona's POV and don't
+need keys.
+
+Trade-offs vs SandboxServiceBackend
+-----------------------------------
+
+  - +  Daytona is open-source and self-hostable via docker-compose;
+       no upstream-service dependency.
+  - +  Stronger isolation (per-sandbox kernel/fs/network stack).
+  - +  Native multi-tenant via Daytona's organization + API-key model.
+  - −  Two services to reach (control plane + toolbox proxy). Operators
+       on stock docker-compose just publish both ports.
+  - −  No streaming exec in v1 (inherit ABC default — one chunk at end).
+  - −  Stdout/stderr are merged in the exec response (see above).
+
+See `docs/04-deployment-sandbox.md` Path D for the operator setup story.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import threading
+import time
+import uuid
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, Any, Optional
+from urllib.parse import urlsplit, urlunsplit
+
+import httpx
+
+from ..config import (
+    ExecResult,
+    FsReadConfig,
+    FsWriteConfig,
+    NetworkConfig,
+    SandboxViolation,
+)
+from .base import SandboxBackend
+
+if TYPE_CHECKING:
+    from ...credentials import CredentialProvider
+    from ..workspace import WorkspaceRoot
+
+log = logging.getLogger(__name__)
+
+# Daytona's stock self-hosted layout: control plane on :3000, toolbox
+# proxy on :4000, same host. If ADK_CC_DAYTONA_PROXY_URL is unset, we
+# derive the proxy URL by swapping :3000 → :4000 on the API URL.
+_DEFAULT_PROXY_PORT = 4000
+
+# Terminal sandbox states that abort the start-poll loop. Anything not
+# in this set OR "started" is treated as a transient state we keep
+# polling on (creating, starting, pulling, building, …).
+_TERMINAL_FAILURE_STATES = frozenset(
+    {"error", "build_failed", "destroyed", "deleting"}
+)
+
+
+def _derive_proxy_url(api_url: str) -> str:
+    """Swap the API URL's port to :4000 when ADK_CC_DAYTONA_PROXY_URL
+    is unset. Stock docker-compose publishes the toolbox proxy on the
+    same host as the control plane on port 4000."""
+    parts = urlsplit(api_url)
+    host = parts.hostname or "localhost"
+    if parts.scheme not in ("http", "https"):
+        # Defensive: malformed input; let the request layer surface it.
+        return api_url
+    return urlunsplit(
+        (parts.scheme, f"{host}:{_DEFAULT_PROXY_PORT}", "", "", "")
+    )
+
+
+class DaytonaBackend(SandboxBackend):
+    """Sandbox backend backed by a Daytona deployment.
+
+    See module docstring for the architecture + the routes we
+    deliberately don't take.
+    """
+
+    name = "daytona"
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        tenant_id: str,
+        api_url: str,
+        proxy_url: str,
+        api_key: Optional[str] = None,
+        credentials: Optional["CredentialProvider"] = None,
+        credential_key: str = "daytona_api_key",
+        snapshot: Optional[str] = None,
+        workspace_path: str = "/home/daytona",
+        autostop_minutes: int = 15,
+        autodelete_minutes: int = 1440,
+        delete_on_close: bool = False,
+        start_timeout_s: float = 120.0,
+        request_timeout_s: float = 30.0,
+        client: Optional[httpx.AsyncClient] = None,
+    ) -> None:
+        self._session_id = session_id
+        self._tenant_id = tenant_id
+        self._api_base = api_url.rstrip("/")
+        self._proxy_base = proxy_url.rstrip("/")
+        # Exactly one of (api_key, credentials) must be provided. The
+        # factory validates this; we accept either here for direct ctor
+        # use (tests, embedding) without enforcing.
+        self._static_token: Optional[str] = api_key
+        self._credentials: Optional["CredentialProvider"] = credentials
+        self._credential_key = credential_key
+        self._snapshot = snapshot
+        self._workspace_path = workspace_path
+        self._autostop_minutes = int(autostop_minutes)
+        self._autodelete_minutes = int(autodelete_minutes)
+        self._delete_on_close = bool(delete_on_close)
+        self._start_timeout_s = float(start_timeout_s)
+        self._request_timeout_s = float(request_timeout_s)
+        # Daytona-side sandbox id. Set by `ensure_workspace()` on first
+        # call; subsequent calls are no-ops.
+        self._sandbox_id: Optional[str] = None
+        # Test-injection client; see SandboxServiceBackend's note on why
+        # we don't cache an AsyncClient in production (cross-event-loop
+        # safety). When set, the same client is used for BOTH api and
+        # proxy calls — test fixtures usually drive both with one
+        # MockTransport's route dispatcher.
+        self._http: Optional[httpx.AsyncClient] = client
+        # threading.Lock (not asyncio.Lock) so concurrent first-calls
+        # from different event loops don't each create a sandbox.
+        self._create_lock = threading.Lock()
+
+    # --- helpers --------------------------------------------------------
+
+    @staticmethod
+    def _idem_key() -> str:
+        """Fresh idempotency key for a single mutating call. UUIDv4 hex.
+
+        Same convention as SandboxServiceBackend: one key per logical
+        operation, not reused across retries (httpx retries — if any —
+        would be wrapped at the call site, not here)."""
+        return uuid.uuid4().hex
+
+    async def _resolve_token(self) -> str:
+        if self._static_token:
+            return self._static_token
+        if self._credentials is None:
+            raise RuntimeError(
+                "daytona: no api_key set and no CredentialProvider available — "
+                "configure ADK_CC_DAYTONA_API_KEY (single-tenant) or pass a "
+                "credentials provider to make_daytona_backend_from_env()."
+            )
+        token = await self._credentials.get(
+            tenant_id=self._tenant_id, key=self._credential_key
+        )
+        if not token:
+            raise RuntimeError(
+                f"daytona: no token for tenant {self._tenant_id!r} under "
+                f"credential key {self._credential_key!r} — register one in "
+                f"the credential store before opening this tenant's sessions"
+            )
+        return token
+
+    @asynccontextmanager
+    async def _client(self):
+        """Yield an httpx.AsyncClient. One client serves both the
+        control plane and the toolbox proxy — we route by passing
+        absolute URLs to each request (no base_url on the client), so
+        a single MockTransport in tests can dispatch by request URL.
+
+        Production: build a fresh client per call (cross-event-loop
+        safety; see SandboxServiceBackend's note). Test injection: the
+        constructor's `client=` kwarg short-circuits this.
+        """
+        if self._http is not None:
+            yield self._http
+            return
+        token = await self._resolve_token()
+        async with httpx.AsyncClient(
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=self._request_timeout_s,
+        ) as client:
+            yield client
+
+    def _api_url(self, path: str) -> str:
+        return f"{self._api_base}{path}"
+
+    def _proxy_url(self, path: str) -> str:
+        return f"{self._proxy_base}{path}"
+
+    def _normalize_error(self, response: httpx.Response, op: str) -> None:
+        """Map a Daytona error response to our exception model.
+
+        Daytona returns errors as `{path, timestamp, statusCode, error,
+        message}`. Caller-fixable mistakes raise SandboxViolation;
+        transport / 5xx errors re-raise httpx.HTTPStatusError so the
+        callsite can apply its own retry. No-op on 2xx.
+        """
+        if response.status_code < 400:
+            return
+        try:
+            body = response.json()
+            msg = body.get("message") or body.get("error") or ""
+        except Exception:
+            msg = response.text[:200]
+        code = response.status_code
+        if code == 401:
+            raise SandboxViolation(f"daytona auth failed during {op}: {msg}")
+        if code == 403:
+            raise SandboxViolation(f"daytona forbidden during {op}: {msg}")
+        if code == 404:
+            raise SandboxViolation(f"daytona not found during {op}: {msg}")
+        if code == 429:
+            raise SandboxViolation(f"daytona quota exhausted during {op}: {msg}")
+        if 500 <= code < 600:
+            # Bubble 5xx as a normal httpx error so callsites can retry.
+            response.raise_for_status()
+            return
+        raise SandboxViolation(f"daytona {code} during {op}: {msg}")
+
+    def _check_allowed(
+        self, path: str, fs_cfg: FsReadConfig | FsWriteConfig, *, op: str
+    ) -> None:
+        """Raise SandboxViolation if the workspace's allow_paths don't
+        cover `path`. Mirrors the client-side fail-fast pattern other
+        backends use — surfaces "you're outside the workspace" before
+        any HTTP round-trip."""
+        if not fs_cfg.allows(path):
+            raise SandboxViolation(
+                f"daytona: path {path!r} is not in the workspace's "
+                f"allowed paths during {op}"
+            )
+
+    # --- lifecycle ------------------------------------------------------
+
+    async def ensure_workspace(self, ws: "WorkspaceRoot") -> None:
+        """Create the Daytona sandbox and poll until state=started.
+
+        Idempotent: a cached `_sandbox_id` short-circuits on second call.
+        Serialized via `threading.Lock` so concurrent first-calls from
+        different event loops don't each POST a new sandbox.
+        """
+        if self._sandbox_id is not None:
+            return
+        with self._create_lock:
+            if self._sandbox_id is not None:
+                return
+            # Build the create body. Daytona rejects resource fields
+            # alongside a snapshot; we never send them in v1 (see
+            # module docstring). The snapshot is optional — omitting
+            # it lets Daytona use its configured default.
+            payload: dict[str, Any] = {
+                "name": f"adk-cc-{self._session_id}",
+                "autoStopInterval": self._autostop_minutes,
+                "autoDeleteInterval": self._autodelete_minutes,
+            }
+            if self._snapshot:
+                payload["snapshot"] = self._snapshot
+            async with self._client() as client:
+                resp = await client.post(
+                    self._api_url("/api/sandbox"),
+                    json=payload,
+                    headers={"Idempotency-Key": self._idem_key()},
+                )
+                self._normalize_error(resp, op="create_sandbox")
+                body = resp.json()
+                sandbox_id = body.get("id")
+                if not sandbox_id:
+                    raise RuntimeError(
+                        f"daytona: create_sandbox response missing `id`: {body!r}"
+                    )
+                log.info(
+                    "daytona: created sandbox %s for adk-cc session %s "
+                    "(tenant=%s, snapshot=%s, state=%s)",
+                    sandbox_id,
+                    self._session_id,
+                    self._tenant_id,
+                    body.get("snapshot"),
+                    body.get("state"),
+                )
+                # Poll the same client (avoid reopening the connection).
+                await self._poll_until_started(client, sandbox_id)
+            self._sandbox_id = sandbox_id
+
+    async def _poll_until_started(
+        self, client: httpx.AsyncClient, sandbox_id: str
+    ) -> None:
+        """Exponential-backoff poll on `GET /api/sandbox/{id}` until
+        state=started or a terminal failure state.
+
+        Initial wait 0.5s, doubling, capped at 5s; total deadline is
+        `self._start_timeout_s`.
+        """
+        delay = 0.5
+        deadline = time.monotonic() + self._start_timeout_s
+        while time.monotonic() < deadline:
+            resp = await client.get(self._api_url(f"/api/sandbox/{sandbox_id}"))
+            self._normalize_error(resp, op="poll_sandbox")
+            body = resp.json()
+            state = body.get("state")
+            if state == "started":
+                return
+            if state in _TERMINAL_FAILURE_STATES:
+                reason = (
+                    body.get("errorReason")
+                    or body.get("reason")
+                    or "<no reason>"
+                )
+                raise SandboxViolation(
+                    f"daytona: sandbox {sandbox_id} entered terminal state "
+                    f"{state!r}: {reason}"
+                )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 5.0)
+        raise SandboxViolation(
+            f"daytona: sandbox {sandbox_id} not started after "
+            f"{self._start_timeout_s}s (last state was transient)"
+        )
+
+    async def close(self) -> None:
+        """Best-effort stop / delete. Never raises.
+
+        Default: POST stop (preserves the sandbox for resume; Daytona's
+        own autoDeleteInterval reaper handles eventual cleanup).
+        Set ADK_CC_DAYTONA_DELETE_ON_CLOSE=1 to issue DELETE instead —
+        useful for ephemeral CI-style usage where you want the storage
+        reclaimed immediately.
+        """
+        if self._sandbox_id is None:
+            return
+        sandbox_id = self._sandbox_id
+        try:
+            async with self._client() as client:
+                if self._delete_on_close:
+                    await client.delete(
+                        self._api_url(f"/api/sandbox/{sandbox_id}"),
+                        headers={"Idempotency-Key": self._idem_key()},
+                    )
+                else:
+                    await client.post(
+                        self._api_url(f"/api/sandbox/{sandbox_id}/stop"),
+                        headers={"Idempotency-Key": self._idem_key()},
+                    )
+        except Exception as e:  # noqa: BLE001 — best-effort
+            log.warning(
+                "daytona: close (%s) on sandbox %s failed (best-effort): %s",
+                "delete" if self._delete_on_close else "stop",
+                sandbox_id,
+                e,
+            )
+
+    # --- ABC methods ----------------------------------------------------
+
+    async def exec(
+        self,
+        cmd: str,
+        *,
+        fs_write: FsWriteConfig,
+        network: NetworkConfig,
+        timeout_s: int,
+        cwd: str,
+    ) -> ExecResult:
+        """Synchronous exec via the toolbox proxy's POST
+        /toolbox/{id}/process/execute endpoint.
+
+        Daytona returns `{exitCode, result}` with stdout+stderr merged
+        in `result`. We surface `result` on ExecResult.stdout with
+        stderr="" — callers can't reliably split the streams.
+
+        Transport / 4xx / 5xx errors all synthesize an
+        ExecResult(exit_code=-1, stderr=<error>) rather than raise; this
+        matches SandboxServiceBackend's convention so callers have one
+        error-handling pattern.
+        """
+        await self.ensure_workspace_inferred()
+        body: dict[str, Any] = {
+            "command": cmd,
+            "cwd": cwd or self._workspace_path,
+        }
+        if timeout_s and timeout_s > 0:
+            # Daytona's spec calls this `timeout` (seconds); we mirror.
+            body["timeout"] = int(timeout_s)
+        # `network` arg is not sent per-call: Daytona enforces network
+        # policy at sandbox-create time (networkBlockAll / networkAllowList),
+        # not per-exec. Documented in the module docstring as a known
+        # behavioral asymmetry vs other backends.
+        del network  # unused; kept in signature to satisfy the ABC
+        del fs_write  # write scoping likewise enforced sandbox-wide
+        try:
+            async with self._client() as client:
+                resp = await client.post(
+                    self._proxy_url(f"/toolbox/{self._sandbox_id}/process/execute"),
+                    json=body,
+                )
+        except httpx.HTTPError as e:
+            return ExecResult(
+                exit_code=-1,
+                stdout="",
+                stderr=f"daytona: exec transport error: {e}",
+                timed_out=False,
+            )
+        if resp.status_code >= 400:
+            return ExecResult(
+                exit_code=-1,
+                stdout="",
+                stderr=(
+                    f"daytona: exec returned {resp.status_code}: {resp.text}"
+                ),
+                timed_out=False,
+            )
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        exit_code = int(data.get("exitCode", -1))
+        result_text = data.get("result", "") or ""
+        return ExecResult(
+            exit_code=exit_code,
+            stdout=result_text,
+            stderr="",
+            timed_out=False,
+        )
+
+    async def read_text(self, path: str, *, fs_read: FsReadConfig) -> str:
+        self._check_allowed(path, fs_read, op="read_text")
+        await self.ensure_workspace_inferred()
+        async with self._client() as client:
+            try:
+                resp = await client.get(
+                    self._proxy_url(f"/toolbox/{self._sandbox_id}/files/download"),
+                    params={"path": path},
+                )
+            except httpx.HTTPError as e:
+                raise RuntimeError(
+                    f"daytona: read_text transport error for {path!r}: {e}"
+                ) from e
+            if resp.status_code == 404:
+                raise FileNotFoundError(path)
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"daytona: read_text returned {resp.status_code} for "
+                    f"{path!r}: {resp.text}"
+                )
+            return resp.content.decode("utf-8", errors="replace")
+
+    async def write_text(
+        self, path: str, content: str, *, fs_write: FsWriteConfig
+    ) -> None:
+        self._check_allowed(path, fs_write, op="write_text")
+        await self.ensure_workspace_inferred()
+        # Multipart upload: `path` is a QUERY parameter (not a form
+        # field — easy to get wrong; Daytona's OpenAPI marks it as
+        # `in: query`). The form field name is `file`; the filename is
+        # cosmetic (server uses the query path for placement).
+        files = {
+            "file": ("payload", content.encode("utf-8"), "application/octet-stream"),
+        }
+        async with self._client() as client:
+            try:
+                resp = await client.post(
+                    self._proxy_url(f"/toolbox/{self._sandbox_id}/files/upload"),
+                    params={"path": path},
+                    files=files,
+                )
+            except httpx.HTTPError as e:
+                raise RuntimeError(
+                    f"daytona: write_text transport error for {path!r}: {e}"
+                ) from e
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"daytona: write_text returned {resp.status_code} for "
+                    f"{path!r}: {resp.text}"
+                )
+
+    # --- internal -------------------------------------------------------
+
+    async def ensure_workspace_inferred(self) -> None:
+        """No-op if the sandbox already exists.
+
+        Tools may call exec / read_text / write_text without an explicit
+        prior call to `ensure_workspace()` (the runner usually does it
+        eagerly, but defensive code paths exist). If `_sandbox_id` is
+        still None here, we can't proceed — raise rather than silently
+        create a sandbox with empty fs config.
+        """
+        if self._sandbox_id is None:
+            raise RuntimeError(
+                "daytona: backend used before ensure_workspace() — the "
+                "runner should call ensure_workspace() at session start"
+            )
+
+
+def make_daytona_backend_from_env(
+    *,
+    session_id: str,
+    tenant_id: str,
+    credentials: Optional["CredentialProvider"] = None,
+) -> DaytonaBackend:
+    """Construct from `ADK_CC_DAYTONA_*` env vars.
+
+    Required:
+      - ADK_CC_DAYTONA_API_URL
+      - ONE OF:
+        - ADK_CC_DAYTONA_API_KEY — single-tenant / dev shared bearer.
+        - `credentials` parameter — production multi-tenant: token
+          resolved per `(tenant_id, key)` from the credential provider.
+          Key defaults to `daytona_api_key`; override via
+          ADK_CC_DAYTONA_CREDENTIAL_KEY.
+
+    Optional:
+      - ADK_CC_DAYTONA_PROXY_URL          — toolbox proxy base; default
+                                            derived by swapping :3000
+                                            → :4000 on the API URL.
+      - ADK_CC_DAYTONA_SNAPSHOT           — snapshot id/name; default
+                                            uses Daytona's configured
+                                            default (see GET /api/config).
+      - ADK_CC_DAYTONA_WORKSPACE_PATH     — in-sandbox cwd; default
+                                            `/home/daytona`.
+      - ADK_CC_DAYTONA_AUTOSTOP_MIN       — default 15.
+      - ADK_CC_DAYTONA_AUTODELETE_MIN     — default 1440 (24h).
+      - ADK_CC_DAYTONA_DELETE_ON_CLOSE    — "1" to DELETE instead of stop.
+      - ADK_CC_DAYTONA_START_TIMEOUT_S    — default 120.
+      - ADK_CC_DAYTONA_REQUEST_TIMEOUT_S  — default 30.
+
+    Resource fields (cpu/memory/disk) are NOT exposed via env in v1:
+    Daytona's API rejects them alongside a snapshot, and v1 always
+    routes through snapshots. Custom resource sizing goes through a
+    `buildInfo` build in v2.
+    """
+    api_url = os.environ.get("ADK_CC_DAYTONA_API_URL")
+    if not api_url:
+        raise RuntimeError(
+            "ADK_CC_SANDBOX_BACKEND=daytona requires ADK_CC_DAYTONA_API_URL"
+        )
+    proxy_url = (
+        os.environ.get("ADK_CC_DAYTONA_PROXY_URL")
+        or _derive_proxy_url(api_url)
+    )
+
+    static_token = os.environ.get("ADK_CC_DAYTONA_API_KEY")
+    credential_key = os.environ.get(
+        "ADK_CC_DAYTONA_CREDENTIAL_KEY", "daytona_api_key"
+    )
+    if not static_token and credentials is None:
+        raise RuntimeError(
+            "ADK_CC_SANDBOX_BACKEND=daytona requires either "
+            "ADK_CC_DAYTONA_API_KEY (single-tenant / dev) or a "
+            "CredentialProvider passed to the factory (production)."
+        )
+
+    def _int_env(key: str, default: int) -> int:
+        raw = os.environ.get(key)
+        if raw is None or raw == "":
+            return default
+        try:
+            return int(raw)
+        except ValueError as e:
+            raise RuntimeError(f"{key}={raw!r} is not a valid int: {e}") from e
+
+    def _float_env(key: str, default: float) -> float:
+        raw = os.environ.get(key)
+        if raw is None or raw == "":
+            return default
+        try:
+            return float(raw)
+        except ValueError as e:
+            raise RuntimeError(f"{key}={raw!r} is not a valid float: {e}") from e
+
+    return DaytonaBackend(
+        session_id=session_id,
+        tenant_id=tenant_id,
+        api_url=api_url,
+        proxy_url=proxy_url,
+        api_key=static_token,
+        credentials=credentials if not static_token else None,
+        credential_key=credential_key,
+        snapshot=os.environ.get("ADK_CC_DAYTONA_SNAPSHOT") or None,
+        workspace_path=os.environ.get(
+            "ADK_CC_DAYTONA_WORKSPACE_PATH", "/home/daytona"
+        ),
+        autostop_minutes=_int_env("ADK_CC_DAYTONA_AUTOSTOP_MIN", 15),
+        autodelete_minutes=_int_env("ADK_CC_DAYTONA_AUTODELETE_MIN", 1440),
+        delete_on_close=os.environ.get("ADK_CC_DAYTONA_DELETE_ON_CLOSE") == "1",
+        start_timeout_s=_float_env("ADK_CC_DAYTONA_START_TIMEOUT_S", 120.0),
+        request_timeout_s=_float_env("ADK_CC_DAYTONA_REQUEST_TIMEOUT_S", 30.0),
+    )

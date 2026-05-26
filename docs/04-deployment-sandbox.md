@@ -321,3 +321,162 @@ programmatic Python consumer. If you also want LLM clients to drive
 the same sandbox directly, point them at `/mcp` with the same Bearer
 token; agent-driven and LLM-driven sessions are isolated by their
 own session IDs and don't conflict.
+
+
+## 7. Alternative: self-hosted Daytona (`daytona` backend)
+
+A second external-service option lives at `ADK_CC_SANDBOX_BACKEND=daytona`.
+This delegates to a self-hosted [Daytona](https://daytona.io) compute
+plane — open-source, docker-compose or k8s deployable, with native
+per-sandbox isolation and per-tenant API keys.
+
+### When to pick this over `sandbox_service`
+
+- You want an open-source compute plane you can host yourself rather
+  than depending on the upstream `JISUlicious/sandboxing` service.
+- You already operate Daytona for developer workspaces and want adk-cc
+  to share the same compute fleet.
+- You want native multi-tenant support backed by Daytona's organization
+  + API-key model rather than rolling your own credential layer.
+
+### Architecture
+
+Daytona splits operations between two HTTP services, both reachable
+from external clients on a stock self-hosted deployment:
+
+1. **Control plane** (NestJS, port 3000): sandbox lifecycle — create,
+   start, stop, delete; snapshots; organizations; runners.
+2. **Toolbox proxy** (Go, port 4000): per-operation exec / file IO.
+   URL-path dispatched (host-header-insensitive), so the agent can
+   reach it directly via the host IP regardless of what
+   `/api/sandbox/{id}/toolbox-proxy-url` returns.
+
+One adk-cc session maps to one Daytona sandbox. Same Bearer token
+authenticates both services.
+
+```
+agent process                Daytona deployment
+─────────────────            ────────────────────────────
+DaytonaBackend
+  │
+  ├── control plane ────────► <api_url>:3000   (sandbox lifecycle)
+  │
+  └── toolbox proxy ────────► <proxy_url>:4000 (exec / files)
+```
+
+### Trade-offs
+
+- **+** Stronger isolation than `DockerBackend` (per-sandbox kernel,
+  filesystem, network stack).
+- **+** Open-source; self-hosted via docker-compose or k8s.
+- **+** Native multi-tenant: per-organization API keys, quotas,
+  audit logs on the Daytona side.
+- **+** Sandbox auto-stop + auto-delete reapers handle abandoned
+  sessions for free.
+- **−** No streaming exec in v1 (the backend inherits the ABC default:
+  one chunk at end). v2 will use Daytona's `/process/session` API.
+- **−** Stdout and stderr are merged in the exec response (Daytona's
+  `{exitCode, result}` shape). v1 surfaces `result` as
+  `ExecResult.stdout` with `stderr=""`. Use sessions for split streams.
+- **−** Resource sizing (cpu/memory/disk) is dictated by the snapshot
+  — Daytona's API rejects request-time resource fields when a snapshot
+  is set. Bake the resource profile into your snapshot.
+
+### Setup
+
+1. **Stand up Daytona** via the stock docker-compose distribution.
+   Confirm both services are reachable:
+   ```bash
+   curl http://<daytona-host>:3000/api/health      # control plane
+   curl http://<daytona-host>:4000/healthz         # toolbox proxy
+   ```
+
+2. **Build an adk-cc snapshot.** The repo's
+   `Dockerfile.daytona-snapshot` layers on `daytonaio/sandbox:0.5.0-slim`
+   and adds python3, pip, uv, git. From the agent-side repo root:
+   ```bash
+   docker build -f Dockerfile.daytona-snapshot \
+       -t <your-registry>/adk-cc-daytona:latest .
+   docker push <your-registry>/adk-cc-daytona:latest
+   ```
+
+3. **Register the snapshot in Daytona.** Use the dashboard at
+   `http://<daytona-host>:3000/dashboard` or
+   `POST /api/snapshots`. Note the snapshot id / name.
+
+4. **Generate an API key.** Dashboard or `POST /api/api-keys`. For
+   single-tenant deployments this becomes
+   `ADK_CC_DAYTONA_API_KEY`. For multi-tenant, store per-tenant keys
+   in your `CredentialProvider` under the `daytona_api_key` key (or
+   override the key name via `ADK_CC_DAYTONA_CREDENTIAL_KEY`).
+
+5. **Configure the agent host.** Required env:
+   ```bash
+   ADK_CC_SANDBOX_BACKEND=daytona
+   ADK_CC_DAYTONA_API_URL=http://<daytona-host>:3000
+   ADK_CC_DAYTONA_API_KEY=<your bearer token>
+   ADK_CC_DAYTONA_SNAPSHOT=adk-cc-daytona      # the name you registered
+   ```
+   Optional:
+   ```bash
+   ADK_CC_DAYTONA_PROXY_URL=http://<daytona-host>:4000  # defaults to API host:4000
+   ADK_CC_DAYTONA_WORKSPACE_PATH=/home/daytona           # cwd in the sandbox
+   ADK_CC_DAYTONA_AUTOSTOP_MIN=15                        # idle pause
+   ADK_CC_DAYTONA_AUTODELETE_MIN=1440                    # 24h reaper
+   ADK_CC_DAYTONA_DELETE_ON_CLOSE=1                      # ephemeral / CI mode
+   ADK_CC_DAYTONA_START_TIMEOUT_S=120                    # cold-start cap
+   ```
+
+### Smoke test
+
+After configuring the agent host, drive a one-shot exec via the
+adk-cc REPL or any agent session:
+
+```bash
+ADK_CC_SANDBOX_BACKEND=daytona \
+ADK_CC_DAYTONA_API_URL=http://<host>:3000 \
+ADK_CC_DAYTONA_API_KEY=<token> \
+python -c "
+import asyncio
+from adk_cc.sandbox import make_default_backend
+from adk_cc.sandbox.config import FsWriteConfig, NetworkConfig
+from adk_cc.sandbox.workspace import WorkspaceRoot
+
+async def main():
+    b = make_default_backend(session_id='smoke', tenant_id='local')
+    ws = WorkspaceRoot(tenant_id='local', session_id='smoke',
+                      abs_path='/home/daytona')
+    await b.ensure_workspace(ws)
+    r = await b.exec('echo hello', fs_write=FsWriteConfig(),
+                     network=NetworkConfig(), timeout_s=10, cwd='/home/daytona')
+    print('exit:', r.exit_code, '| out:', r.stdout.strip())
+    await b.close()
+asyncio.run(main())
+"
+```
+
+You should see `exit: 0 | out: hello` and an audit line on the
+Daytona side recording the sandbox create + stop.
+
+### Notes worth knowing (from upstream feedback)
+
+These behaviors of the Daytona API on self-hosted v0.176.0 are
+documented as inline comments in
+`adk_cc/sandbox/backends/daytona_backend.py` — repeated here for
+discoverability:
+
+- **Canonical external route shape**:
+  `<proxy>:4000/toolbox/{id}/<route>` (no doubled `/toolbox/` segment).
+  The `/api/toolbox/{id}/toolbox/*` routes on the control plane are
+  correctly `[DEPRECATED]` — they relay every byte through NestJS and
+  don't scale.
+- **`proxy.localhost` in `toolbox-proxy-url` is cosmetic.** The Go
+  proxy dispatches by URL path, ignoring the Host header for `/toolbox/*`
+  routes. We accept the proxy URL via `ADK_CC_DAYTONA_PROXY_URL` rather
+  than dereferencing the API. Operators with custom routing can
+  override the literal via the (undocumented) `PROXY_TOOLBOX_BASE_URL`
+  env on the API container.
+- **Snapshot ↔ resources exclusivity**: `POST /api/sandbox` rejects
+  `cpu` / `memory` / `disk` when `snapshot` is set
+  (`sandbox.controller.ts:304-306` upstream). Our request builder
+  elides resource fields whenever a snapshot is in play.
