@@ -2,6 +2,14 @@ import { type RunEvent } from "@/api/sse"
 import { MessageBubble } from "./MessageBubble"
 import { ToolCallCard } from "./ToolCallCard"
 import { ToolResponseCard } from "./ToolResponseCard"
+import {
+  ConfirmationCard,
+  type ConfirmPayload,
+} from "./ConfirmationCard"
+import {
+  AskUserQuestionCard,
+  type AskUserQuestionArgsDef,
+} from "./AskUserQuestionCard"
 
 /**
  * Renders the linear event stream as chat rows.
@@ -11,20 +19,45 @@ import { ToolResponseCard } from "./ToolResponseCard"
  * stays single-column and the tool-call cards sit inline with the
  * surrounding text.
  *
+ * Two tool names get specialized renderers when their function_call is
+ * still pending (no matching function_response yet):
+ *   - `adk_request_confirmation` / `adk_cc_confirmation_form`
+ *       → ConfirmationCard (HITL permission ask)
+ *   - `ask_user_question`
+ *       → AskUserQuestionCard (structured multi-choice form)
+ *
+ * Once the response lands, the call falls back to the generic
+ * ToolCallCard so the historical state stays inspectable.
+ *
  * Partial events: the SSE stream emits incremental `partial: true`
  * events as the model streams tokens. We dedupe partials so only the
- * latest snapshot from each (invocation_id, author) group is rendered,
- * giving a "streaming" feel without the duplicate rows we'd get if we
- * appended every chunk.
+ * latest snapshot from each (invocation_id, author) group is rendered.
  */
+
+const CONFIRMATION_NAMES = new Set([
+  "adk_request_confirmation",
+  "adk_cc_confirmation_form",
+])
+const ASK_QUESTION_NAME = "ask_user_question"
+
 export function Thread({
   events,
   isStreaming,
+  onSubmitFunctionResponse,
 }: {
   events: RunEvent[]
   isStreaming: boolean
+  /** Called when the user submits a response to a pending long-running
+   * tool call (confirmation choice, ask_user_question answers). */
+  onSubmitFunctionResponse: (
+    callId: string,
+    toolName: string,
+    response: unknown,
+  ) => void
 }) {
-  const rows = flattenEvents(dedupePartials(events))
+  const deduped = dedupePartials(events)
+  const pendingCallIds = collectPendingCallIds(deduped)
+  const rows = flattenEvents(deduped)
 
   return (
     <div className="flex flex-col gap-3 px-6 py-4">
@@ -35,7 +68,13 @@ export function Thread({
         </p>
       )}
       {rows.map((row, i) => (
-        <Row key={`${row.eventId}:${row.kind}:${i}`} row={row} />
+        <Row
+          key={`${row.eventId}:${row.kind}:${i}`}
+          row={row}
+          pendingCallIds={pendingCallIds}
+          onSubmitFunctionResponse={onSubmitFunctionResponse}
+          submitDisabled={isStreaming}
+        />
       ))}
       {isStreaming && (
         <p className="text-xs text-muted-foreground italic px-2">
@@ -46,7 +85,21 @@ export function Thread({
   )
 }
 
-function Row({ row }: { row: ChatRow }) {
+function Row({
+  row,
+  pendingCallIds,
+  onSubmitFunctionResponse,
+  submitDisabled,
+}: {
+  row: ChatRow
+  pendingCallIds: Set<string>
+  onSubmitFunctionResponse: (
+    callId: string,
+    toolName: string,
+    response: unknown,
+  ) => void
+  submitDisabled: boolean
+}) {
   switch (row.kind) {
     case "text":
       return (
@@ -56,7 +109,39 @@ function Row({ row }: { row: ChatRow }) {
           isPartial={row.isPartial}
         />
       )
-    case "function_call":
+    case "function_call": {
+      const isPending = pendingCallIds.has(row.callId)
+      if (isPending && CONFIRMATION_NAMES.has(row.name)) {
+        const payload =
+          row.args && typeof row.args === "object"
+            ? ((row.args as { payload?: ConfirmPayload }).payload ?? null)
+            : null
+        if (payload) {
+          return (
+            <ConfirmationCard
+              payload={payload}
+              disabled={submitDisabled}
+              onSubmit={(resp) =>
+                onSubmitFunctionResponse(row.callId, row.name, resp)
+              }
+            />
+          )
+        }
+      }
+      if (isPending && row.name === ASK_QUESTION_NAME) {
+        const args = row.args as AskUserQuestionArgsDef | undefined
+        if (args && Array.isArray(args.questions)) {
+          return (
+            <AskUserQuestionCard
+              args={args}
+              disabled={submitDisabled}
+              onSubmit={(resp) =>
+                onSubmitFunctionResponse(row.callId, row.name, resp)
+              }
+            />
+          )
+        }
+      }
       return (
         <ToolCallCard
           callId={row.callId}
@@ -64,6 +149,7 @@ function Row({ row }: { row: ChatRow }) {
           args={row.args}
         />
       )
+    }
     case "function_response":
       return (
         <ToolResponseCard
@@ -122,6 +208,19 @@ function dedupePartials(events: RunEvent[]): RunEvent[] {
     }
   }
   return out
+}
+
+function collectPendingCallIds(events: RunEvent[]): Set<string> {
+  const calls = new Set<string>()
+  const responses = new Set<string>()
+  for (const e of events) {
+    for (const part of e.content?.parts ?? []) {
+      if (part.function_call?.id) calls.add(part.function_call.id)
+      if (part.function_response?.id) responses.add(part.function_response.id)
+    }
+  }
+  for (const r of responses) calls.delete(r)
+  return calls
 }
 
 function flattenEvents(events: RunEvent[]): ChatRow[] {

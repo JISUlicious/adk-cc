@@ -41,6 +41,24 @@ export interface RunArgs {
   message: string
 }
 
+export interface FunctionResponseArgs {
+  appName: string
+  userId: string
+  sessionId: string
+  /** The function_call id this resolves. Matches the original call event. */
+  callId: string
+  /** The tool name. Required by ADK to route the resume back to the
+   * right pending call (`ask_user_question`, `adk_request_confirmation`,
+   * etc.). */
+  toolName: string
+  /** JSON payload the agent receives as the call's response. Shape is
+   * tool-specific:
+   *   - confirmation: `{chose_id, comment?, persist_across_sessions?}`
+   *   - ask_user_question: `{<question_text>: <chosen_label>}` (or array
+   *     for multi_select). */
+  response: unknown
+}
+
 interface StreamCallbacks {
   onEvent: (event: RunEvent) => void
   onError?: (err: Error) => void
@@ -50,12 +68,41 @@ interface StreamCallbacks {
 /** Open an SSE stream against /run_sse. Returns an abort function. */
 export function streamRun(args: RunArgs, cb: StreamCallbacks): () => void {
   const ctrl = new AbortController()
-  void _runStreamLoop(args, cb, ctrl.signal)
+  const newMessage = {
+    role: "user",
+    parts: [{ text: args.message }],
+  }
+  void _runStreamLoop(args, newMessage, cb, ctrl.signal)
+  return () => ctrl.abort()
+}
+
+/** Resume a pending long-running tool call by submitting its
+ * function_response. The agent loop picks up the response on the next
+ * turn and continues. Returns an abort function. */
+export function streamFunctionResponse(
+  args: FunctionResponseArgs,
+  cb: StreamCallbacks,
+): () => void {
+  const ctrl = new AbortController()
+  const newMessage = {
+    role: "user",
+    parts: [
+      {
+        function_response: {
+          id: args.callId,
+          name: args.toolName,
+          response: args.response,
+        },
+      },
+    ],
+  }
+  void _runStreamLoop(args, newMessage, cb, ctrl.signal)
   return () => ctrl.abort()
 }
 
 async function _runStreamLoop(
-  args: RunArgs,
+  args: { appName: string; userId: string; sessionId: string },
+  newMessage: unknown,
   cb: StreamCallbacks,
   signal: AbortSignal,
 ): Promise<void> {
@@ -74,10 +121,7 @@ async function _runStreamLoop(
         appName: args.appName,
         userId: args.userId,
         sessionId: args.sessionId,
-        newMessage: {
-          role: "user",
-          parts: [{ text: args.message }],
-        },
+        newMessage,
       }),
       signal,
     })
