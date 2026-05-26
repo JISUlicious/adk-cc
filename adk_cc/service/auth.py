@@ -249,7 +249,12 @@ class JwtAuthExtractor:
         return (str(user_id), str(tenant_id))
 
 
-def make_auth_middleware(extractor: AuthExtractor):
+def make_auth_middleware(
+    extractor: AuthExtractor,
+    *,
+    exempt_path_prefixes: tuple[str, ...] = (),
+    exempt_exact_paths: tuple[str, ...] = (),
+):
     """Build a Starlette middleware that calls `extractor`, stashes the
     result on `request.state.adk_cc_auth = (user_id, tenant_id)`, AND
     sets the same pair into a ContextVar so ADK plugins downstream
@@ -270,6 +275,14 @@ def make_auth_middleware(extractor: AuthExtractor):
     `user_id`, hardcodes `tenant_id="local"`, and the JWT's tenant is
     never used unless the operator supplies a custom resolver. The
     ContextVar closes that gap.
+
+    Args:
+      extractor: the AuthExtractor callable to apply to gated paths.
+      exempt_path_prefixes: paths starting with any of these strings are
+        passed through unauthenticated. Used by the UI mount to let the
+        SPA bundle (`/assets/...`) load before the user has signed in.
+      exempt_exact_paths: paths that match exactly are also passed through.
+        Used for the SPA index (`/`) and `/favicon.svg`.
     """
     if not _FASTAPI_AVAILABLE:
         raise RuntimeError("fastapi is not installed")
@@ -278,6 +291,12 @@ def make_auth_middleware(extractor: AuthExtractor):
         async def dispatch(
             self, request: "Request", call_next: Callable[..., Awaitable["Response"]]
         ):
+            path = request.url.path
+            if path in exempt_exact_paths or any(
+                path.startswith(p) for p in exempt_path_prefixes
+            ):
+                return await call_next(request)
+
             try:
                 user_id, tenant_id = await extractor(request)
             except HTTPException as e:
