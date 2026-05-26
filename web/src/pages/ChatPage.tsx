@@ -10,7 +10,6 @@ import {
 import { SessionRail } from "@/components/SessionRail"
 import { Thread } from "@/components/Thread"
 import { Composer } from "@/components/Composer"
-import { PlanModeBanner } from "@/components/PlanModeBanner"
 import { TaskSidebar } from "@/components/TaskSidebar"
 
 /**
@@ -220,7 +219,6 @@ export function ChatPage() {
             </Button>
           </div>
         </header>
-        <PlanModeBanner mode={permissionMode} />
         {error && (
           <div className="border-b bg-destructive/10 px-6 py-2 text-sm text-destructive">
             {error}
@@ -247,6 +245,7 @@ export function ChatPage() {
           onAbort={handleAbort}
           isStreaming={isStreaming}
           disabled={!session}
+          mode={permissionMode}
         />
       </div>
       {session && <TaskSidebar events={events} />}
