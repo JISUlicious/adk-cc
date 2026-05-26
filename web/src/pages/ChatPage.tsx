@@ -1,55 +1,181 @@
+import { useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { clearToken, getUser } from "@/api/auth"
+import { getSession, type Session } from "@/api/sessions"
+import { streamRun, type RunEvent } from "@/api/sse"
+import { SessionRail } from "@/components/SessionRail"
+import { Thread } from "@/components/Thread"
+import { Composer } from "@/components/Composer"
 
 /**
- * Phase 0 placeholder. Phase 1 fills this with:
- *   - Session list (left rail)
- *   - Thread (center) — message bubbles + tool-call cards, SSE-streamed
- *   - Input (bottom) — multi-line composer
+ * Three-pane layout: rail (apps + sessions) | thread (messages) |
+ * composer (input). The rail owns its own data fetching; ChatPage owns
+ * the currently-displayed session and the in-flight SSE stream.
  *
- * The auth gate has run by the time we get here, so apiFetch / streamRun
- * will carry the token.
+ * Event sources merged into one rendered list:
+ *   1. Session.events loaded on selection — historical truth.
+ *   2. Live events arriving over SSE while a turn is running.
+ * Both feed into `events`, which Thread renders linearly. When the
+ * turn ends we re-GET the session so the canonical event ids/timestamps
+ * replace the optimistic in-memory ones.
  */
 export function ChatPage() {
+  const userId = getUser()
+  const [appName, setAppName] = useState<string | null>(null)
+  const [session, setSession] = useState<Session | null>(null)
+  const [events, setEvents] = useState<RunEvent[]>([])
+  const [isStreaming, setIsStreaming] = useState(false)
+  const [refreshTick, setRefreshTick] = useState(0)
+  const [error, setError] = useState<string | null>(null)
+  const abortRef = useRef<(() => void) | null>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  // When the selected session changes, fetch its full event log.
+  useEffect(() => {
+    if (!appName || !session) {
+      setEvents([])
+      return
+    }
+    let cancelled = false
+    getSession(appName, userId, session.id)
+      .then((s) => {
+        if (!cancelled) setEvents(s.events)
+      })
+      .catch((e) => {
+        if (!cancelled) setError(`Failed to load session: ${e.message}`)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [appName, userId, session?.id])
+
+  // Auto-scroll to bottom when events grow.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }, [events, isStreaming])
+
+  function handleSend(text: string) {
+    if (!appName || !session) return
+    setError(null)
+
+    // Optimistic user-message append so the bubble shows immediately
+    // (before the SSE stream echoes it back).
+    const optimistic: RunEvent = {
+      id: `optimistic-${Date.now()}`,
+      author: "user",
+      content: { role: "user", parts: [{ text }] },
+    }
+    setEvents((prev) => [...prev, optimistic])
+
+    setIsStreaming(true)
+    const abort = streamRun(
+      {
+        appName,
+        userId,
+        sessionId: session.id,
+        message: text,
+      },
+      {
+        onEvent: (e) => {
+          setEvents((prev) => [...prev, e])
+        },
+        onError: (err) => {
+          setError(err.message)
+          setIsStreaming(false)
+        },
+        onClose: () => {
+          setIsStreaming(false)
+          abortRef.current = null
+          // Replace optimistic events with canonical server state so
+          // ids/timestamps are correct in the rendered thread, and
+          // ping the rail to refresh ordering.
+          if (appName && session) {
+            getSession(appName, userId, session.id)
+              .then((s) => setEvents(s.events))
+              .catch(() => {
+                /* keep optimistic if reload fails */
+              })
+          }
+          setRefreshTick((t) => t + 1)
+        },
+      },
+    )
+    abortRef.current = abort
+  }
+
+  function handleAbort() {
+    abortRef.current?.()
+    abortRef.current = null
+    setIsStreaming(false)
+  }
+
   return (
-    <div className="flex min-h-screen flex-col">
-      <header className="flex items-center justify-between border-b px-6 py-3">
-        <div className="flex items-center gap-3">
-          <span className="text-lg font-semibold tracking-tight">
-            adk-cc
-          </span>
-          <span className="text-xs text-muted-foreground">chat (Phase 0 stub)</span>
+    <div className="flex h-screen">
+      <SessionRail
+        userId={userId}
+        appName={appName}
+        onAppChange={(a) => {
+          setAppName(a)
+          setSession(null)
+        }}
+        sessionId={session?.id ?? null}
+        onSelect={(s) => setSession(s)}
+        refreshTick={refreshTick}
+      />
+      <div className="flex flex-1 flex-col min-w-0">
+        <header className="flex items-center justify-between border-b px-6 py-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <span className="text-lg font-semibold tracking-tight">
+              adk-cc
+            </span>
+            {session && (
+              <span className="text-xs font-mono text-muted-foreground truncate">
+                {session.id}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-muted-foreground">
+              Signed in as <span className="font-mono">{userId}</span>
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                clearToken()
+                location.reload()
+              }}
+            >
+              Sign out
+            </Button>
+          </div>
+        </header>
+        {error && (
+          <div className="border-b bg-destructive/10 px-6 py-2 text-sm text-destructive">
+            {error}
+          </div>
+        )}
+        <div ref={scrollRef} className="flex-1 overflow-y-auto">
+          {session ? (
+            <Thread events={events} isStreaming={isStreaming} />
+          ) : (
+            <div className="flex h-full items-center justify-center p-12">
+              <p className="max-w-md text-center text-sm text-muted-foreground">
+                Pick a session from the left rail or click{" "}
+                <span className="font-mono">+ New</span> to start one.
+              </p>
+            </div>
+          )}
         </div>
-        <div className="flex items-center gap-3">
-          <span className="text-sm text-muted-foreground">
-            Signed in as <span className="font-mono">{getUser()}</span>
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              clearToken()
-              location.reload()
-            }}
-          >
-            Sign out
-          </Button>
-        </div>
-      </header>
-      <main className="flex flex-1 items-center justify-center p-12">
-        <div className="max-w-md space-y-3 text-center">
-          <p className="text-sm text-muted-foreground">
-            Phase 0 skeleton is alive. Next phase wires session list,
-            message thread, and SSE streaming.
-          </p>
-          <p className="text-xs text-muted-foreground">
-            Build:{" "}
-            <code className="font-mono">npm --prefix web run build</code>
-            {"  ·  "}Dev:{" "}
-            <code className="font-mono">npm --prefix web run dev</code>
-          </p>
-        </div>
-      </main>
+        <Composer
+          onSend={handleSend}
+          onAbort={handleAbort}
+          isStreaming={isStreaming}
+          disabled={!session}
+        />
+      </div>
     </div>
   )
 }
