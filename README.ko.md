@@ -85,6 +85,13 @@ ADK_CC_SERVE_UI=1 \
 # 3. http://127.0.0.1:8000/ 접속 후 토큰 `devtok`으로 로그인
 ```
 
+`adk_cc` 패키지가 import 시점에 `.env`를 자동 로드합니다
+(`ADK_CC_AGENTS_DIR` → repo root → CWD 순). 따라서
+`set -a; . ./.env; set +a` 없이도 `.env`의 `ADK_CC_API_KEY` /
+`ADK_CC_MODEL` / `ADK_CC_API_BASE`이 uvicorn에 도달합니다.
+프로세스 env가 `.env`보다 우선합니다. 비활성화하려면
+`ADK_CC_SKIP_DOTENV=1`.
+
 같은 서버에 대해 HMR 개발을 하려면 `npm --prefix web run dev`를 사용하세요 (Vite dev server가 `:5173`에서 `/run*`, `/apps`, `/list-apps`, `/api`, `/admin`, `/debug`을 기본적으로 `http://127.0.0.1:8000`으로 프록시; `ADK_CC_DEV_API`로 오버라이드).
 
 ### UI 구성요소

@@ -236,6 +236,11 @@ def make_app():
     Operators with bespoke auth (session DB, mTLS, custom IdP integration)
     should implement an `AuthExtractor` and call `build_fastapi_app(
     auth_extractor=...)` from their own factory rather than `make_app`.
+
+    `.env` auto-load: matches `adk web`'s behavior. The bootstrap runs
+    once at `adk_cc` package import (`adk_cc/__init__.py`), before the
+    agent module is loaded. Disable via `ADK_CC_SKIP_DOTENV=1`. See the
+    package `__init__.py` for the lookup order.
     """
     agents_dir = os.environ.get("ADK_CC_AGENTS_DIR")
     if not agents_dir:
