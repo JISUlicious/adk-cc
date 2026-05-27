@@ -1,7 +1,13 @@
-import { useRef, useState, type KeyboardEvent } from "react"
+import { useRef, useState, useMemo, type KeyboardEvent } from "react"
 import { Send, Square, ClipboardList } from "lucide-react"
 import { Button } from "./ui/button"
 import { cn } from "@/lib/utils"
+import {
+  SlashCommandMenu,
+  filterSlash,
+  type SlashCommand,
+  type SlashAction,
+} from "./SlashCommandMenu"
 
 /**
  * Multi-line message composer. Enter sends; Shift+Enter newlines.
@@ -14,35 +20,97 @@ import { cn } from "@/lib/utils"
  * small violet badge + hint above the textarea and tints the textarea
  * border violet so the user sees the active mode at the moment of
  * typing — that's the surface where it matters most.
- * `session.state.permission_mode` arrives via the `mode` prop; values
- * are defined in `adk_cc/permissions/modes.py::PermissionMode`.
+ *
+ * When the input starts with `/`, the SlashCommandMenu floats above
+ * the textarea. Up/Down navigates, Tab/Enter picks, Escape closes.
+ * UI-only commands route to `onSlashAction`; templated-message
+ * commands replace the input with their text and submit through
+ * `onSend` like any normal message.
  */
 export function Composer({
   onSend,
   onAbort,
+  onSlashAction,
   isStreaming,
   disabled,
   mode,
 }: {
   onSend: (text: string) => void
   onAbort: () => void
+  onSlashAction: (action: SlashAction) => void
   isStreaming: boolean
   disabled: boolean
   mode: string | undefined
 }) {
   const [value, setValue] = useState("")
+  const [slashCursor, setSlashCursor] = useState(0)
   const ref = useRef<HTMLTextAreaElement>(null)
+
+  // Slash UX is only active when the FIRST char is `/` and there's no
+  // newline — i.e. the user is typing a command, not a message that
+  // happens to contain a slash. Filter against the text after `/`.
+  const slashQuery = useMemo(() => {
+    if (!value.startsWith("/")) return null
+    if (value.includes("\n")) return null
+    return value.slice(1)
+  }, [value])
+  const slashMatches = useMemo(
+    () => (slashQuery === null ? [] : filterSlash(slashQuery)),
+    [slashQuery],
+  )
+  const slashOpen = slashQuery !== null && slashMatches.length > 0
 
   function submit() {
     const trimmed = value.trim()
     if (!trimmed || disabled || isStreaming) return
     onSend(trimmed)
     setValue("")
-    // Restore focus so the user can keep typing immediately.
+    setSlashCursor(0)
     ref.current?.focus()
   }
 
+  function pickSlash(cmd: SlashCommand) {
+    if (cmd.kind.type === "action") {
+      // Clear input and dispatch — no message hits the wire.
+      setValue("")
+      setSlashCursor(0)
+      onSlashAction(cmd.kind.action)
+      ref.current?.focus()
+    } else {
+      // Send the templated text now. Don't leave it sitting in the
+      // input for the user to second-guess.
+      const text = cmd.kind.text
+      setValue("")
+      setSlashCursor(0)
+      onSend(text)
+      ref.current?.focus()
+    }
+  }
+
   function handleKey(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (slashOpen) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault()
+        setSlashCursor((i) => (i + 1) % slashMatches.length)
+        return
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault()
+        setSlashCursor((i) => (i - 1 + slashMatches.length) % slashMatches.length)
+        return
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault()
+        pickSlash(slashMatches[slashCursor] ?? slashMatches[0])
+        return
+      }
+      if (e.key === "Escape") {
+        e.preventDefault()
+        setValue("")
+        setSlashCursor(0)
+        return
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
       submit()
@@ -58,7 +126,16 @@ export function Composer({
         isPlan && "border-t-violet-500 bg-violet-50/40 dark:bg-violet-950/20",
       )}
     >
-      <div className="max-w-3xl mx-auto space-y-2">
+      <div className="max-w-3xl mx-auto space-y-2 relative">
+        {slashOpen && (
+          <div className="absolute bottom-full left-0 right-0 mb-2">
+            <SlashCommandMenu
+              query={slashQuery ?? ""}
+              selectedIndex={Math.min(slashCursor, slashMatches.length - 1)}
+              onPick={pickSlash}
+            />
+          </div>
+        )}
         {isPlan && (
           <div className="flex items-center gap-1.5 text-[11px] text-violet-700 dark:text-violet-300">
             <ClipboardList className="h-3.5 w-3.5" />
@@ -73,14 +150,17 @@ export function Composer({
         <textarea
           ref={ref}
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => {
+            setValue(e.target.value)
+            setSlashCursor(0)
+          }}
           onKeyDown={handleKey}
           placeholder={
             disabled
               ? "Pick or create a session to start chatting"
               : isPlan
                 ? "Plan mode — describe what you want the agent to plan"
-                : "Message the agent — Enter to send, Shift+Enter for newline"
+                : "Message the agent — Enter to send, type / for commands"
           }
           disabled={disabled}
           rows={2}

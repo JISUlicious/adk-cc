@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react"
+import { Settings as SettingsIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { clearToken, getUser } from "@/api/auth"
-import { getSession, type Session } from "@/api/sessions"
+import {
+  createSession,
+  getSession,
+  type Session,
+} from "@/api/sessions"
 import {
   streamRun,
   streamFunctionResponse,
@@ -11,6 +16,9 @@ import { SessionRail } from "@/components/SessionRail"
 import { Thread } from "@/components/Thread"
 import { Composer } from "@/components/Composer"
 import { TaskSidebar } from "@/components/TaskSidebar"
+import { SettingsDialog } from "@/components/SettingsDialog"
+import { type SlashAction } from "@/components/SlashCommandMenu"
+import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/lib/theme"
 
 /**
  * Three-pane layout: rail (apps + sessions) | thread (messages) |
@@ -34,6 +42,7 @@ export function ChatPage() {
   const [isStreaming, setIsStreaming] = useState(false)
   const [refreshTick, setRefreshTick] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const abortRef = useRef<(() => void) | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -173,6 +182,49 @@ export function ChatPage() {
     setIsStreaming(false)
   }
 
+  function handleSlashAction(action: SlashAction) {
+    switch (action) {
+      case "help":
+        // No backend protocol — we just send a plain user message
+        // listing available shortcuts. Cheap, no schema.
+        if (appName && session) {
+          handleSend(
+            "Available slash commands: /help, /clear (new session), " +
+              "/plan, /exit-plan, /theme, /settings, /signout. " +
+              "These are UI shortcuts on the client; the agent doesn't see them.",
+          )
+        }
+        return
+      case "clear":
+        if (!appName) return
+        createSession(appName, userId, {})
+          .then((s) => {
+            setSession(s)
+            setEvents([])
+            setRefreshTick((t) => t + 1)
+          })
+          .catch((e) =>
+            setError(`Failed to create new session: ${(e as Error).message}`),
+          )
+        return
+      case "settings":
+        setSettingsOpen(true)
+        return
+      case "theme": {
+        // Cycle: light → dark → system → light. Persisted by setStoredTheme.
+        const cur = getStoredTheme()
+        const next: ThemeMode =
+          cur === "light" ? "dark" : cur === "dark" ? "system" : "light"
+        setStoredTheme(next)
+        return
+      }
+      case "signout":
+        clearToken()
+        location.reload()
+        return
+    }
+  }
+
   const permissionMode =
     typeof session?.state?.permission_mode === "string"
       ? (session.state.permission_mode as string)
@@ -209,13 +261,11 @@ export function ChatPage() {
             </span>
             <Button
               variant="outline"
-              size="sm"
-              onClick={() => {
-                clearToken()
-                location.reload()
-              }}
+              size="icon"
+              onClick={() => setSettingsOpen(true)}
+              title="Settings"
             >
-              Sign out
+              <SettingsIcon className="h-4 w-4" />
             </Button>
           </div>
         </header>
@@ -243,12 +293,17 @@ export function ChatPage() {
         <Composer
           onSend={handleSend}
           onAbort={handleAbort}
+          onSlashAction={handleSlashAction}
           isStreaming={isStreaming}
           disabled={!session}
           mode={permissionMode}
         />
       </div>
       {session && <TaskSidebar events={events} />}
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+      />
     </div>
   )
 }
