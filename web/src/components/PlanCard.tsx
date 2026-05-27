@@ -90,7 +90,7 @@ export function PlanCard({
           <Icon className="h-4 w-4 text-primary" />
           <span className="text-xs font-medium truncate flex-1">{title}</span>
           {isPending && (
-            <span className="rounded-sm bg-secondary text-secondary-foreground px-1.5 py-0.5 text-[10px] font-medium">
+            <span className="rounded-sm bg-amber-500/15 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 text-[10px] font-medium">
               writing…
             </span>
           )}
@@ -118,7 +118,7 @@ export function PlanCard({
               </div>
             )}
             {r?.warning && (
-              <div className="rounded bg-secondary text-secondary-foreground px-2 py-1 text-xs">
+              <div className="rounded bg-amber-500/10 text-amber-800 dark:text-amber-200 px-2 py-1 text-xs">
                 {r.warning}
               </div>
             )}

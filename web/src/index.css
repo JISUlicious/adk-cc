@@ -23,21 +23,13 @@
  *     WeasyPrint print fidelity; we keep it on screen for consistency).
  * ------------------------------------------------------------------ */
 :root {
-  /* kami source tokens (canonical names — usable as raw CSS vars too).
-   *
-   * NOTE on --brand: kami ships ink-blue (#1B365D) as its single
-   * chromatic accent. We've shifted to a warm burgundy/ink so the
-   * accent matches kami's "all warm-toned" rule (#3) instead of
-   * standing out as the lone cool color against parchment. The
-   * "single accent, no second chromatic" discipline is unchanged —
-   * we just chose a warm hue.
-   */
+  /* kami source tokens (canonical names — usable as raw CSS vars too) */
   --parchment: #f5f4ed;
   --ivory: #faf9f5;
   --sand: #e8e6dc;
-  --brand: #5c2531;            /* deep burgundy ink (was #1B365D) */
-  --brand-tint: #f1e3e7;       /* warm wash, parchment cousin */
-  --brand-tint-strong: #e4ced5; /* selected/picked state — deeper warm wash */
+  --brand: #1B365D;
+  --brand-tint: #EEF2F7;
+  --brand-tint-strong: #E4ECF5;
   --near-black: #141413;
   --dark-warm: #3d3d3a;
   --olive: #504e49;
@@ -78,11 +70,11 @@
 /* Dark theme — kami's "warm charcoal" surface, not cool slate.
    References: design.md §1 Surface, --dark-surface / --deep-dark. */
 .dark {
-  /* Brand-tint overrides for dark theme: warm rose ink that reads on
-     warm charcoal. Same role as in light theme — surfaces that should
-     carry the brand accent (selected rows, structured prompt cards). */
-  --brand-tint: #3a2630;
-  --brand-tint-strong: #4a3140;
+  /* Brand-tint overrides for dark theme: keep the ink-blue feel but
+     legible on warm charcoal. Used for selected rows + structured
+     prompt card backgrounds (Confirmation, AskUserQuestion, Plan). */
+  --brand-tint: #2c3a4d;
+  --brand-tint-strong: #364860;
 
   --background: #141413;       /* deep-dark — slight olive undertone */
   --foreground: #ece9df;       /* parchment-ish text on warm charcoal */
@@ -90,7 +82,7 @@
   --card-foreground: #ece9df;
   --popover: #1f1f1d;
   --popover-foreground: #ece9df;
-  --primary: #c4848e;          /* warm rose ink — readable on warm charcoal */
+  --primary: #6FA0D8;          /* brand-light variant — readable on dark warm */
   --primary-foreground: #141413;
   --secondary: #30302e;        /* dark-surface */
   --secondary-foreground: #ece9df;
@@ -101,12 +93,11 @@
      theme so hover ≠ selected on dark too. */
   --accent: #2a2a28;
   --accent-foreground: #ece9df;
-  /* (light-theme uses #c4848e via --primary mapping; dark only) */
   --destructive: #b34e3d;
   --destructive-foreground: #ece9df;
   --border: #2a2a28;
   --input: #30302e;
-  --ring: #c4848e;
+  --ring: #6FA0D8;
 }
 
 /* Map kami-mapped shadcn vars onto Tailwind v4's @theme directive so
