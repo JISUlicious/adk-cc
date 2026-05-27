@@ -13,6 +13,7 @@ import {
 import { BashTerminalCard } from "./BashTerminalCard"
 import { FileEditCard } from "./FileEditCard"
 import { PlanCard } from "./PlanCard"
+import { ThoughtBubble } from "./ThoughtBubble"
 
 /**
  * Renders the linear event stream as chat rows.
@@ -126,6 +127,8 @@ function Row({
           isPartial={row.isPartial}
         />
       )
+    case "thought":
+      return <ThoughtBubble author={row.author} text={row.text} />
     case "function_call": {
       const isPending = pendingCallIds.has(row.callId)
       // Interactive widgets first — they only render while pending.
@@ -245,6 +248,12 @@ type ChatRow =
       author: string
       text: string
       isPartial: boolean
+    }
+  | {
+      kind: "thought"
+      eventId: string
+      author: string
+      text: string
     }
   | {
       kind: "function_call"
@@ -377,11 +386,22 @@ function flattenEvents(
     const author = e.author ?? "agent"
     const parts = e.content?.parts ?? []
     for (const part of parts) {
-      // Skip thought parts — those are the model's internal thinking
-      // output (Gemini thought summaries, etc.), not user-visible
-      // chat content. Surfacing them would create bubbles that look
-      // like assistant turns but carry no useful text.
-      if (part.thought) continue
+      // Thought parts (Gemini thought summaries, etc.) render as
+      // faded ThoughtBubbles so the reader can see the model's
+      // internal reasoning without confusing it with user-facing
+      // reply text. Partials are still filtered upstream in
+      // dedupePartials — only consolidated thoughts surface here.
+      if (part.thought) {
+        if (typeof part.text === "string" && part.text.trim().length > 0) {
+          rows.push({
+            kind: "thought",
+            eventId,
+            author,
+            text: part.text,
+          })
+        }
+        continue
+      }
 
       if (typeof part.text === "string" && part.text.trim().length > 0) {
         rows.push({
