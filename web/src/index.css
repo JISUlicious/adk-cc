@@ -1,0 +1,161 @@
+@import "tailwindcss";
+
+/* --------------------------------------------------------------------
+ * kami theme tokens
+ *
+ * "warm parchment canvas, ink-blue accent, serif carries hierarchy,
+ *  avoid cool grays and hard shadows."
+ *
+ * Palette pulled from kami's references/tokens.json and design.md §1.
+ * Mapped onto shadcn-style variable names so the existing components
+ * inherit the look without per-component edits.
+ *
+ *   --background  → parchment (#f5f4ed) — not pure white
+ *   --card        → ivory (#faf9f5)     — lifted surfaces brighter than parchment
+ *   --muted       → warm sand (#e8e6dc) — button default / interactive surface
+ *   --primary     → ink blue (#1B365D)  — single accent, ≤ 5% of surface
+ *   --accent      → brand tint (#EEF2F7) — kami's solid translucent equivalent
+ *   foreground levels: near-black → dark-warm → olive → stone (warm grays)
+ *
+ * Two invariants enforced by these choices:
+ *   - all grays warm-toned (R ≈ G > B undertone); no cool blue-grays.
+ *   - tag/accent backgrounds are solid hex, never rgba (kami rule for
+ *     WeasyPrint print fidelity; we keep it on screen for consistency).
+ * ------------------------------------------------------------------ */
+:root {
+  /* kami source tokens (canonical names — usable as raw CSS vars too) */
+  --parchment: #f5f4ed;
+  --ivory: #faf9f5;
+  --sand: #e8e6dc;
+  --brand: #1B365D;
+  --brand-tint: #EEF2F7;
+  --brand-tint-strong: #E4ECF5;
+  --near-black: #141413;
+  --dark-warm: #3d3d3a;
+  --olive: #504e49;
+  --stone: #6b6a64;
+  --border-soft: #e5e3d8;
+
+  /* shadcn-shaped aliases (HSL-style triples are converted to hex
+     because kami's palette is hex-native and we don't need the
+     opacity-modifier trick utility classes get from HSL). */
+  --background: var(--parchment);
+  --foreground: var(--near-black);
+  --card: var(--ivory);
+  --card-foreground: var(--near-black);
+  --popover: var(--ivory);
+  --popover-foreground: var(--near-black);
+  --primary: var(--brand);
+  --primary-foreground: var(--ivory);
+  --secondary: var(--sand);
+  --secondary-foreground: var(--dark-warm);
+  --muted: var(--sand);
+  --muted-foreground: var(--stone);
+  /* Hover / casual-highlight surface. Warmer than parchment so it
+     shows on row hover without fighting kami's warm canvas. The
+     brand-tint (ink-blue surface) is exposed separately as
+     bg-brand-tint for surfaces that *should* carry the ink accent
+     (selected items, structured-prompt card frames). Keeping the
+     two distinct means hover ≠ selected visually. */
+  --accent: #ece9dc;
+  --accent-foreground: var(--near-black);
+  --destructive: #9a3325; /* warm rust, not cool red — keeps the palette warm */
+  --destructive-foreground: var(--ivory);
+  --border: var(--sand);
+  --input: var(--border-soft);
+  --ring: var(--brand);
+  --radius: 0.375rem; /* kami runs tighter than shadcn default */
+}
+
+/* Dark theme — kami's "warm charcoal" surface, not cool slate.
+   References: design.md §1 Surface, --dark-surface / --deep-dark. */
+.dark {
+  /* Brand-tint overrides for dark theme: keep the ink-blue feel but
+     legible on warm charcoal. Used for selected rows + structured
+     prompt card backgrounds (Confirmation, AskUserQuestion, Plan). */
+  --brand-tint: #2c3a4d;
+  --brand-tint-strong: #364860;
+
+  --background: #141413;       /* deep-dark — slight olive undertone */
+  --foreground: #ece9df;       /* parchment-ish text on warm charcoal */
+  --card: #1f1f1d;             /* one step up from page */
+  --card-foreground: #ece9df;
+  --popover: #1f1f1d;
+  --popover-foreground: #ece9df;
+  --primary: #6FA0D8;          /* brand-light variant — readable on dark warm */
+  --primary-foreground: #141413;
+  --secondary: #30302e;        /* dark-surface */
+  --secondary-foreground: #ece9df;
+  --muted: #2a2a28;
+  --muted-foreground: #a4a297; /* warm muted text */
+  /* Dark hover: subtle warm lift between card and secondary. Brand-tint
+     for selected lives on --brand-tint below — same split as the light
+     theme so hover ≠ selected on dark too. */
+  --accent: #2a2a28;
+  --accent-foreground: #ece9df;
+  --destructive: #b34e3d;
+  --destructive-foreground: #ece9df;
+  --border: #2a2a28;
+  --input: #30302e;
+  --ring: #6FA0D8;
+}
+
+/* Map kami-mapped shadcn vars onto Tailwind v4's @theme directive so
+   utilities like bg-background / text-muted-foreground resolve. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-brand-tint: var(--brand-tint);
+  --color-brand-tint-strong: var(--brand-tint-strong);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius: var(--radius);
+
+  /* Fonts: kami's English stack is Charter-led serif for everything.
+     UI labels (small chrome) use the same family — kami forbids a
+     second sans, --sans is aliased to --serif. We expose both so
+     components that want a mono stack for code/terminal blocks
+     (BashTerminalCard) still have one. */
+  --font-sans: Charter, Georgia, Palatino, "Times New Roman", serif;
+  --font-serif: Charter, Georgia, Palatino, "Times New Roman", serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", Consolas, Monaco,
+    monospace;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background-color: var(--background);
+  color: var(--foreground);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* kami body line-height tier: "dense body" (1.42-1.45) for chat
+     density. design.md §2 line-height table. */
+  line-height: 1.5;
+}
+
+/* kami invariant #10: no italic in print. We're not print, but
+   `<em>` in chat content was rendering with cheap italic Charter —
+   downgrade to a subtle weight bump instead to keep the editorial
+   feel consistent with kami's "restrained typography" principle. */
+em {
+  font-style: normal;
+  font-weight: 500;
+}

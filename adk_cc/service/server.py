@@ -87,6 +87,7 @@ def build_fastapi_app(
     workspace_root: Optional[str] = None,
     auth_extractor=None,
     serve_web: bool = False,
+    ui_dist_dir: Optional[str] = None,
 ):
     """Build a production FastAPI app.
 
@@ -100,7 +101,12 @@ def build_fastapi_app(
       quota_per_minute: per-tenant tool-call rate cap.
       workspace_root: per-session FS root; None → CWD.
       auth_extractor: callable(request) → (user_id, tenant_id); None → no auth.
-      serve_web: True to also mount the web UI; False = API only.
+      serve_web: True to also mount ADK's bundled web UI; False = API only.
+      ui_dist_dir: path to the adk-cc custom UI build artifacts (Vite
+        `web/dist/`). When set and the directory exists, StaticFiles
+        is mounted at `/` so the same FastAPI process serves both API
+        and UI. Mutually exclusive with `serve_web=True` (the bundled
+        ADK UI also claims `/`).
     """
     from google.adk.cli.fast_api import get_fast_api_app
 
@@ -132,9 +138,73 @@ def build_fastapi_app(
     if auth_extractor is not None:
         from .auth import make_auth_middleware
 
-        fastapi_app.add_middleware(make_auth_middleware(auth_extractor))
+        # When the SPA bundle is mounted, exempt its public paths from
+        # auth — the React app *itself* is what asks the user to sign in,
+        # so the HTML + JS + CSS must load anonymously. API routes
+        # (/run, /run_sse, /list-apps, /apps/*, /debug/*) stay gated.
+        if ui_dist_dir:
+            exempt_exact = ("/", "/favicon.svg", "/favicon.ico")
+            exempt_prefixes = ("/assets/",)
+        else:
+            exempt_exact = ()
+            exempt_prefixes = ()
+        fastapi_app.add_middleware(
+            make_auth_middleware(
+                auth_extractor,
+                exempt_path_prefixes=exempt_prefixes,
+                exempt_exact_paths=exempt_exact,
+            )
+        )
+
+    if ui_dist_dir:
+        _mount_ui(fastapi_app, ui_dist_dir)
 
     return fastapi_app
+
+
+def _mount_ui(app, dist_dir: str) -> None:
+    """Mount the Vite-built SPA at `/`.
+
+    Mounted last so ADK's API routes (`/run`, `/run_sse`, `/list-apps`,
+    `/apps/*`, `/debug/*`) win on path match. StaticFiles only catches
+    leftover paths (`/`, `/assets/*`, `/favicon.svg`).
+
+    SPA route fallback: for unmatched sub-paths (e.g. react-router
+    `/chat/abc` once we add routes in Phase 2+), serve index.html. We
+    install a small catch-all that delegates to the bundle's
+    `index.html` so client-side routing works on hard refresh.
+
+    The auth middleware (when present) runs before StaticFiles, but it
+    only enforces auth on API paths — the middleware exempts the SPA
+    assets so the login form can load.
+    """
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    dist = Path(dist_dir)
+    if not dist.is_dir():
+        # Fail loud — operators who opt in expect static assets to exist.
+        raise RuntimeError(
+            f"ui_dist_dir={dist_dir!r} does not exist or is not a directory. "
+            f"Run `npm --prefix web run build` before starting the server."
+        )
+
+    index_html = dist / "index.html"
+    if not index_html.is_file():
+        raise RuntimeError(
+            f"{index_html} not found. Did the Vite build complete?"
+        )
+
+    # Catch-all SPA fallback. Registered before the StaticFiles mount so
+    # `/` and arbitrary subpaths return index.html when they don't match
+    # an API route or a real static asset. We register only specific
+    # subpath prefixes to avoid swallowing 404s for legitimately missing
+    # API routes (which should still surface as 404, not as the SPA).
+    @app.get("/", include_in_schema=False)
+    def _spa_root() -> FileResponse:
+        return FileResponse(index_html)
+
+    app.mount("/", StaticFiles(directory=str(dist), html=False), name="ui")
 
 
 def make_app():
@@ -155,6 +225,8 @@ def make_app():
       ADK_CC_JWT_TENANT_CLAIM  (optional, default "tenant")
       ADK_CC_AUTH_TOKENS       (optional fallback, see auth.BearerTokenExtractor)
       ADK_CC_ALLOW_NO_AUTH     (optional dev escape — see below)
+      ADK_CC_SERVE_UI          (optional; "1" to mount the custom UI bundle)
+      ADK_CC_UI_DIST           (optional; dir to serve; default: <repo>/web/dist)
 
     Auth extractor selection (first match wins):
       1. ADK_CC_JWT_JWKS_URL set → JwtAuthExtractor (production).
@@ -198,6 +270,16 @@ def make_app():
             "acknowledge the no-auth deployment."
         )
 
+    ui_dist_dir: Optional[str] = None
+    if os.environ.get("ADK_CC_SERVE_UI") == "1":
+        explicit = os.environ.get("ADK_CC_UI_DIST")
+        if explicit:
+            ui_dist_dir = explicit
+        else:
+            # Default: <repo_root>/web/dist. server.py lives at
+            # adk_cc/service/server.py, so repo_root is two parents up.
+            ui_dist_dir = str(Path(__file__).resolve().parents[2] / "web" / "dist")
+
     return build_fastapi_app(
         agents_dir=agents_dir,
         session_service_uri=os.environ.get("ADK_CC_SESSION_DSN"),
@@ -206,6 +288,7 @@ def make_app():
         quota_per_minute=int(os.environ.get("ADK_CC_QUOTA_PER_MINUTE", "120")),
         workspace_root=os.environ.get("ADK_CC_WORKSPACE_ROOT"),
         auth_extractor=extractor,
+        ui_dist_dir=ui_dist_dir,
     )
 
 
