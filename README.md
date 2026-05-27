@@ -4,7 +4,7 @@ A Claude-Code-style **gather → plan → act → verify** agent loop built as a
 
 Read in: **English** · [한국어](./README.ko.md)
 
-Deeper docs in [`docs/`](./docs/): [specification](./docs/01-specification.md), [architecture](./docs/02-architecture.md), [prompts](./docs/03-prompts.md), [sandbox runbook](./docs/04-deployment-sandbox.md), [production runbook](./docs/05-production-deployment.md), [confirmation wire protocol](./docs/06-confirmation-protocol.md).
+Deeper docs in [`docs/`](./docs/): [specification](./docs/01-specification.md), [architecture](./docs/02-architecture.md), [prompts](./docs/03-prompts.md), [sandbox runbook](./docs/04-deployment-sandbox.md), [production runbook](./docs/05-production-deployment.md), [confirmation wire protocol](./docs/06-confirmation-protocol.md), [web UI](./docs/07-web-ui.md).
 
 ## What it is
 
@@ -192,7 +192,7 @@ For single-tenant deployments, you can use one tenant_id (defaults to `"local"` 
 uvicorn adk_cc.service.server:make_app --factory --host 0.0.0.0 --port 8000
 ```
 
-`make_app` reads everything from env (see [`.env.example`](./.env.example)) and wires the full plugin chain — `[Audit, Tenancy, Permission, Quota, PlanModeReminder, TaskReminder, ToolCallValidator, ContextGuard, ProjectContext, ConfirmationFormUi, AskUserQuestionUiHint, ModelIoTrace, SessionRetry]` — plus an auth middleware. It **fails closed on auth**: refuses to start unless one of these is set:
+`make_app` reads everything from env (see [`.env.example`](./.env.example)) and adds the production-only plugin chain `[Audit, Tenancy, Permission, Quota, PlanModeReminder, TaskReminder, ToolCallValidator, ContextGuard]` on top of whatever the agent's `App` already registers (`adk_cc/agent.py` adds `ProjectContext`, `AskUserQuestionUiHint`, `ConfirmationFormUi`, `ModelIOTrace`), plus an auth middleware. `SessionRetryPlugin` ships in `adk_cc/plugins/` but is opt-in — wire it explicitly if you need stale-session recovery. The factory **fails closed on auth**: refuses to start unless one of these is set:
 
 - `ADK_CC_AUTH_TOKENS=tok1=alice:tenant_a,tok2=bob:tenant_b` — static token map (single-instance, simple)
 - `ADK_CC_JWT_JWKS_URL=...` + `ADK_CC_JWT_ISSUER=...` etc. — JWT validation
@@ -361,4 +361,4 @@ Both `e2e_skills.py` and `e2e_streaming_adapter.py` need Python 3.12+ and adk-cc
 
 ## Status
 
-**Alpha** (`v0.0.1` is the first tagged release). Functional and exercised end-to-end (~206 unit + e2e checks across 19 test files), with a working React chat UI shipping on `feat/chat-ui`. Has known operational gaps documented in [`docs/05-production-deployment.md`](./docs/05-production-deployment.md)'s readiness checklist (security / reliability / observability / ops / multi-tenancy / config / tests). Close the ✗ items appropriate to your threat model and SLO before serving real users.
+**Alpha** (`v0.0.1` is the first tagged release). Functional and exercised end-to-end by 28 test files (20 unit + 8 e2e/diagnostic), with a working React chat UI shipping on `feat/chat-ui`. Has known operational gaps documented in [`docs/05-production-deployment.md`](./docs/05-production-deployment.md)'s readiness checklist (security / reliability / observability / ops / multi-tenancy / config / tests). Close the ✗ items appropriate to your threat model and SLO before serving real users.

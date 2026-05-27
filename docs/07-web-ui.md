@@ -90,7 +90,7 @@ UI-only sugar — no backend slash protocol. The picker opens when the composer'
 
 | Command | Kind | Effect |
 |---|---|---|
-| `/help` | message | Sends a user message listing the available commands |
+| `/help` | action | UI-side handler sends a user message listing the available commands |
 | `/clear` | action | `createSession(...)` and switches to the new one |
 | `/plan` | action | `PATCH /apps/.../sessions/{id}` with `state_delta: { permission_mode: "plan" }` — deterministic, no LLM round-trip |
 | `/exit-plan` | action | Same PATCH route, sets `permission_mode: "default"` |
