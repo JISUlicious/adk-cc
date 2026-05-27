@@ -1,13 +1,15 @@
 # adk-cc
 
-A minimal Claude-Code-style **gather → plan → act → verify** agent loop, implemented as a single ADK agent module loadable by `adk web` / `adk run`, plus an opt-in FastAPI factory for single-instance server deployment.
+A Claude-Code-style **gather → plan → act → verify** agent loop built as a single ADK agent module (loadable by `adk web` / `adk run`), with an opt-in FastAPI factory for single-instance deployment and a custom React chat UI that ships alongside.
 
-Deeper docs in [`docs/`](./docs/): [specification](./docs/01-specification.md), [architecture](./docs/02-architecture.md), [prompts](./docs/03-prompts.md), [sandbox runbook](./docs/04-deployment-sandbox.md), [production runbook](./docs/05-production-deployment.md).
+Read in: **English** · [한국어](./README.ko.md)
+
+Deeper docs in [`docs/`](./docs/): [specification](./docs/01-specification.md), [architecture](./docs/02-architecture.md), [prompts](./docs/03-prompts.md), [sandbox runbook](./docs/04-deployment-sandbox.md), [production runbook](./docs/05-production-deployment.md), [confirmation wire protocol](./docs/06-confirmation-protocol.md).
 
 ## What it is
 
 - One **coordinator** (the only agent that talks to the user). Acts directly with read tools (`read_file`, `glob_files`, `grep`, `web_fetch`, `read_current_plan`), write/exec tools (`write_file`, `edit_file`, `run_bash`), task tools (`task_create` / `task_get` / `task_list` / `task_update`), HITL tools (`ask_user_question`), plan-mode tools (`enter_plan_mode`, `exit_plan_mode`, `write_plan`), and any auto-loaded skills/MCP toolsets.
-- Two specialists wired as ADK `sub_agents`: **`Explore`** (broad codebase search returning a written report) and **`verification`** (adversarial post-implementation gate ending with `VERDICT: PASS|FAIL|PARTIAL`). Delegation is `transfer_to_agent`; sub-agents share the parent's invocation context, so all tool calls/responses stream into `adk web` rather than being buried in an opaque tool result.
+- Two specialists wired as ADK `sub_agents`: **`Explore`** (broad codebase search returning a written report) and **`verification`** (adversarial post-implementation gate ending with `VERDICT: PASS|FAIL|PARTIAL`). Delegation is `transfer_to_agent`; sub-agents share the parent's invocation context, so all tool calls/responses stream into the UI rather than being buried in an opaque tool result.
 - **Planning is not a sub-agent.** When the user wants a written plan with approval before any change, the coordinator calls `enter_plan_mode` — a posture the coordinator takes. `PlanModeReminderPlugin` then dynamically filters write/exec tools out of the LLM's tool surface and injects a planning instruction. The plan persists via `write_plan`; `exit_plan_mode` gates re-entry to the unrestricted surface on user approval.
 - Hub-and-spoke + "coordinator-owns-user-I/O" is enforced by **two** ADK mechanisms — neither alone is enough:
   1. **`disallow_transfer_to_parent=True`** on each specialist (cross-turn structural guarantee — the runner skips specialists when picking whose turn it is on the next user message).
@@ -21,30 +23,26 @@ Deeper docs in [`docs/`](./docs/): [specification](./docs/01-specification.md), 
 ```
 adk-cc/                           ← AGENTS_DIR (parent of adk_cc/)
 ├── pyproject.toml
-├── Dockerfile.sandbox            ← per-session sandbox image (Stage C)
+├── Dockerfile.sandbox            ← per-session sandbox image
+├── .env.example                  ← full config surface (~65 ADK_CC_* vars)
 ├── docs/                         ← architecture, prompts, deployment runbooks
-├── scripts/
-│   ├── scratch_reaper.py         ← cron-style cleanup of session scratch dirs
-│   └── sandbox_destroy.py        ← operator CLI for sandbox session teardown
-├── tests/                        ← unit tests + e2e suites (see "Tests" below)
-└── adk_cc/                       ← agent subdirectory
+├── scripts/                      ← operator CLIs + skill/context/compaction demos
+├── tests/                        ← unit tests + e2e suites (see "Tests")
+├── web/                          ← React chat UI (Vite + Tailwind v4 + shadcn/ui)
+│   └── src/{api,components,pages,lib}
+└── adk_cc/                       ← agent package
     ├── __init__.py               ← `from . import agent`
     ├── agent.py                  ← exposes `app` (preferred) and `root_agent`
     ├── prompts.py                ← per-agent instructions
-    ├── tools/                    ← AdkCcTool subclasses
+    ├── logging_setup.py          ← ADK_CC_LOG_* configuration
+    ├── tools/                    ← AdkCcTool subclasses (read/write/exec/task/HITL/plan/skills/MCP)
     ├── plugins/                  ← ADK BasePlugin integrations
-    ├── permissions/              ← rule engine (Stage B)
-    ├── sandbox/                  ← SandboxBackend ABC + impls (Stage C)
-    │   ├── backends/
-    │   │   ├── noop_backend.py            ← host execution, dev only
-    │   │   ├── docker_backend.py          ← per-session container, prod-grade
-    │   │   ├── sandbox_service_backend.py ← REST client for an external
-    │   │   │                                 sandbox service (gVisor isolation)
-    │   │   └── e2b_backend.py             ← stub (microVM, future)
-    │   └── code_executor.py      ← BaseCodeExecutor adapter for skill scripts
-    ├── tasks/                    ← task tracking + storage (Stage F)
+    ├── permissions/              ← rule engine + confirmation payloads
+    ├── sandbox/                  ← SandboxBackend ABC + impls
+    │   └── backends/{noop,docker,sandbox_service,e2b}.py
+    ├── tasks/                    ← task tracking + JSON storage (filelock-safe)
     ├── credentials/              ← per-tenant secret storage
-    └── service/                  ← FastAPI factory + auth + tenancy
+    └── service/                  ← FastAPI factory + auth + tenancy + admin
 ```
 
 ## Quick start
@@ -54,13 +52,68 @@ cd adk-cc
 uv venv .venv && source .venv/bin/activate
 uv pip install -e .
 
-# .env file — the API key for your model server
+# .env file — at minimum the API key for your model server
 echo 'ADK_CC_API_KEY=sk-your-model-server-key' > .env
 
-# Point adk web at this directory (the parent of adk_cc/)
+# Option A: bundled ADK web UI
 adk web .
-# or one-shot:
+
+# Option B: one-shot CLI
 adk run adk_cc
+
+# Option C: FastAPI + custom React UI (see "Web UI" below)
+```
+
+## Web UI
+
+A custom React chat lives in [`web/`](./web/). It replaces the bundled `adk web` UI for end-user chat with adk-cc-aware widgets: confirmation prompts, structured `ask_user_question` forms, plan/edit/bash artifact renderers, task sidebar, slash commands, theme, and SSE token streaming.
+
+### Run it
+
+```bash
+# 1. Build the bundle (one-time, or whenever web/ changes)
+npm --prefix web install
+npm --prefix web run build
+
+# 2. Start the FastAPI server with the UI mounted at /
+ADK_CC_AGENTS_DIR=$(pwd) \
+ADK_CC_AUTH_TOKENS='devtok=alice:acme' \
+ADK_CC_SERVE_UI=1 \
+.venv/bin/uvicorn adk_cc.service.server:make_app --factory \
+  --host 127.0.0.1 --port 8000
+
+# 3. Open http://127.0.0.1:8000/ and sign in with token `devtok`
+```
+
+For HMR development against the same server use `npm --prefix web run dev` (Vite dev server on `:5173` proxies `/run*`, `/apps`, `/list-apps`, `/api`, `/admin`, `/debug` to `http://127.0.0.1:8000` by default; override via `ADK_CC_DEV_API`).
+
+### What's in the UI
+
+- **Session rail** — left nav with agent picker (`/list-apps`) + per-user session list + new/delete.
+- **Thread** — flattens ADK events into chat rows. Streams tokens as they arrive (opt-in via `streaming: true` on `/run_sse`, with per-chunk delta accumulation).
+- **Composer** — multi-line textarea. Enter sends, Shift+Enter newlines. Type `/` to open the slash-command picker.
+- **adk-cc-aware widgets** (replace generic tool-call cards while pending):
+  - `ConfirmationCard` — renders the `ConfirmPrompt` payload from the permission engine's "ask" branch (allow once / allow always / deny + optional comment + persist toggle). Triggered by `adk_request_confirmation` / `adk_cc_confirmation_form` function-calls.
+  - `AskUserQuestionCard` — structured multi-choice / multi-select form. Triggered by `ask_user_question` long-running calls; auto-adds an "Other" free-form fallback.
+- **Artifact renderers** (paired call+response in a single card):
+  - `BashTerminalCard` (`run_bash`) — `$ command` prompt, stdout/stderr coloring, exit-code chip.
+  - `FileEditCard` (`edit_file`, `write_file`) — side-by-side before/after for edits, single green block for writes.
+  - `PlanCard` (`write_plan`, `read_current_plan`) — markdown content + storage path + collapsible history.
+- **Task sidebar** — derives the live task list from `task_create` / `task_update` / `task_list` function-responses; no extra endpoint.
+- **Plan mode** — when `session.state.permission_mode === "plan"`, the composer gets a violet badge + tinted border so the active mode is unambiguous at the moment of typing.
+- **Slash commands** — `/help`, `/clear` (new session), `/plan` and `/exit-plan` (flip `permission_mode` directly via `PATCH /apps/.../sessions/{id}` with a `state_delta` — deterministic, no LLM round-trip), `/theme` (cycle light → dark → system), `/settings`, `/signout`.
+- **Settings dialog** — lightweight modal (no Radix dep). Theme picker (light/dark/system), read-only identity rows, sign-out shortcut. Reachable via the gear icon or `/settings`.
+
+### Auth + serving
+
+The auth middleware exempts the SPA bundle paths (`/`, `/favicon.svg`, `/assets/*`) so the login form can load anonymously; everything else (`/run*`, `/apps/*`, `/list-apps`, `/debug/*`) stays gated. JWT (`JwtAuthExtractor`) and dev token map (`BearerTokenExtractor`) both work — the React app just posts a Bearer header.
+
+UI-related env knobs:
+
+```bash
+ADK_CC_SERVE_UI=1                  # mount the SPA from web/dist at /
+ADK_CC_UI_DIST=/path/to/web/dist   # override default (<repo>/web/dist)
+ADK_CC_DEV_API=http://...:8000     # dev-only, for the Vite proxy
 ```
 
 ## Local model
@@ -113,6 +166,18 @@ ADK_CC_SKILLS_DIR=/path/to/skill-folders   # default: adk_cc/skills/ if it exist
 
 A non-canonical skill layout (e.g. doc files at the skill root, not under `references/`) is handled by a fallback `load_skill_resource` that does a filesystem scan when ADK's strict path lookup misses.
 
+Project-level skills are also auto-discovered from `.adk-cc/skills/` and `.claude/skills/` in the project's working tree (disable via `ADK_CC_DISABLE_PROJECT_SKILLS=1`).
+
+## Project context
+
+`ProjectContextPlugin` auto-loads project-level context files into every agent invocation's `system_instruction`. Resolution order:
+
+1. `.adk-cc/CONTEXT.md` (project-owned)
+2. `CLAUDE.md` (Claude Code convention)
+3. `AGENTS.md` (Agent.md convention)
+
+The first match wins. Disable via `ADK_CC_DISABLE_PROJECT_CONTEXT=1`. Override the search list via `ADK_CC_CONTEXT_FILES=path1,path2`.
+
 ## MCP servers
 
 Connect external MCP servers via the per-tenant registry. Set `ADK_CC_TENANT_REGISTRY_DIR` and store one `mcp.json` per tenant. The `TenantMcpToolset` resolves servers per-invocation from the active tenant's config; credentials substitute from the credential provider.
@@ -127,7 +192,7 @@ For single-tenant deployments, you can use one tenant_id (defaults to `"local"` 
 uvicorn adk_cc.service.server:make_app --factory --host 0.0.0.0 --port 8000
 ```
 
-`make_app` reads everything from env (see [`.env.example`](./.env.example)) and wires the full plugin chain — `[Audit, Tenancy, Permission, Quota, PlanModeReminder, TaskReminder, ToolCallValidator]` — plus an auth middleware. It **fails closed on auth**: refuses to start unless one of these is set:
+`make_app` reads everything from env (see [`.env.example`](./.env.example)) and wires the full plugin chain — `[Audit, Tenancy, Permission, Quota, PlanModeReminder, TaskReminder, ToolCallValidator, ContextGuard, ProjectContext, ConfirmationFormUi, AskUserQuestionUiHint, ModelIoTrace, SessionRetry]` — plus an auth middleware. It **fails closed on auth**: refuses to start unless one of these is set:
 
 - `ADK_CC_AUTH_TOKENS=tok1=alice:tenant_a,tok2=bob:tenant_b` — static token map (single-instance, simple)
 - `ADK_CC_JWT_JWKS_URL=...` + `ADK_CC_JWT_ISSUER=...` etc. — JWT validation
@@ -165,6 +230,9 @@ ADK_CC_AUDIT_LOG=/var/log/adk-cc/audit.jsonl
 
 # Permissions YAML (optional but recommended)
 ADK_CC_PERMISSIONS_YAML=/etc/adk-cc/permissions.yaml
+
+# Custom UI (optional — bundles the React chat at /)
+ADK_CC_SERVE_UI=1
 ```
 
 Then:
@@ -179,6 +247,7 @@ That's a fully working single-instance deployment with:
 - Persistent sessions (the conversation history survives a process restart)
 - Static-token auth with one tenant
 - Audit log of every tool call
+- The custom React chat UI mounted at `/`
 
 For multi-tenant deployments and the full readiness checklist (security / reliability / observability / ops gaps), see [`docs/05-production-deployment.md`](./docs/05-production-deployment.md).
 
@@ -210,11 +279,13 @@ The coordinator produces the plan via `write_plan` (each call creates a new time
 
 Plan mode is asymmetric with `exit_plan_mode`: entering tightens posture (no confirmation), exiting relaxes (user must approve).
 
+The web UI also exposes `/plan` and `/exit-plan` slash commands that flip `permission_mode` directly via `PATCH /apps/.../sessions/{id}` with a `state_delta` — deterministic and skips the LLM round-trip.
+
 ## Confirmations
 
 Destructive tool calls (and any ASK-rule match) pause for human confirmation via ADK's `request_confirmation` seam. `PermissionPlugin` sends a structured `ConfirmPrompt` payload with three options — **Allow once / Allow always / Deny**. "Allow always" injects a SESSION-scope ALLOW rule keyed by `(tool, extracted rule key)` so the same operation isn't re-asked for the rest of the session; scope is intentionally narrow (exact rule-key match, no wildcards).
 
-`ConfirmationFormUiPlugin` (registered by default) bridges this to bundled `adk web` so the options actually render as a selectable form instead of a hardcoded binary checkbox: it rewrites the wrapper event's name to a sentinel, injects a `response_schema` derived from the options, then reshapes the user's submission back to ADK's standard `ToolConfirmation` shape on the way in. Disable the plugin to revert to bundled UI's binary checkbox; both `PermissionPlugin` and the underlying ADK flow keep working. Custom payload-aware frontends can read the original `ConfirmPrompt` from the rewritten event's args.
+`ConfirmationFormUiPlugin` (registered by default) bridges this to the bundled `adk web` UI so the options actually render as a selectable form instead of a hardcoded binary checkbox. The custom React UI in `web/` reads the structured payload directly (`ConfirmationCard.tsx`) and posts back the `chose_id` / `comment` / `persist_across_sessions` response — no rewrite plugin needed for that path.
 
 Wire contract: [`docs/06-confirmation-protocol.md`](./docs/06-confirmation-protocol.md).
 
@@ -231,34 +302,43 @@ ADK_CC_TASK_REMINDER_TURNS_SINCE_WRITE=10
 ADK_CC_TASK_REMINDER_TURNS_BETWEEN=10
 ```
 
+The web UI surfaces the live task list as a right-rail `TaskSidebar` derived from `task_*` function-responses in the session event log.
+
 ## Tests
 
 ```
 tests/
-├── test_*.py                       ← unit tests (mocked I/O, fast)
-│   ├── test_sandbox_service_backend.py   24 tests
-│   ├── test_workspace_layout.py          11 tests
-│   ├── test_skill_resource_fallback.py    6 tests
-│   ├── test_session_retry.py              7 tests
-│   ├── test_context_guard.py             10 tests
-│   ├── test_tenancy_resolver.py             7 tests
-│   ├── test_permissions_confirmation.py    12 tests
-│   ├── test_ask_user_question_ui_hint.py   11 tests
-│   ├── test_confirmation_form_ui.py        14 tests
-│   ├── test_plan_mode_env_default.py        9 tests
-│   └── test_read_file_limits.py            15 tests   ── 126 unit tests total
+├── test_*.py                          ← unit tests (mocked I/O, fast; ~126 checks)
+│   ├── test_sandbox_service_backend.py
+│   ├── test_workspace_layout.py
+│   ├── test_skill_resource_fallback.py
+│   ├── test_session_retry.py
+│   ├── test_context_guard.py
+│   ├── test_tenancy_resolver.py
+│   ├── test_permissions_confirmation.py
+│   ├── test_ask_user_question_ui_hint.py
+│   ├── test_confirmation_form_ui.py
+│   ├── test_plan_mode_env_default.py
+│   ├── test_plan_mode_tools_env_default.py
+│   ├── test_read_file_limits.py
+│   ├── test_token_counter.py
+│   ├── test_logging_setup.py
+│   ├── test_model_io_trace.py
+│   ├── test_audit_extensions.py
+│   ├── test_project_context.py
+│   └── test_compaction_audit.py
 │
-├── e2e_features.py                 ← in-process FastAPI e2e (auth + admin + skill upload)
-├── e2e_confirmation_flow.py        ← in-process ADK Runner e2e (4 tests) — confirmation gate, allow_always session rule, deny path, scope-narrow check
-├── e2e_confirmation_form_ui.py     ← in-process ADK Runner e2e (3 tests) — sentinel-name rewrite, form-shaped resume, deny path with form widget
-├── e2e_ask_user_question.py        ← in-process ADK Runner e2e (4 tests) — long_running pause, no premature response event, resume with user answer, long_running_tool_ids on call event
+├── e2e_features.py                    ← in-process FastAPI e2e (auth + admin + skill upload)
+├── e2e_confirmation_flow.py           ← in-process ADK Runner e2e — confirmation gate, allow_always session rule, deny path, scope-narrow check
+├── e2e_confirmation_form_ui.py        ← in-process ADK Runner e2e — sentinel-name rewrite, form-shaped resume, deny path with form widget
+├── e2e_ask_user_question.py           ← in-process ADK Runner e2e — long_running pause, no premature response event, resume with user answer
 │
 └── e2e against a live sandbox service:
-    ├── e2e_sandbox_service.py            9 contract checks + 6 bug-fix verifications
-    ├── e2e_sandbox_comprehensive.py     53 checks across 9 categories
-    ├── e2e_skills.py                     6 — full skill chain
-    ├── e2e_streaming_adapter.py          9 — exec_stream + BashTool stream
-    └── diag_streaming_timing.py          diagnostic (always-on probe)
+    ├── e2e_sandbox_service.py         9 contract checks + 6 bug-fix verifications
+    ├── e2e_sandbox_comprehensive.py   53 checks across 9 categories
+    ├── e2e_skills.py                  6 — full skill chain
+    ├── e2e_streaming_adapter.py       9 — exec_stream + BashTool stream
+    └── diag_streaming_timing.py       diagnostic (always-on probe)
 ```
 
 Run unit tests with no env config required:
@@ -281,4 +361,4 @@ Both `e2e_skills.py` and `e2e_streaming_adapter.py` need Python 3.12+ and adk-cc
 
 ## Status
 
-**Alpha.** Functional and exercised end-to-end (~206 unit + e2e checks across 19 test files). Has known operational gaps documented in [`docs/05-production-deployment.md`](./docs/05-production-deployment.md)'s readiness checklist (security / reliability / observability / ops / multi-tenancy / config / tests). Close the ✗ items appropriate to your threat model and SLO before serving real users.
+**Alpha** (`v0.0.1` is the first tagged release). Functional and exercised end-to-end (~206 unit + e2e checks across 19 test files), with a working React chat UI shipping on `feat/chat-ui`. Has known operational gaps documented in [`docs/05-production-deployment.md`](./docs/05-production-deployment.md)'s readiness checklist (security / reliability / observability / ops / multi-tenancy / config / tests). Close the ✗ items appropriate to your threat model and SLO before serving real users.
