@@ -85,6 +85,12 @@ ADK_CC_SERVE_UI=1 \
 # 3. Open http://127.0.0.1:8000/ and sign in with token `devtok`
 ```
 
+The `adk_cc` package auto-loads `.env` at import time (looks in
+`ADK_CC_AGENTS_DIR`, then the repo root, then CWD), so `ADK_CC_API_KEY`
+/ `ADK_CC_MODEL` / `ADK_CC_API_BASE` etc. from your `.env` reach
+uvicorn without needing `set -a; . ./.env; set +a` first. Process env
+always wins over `.env`. Set `ADK_CC_SKIP_DOTENV=1` to disable.
+
 For HMR development against the same server use `npm --prefix web run dev` (Vite dev server on `:5173` proxies `/run*`, `/apps`, `/list-apps`, `/api`, `/admin`, `/debug` to `http://127.0.0.1:8000` by default; override via `ADK_CC_DEV_API`).
 
 ### What's in the UI
