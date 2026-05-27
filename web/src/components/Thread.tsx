@@ -258,19 +258,54 @@ type ChatRow =
     }
 
 function dedupePartials(events: RunEvent[]): RunEvent[] {
+  // ADK streaming protocol (google/adk/models/base_llm.py:96-101):
+  // each `partial: true` event carries a DELTA chunk
+  // ("The weather", " in Tokyo is", " sunny."), then one final
+  // `partial: false` event arrives containing the full accumulated
+  // content. So we accumulate text per (invocation_id, author) group
+  // for as long as partials keep arriving, and replace the accumulated
+  // bubble with the final non-partial when it lands.
   const out: RunEvent[] = []
-  const lastPartialIdx = new Map<string, number>()
+  const open = new Map<string, { idx: number; text: string }>()
+
   for (const e of events) {
-    if (!e.partial) {
-      out.push(e)
+    const key = `${e.invocation_id ?? ""}::${e.author ?? ""}`
+
+    if (e.partial) {
+      const deltaText = (e.content?.parts ?? [])
+        .map((p) => (typeof p.text === "string" ? p.text : ""))
+        .join("")
+      const entry = open.get(key)
+      if (entry) {
+        entry.text += deltaText
+        // Replace the stored event's text part with the accumulated
+        // value so the rendered bubble grows instead of flicker-replacing.
+        out[entry.idx] = {
+          ...e,
+          content: { ...e.content, parts: [{ text: entry.text }] },
+        }
+      } else {
+        open.set(key, { idx: out.length, text: deltaText })
+        out.push({
+          ...e,
+          content: { ...e.content, parts: [{ text: deltaText }] },
+        })
+      }
       continue
     }
-    const key = `${e.invocation_id ?? ""}::${e.author ?? ""}`
-    const prev = lastPartialIdx.get(key)
-    if (prev !== undefined) {
-      out[prev] = e
+
+    // Non-partial. If this finalizes an open partial group, swap the
+    // accumulated bubble for the final event (which per ADK spec
+    // already contains the full text + any tool calls). Otherwise it
+    // stands on its own.
+    const entry = open.get(key)
+    const hasText = (e.content?.parts ?? []).some(
+      (p) => typeof p.text === "string" && p.text.length > 0,
+    )
+    if (entry && hasText) {
+      out[entry.idx] = e
+      open.delete(key)
     } else {
-      lastPartialIdx.set(key, out.length)
       out.push(e)
     }
   }

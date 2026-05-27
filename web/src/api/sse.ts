@@ -122,6 +122,14 @@ async function _runStreamLoop(
         userId: args.userId,
         sessionId: args.sessionId,
         newMessage,
+        // streaming=true tells ADK's runner to emit partial events as
+        // the model produces tokens (`partial: true` chunks). Without
+        // it, the loop still streams *event*-level (one full
+        // function_call / response / text event at a time) but no
+        // token-level partials. We already dedupe partials in
+        // Thread.tsx so multiple partial events per turn collapse
+        // into one streaming bubble.
+        streaming: true,
       }),
       signal,
     })
