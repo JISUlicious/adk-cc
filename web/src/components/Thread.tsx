@@ -130,10 +130,14 @@ function Row({
       const isPending = pendingCallIds.has(row.callId)
       // Interactive widgets first — they only render while pending.
       if (isPending && CONFIRMATION_NAMES.has(row.name)) {
-        const payload =
-          row.args && typeof row.args === "object"
-            ? ((row.args as { payload?: ConfirmPayload }).payload ?? null)
-            : null
+        // ADK's request_confirmation tool wraps the payload under
+        // `toolConfirmation.payload` (camelCase via Pydantic
+        // alias_generator). ConfirmationFormUiPlugin keeps the same
+        // shape when it rewrites the function name from
+        // adk_request_confirmation → adk_cc_confirmation_form, so
+        // both names land at the same path. Be defensive in case a
+        // future plugin variant flattens to args.payload directly.
+        const payload = extractConfirmPayload(row.args)
         if (payload) {
           return (
             <ConfirmationCard
@@ -220,6 +224,16 @@ function Row({
       }
     }
   }
+}
+
+function extractConfirmPayload(args: unknown): ConfirmPayload | null {
+  if (!args || typeof args !== "object") return null
+  const a = args as Record<string, unknown>
+  const wrapped = (a.toolConfirmation as { payload?: ConfirmPayload } | undefined)?.payload
+  if (wrapped && typeof wrapped === "object") return wrapped
+  const direct = a.payload as ConfirmPayload | undefined
+  if (direct && typeof direct === "object") return direct
+  return null
 }
 
 // --- internals ---

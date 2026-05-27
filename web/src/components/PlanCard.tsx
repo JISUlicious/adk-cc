@@ -1,5 +1,7 @@
 import { useState } from "react"
 import { BookOpen, FileText, ChevronDown, ChevronRight } from "lucide-react"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 
 /**
  * Renders `write_plan` and `read_current_plan` tool calls.
@@ -121,9 +123,14 @@ export function PlanCard({
               </div>
             )}
             {content && (
-              <pre className="rounded bg-background/60 p-3 text-xs leading-relaxed font-mono whitespace-pre-wrap max-h-96 overflow-y-auto">
-                {content}
-              </pre>
+              <div className="rounded bg-background/60 p-3 max-h-96 overflow-y-auto text-sm leading-relaxed">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={MARKDOWN_COMPONENTS}
+                >
+                  {content}
+                </ReactMarkdown>
+              </div>
             )}
             {path && (
               <div className="text-[10px] font-mono text-muted-foreground">
@@ -165,4 +172,76 @@ function extractTitle(markdown: string): string | undefined {
   // server-side title extraction in adk_cc/plans/storage.py.
   const m = markdown.match(/^#\s+(.+?)\s*$/m)
   return m?.[1]
+}
+
+// Custom renderers so we don't need @tailwindcss/typography. Just enough
+// to make plan markdown look like a plan (headings + lists + code).
+const MARKDOWN_COMPONENTS = {
+  h1: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
+    <h1 className="text-base font-semibold mt-3 mb-2 first:mt-0" {...props} />
+  ),
+  h2: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
+    <h2 className="text-sm font-semibold mt-3 mb-1.5 first:mt-0" {...props} />
+  ),
+  h3: (props: React.HTMLAttributes<HTMLHeadingElement>) => (
+    <h3 className="text-sm font-medium mt-2 mb-1 first:mt-0" {...props} />
+  ),
+  p: (props: React.HTMLAttributes<HTMLParagraphElement>) => (
+    <p className="my-2 first:mt-0 last:mb-0" {...props} />
+  ),
+  ul: (props: React.HTMLAttributes<HTMLUListElement>) => (
+    <ul className="list-disc pl-5 my-2 space-y-1" {...props} />
+  ),
+  ol: (props: React.OlHTMLAttributes<HTMLOListElement>) => (
+    <ol className="list-decimal pl-5 my-2 space-y-1" {...props} />
+  ),
+  li: (props: React.LiHTMLAttributes<HTMLLIElement>) => (
+    <li className="leading-relaxed" {...props} />
+  ),
+  code: (props: React.HTMLAttributes<HTMLElement>) => {
+    const { className } = props
+    // Block code blocks have language-* className; inline has nothing.
+    if (className?.startsWith("language-")) {
+      return <code className="text-xs" {...props} />
+    }
+    return (
+      <code
+        className="rounded bg-muted px-1 py-0.5 text-[0.85em] font-mono"
+        {...props}
+      />
+    )
+  },
+  pre: (props: React.HTMLAttributes<HTMLPreElement>) => (
+    <pre
+      className="rounded bg-muted p-2 my-2 overflow-x-auto text-xs font-mono"
+      {...props}
+    />
+  ),
+  a: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
+    <a
+      className="text-indigo-600 dark:text-indigo-400 hover:underline"
+      target="_blank"
+      rel="noreferrer"
+      {...props}
+    />
+  ),
+  blockquote: (props: React.HTMLAttributes<HTMLQuoteElement>) => (
+    <blockquote
+      className="border-l-2 border-border pl-3 my-2 text-muted-foreground italic"
+      {...props}
+    />
+  ),
+  table: (props: React.TableHTMLAttributes<HTMLTableElement>) => (
+    <table className="my-2 border-collapse text-xs" {...props} />
+  ),
+  th: (props: React.ThHTMLAttributes<HTMLTableCellElement>) => (
+    <th className="border border-border px-2 py-1 text-left font-medium" {...props} />
+  ),
+  td: (props: React.TdHTMLAttributes<HTMLTableCellElement>) => (
+    <td className="border border-border px-2 py-1" {...props} />
+  ),
+  hr: () => <hr className="my-3 border-border" />,
+  strong: (props: React.HTMLAttributes<HTMLElement>) => (
+    <strong className="font-semibold" {...props} />
+  ),
 }
