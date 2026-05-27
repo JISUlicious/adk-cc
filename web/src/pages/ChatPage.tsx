@@ -5,6 +5,7 @@ import { clearToken, getUser } from "@/api/auth"
 import {
   createSession,
   getSession,
+  patchSessionState,
   type Session,
 } from "@/api/sessions"
 import {
@@ -222,6 +223,30 @@ export function ChatPage() {
         clearToken()
         location.reload()
         return
+      case "plan":
+      case "exit-plan": {
+        // Direct state mutation — no LLM turn. ADK appends a synthetic
+        // state-update Event so the change shows up in session.events
+        // and (importantly) in session.state.permission_mode for the
+        // next tool call. Values match adk_cc/permissions/modes.py:
+        // PLAN="plan", DEFAULT="default".
+        if (!appName || !session) return
+        const next = action === "plan" ? "plan" : "default"
+        patchSessionState(appName, userId, session.id, {
+          permission_mode: next,
+        })
+          .then((s) => {
+            setSession(s)
+            setEvents(s.events)
+            setRefreshTick((t) => t + 1)
+          })
+          .catch((e) =>
+            setError(
+              `Failed to switch permission mode: ${(e as Error).message}`,
+            ),
+          )
+        return
+      }
     }
   }
 

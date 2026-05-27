@@ -72,6 +72,26 @@ export async function createSession(
   )
 }
 
+/** Mutate session state without running the agent. ADK exposes this
+ * via `PATCH /apps/.../sessions/{id}` taking a `state_delta` body —
+ * the server appends a synthetic state-update Event under the hood.
+ * Used by slash commands like `/plan` to flip `permission_mode`
+ * directly instead of asking the LLM to do it through a tool call. */
+export async function patchSessionState(
+  appName: string,
+  userId: string,
+  sessionId: string,
+  stateDelta: Record<string, unknown>,
+): Promise<Session> {
+  return apiFetch<Session>(
+    `/apps/${encodeURIComponent(appName)}/users/${encodeURIComponent(userId)}/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ stateDelta }),
+    },
+  )
+}
+
 export async function deleteSession(
   appName: string,
   userId: string,

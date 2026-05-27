@@ -26,6 +26,8 @@ export type SlashAction =
   | "settings"
   | "theme"
   | "signout"
+  | "plan"
+  | "exit-plan"
 
 export interface SlashCommand {
   /** What the user types after `/`. Match is prefix-insensitive. */
@@ -52,15 +54,15 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   },
   {
     name: "plan",
-    description: "Ask the agent to enter plan mode",
+    description: "Switch the session to plan mode",
     icon: ClipboardList,
-    kind: { type: "message", text: "Enter plan mode for the next request." },
+    kind: { type: "action", action: "plan" },
   },
   {
     name: "exit-plan",
-    description: "Ask the agent to exit plan mode",
+    description: "Switch the session back to default mode",
     icon: ClipboardList,
-    kind: { type: "message", text: "Exit plan mode." },
+    kind: { type: "action", action: "exit-plan" },
   },
   {
     name: "theme",
