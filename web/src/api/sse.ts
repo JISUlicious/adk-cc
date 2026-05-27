@@ -16,19 +16,34 @@ import { getToken } from "./auth"
 
 /** An Event from ADK's session machinery. Loose typing — the actual
  * shape comes from google.adk.events.Event; we only inspect a few
- * fields in the renderers, so we keep this open-ended. */
+ * fields in the renderers, so we keep this open-ended.
+ *
+ * Wire format: ADK's Event model uses `alias_generator=to_camel` with
+ * `populate_by_name=True`, and the server serializes with
+ * `by_alias=True`, so we get **camelCase** keys on the wire
+ * (`functionCall`, `functionResponse`, `invocationId`). The Pydantic
+ * model accepts either form on input, so when we POST back a
+ * function_response we can use either case — we standardize on
+ * camelCase to match what we read.
+ *
+ * `thought` parts are the model's internal thinking output (Gemini
+ * "thought summaries", etc.) — they carry `text` but should NOT
+ * render as a normal chat bubble. The renderers skip them.
+ */
 export interface RunEvent {
   author?: string
   content?: {
     role?: string
     parts?: Array<{
       text?: string
-      function_call?: { id?: string; name?: string; args?: unknown }
-      function_response?: { id?: string; name?: string; response?: unknown }
+      /** Marks the part as model-internal thinking. Renderers hide it. */
+      thought?: boolean
+      functionCall?: { id?: string; name?: string; args?: unknown }
+      functionResponse?: { id?: string; name?: string; response?: unknown }
     }>
   }
   partial?: boolean
-  invocation_id?: string
+  invocationId?: string
   actions?: Record<string, unknown>
   // ... ADK adds many more; we accept them.
   [key: string]: unknown
@@ -88,7 +103,7 @@ export function streamFunctionResponse(
     role: "user",
     parts: [
       {
-        function_response: {
+        functionResponse: {
           id: args.callId,
           name: args.toolName,
           response: args.response,

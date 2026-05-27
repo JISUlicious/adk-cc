@@ -109,7 +109,7 @@ function deriveTasks(events: RunEvent[]): TaskRow[] {
 
   for (const e of events) {
     for (const part of e.content?.parts ?? []) {
-      const fr = part.function_response
+      const fr = part.functionResponse
       if (!fr) continue
       const name = fr.name ?? ""
       const resp = (fr.response ?? {}) as Record<string, unknown>
@@ -181,7 +181,7 @@ function findCreateArgs(
   if (!callId) return null
   for (const e of events) {
     for (const part of e.content?.parts ?? []) {
-      const fc = part.function_call
+      const fc = part.functionCall
       if (fc?.id === callId && fc.name === "task_create") {
         const a = (fc.args ?? {}) as Record<string, unknown>
         return {

@@ -144,7 +144,7 @@ export function ChatPage() {
         role: "user",
         parts: [
           {
-            function_response: { id: callId, name: toolName, response },
+            functionResponse: { id: callId, name: toolName, response },
           },
         ],
       },

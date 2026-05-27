@@ -272,7 +272,10 @@ function dedupePartials(events: RunEvent[]): RunEvent[] {
     const key = `${e.invocation_id ?? ""}::${e.author ?? ""}`
 
     if (e.partial) {
+      // Only accumulate visible text — thought parts get filtered so
+      // the streaming bubble doesn't grow with internal-thinking noise.
       const deltaText = (e.content?.parts ?? [])
+        .filter((p) => !p.thought)
         .map((p) => (typeof p.text === "string" ? p.text : ""))
         .join("")
       const entry = open.get(key)
@@ -300,7 +303,7 @@ function dedupePartials(events: RunEvent[]): RunEvent[] {
     // stands on its own.
     const entry = open.get(key)
     const hasText = (e.content?.parts ?? []).some(
-      (p) => typeof p.text === "string" && p.text.length > 0,
+      (p) => !p.thought && typeof p.text === "string" && p.text.trim().length > 0,
     )
     if (entry && hasText) {
       out[entry.idx] = e
@@ -317,8 +320,8 @@ function collectPendingCallIds(events: RunEvent[]): Set<string> {
   const responses = new Set<string>()
   for (const e of events) {
     for (const part of e.content?.parts ?? []) {
-      if (part.function_call?.id) calls.add(part.function_call.id)
-      if (part.function_response?.id) responses.add(part.function_response.id)
+      if (part.functionCall?.id) calls.add(part.functionCall.id)
+      if (part.functionResponse?.id) responses.add(part.functionResponse.id)
     }
   }
   for (const r of responses) calls.delete(r)
@@ -334,7 +337,7 @@ function collectResponses(events: RunEvent[]): Map<string, ResponsePart> {
   const m = new Map<string, ResponsePart>()
   for (const e of events) {
     for (const part of e.content?.parts ?? []) {
-      const fr = part.function_response
+      const fr = part.functionResponse
       if (fr?.id) {
         m.set(fr.id, {
           name: fr.name ?? "",
@@ -352,17 +355,21 @@ function flattenEvents(
 ): ChatRow[] {
   const rows: ChatRow[] = []
   // Track which response callIds got consumed into a pair so we can
-  // skip emitting their standalone function_response row below.
+  // skip emitting their standalone functionResponse row below.
   const consumedResponseIds = new Set<string>()
 
-  // First pass: build the rows, deciding whether each call is
-  // specialized (→ tool_pair row) or generic (→ function_call row).
   for (const e of events) {
     const eventId = (e.id as string | undefined) ?? ""
     const author = e.author ?? "agent"
     const parts = e.content?.parts ?? []
     for (const part of parts) {
-      if (typeof part.text === "string" && part.text.length > 0) {
+      // Skip thought parts — those are the model's internal thinking
+      // output (Gemini thought summaries, etc.), not user-visible
+      // chat content. Surfacing them would create bubbles that look
+      // like assistant turns but carry no useful text.
+      if (part.thought) continue
+
+      if (typeof part.text === "string" && part.text.trim().length > 0) {
         rows.push({
           kind: "text",
           eventId,
@@ -370,9 +377,9 @@ function flattenEvents(
           text: part.text,
           isPartial: Boolean(e.partial),
         })
-      } else if (part.function_call) {
-        const callId = part.function_call.id ?? ""
-        const name = part.function_call.name ?? "(unnamed)"
+      } else if (part.functionCall) {
+        const callId = part.functionCall.id ?? ""
+        const name = part.functionCall.name ?? "(unnamed)"
         const pairKind = PAIRED_RENDERERS[name]
         if (pairKind) {
           const matched = callId ? responsesByCallId.get(callId) : undefined
@@ -381,7 +388,7 @@ function flattenEvents(
             eventId,
             callId,
             pairKind,
-            args: part.function_call.args,
+            args: part.functionCall.args,
             response: matched ? matched.response : null,
           })
           if (callId) consumedResponseIds.add(callId)
@@ -391,18 +398,18 @@ function flattenEvents(
             eventId,
             callId,
             name,
-            args: part.function_call.args,
+            args: part.functionCall.args,
           })
         }
-      } else if (part.function_response) {
-        const callId = part.function_response.id ?? ""
-        if (consumedResponseIds.has(callId)) continue // shown inside the pair row
+      } else if (part.functionResponse) {
+        const callId = part.functionResponse.id ?? ""
+        if (consumedResponseIds.has(callId)) continue
         rows.push({
           kind: "function_response",
           eventId,
           callId,
-          name: part.function_response.name ?? "(unnamed)",
-          response: part.function_response.response,
+          name: part.functionResponse.name ?? "(unnamed)",
+          response: part.functionResponse.response,
         })
       }
     }
