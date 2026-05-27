@@ -10,6 +10,9 @@ import {
   AskUserQuestionCard,
   type AskUserQuestionArgsDef,
 } from "./AskUserQuestionCard"
+import { BashTerminalCard } from "./BashTerminalCard"
+import { FileEditCard } from "./FileEditCard"
+import { PlanCard } from "./PlanCard"
 
 /**
  * Renders the linear event stream as chat rows.
@@ -19,15 +22,19 @@ import {
  * stays single-column and the tool-call cards sit inline with the
  * surrounding text.
  *
- * Two tool names get specialized renderers when their function_call is
- * still pending (no matching function_response yet):
- *   - `adk_request_confirmation` / `adk_cc_confirmation_form`
- *       → ConfirmationCard (HITL permission ask)
- *   - `ask_user_question`
- *       → AskUserQuestionCard (structured multi-choice form)
+ * Specialized tool renderers (one paired row per call):
+ *   - `run_bash`                         → BashTerminalCard
+ *   - `edit_file` / `write_file`         → FileEditCard
+ *   - `write_plan` / `read_current_plan` → PlanCard
  *
- * Once the response lands, the call falls back to the generic
- * ToolCallCard so the historical state stays inspectable.
+ * Long-running interactive widgets (rendered for the function_call
+ * row while no matching function_response exists yet):
+ *   - `adk_request_confirmation` / `adk_cc_confirmation_form`
+ *       → ConfirmationCard
+ *   - `ask_user_question`
+ *       → AskUserQuestionCard
+ *
+ * Anything else: generic ToolCallCard / ToolResponseCard (two rows).
  *
  * Partial events: the SSE stream emits incremental `partial: true`
  * events as the model streams tokens. We dedupe partials so only the
@@ -40,6 +47,17 @@ const CONFIRMATION_NAMES = new Set([
 ])
 const ASK_QUESTION_NAME = "ask_user_question"
 
+// Tools whose call + response render as a single combined card. The
+// associated function_response row is suppressed (consumed into the
+// pair) to avoid a duplicate ToolResponseCard right below.
+const PAIRED_RENDERERS: Record<string, "bash" | "edit" | "write" | "plan_read" | "plan_write"> = {
+  run_bash: "bash",
+  edit_file: "edit",
+  write_file: "write",
+  read_current_plan: "plan_read",
+  write_plan: "plan_write",
+}
+
 export function Thread({
   events,
   isStreaming,
@@ -47,8 +65,6 @@ export function Thread({
 }: {
   events: RunEvent[]
   isStreaming: boolean
-  /** Called when the user submits a response to a pending long-running
-   * tool call (confirmation choice, ask_user_question answers). */
   onSubmitFunctionResponse: (
     callId: string,
     toolName: string,
@@ -57,7 +73,8 @@ export function Thread({
 }) {
   const deduped = dedupePartials(events)
   const pendingCallIds = collectPendingCallIds(deduped)
-  const rows = flattenEvents(deduped)
+  const responsesByCallId = collectResponses(deduped)
+  const rows = flattenEvents(deduped, responsesByCallId)
 
   return (
     <div className="flex flex-col gap-3 px-6 py-4">
@@ -111,6 +128,7 @@ function Row({
       )
     case "function_call": {
       const isPending = pendingCallIds.has(row.callId)
+      // Interactive widgets first — they only render while pending.
       if (isPending && CONFIRMATION_NAMES.has(row.name)) {
         const payload =
           row.args && typeof row.args === "object"
@@ -158,6 +176,49 @@ function Row({
           response={row.response}
         />
       )
+    case "tool_pair": {
+      const { pairKind, callId, args, response } = row
+      switch (pairKind) {
+        case "bash":
+          return <BashTerminalCard callId={callId} args={args} response={response} />
+        case "edit":
+          return (
+            <FileEditCard
+              op="edit"
+              callId={callId}
+              args={args}
+              response={response}
+            />
+          )
+        case "write":
+          return (
+            <FileEditCard
+              op="write"
+              callId={callId}
+              args={args}
+              response={response}
+            />
+          )
+        case "plan_read":
+          return (
+            <PlanCard
+              op="read"
+              callId={callId}
+              args={args}
+              response={response}
+            />
+          )
+        case "plan_write":
+          return (
+            <PlanCard
+              op="write"
+              callId={callId}
+              args={args}
+              response={response}
+            />
+          )
+      }
+    }
   }
 }
 
@@ -185,12 +246,18 @@ type ChatRow =
       name: string
       response: unknown
     }
+  | {
+      kind: "tool_pair"
+      eventId: string
+      callId: string
+      /** Specialized renderer key — drives which card is used. */
+      pairKind: "bash" | "edit" | "write" | "plan_read" | "plan_write"
+      args: unknown
+      /** null while the response hasn't landed yet. */
+      response: unknown
+    }
 
 function dedupePartials(events: RunEvent[]): RunEvent[] {
-  // Keep all non-partials; for partials, keep only the last in each
-  // (invocation_id, author) group. That collapses streaming chunks
-  // into one row without losing standalone partials when there's no
-  // group to merge into.
   const out: RunEvent[] = []
   const lastPartialIdx = new Map<string, number>()
   for (const e of events) {
@@ -223,8 +290,38 @@ function collectPendingCallIds(events: RunEvent[]): Set<string> {
   return calls
 }
 
-function flattenEvents(events: RunEvent[]): ChatRow[] {
+interface ResponsePart {
+  name: string
+  response: unknown
+}
+
+function collectResponses(events: RunEvent[]): Map<string, ResponsePart> {
+  const m = new Map<string, ResponsePart>()
+  for (const e of events) {
+    for (const part of e.content?.parts ?? []) {
+      const fr = part.function_response
+      if (fr?.id) {
+        m.set(fr.id, {
+          name: fr.name ?? "",
+          response: fr.response,
+        })
+      }
+    }
+  }
+  return m
+}
+
+function flattenEvents(
+  events: RunEvent[],
+  responsesByCallId: Map<string, ResponsePart>,
+): ChatRow[] {
   const rows: ChatRow[] = []
+  // Track which response callIds got consumed into a pair so we can
+  // skip emitting their standalone function_response row below.
+  const consumedResponseIds = new Set<string>()
+
+  // First pass: build the rows, deciding whether each call is
+  // specialized (→ tool_pair row) or generic (→ function_call row).
   for (const e of events) {
     const eventId = (e.id as string | undefined) ?? ""
     const author = e.author ?? "agent"
@@ -239,18 +336,36 @@ function flattenEvents(events: RunEvent[]): ChatRow[] {
           isPartial: Boolean(e.partial),
         })
       } else if (part.function_call) {
-        rows.push({
-          kind: "function_call",
-          eventId,
-          callId: part.function_call.id ?? "",
-          name: part.function_call.name ?? "(unnamed)",
-          args: part.function_call.args,
-        })
+        const callId = part.function_call.id ?? ""
+        const name = part.function_call.name ?? "(unnamed)"
+        const pairKind = PAIRED_RENDERERS[name]
+        if (pairKind) {
+          const matched = callId ? responsesByCallId.get(callId) : undefined
+          rows.push({
+            kind: "tool_pair",
+            eventId,
+            callId,
+            pairKind,
+            args: part.function_call.args,
+            response: matched ? matched.response : null,
+          })
+          if (callId) consumedResponseIds.add(callId)
+        } else {
+          rows.push({
+            kind: "function_call",
+            eventId,
+            callId,
+            name,
+            args: part.function_call.args,
+          })
+        }
       } else if (part.function_response) {
+        const callId = part.function_response.id ?? ""
+        if (consumedResponseIds.has(callId)) continue // shown inside the pair row
         rows.push({
           kind: "function_response",
           eventId,
-          callId: part.function_response.id ?? "",
+          callId,
           name: part.function_response.name ?? "(unnamed)",
           response: part.function_response.response,
         })
