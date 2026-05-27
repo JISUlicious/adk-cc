@@ -86,8 +86,9 @@ export function BashTerminalCard({
                 "rounded-sm px-1.5 py-0.5 text-[10px] font-medium",
                 isFailure
                   ? "bg-destructive/15 text-destructive"
-                  // kami warm-green: olive-leaning, not cool emerald.
-                  : "bg-accent text-primary",
+                  // Success → brand-tint (the ink-blue surface). Reads
+                  // as "intentional positive", not a casual hover.
+                  : "bg-brand-tint text-primary",
               )}
             >
               exit {exitCode ?? "?"}

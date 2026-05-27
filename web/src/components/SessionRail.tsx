@@ -164,7 +164,11 @@ export function SessionRail({
               key={s.id}
               className={cn(
                 "group flex items-center gap-2 px-4 py-2 cursor-pointer hover:bg-accent",
-                s.id === sessionId && "bg-accent",
+                // Selected uses brand-tint so the active row is
+                // distinguishable from a row the cursor is just
+                // passing over (which gets the warm hover above).
+                s.id === sessionId &&
+                  "bg-brand-tint hover:bg-brand-tint border-l-2 border-l-primary",
               )}
               onClick={() => onSelect(s)}
             >

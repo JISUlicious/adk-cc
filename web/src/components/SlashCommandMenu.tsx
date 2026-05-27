@@ -109,8 +109,8 @@ export function SlashCommandMenu({
               role="option"
               aria-selected={i === selectedIndex}
               className={cn(
-                "flex items-center gap-2 px-3 py-2 cursor-pointer",
-                i === selectedIndex && "bg-accent",
+                "flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-accent",
+                i === selectedIndex && "bg-brand-tint hover:bg-brand-tint",
               )}
               onMouseDown={(e) => {
                 // mousedown not click so we beat the textarea blur

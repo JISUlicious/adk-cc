@@ -125,7 +125,7 @@ export function Composer({
         "border-t bg-background px-4 py-3",
         // Plan mode uses kami's brand-tint surface — the single accent
         // already carries the "different mode" signal; no second hue.
-        isPlan && "border-t-primary bg-accent",
+        isPlan && "border-t-primary bg-brand-tint",
       )}
     >
       <div className="max-w-3xl mx-auto space-y-2 relative">

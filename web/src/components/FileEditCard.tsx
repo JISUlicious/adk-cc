@@ -92,7 +92,7 @@ export function FileEditCard({
             </span>
           )}
           {!isPending && !failed && (
-            <span className="rounded-sm bg-accent text-primary px-1.5 py-0.5 text-[10px] font-medium">
+            <span className="rounded-sm bg-brand-tint text-primary px-1.5 py-0.5 text-[10px] font-medium">
               ok{typeof r?.bytes === "number" ? ` · ${r.bytes}b` : ""}
             </span>
           )}

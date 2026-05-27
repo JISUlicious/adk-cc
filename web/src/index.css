@@ -51,8 +51,14 @@
   --secondary-foreground: var(--dark-warm);
   --muted: var(--sand);
   --muted-foreground: var(--stone);
-  --accent: var(--brand-tint);
-  --accent-foreground: var(--brand);
+  /* Hover / casual-highlight surface. Warmer than parchment so it
+     shows on row hover without fighting kami's warm canvas. The
+     brand-tint (ink-blue surface) is exposed separately as
+     bg-brand-tint for surfaces that *should* carry the ink accent
+     (selected items, structured-prompt card frames). Keeping the
+     two distinct means hover ≠ selected visually. */
+  --accent: #ece9dc;
+  --accent-foreground: var(--near-black);
   --destructive: #9a3325; /* warm rust, not cool red — keeps the palette warm */
   --destructive-foreground: var(--ivory);
   --border: var(--sand);
@@ -64,6 +70,12 @@
 /* Dark theme — kami's "warm charcoal" surface, not cool slate.
    References: design.md §1 Surface, --dark-surface / --deep-dark. */
 .dark {
+  /* Brand-tint overrides for dark theme: keep the ink-blue feel but
+     legible on warm charcoal. Used for selected rows + structured
+     prompt card backgrounds (Confirmation, AskUserQuestion, Plan). */
+  --brand-tint: #2c3a4d;
+  --brand-tint-strong: #364860;
+
   --background: #141413;       /* deep-dark — slight olive undertone */
   --foreground: #ece9df;       /* parchment-ish text on warm charcoal */
   --card: #1f1f1d;             /* one step up from page */
@@ -76,8 +88,11 @@
   --secondary-foreground: #ece9df;
   --muted: #2a2a28;
   --muted-foreground: #a4a297; /* warm muted text */
-  --accent: #2c3a4d;            /* ink-tinted warm */
-  --accent-foreground: #cfd9e6;
+  /* Dark hover: subtle warm lift between card and secondary. Brand-tint
+     for selected lives on --brand-tint below — same split as the light
+     theme so hover ≠ selected on dark too. */
+  --accent: #2a2a28;
+  --accent-foreground: #ece9df;
   --destructive: #b34e3d;
   --destructive-foreground: #ece9df;
   --border: #2a2a28;
@@ -102,6 +117,8 @@
   --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+  --color-brand-tint: var(--brand-tint);
+  --color-brand-tint-strong: var(--brand-tint-strong);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);

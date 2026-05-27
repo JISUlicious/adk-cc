@@ -142,7 +142,7 @@ function ThemeOption({
       className={cn(
         "flex-1 flex flex-col items-center gap-1 rounded-md border px-2 py-3 text-xs transition-colors",
         value === active
-          ? "border-primary bg-primary/10"
+          ? "border-primary bg-brand-tint"
           : "border-input hover:bg-accent",
       )}
     >

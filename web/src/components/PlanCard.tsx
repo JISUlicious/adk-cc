@@ -76,7 +76,7 @@ export function PlanCard({
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-[80%] w-full rounded-md border border-primary/40 bg-accent text-sm">
+      <div className="max-w-[80%] w-full rounded-md border border-primary/40 bg-brand-tint text-sm">
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}
