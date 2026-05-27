@@ -123,7 +123,9 @@ export function Composer({
     <div
       className={cn(
         "border-t bg-background px-4 py-3",
-        isPlan && "border-t-violet-500 bg-violet-50/40 dark:bg-violet-950/20",
+        // Plan mode uses kami's brand-tint surface — the single accent
+        // already carries the "different mode" signal; no second hue.
+        isPlan && "border-t-primary bg-accent",
       )}
     >
       <div className="max-w-3xl mx-auto space-y-2 relative">
@@ -137,10 +139,10 @@ export function Composer({
           </div>
         )}
         {isPlan && (
-          <div className="flex items-center gap-1.5 text-[11px] text-violet-700 dark:text-violet-300">
+          <div className="flex items-center gap-1.5 text-[11px] text-primary">
             <ClipboardList className="h-3.5 w-3.5" />
             <span className="font-medium">Plan mode</span>
-            <span className="text-violet-700/70 dark:text-violet-300/70">
+            <span className="text-muted-foreground">
               — agent will draft a plan; destructive tools are off until
               you exit plan mode.
             </span>
@@ -167,7 +169,7 @@ export function Composer({
           className={cn(
             "flex-1 resize-none rounded-md border bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 disabled:cursor-not-allowed disabled:opacity-50",
             isPlan
-              ? "border-violet-400 focus-visible:ring-violet-500 placeholder:text-violet-700/50 dark:placeholder:text-violet-300/50"
+              ? "border-primary focus-visible:ring-primary"
               : "border-input focus-visible:ring-ring",
           )}
         />

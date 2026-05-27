@@ -61,9 +61,11 @@ export function ConfirmationCard({
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-[80%] w-full rounded-md border border-amber-500/40 bg-amber-50/40 dark:bg-amber-950/20 text-sm">
+      {/* kami: single accent. The "this needs your attention" weight
+          comes from ink-blue framing and the icon, not a second hue. */}
+      <div className="max-w-[80%] w-full rounded-md border border-primary/40 bg-accent text-sm">
         <div className="flex items-start gap-2 px-3 pt-3">
-          <ShieldAlert className="h-5 w-5 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0" />
+          <ShieldAlert className="h-5 w-5 text-primary mt-0.5 shrink-0" />
           <div className="min-w-0 flex-1">
             <div className="font-medium">{payload.title}</div>
             <div className="text-xs text-muted-foreground whitespace-pre-wrap mt-1">

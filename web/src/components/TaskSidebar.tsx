@@ -92,11 +92,15 @@ export function TaskSidebar({ events }: { events: RunEvent[] }) {
 }
 
 function StatusIcon({ status }: { status: TaskRow["status"] }) {
+  // kami: status is functional, but we de-saturate so it sits on
+  // parchment without competing with the ink-blue accent. Completed
+  // = olive-green, in-progress = ink-blue (the actual accent),
+  // pending = warm muted.
   if (status === "completed") {
-    return <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400 mt-0.5 shrink-0" />
+    return <CheckCircle2 className="h-4 w-4 mt-0.5 shrink-0" style={{ color: "#5a6e3a" }} />
   }
   if (status === "in_progress") {
-    return <CircleDashed className="h-4 w-4 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0 animate-pulse" />
+    return <CircleDashed className="h-4 w-4 text-primary mt-0.5 shrink-0 animate-pulse" />
   }
   return <Circle className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
 }

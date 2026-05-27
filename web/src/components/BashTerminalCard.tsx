@@ -71,12 +71,12 @@ export function BashTerminalCard({
             {command || "run_bash"}
           </span>
           {isPending && (
-            <span className="rounded-sm bg-amber-500/15 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 text-[10px] font-medium">
+            <span className="rounded-sm bg-secondary text-secondary-foreground px-1.5 py-0.5 text-[10px] font-medium">
               running…
             </span>
           )}
           {!isPending && isTimeout && (
-            <span className="rounded-sm bg-orange-500/15 text-orange-700 dark:text-orange-300 px-1.5 py-0.5 text-[10px] font-medium">
+            <span className="rounded-sm bg-destructive/15 text-destructive px-1.5 py-0.5 text-[10px] font-medium">
               timeout
             </span>
           )}
@@ -86,7 +86,8 @@ export function BashTerminalCard({
                 "rounded-sm px-1.5 py-0.5 text-[10px] font-medium",
                 isFailure
                   ? "bg-destructive/15 text-destructive"
-                  : "bg-green-500/15 text-green-700 dark:text-green-400",
+                  // kami warm-green: olive-leaning, not cool emerald.
+                  : "bg-accent text-primary",
               )}
             >
               exit {exitCode ?? "?"}
@@ -100,27 +101,30 @@ export function BashTerminalCard({
         </button>
         {open && (
           <div className="px-3 pb-3 space-y-2">
-            <pre className="rounded bg-zinc-950 text-zinc-100 dark:bg-zinc-900 p-3 text-xs leading-relaxed font-mono overflow-x-auto">
-              <span className="text-emerald-400 select-none">$ </span>
+            {/* kami: terminal stays dark for legibility, but on a
+                warm-charcoal canvas (#141413, deep-dark) instead of
+                a cool zinc. Prompt and stderr keep functional color,
+                tuned warmer — stderr uses warm rust, prompt uses
+                muted parchment, not cool emerald. */}
+            <pre className="rounded p-3 text-xs leading-relaxed font-mono overflow-x-auto" style={{ background: "#141413", color: "#ece9df" }}>
+              <span style={{ color: "#a4a297" }} className="select-none">$ </span>
               {command}
               {r?.stdout && (
                 <>
                   {"\n"}
-                  <span className="text-zinc-100">{r.stdout.trimEnd()}</span>
+                  <span style={{ color: "#ece9df" }}>{r.stdout.trimEnd()}</span>
                 </>
               )}
               {r?.stderr && (
                 <>
                   {"\n"}
-                  <span className="text-red-400">{r.stderr.trimEnd()}</span>
+                  <span style={{ color: "#d49684" }}>{r.stderr.trimEnd()}</span>
                 </>
               )}
               {isPending && (
                 <>
                   {"\n"}
-                  <span className="text-zinc-500 italic">
-                    (waiting for output…)
-                  </span>
+                  <span style={{ color: "#7a7872" }}>(waiting for output…)</span>
                 </>
               )}
             </pre>

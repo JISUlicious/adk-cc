@@ -105,9 +105,12 @@ export function AskUserQuestionCard({
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-[80%] w-full rounded-md border border-sky-500/40 bg-sky-50/40 dark:bg-sky-950/20 text-sm">
+      {/* kami: same single accent as ConfirmationCard. Differentiation
+          between "permission ask" and "agent question" comes from the
+          icon and the form, not a second chromatic hue. */}
+      <div className="max-w-[80%] w-full rounded-md border border-primary/40 bg-accent text-sm">
         <div className="flex items-start gap-2 px-3 pt-3">
-          <HelpCircle className="h-5 w-5 text-sky-600 dark:text-sky-400 mt-0.5 shrink-0" />
+          <HelpCircle className="h-5 w-5 text-primary mt-0.5 shrink-0" />
           <div className="text-xs text-muted-foreground">
             The agent needs your input. Pick {args.questions.length === 1 ? "an option" : "options for each question"} below.
           </div>
@@ -116,7 +119,7 @@ export function AskUserQuestionCard({
           {args.questions.map((q) => (
             <div key={q.question} className="space-y-2">
               <div className="flex items-start gap-2">
-                <span className="rounded-sm bg-sky-500/15 text-sky-700 dark:text-sky-300 px-1.5 py-0.5 text-[10px] font-mono uppercase">
+                <span className="rounded-sm bg-primary text-primary-foreground px-1.5 py-0.5 text-[10px] font-mono uppercase">
                   {q.header}
                 </span>
                 <div className="font-medium text-sm flex-1">{q.question}</div>
@@ -136,8 +139,8 @@ export function AskUserQuestionCard({
                       className={cn(
                         "rounded-md border px-3 py-2 text-left text-xs transition-colors",
                         isPicked(q, opt.label)
-                          ? "border-sky-500 bg-sky-500/10"
-                          : "border-input hover:bg-accent",
+                          ? "border-primary bg-primary/10"
+                          : "border-input hover:bg-secondary",
                       )}
                     >
                       <div className="font-medium">{opt.label}</div>

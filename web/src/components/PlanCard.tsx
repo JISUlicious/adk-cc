@@ -76,18 +76,18 @@ export function PlanCard({
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-[80%] w-full rounded-md border border-indigo-500/40 bg-indigo-50/30 dark:bg-indigo-950/20 text-sm">
+      <div className="max-w-[80%] w-full rounded-md border border-primary/40 bg-accent text-sm">
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}
           className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent rounded-md"
         >
           {open ? (
-            <ChevronDown className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+            <ChevronDown className="h-4 w-4 text-primary" />
           ) : (
-            <ChevronRight className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+            <ChevronRight className="h-4 w-4 text-primary" />
           )}
-          <Icon className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+          <Icon className="h-4 w-4 text-primary" />
           <span className="text-xs font-medium truncate flex-1">{title}</span>
           {isPending && (
             <span className="rounded-sm bg-amber-500/15 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 text-[10px] font-medium">
@@ -142,7 +142,7 @@ export function PlanCard({
                 <button
                   type="button"
                   onClick={() => setHistoryOpen((h) => !h)}
-                  className="text-[10px] text-indigo-700 dark:text-indigo-300 hover:underline"
+                  className="text-[10px] text-primary hover:underline"
                 >
                   {historyOpen ? "Hide" : "Show"} history ({r.history.length})
                 </button>
@@ -218,12 +218,7 @@ const MARKDOWN_COMPONENTS = {
     />
   ),
   a: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
-    <a
-      className="text-indigo-600 dark:text-indigo-400 hover:underline"
-      target="_blank"
-      rel="noreferrer"
-      {...props}
-    />
+    <a className="text-primary hover:underline" target="_blank" rel="noreferrer" {...props} />
   ),
   blockquote: (props: React.HTMLAttributes<HTMLQuoteElement>) => (
     <blockquote

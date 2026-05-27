@@ -1,6 +1,5 @@
 import { useState } from "react"
 import { FileEdit, FilePlus, ChevronDown, ChevronRight } from "lucide-react"
-import { cn } from "@/lib/utils"
 
 /**
  * Renders `edit_file` and `write_file` tool calls. Two shapes:
@@ -83,7 +82,7 @@ export function FileEditCard({
             {path}
           </span>
           {isPending && (
-            <span className="rounded-sm bg-amber-500/15 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 text-[10px] font-medium">
+            <span className="rounded-sm bg-secondary text-secondary-foreground px-1.5 py-0.5 text-[10px] font-medium">
               writing…
             </span>
           )}
@@ -93,7 +92,7 @@ export function FileEditCard({
             </span>
           )}
           {!isPending && !failed && (
-            <span className="rounded-sm bg-green-500/15 text-green-700 dark:text-green-400 px-1.5 py-0.5 text-[10px] font-medium">
+            <span className="rounded-sm bg-accent text-primary px-1.5 py-0.5 text-[10px] font-medium">
               ok{typeof r?.bytes === "number" ? ` · ${r.bytes}b` : ""}
             </span>
           )}
@@ -153,27 +152,31 @@ function CodeBlock({
   variant: "add" | "remove"
   label: string
 }) {
+  // kami: diff red/green is the rare case where second/third hues
+  // are functional, not decorative — but we tune them warmer so they
+  // sit on a parchment canvas without screaming. Olive-green for add
+  // ("#5a6e3a"-ish), warm rust for remove ("#9a3325" via destructive).
+  const labelStyle =
+    variant === "add"
+      ? { color: "#5a6e3a" }
+      : { color: "#9a3325" }
+  const blockStyle =
+    variant === "add"
+      ? { background: "rgba(132, 145, 95, 0.12)", color: "#3d3d3a" }
+      : { background: "rgba(154, 51, 37, 0.10)", color: "#3d3d3a" }
   return (
     <div className="min-w-0">
       <div
-        className={cn(
-          "text-[10px] uppercase tracking-wider mb-1",
-          variant === "add"
-            ? "text-green-700 dark:text-green-400"
-            : "text-red-700 dark:text-red-400",
-        )}
+        className="text-[10px] uppercase tracking-wider mb-1 font-medium"
+        style={labelStyle}
       >
         {label}
       </div>
       <pre
-        className={cn(
-          "rounded p-2 text-xs leading-relaxed font-mono overflow-x-auto max-h-64 whitespace-pre-wrap break-all",
-          variant === "add"
-            ? "bg-green-500/10 text-green-900 dark:text-green-200"
-            : "bg-red-500/10 text-red-900 dark:text-red-200",
-        )}
+        className="rounded p-2 text-xs leading-relaxed font-mono overflow-x-auto max-h-64 whitespace-pre-wrap break-all"
+        style={blockStyle}
       >
-        {content || <span className="opacity-50 italic">(empty)</span>}
+        {content || <span className="opacity-50">(empty)</span>}
       </pre>
     </div>
   )
