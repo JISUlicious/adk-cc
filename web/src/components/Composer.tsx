@@ -120,7 +120,7 @@ export function Composer({
   const isPlan = mode === "plan"
 
   return (
-    <div className="bg-background px-4 py-3 border-t border-border/60">
+    <div className="bg-background px-4 py-3 faded-top-edge">
       <div className="max-w-3xl mx-auto relative">
         {slashOpen && (
           <div className="absolute bottom-full left-0 right-0 mb-2">
@@ -131,26 +131,31 @@ export function Composer({
             />
           </div>
         )}
-        {/* Plan-mode decoration frames just the input — the rest of
-            the footer stays neutral so the indicator doesn't sprawl
-            across the full window width. */}
+        {/* Plan-mode decoration frames just the input. The wrapper +
+            badge slot are ALWAYS rendered so the footer height stays
+            constant across the mode toggle — only the border/bg/
+            badge-visibility light up when plan is active. */}
         <div
           className={cn(
-            "transition-colors",
-            isPlan &&
-              "rounded-md border border-primary/50 bg-brand-tint p-2 space-y-2",
+            "rounded-md border p-2 space-y-2 transition-colors",
+            isPlan
+              ? "border-primary/50 bg-brand-tint"
+              : "border-transparent bg-transparent",
           )}
         >
-          {isPlan && (
-            <div className="flex items-center gap-1.5 px-1 text-[11px] text-primary">
-              <ClipboardList className="h-3.5 w-3.5" />
-              <span className="font-medium">Plan mode</span>
-              <span className="text-muted-foreground">
-                — agent will draft a plan; destructive tools are off
-                until you exit plan mode.
-              </span>
-            </div>
-          )}
+          <div
+            className={cn(
+              "flex items-center gap-1.5 px-1 text-[11px] text-primary overflow-hidden",
+              !isPlan && "invisible",
+            )}
+          >
+            <ClipboardList className="h-3.5 w-3.5 shrink-0" />
+            <span className="font-medium shrink-0">Plan mode</span>
+            <span className="text-muted-foreground truncate">
+              — agent will draft a plan; destructive tools are off
+              until you exit plan mode.
+            </span>
+          </div>
           <div className="flex items-end gap-2">
         <textarea
           ref={ref}

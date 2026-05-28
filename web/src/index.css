@@ -159,3 +159,21 @@ em {
   font-style: normal;
   font-weight: 500;
 }
+
+/* 1px horizontal divider that fades to transparent at both ends.
+   Used on the composer's top edge so the footer reads as a soft
+   demarcation instead of a hard wall-to-wall line. `color-mix` keeps
+   the divider color theme-aware (light → warm sand, dark → warm
+   charcoal) without needing a second CSS variable. */
+.faded-top-edge {
+  background-image: linear-gradient(
+    to right,
+    transparent 0%,
+    color-mix(in srgb, var(--border) 60%, transparent) 12%,
+    color-mix(in srgb, var(--border) 60%, transparent) 88%,
+    transparent 100%
+  );
+  background-size: 100% 1px;
+  background-position: top;
+  background-repeat: no-repeat;
+}
