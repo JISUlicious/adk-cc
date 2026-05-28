@@ -197,6 +197,12 @@ class DaytonaBackend(SandboxBackend):
         # `verify=False` disables verification entirely (dev/test only
         # — self-signed Daytona instances).
         self._verify: Any = ca_bundle if ca_bundle else verify_ssl
+        # Host-side workspace prefix captured from the WorkspaceRoot
+        # passed to ensure_workspace(). Used to translate host paths
+        # (`<workspace_root>/<tenant>/<user>/foo.py`) into Daytona's
+        # in-sandbox paths (`<self._workspace_path>/foo.py`). Same role
+        # as DockerBackend._workspace_abs_path.
+        self._host_workspace: Optional[str] = None
         # Daytona-side sandbox id. Set by `ensure_workspace()` on first
         # call; subsequent calls are no-ops.
         self._sandbox_id: Optional[str] = None
@@ -269,6 +275,31 @@ class DaytonaBackend(SandboxBackend):
     def _proxy_url(self, path: str) -> str:
         return f"{self._proxy_base}{path}"
 
+    def _to_sandbox_path(self, host_path: str) -> str:
+        """Translate a host-side workspace path to its in-sandbox equivalent.
+
+        Tools call read_text / write_text / exec with absolute host
+        paths under the WorkspaceRoot (`<root>/<tenant>/<user>/foo.py`).
+        Daytona's toolbox expects paths rooted at the sandbox's own
+        filesystem (`<self._workspace_path>/foo.py`, default
+        `/home/daytona/foo.py`). Same role as DockerBackend's
+        `_to_container_path`.
+
+        When the host path is the workspace prefix itself, it maps to
+        the in-sandbox workspace_path directly. When the path is
+        outside the workspace mount (e.g. `/etc/hostname`), pass it
+        through unchanged — the sandbox's own rootfs handles it.
+        """
+        if not self._host_workspace:
+            return host_path
+        ws = self._host_workspace
+        if host_path == ws:
+            return self._workspace_path
+        if host_path.startswith(ws + "/"):
+            tail = host_path[len(ws) + 1:]
+            return f"{self._workspace_path.rstrip('/')}/{tail}"
+        return host_path
+
     def _normalize_error(self, response: httpx.Response, op: str) -> None:
         """Map a Daytona error response to our exception model.
 
@@ -321,6 +352,10 @@ class DaytonaBackend(SandboxBackend):
         Serialized via `threading.Lock` so concurrent first-calls from
         different event loops don't each POST a new sandbox.
         """
+        # Always capture the host workspace prefix, even on re-entry —
+        # _to_sandbox_path() needs it for path translation, and the
+        # ws may differ between calls in test fixtures.
+        self._host_workspace = ws.abs_path.rstrip("/") if ws.abs_path else None
         if self._sandbox_id is not None:
             return
         with self._create_lock:
@@ -454,9 +489,12 @@ class DaytonaBackend(SandboxBackend):
         error-handling pattern.
         """
         await self.ensure_workspace_inferred()
+        # cwd from the tool layer is a host-side workspace path; translate
+        # to the in-sandbox equivalent. Falls back to the in-sandbox
+        # workspace root when the caller passed no cwd.
         body: dict[str, Any] = {
             "command": cmd,
-            "cwd": cwd or self._workspace_path,
+            "cwd": self._to_sandbox_path(cwd) if cwd else self._workspace_path,
         }
         if timeout_s and timeout_s > 0:
             # Daytona's spec calls this `timeout` (seconds); we mirror.
@@ -505,11 +543,12 @@ class DaytonaBackend(SandboxBackend):
     async def read_text(self, path: str, *, fs_read: FsReadConfig) -> str:
         self._check_allowed(path, fs_read, op="read_text")
         await self.ensure_workspace_inferred()
+        sandbox_path = self._to_sandbox_path(path)
         async with self._client() as client:
             try:
                 resp = await client.get(
                     self._proxy_url(f"/toolbox/{self._sandbox_id}/files/download"),
-                    params={"path": path},
+                    params={"path": sandbox_path},
                 )
             except httpx.HTTPError as e:
                 raise RuntimeError(
@@ -529,6 +568,7 @@ class DaytonaBackend(SandboxBackend):
     ) -> None:
         self._check_allowed(path, fs_write, op="write_text")
         await self.ensure_workspace_inferred()
+        sandbox_path = self._to_sandbox_path(path)
         # Multipart upload: `path` is a QUERY parameter (not a form
         # field — easy to get wrong; Daytona's OpenAPI marks it as
         # `in: query`). The form field name is `file`; the filename is
@@ -540,7 +580,7 @@ class DaytonaBackend(SandboxBackend):
             try:
                 resp = await client.post(
                     self._proxy_url(f"/toolbox/{self._sandbox_id}/files/upload"),
-                    params={"path": path},
+                    params={"path": sandbox_path},
                     files=files,
                 )
             except httpx.HTTPError as e:
