@@ -28,9 +28,20 @@ export function ThoughtBubble({
           <div className="text-[10px] uppercase tracking-wider mb-0.5 opacity-60">
             {author} · thinking
           </div>
-          {text}
+          {reflowThought(text)}
         </div>
       </div>
     </div>
   )
+}
+
+/** Some providers split a thought into one part per token and stick a
+ * lone `\n` between consecutive deltas, producing mid-word fragments
+ * like "Tet\nris\n works". This reflow drops lone newlines (preserving
+ * real paragraph breaks where the model emitted `\n\n`+), then
+ * collapses any double-spaces the cleanup leaves behind. */
+function reflowThought(text: string): string {
+  return text
+    .replace(/(?<!\n)\n(?!\n)/g, "")
+    .replace(/[ \t]{2,}/g, " ")
 }
