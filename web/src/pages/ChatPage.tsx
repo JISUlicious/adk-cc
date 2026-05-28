@@ -269,7 +269,7 @@ export function ChatPage() {
         refreshTick={refreshTick}
       />
       <div className="flex flex-1 flex-col min-w-0">
-        <header className="flex items-center justify-between px-6 py-3 relative z-10 shadow-[0_4px_12px_-6px_rgba(20,20,19,0.06)] dark:shadow-[0_4px_12px_-6px_rgba(0,0,0,0.35)]">
+        <header className="flex items-center justify-between px-6 py-3 relative z-10 shadow-[0_6px_16px_-4px_rgba(20,20,19,0.10)] dark:shadow-[0_6px_16px_-4px_rgba(0,0,0,0.50)]">
           <div className="flex items-center gap-3 min-w-0">
             <span className="text-lg font-semibold tracking-tight">
               adk-cc

@@ -39,7 +39,7 @@ export function TaskSidebar({ events }: { events: RunEvent[] }) {
     <aside
       className={cn(
         "bg-muted/40 flex flex-col transition-all relative z-10",
-        "shadow-[-4px_0_12px_-6px_rgba(20,20,19,0.08)] dark:shadow-[-4px_0_12px_-6px_rgba(0,0,0,0.4)]",
+        "shadow-[-6px_0_16px_-4px_rgba(20,20,19,0.13)] dark:shadow-[-6px_0_16px_-4px_rgba(0,0,0,0.55)]",
         collapsed ? "w-10" : "w-64",
       )}
     >
