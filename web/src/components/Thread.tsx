@@ -1,6 +1,5 @@
 import { type RunEvent } from "@/api/sse"
 import { MessageBubble } from "./MessageBubble"
-import { ToolCallCard } from "./ToolCallCard"
 import { ToolResponseCard } from "./ToolResponseCard"
 import {
   ConfirmationCard,
@@ -14,6 +13,7 @@ import { BashTerminalCard } from "./BashTerminalCard"
 import { FileEditCard } from "./FileEditCard"
 import { PlanCard } from "./PlanCard"
 import { ThoughtBubble } from "./ThoughtBubble"
+import { ToolCard } from "./ToolCard"
 
 /**
  * Renders the linear event stream as chat rows.
@@ -35,7 +35,9 @@ import { ThoughtBubble } from "./ThoughtBubble"
  *   - `ask_user_question`
  *       → AskUserQuestionCard
  *
- * Anything else: generic ToolCallCard / ToolResponseCard (two rows).
+ * Anything else: ToolCard — call+response merged with a status chip
+ *   (called / finished / error). Orphan function_responses (no matching
+ *   call) still fall through to ToolResponseCard.
  *
  * Partial events: the SSE stream emits incremental `partial: true`
  * events as the model streams tokens. We dedupe partials so only the
@@ -51,13 +53,23 @@ const ASK_QUESTION_NAME = "ask_user_question"
 // Tools whose call + response render as a single combined card. The
 // associated function_response row is suppressed (consumed into the
 // pair) to avoid a duplicate ToolResponseCard right below.
-const PAIRED_RENDERERS: Record<string, "bash" | "edit" | "write" | "plan_read" | "plan_write"> = {
+const PAIRED_RENDERERS: Record<
+  string,
+  "bash" | "edit" | "write" | "plan_read" | "plan_write"
+> = {
   run_bash: "bash",
   edit_file: "edit",
   write_file: "write",
   read_current_plan: "plan_read",
   write_plan: "plan_write",
 }
+
+/** Function-call names we intentionally drop from the thread.
+ * `_handback_to_coordinator` is the synthetic control-call ADK fires
+ * from `after_agent_callback` to keep the LLM flow looping (see
+ * `adk_cc/agent.py::_force_coordinator_continuation`). It never gets
+ * a response and isn't user-relevant. */
+const HIDDEN_TOOL_NAMES = new Set(["_handback_to_coordinator"])
 
 export function Thread({
   events,
@@ -131,53 +143,9 @@ function Row({
       )
     case "thought":
       return <ThoughtBubble author={row.author} text={row.text} />
-    case "function_call": {
-      const isPending = pendingCallIds.has(row.callId)
-      // Interactive widgets first — they only render while pending.
-      if (isPending && CONFIRMATION_NAMES.has(row.name)) {
-        // ADK's request_confirmation tool wraps the payload under
-        // `toolConfirmation.payload` (camelCase via Pydantic
-        // alias_generator). ConfirmationFormUiPlugin keeps the same
-        // shape when it rewrites the function name from
-        // adk_request_confirmation → adk_cc_confirmation_form, so
-        // both names land at the same path. Be defensive in case a
-        // future plugin variant flattens to args.payload directly.
-        const payload = extractConfirmPayload(row.args)
-        if (payload) {
-          return (
-            <ConfirmationCard
-              payload={payload}
-              disabled={submitDisabled}
-              onSubmit={(resp) =>
-                onSubmitFunctionResponse(row.callId, row.name, resp)
-              }
-            />
-          )
-        }
-      }
-      if (isPending && row.name === ASK_QUESTION_NAME) {
-        const args = row.args as AskUserQuestionArgsDef | undefined
-        if (args && Array.isArray(args.questions)) {
-          return (
-            <AskUserQuestionCard
-              args={args}
-              disabled={submitDisabled}
-              onSubmit={(resp) =>
-                onSubmitFunctionResponse(row.callId, row.name, resp)
-              }
-            />
-          )
-        }
-      }
-      return (
-        <ToolCallCard
-          callId={row.callId}
-          name={row.name}
-          args={row.args}
-        />
-      )
-    }
     case "function_response":
+      // Orphan response (no matching function_call in the event log)
+      // — rare, falls through to the generic response card.
       return (
         <ToolResponseCard
           callId={row.callId}
@@ -186,7 +154,47 @@ function Row({
         />
       )
     case "tool_pair": {
-      const { pairKind, callId, args, response } = row
+      const { pairKind, callId, name, args, response } = row
+      const isPending = pendingCallIds.has(callId)
+
+      // Interactive widgets while pending take precedence over the
+      // generic ToolCard. Once a response lands, the call+response
+      // pair falls through to the generic card so the user can see
+      // their answered question/confirmation as resolved history.
+      if (isPending && CONFIRMATION_NAMES.has(name)) {
+        // ADK wraps the payload under `toolConfirmation.payload`
+        // (camelCase via Pydantic alias_generator).
+        // ConfirmationFormUiPlugin keeps the same shape when it
+        // rewrites the function name. extractConfirmPayload also
+        // tolerates a flat `args.payload` for future plugin variants.
+        const payload = extractConfirmPayload(args)
+        if (payload) {
+          return (
+            <ConfirmationCard
+              payload={payload}
+              disabled={submitDisabled}
+              onSubmit={(resp) =>
+                onSubmitFunctionResponse(callId, name, resp)
+              }
+            />
+          )
+        }
+      }
+      if (isPending && name === ASK_QUESTION_NAME) {
+        const askArgs = args as AskUserQuestionArgsDef | undefined
+        if (askArgs && Array.isArray(askArgs.questions)) {
+          return (
+            <AskUserQuestionCard
+              args={askArgs}
+              disabled={submitDisabled}
+              onSubmit={(resp) =>
+                onSubmitFunctionResponse(callId, name, resp)
+              }
+            />
+          )
+        }
+      }
+
       switch (pairKind) {
         case "bash":
           return <BashTerminalCard callId={callId} args={args} response={response} />
@@ -221,6 +229,15 @@ function Row({
           return (
             <PlanCard
               op="write"
+              callId={callId}
+              args={args}
+              response={response}
+            />
+          )
+        case "generic":
+          return (
+            <ToolCard
+              name={name}
               callId={callId}
               args={args}
               response={response}
@@ -285,13 +302,6 @@ type ChatRow =
       text: string
     }
   | {
-      kind: "function_call"
-      eventId: string
-      callId: string
-      name: string
-      args: unknown
-    }
-  | {
       kind: "function_response"
       eventId: string
       callId: string
@@ -302,8 +312,18 @@ type ChatRow =
       kind: "tool_pair"
       eventId: string
       callId: string
-      /** Specialized renderer key — drives which card is used. */
-      pairKind: "bash" | "edit" | "write" | "plan_read" | "plan_write"
+      /** Tool function name — carried even into the generic case so
+       * the ToolCard header can print it. */
+      name: string
+      /** Specialized renderer key — drives which card is used.
+       * `"generic"` falls through to ToolCard. */
+      pairKind:
+        | "bash"
+        | "edit"
+        | "write"
+        | "plan_read"
+        | "plan_write"
+        | "generic"
       args: unknown
       /** null while the response hasn't landed yet. */
       response: unknown
@@ -456,27 +476,24 @@ function flattenEvents(
       } else if (part.functionCall) {
         const callId = part.functionCall.id ?? ""
         const name = part.functionCall.name ?? "(unnamed)"
-        const pairKind = PAIRED_RENDERERS[name]
-        if (pairKind) {
-          const matched = callId ? responsesByCallId.get(callId) : undefined
-          rows.push({
-            kind: "tool_pair",
-            eventId,
-            callId,
-            pairKind,
-            args: part.functionCall.args,
-            response: matched ? matched.response : null,
-          })
+        if (HIDDEN_TOOL_NAMES.has(name)) {
+          // Skip the row AND eat the (rare) matching response so we
+          // don't leave an orphan ToolResponseCard below.
           if (callId) consumedResponseIds.add(callId)
-        } else {
-          rows.push({
-            kind: "function_call",
-            eventId,
-            callId,
-            name,
-            args: part.functionCall.args,
-          })
+          continue
         }
+        const pairKind = PAIRED_RENDERERS[name] ?? "generic"
+        const matched = callId ? responsesByCallId.get(callId) : undefined
+        rows.push({
+          kind: "tool_pair",
+          eventId,
+          callId,
+          name,
+          pairKind,
+          args: part.functionCall.args,
+          response: matched ? matched.response : null,
+        })
+        if (callId) consumedResponseIds.add(callId)
       } else if (part.functionResponse) {
         const callId = part.functionResponse.id ?? ""
         if (consumedResponseIds.has(callId)) continue
