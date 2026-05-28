@@ -32,25 +32,25 @@ export function ThoughtBubble({
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="max-w-[80%] flex items-start gap-2 border-l-2 border-border pl-3 pr-2 py-1 text-xs text-muted-foreground/70 hover:text-muted-foreground hover:border-muted-foreground/50 transition-colors text-left w-full"
+        className="max-w-[80%] flex items-start gap-2 border-l-2 border-border pl-3 pr-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors text-left w-full"
       >
         {open ? (
-          <ChevronDown className="h-3 w-3 mt-0.5 shrink-0 opacity-70" />
+          <ChevronDown className="h-3 w-3 mt-0.5 shrink-0" />
         ) : (
-          <ChevronRight className="h-3 w-3 mt-0.5 shrink-0 opacity-70" />
+          <ChevronRight className="h-3 w-3 mt-0.5 shrink-0" />
         )}
-        <Sparkles className="h-3 w-3 mt-0.5 shrink-0 opacity-70" />
+        <Sparkles className="h-3 w-3 mt-0.5 shrink-0" />
         <div className="min-w-0 flex-1">
           {open ? (
             <>
-              <div className="text-[10px] uppercase tracking-wider mb-0.5 opacity-60">
+              <div className="text-[10px] uppercase tracking-wider mb-0.5 opacity-80">
                 {author} · thinking
               </div>
               <div className="whitespace-pre-wrap">{reflowed}</div>
             </>
           ) : (
             <div className="truncate">
-              <span className="text-[10px] uppercase tracking-wider opacity-60 mr-2">
+              <span className="text-[10px] uppercase tracking-wider opacity-80 mr-2">
                 {author} · thinking
               </span>
               {preview}
