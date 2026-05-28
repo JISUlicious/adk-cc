@@ -1,7 +1,6 @@
 import { useRef, useState, useMemo, type KeyboardEvent } from "react"
 import { Send, Square, ClipboardList } from "lucide-react"
 import { Button } from "./ui/button"
-import { cn } from "@/lib/utils"
 import {
   SlashCommandMenu,
   filterSlash,
@@ -120,8 +119,12 @@ export function Composer({
   const isPlan = mode === "plan"
 
   return (
-    <div className="border-t bg-background px-4 py-3">
-      <div className="max-w-3xl mx-auto relative">
+    // Composer fills the footer width — no max-w cap, so the input
+    // gets the whole section. No border / no frame around the
+    // textarea or the mode indicator; visual definition comes from
+    // the ivory input surface lifted above the parchment footer.
+    <div className="border-t bg-background px-6 py-3">
+      <div className="relative space-y-1">
         {slashOpen && (
           <div className="absolute bottom-full left-0 right-0 mb-2">
             <SlashCommandMenu
@@ -131,68 +134,57 @@ export function Composer({
             />
           </div>
         )}
-        {/* Plan-mode decoration frames just the input — the rest of
-            the footer stays neutral so the indicator doesn't sprawl
-            across the full window width. */}
-        <div
-          className={cn(
-            "transition-colors",
-            isPlan &&
-              "rounded-md border border-primary/50 bg-brand-tint p-2 space-y-2",
-          )}
-        >
-          {isPlan && (
-            <div className="flex items-center gap-1.5 px-1 text-[11px] text-primary">
-              <ClipboardList className="h-3.5 w-3.5" />
-              <span className="font-medium">Plan mode</span>
-              <span className="text-muted-foreground">
-                — agent will draft a plan; destructive tools are off
-                until you exit plan mode.
-              </span>
-            </div>
-          )}
-          <div className="flex items-end gap-2">
-        <textarea
-          ref={ref}
-          value={value}
-          onChange={(e) => {
-            setValue(e.target.value)
-            setSlashCursor(0)
-          }}
-          onKeyDown={handleKey}
-          placeholder={
-            disabled
-              ? "Pick or create a session to start chatting"
-              : isPlan
-                ? "Plan mode — describe what you want the agent to plan"
-                : "Message the agent — Enter to send, type / for commands"
-          }
-          disabled={disabled}
-          rows={2}
-          className="flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-        />
-        {isStreaming ? (
-          <Button
-            type="button"
-            variant="destructive"
-            size="icon"
-            onClick={onAbort}
-            title="Stop the streaming response"
-          >
-            <Square className="h-4 w-4" />
-          </Button>
-        ) : (
-          <Button
-            type="button"
-            size="icon"
-            onClick={submit}
-            disabled={disabled || !value.trim()}
-            title="Send (Enter)"
-          >
-            <Send className="h-4 w-4" />
-          </Button>
-        )}
+        {isPlan && (
+          <div className="flex items-center gap-1.5 text-[11px] text-primary">
+            <ClipboardList className="h-3.5 w-3.5" />
+            <span className="font-medium">Plan mode</span>
+            <span className="text-muted-foreground">
+              — agent will draft a plan; destructive tools are off
+              until you exit plan mode.
+            </span>
           </div>
+        )}
+        <div className="flex items-end gap-2">
+          <textarea
+            ref={ref}
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value)
+              setSlashCursor(0)
+            }}
+            onKeyDown={handleKey}
+            placeholder={
+              disabled
+                ? "Pick or create a session to start chatting"
+                : isPlan
+                  ? "Plan mode — describe what you want the agent to plan"
+                  : "Message the agent — Enter to send, type / for commands"
+            }
+            disabled={disabled}
+            rows={2}
+            className="flex-1 resize-none rounded-md border-0 bg-card px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          />
+          {isStreaming ? (
+            <Button
+              type="button"
+              variant="destructive"
+              size="icon"
+              onClick={onAbort}
+              title="Stop the streaming response"
+            >
+              <Square className="h-4 w-4" />
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              size="icon"
+              onClick={submit}
+              disabled={disabled || !value.trim()}
+              title="Send (Enter)"
+            >
+              <Send className="h-4 w-4" />
+            </Button>
+          )}
         </div>
       </div>
     </div>
