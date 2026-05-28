@@ -68,9 +68,11 @@ from .plugins import (
     ContextGuardPlugin,
     PermissionPlugin,
     PlanModeReminderPlugin,
+    QuotaPlugin,
     TaskReminderPlugin,
     ToolCallValidatorPlugin,
 )
+from .service.tenancy import TenancyPlugin
 from .tools import (
     AskUserQuestionTool,
     BashTool,
@@ -138,7 +140,18 @@ MODEL = LiteLlm(
 PERMISSION_MODE = PermissionMode(
     os.environ.get("ADK_CC_PERMISSION_MODE", PermissionMode.BYPASS_PERMISSIONS.value)
 )
-SETTINGS = SettingsHierarchy.empty()  # rules added by operators / Stage G loader
+# Permission rules: honor ADK_CC_PERMISSIONS_YAML if set. Falls back to
+# empty hierarchy so operators can still drive everything through
+# PERMISSION_MODE alone. Loading here (rather than in the FastAPI
+# factory) means `adk web .` and the FastAPI deployment both pick up
+# the YAML uniformly.
+_permissions_yaml = os.environ.get("ADK_CC_PERMISSIONS_YAML")
+if _permissions_yaml:
+    from .config import load_settings_from_yaml as _load_settings_from_yaml
+
+    SETTINGS = _load_settings_from_yaml(_permissions_yaml)
+else:
+    SETTINGS = SettingsHierarchy.empty()
 
 
 # ---------- shared tool instances ----------
@@ -680,7 +693,25 @@ _app_kwargs = dict(
     # written by then.
     plugins=[
         AuditPlugin(),
+        # Tenancy seeds state["temp:tenant_context"] / sandbox_workspace /
+        # sandbox_backend before any tool fires AND calls
+        # backend.ensure_workspace(ws) so remote-API backends (Daytona,
+        # SandboxService) have a sandbox to talk to. Must sit before
+        # PermissionPlugin so tenant context is in state when rules
+        # evaluate. Reads ADK_CC_WORKSPACE_ROOT from env (or CWD when
+        # unset for dev). Safe in single-user dev — degrades to
+        # tenant_id="local", user_id="local".
+        TenancyPlugin(
+            default_workspace_root=os.environ.get("ADK_CC_WORKSPACE_ROOT")
+        ),
         PermissionPlugin(SETTINGS, default_mode=PERMISSION_MODE),
+        # Per-tenant tool-call rate cap. Runs after Permission so a
+        # denied call doesn't count against the quota.
+        QuotaPlugin(
+            calls_per_minute=int(
+                os.environ.get("ADK_CC_QUOTA_PER_MINUTE", "120")
+            )
+        ),
         # Reminders run on before_model_callback, lifecycle independent of
         # the before_tool chain — order relative to others doesn't matter.
         # Pass the env-set default to every plugin that reads
