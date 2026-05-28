@@ -378,25 +378,117 @@ class DaytonaBackend(SandboxBackend):
                     json=payload,
                     headers={"Idempotency-Key": self._idem_key()},
                 )
-                self._normalize_error(resp, op="create_sandbox")
-                body = resp.json()
-                sandbox_id = body.get("id")
-                if not sandbox_id:
-                    raise RuntimeError(
-                        f"daytona: create_sandbox response missing `id`: {body!r}"
+                if resp.status_code == 409:
+                    # A sandbox with this name already exists — typical
+                    # case is a server restart where Daytona kept the
+                    # sandbox alive (autodelete hasn't fired) but our
+                    # in-process `_sandbox_id` was reset. Adopt the
+                    # existing one instead of failing the session.
+                    sandbox_id = await self._find_sandbox_id_by_name(
+                        client, payload["name"]
                     )
-                log.info(
-                    "daytona: created sandbox %s for adk-cc session %s "
-                    "(tenant=%s, snapshot=%s, state=%s)",
-                    sandbox_id,
-                    self._session_id,
-                    self._tenant_id,
-                    body.get("snapshot"),
-                    body.get("state"),
-                )
+                    if not sandbox_id:
+                        # The name conflict resolved nothing — surface
+                        # the original 409 with its body.
+                        self._normalize_error(resp, op="create_sandbox")
+                    log.info(
+                        "daytona: adopted existing sandbox %s for adk-cc "
+                        "session %s (tenant=%s) after 409",
+                        sandbox_id,
+                        self._session_id,
+                        self._tenant_id,
+                    )
+                    # The sandbox might be stopped (autostop fired). Best-
+                    # effort wake it; ignore errors so an already-running
+                    # one passes through.
+                    await self._wake_if_stopped(client, sandbox_id)
+                else:
+                    self._normalize_error(resp, op="create_sandbox")
+                    body = resp.json()
+                    sandbox_id = body.get("id")
+                    if not sandbox_id:
+                        raise RuntimeError(
+                            f"daytona: create_sandbox response missing `id`: {body!r}"
+                        )
+                    log.info(
+                        "daytona: created sandbox %s for adk-cc session %s "
+                        "(tenant=%s, snapshot=%s, state=%s)",
+                        sandbox_id,
+                        self._session_id,
+                        self._tenant_id,
+                        body.get("snapshot"),
+                        body.get("state"),
+                    )
                 # Poll the same client (avoid reopening the connection).
                 await self._poll_until_started(client, sandbox_id)
             self._sandbox_id = sandbox_id
+
+    async def _find_sandbox_id_by_name(
+        self, client: httpx.AsyncClient, name: str
+    ) -> Optional[str]:
+        """List sandboxes and return the id of the one matching `name`.
+
+        Used on 409 from create_sandbox to recover the existing id when
+        our in-memory cache was lost (server restart). Returns None if
+        Daytona doesn't return a matching record — caller should then
+        surface the original 409 rather than silently spinning."""
+        try:
+            resp = await client.get(self._api_url("/api/sandbox"))
+        except httpx.HTTPError:
+            return None
+        if resp.status_code >= 400:
+            return None
+        try:
+            items = resp.json()
+        except Exception:
+            return None
+        if not isinstance(items, list):
+            return None
+        for item in items:
+            if isinstance(item, dict) and item.get("name") == name:
+                sid = item.get("id")
+                if isinstance(sid, str) and sid:
+                    return sid
+        return None
+
+    async def _wake_if_stopped(
+        self, client: httpx.AsyncClient, sandbox_id: str
+    ) -> None:
+        """POST /api/sandbox/{id}/start when the sandbox is stopped.
+
+        Daytona auto-stops idle sandboxes after `autoStopInterval`
+        minutes; an adopted sandbox is usually in `stopped` state when
+        we recover it after a restart. Best-effort: failures here are
+        logged but don't raise — the subsequent poll-until-started
+        either succeeds (if the start kicked in) or surfaces a clearer
+        terminal-state error."""
+        try:
+            resp = await client.get(self._api_url(f"/api/sandbox/{sandbox_id}"))
+            if resp.status_code >= 400:
+                return
+            state = (resp.json() or {}).get("state")
+        except Exception:
+            return
+        if state == "started":
+            return
+        try:
+            start_resp = await client.post(
+                self._api_url(f"/api/sandbox/{sandbox_id}/start"),
+                headers={"Idempotency-Key": self._idem_key()},
+            )
+            if start_resp.status_code >= 400:
+                log.warning(
+                    "daytona: wake start returned %s for sandbox %s: %s",
+                    start_resp.status_code,
+                    sandbox_id,
+                    start_resp.text[:300],
+                )
+        except httpx.HTTPError as e:
+            log.warning(
+                "daytona: wake start transport error for sandbox %s: %s",
+                sandbox_id,
+                e,
+            )
 
     async def _poll_until_started(
         self, client: httpx.AsyncClient, sandbox_id: str
