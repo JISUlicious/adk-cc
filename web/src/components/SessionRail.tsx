@@ -109,8 +109,8 @@ export function SessionRail({
   }
 
   return (
-    <aside className="flex w-72 flex-col border-r bg-muted/40">
-      <div className="border-b px-4 py-3">
+    <aside className="flex w-72 flex-col bg-muted/40 border-r border-border/60">
+      <div className="px-4 py-3">
         <label className="text-xs font-medium text-muted-foreground">
           Agent
         </label>
@@ -128,7 +128,7 @@ export function SessionRail({
           ))}
         </select>
       </div>
-      <div className="flex items-center justify-between px-4 py-3 border-b">
+      <div className="flex items-center justify-between px-4 py-3">
         <span className="text-xs font-medium text-muted-foreground">
           Sessions
         </span>

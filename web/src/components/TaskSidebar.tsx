@@ -36,13 +36,13 @@ export function TaskSidebar({ events }: { events: RunEvent[] }) {
   return (
     <aside
       className={cn(
-        "border-l bg-muted/40 flex flex-col transition-all",
+        "bg-muted/40 flex flex-col transition-all border-l border-border/60",
         collapsed ? "w-10" : "w-64",
       )}
     >
       <button
         type="button"
-        className="flex items-center gap-2 border-b px-3 py-3 text-left hover:bg-accent"
+        className="flex items-center gap-2 px-3 py-3 text-left hover:bg-accent"
         onClick={() => setCollapsed((c) => !c)}
         title={collapsed ? "Expand tasks" : "Collapse tasks"}
       >
@@ -66,7 +66,7 @@ export function TaskSidebar({ events }: { events: RunEvent[] }) {
           {tasks.map((t) => (
             <li
               key={t.id}
-              className="flex items-start gap-2 px-3 py-2 border-b border-border/50"
+              className="flex items-start gap-2 px-3 py-2"
             >
               <StatusIcon status={t.status} />
               <div className="min-w-0 flex-1">

@@ -1,6 +1,5 @@
 import { type RunEvent } from "@/api/sse"
 import { MessageBubble } from "./MessageBubble"
-import { ToolCallCard } from "./ToolCallCard"
 import { ToolResponseCard } from "./ToolResponseCard"
 import {
   ConfirmationCard,
@@ -13,6 +12,8 @@ import {
 import { BashTerminalCard } from "./BashTerminalCard"
 import { FileEditCard } from "./FileEditCard"
 import { PlanCard } from "./PlanCard"
+import { ThoughtBubble } from "./ThoughtBubble"
+import { ToolCard } from "./ToolCard"
 
 /**
  * Renders the linear event stream as chat rows.
@@ -34,7 +35,9 @@ import { PlanCard } from "./PlanCard"
  *   - `ask_user_question`
  *       → AskUserQuestionCard
  *
- * Anything else: generic ToolCallCard / ToolResponseCard (two rows).
+ * Anything else: ToolCard — call+response merged with a status chip
+ *   (called / finished / error). Orphan function_responses (no matching
+ *   call) still fall through to ToolResponseCard.
  *
  * Partial events: the SSE stream emits incremental `partial: true`
  * events as the model streams tokens. We dedupe partials so only the
@@ -50,13 +53,23 @@ const ASK_QUESTION_NAME = "ask_user_question"
 // Tools whose call + response render as a single combined card. The
 // associated function_response row is suppressed (consumed into the
 // pair) to avoid a duplicate ToolResponseCard right below.
-const PAIRED_RENDERERS: Record<string, "bash" | "edit" | "write" | "plan_read" | "plan_write"> = {
+const PAIRED_RENDERERS: Record<
+  string,
+  "bash" | "edit" | "write" | "plan_read" | "plan_write"
+> = {
   run_bash: "bash",
   edit_file: "edit",
   write_file: "write",
   read_current_plan: "plan_read",
   write_plan: "plan_write",
 }
+
+/** Function-call names we intentionally drop from the thread.
+ * `_handback_to_coordinator` is the synthetic control-call ADK fires
+ * from `after_agent_callback` to keep the LLM flow looping (see
+ * `adk_cc/agent.py::_force_coordinator_continuation`). It never gets
+ * a response and isn't user-relevant. */
+const HIDDEN_TOOL_NAMES = new Set(["_handback_to_coordinator"])
 
 export function Thread({
   events,
@@ -74,7 +87,9 @@ export function Thread({
   const deduped = dedupePartials(events)
   const pendingCallIds = collectPendingCallIds(deduped)
   const responsesByCallId = collectResponses(deduped)
-  const rows = flattenEvents(deduped, responsesByCallId)
+  const rows = mergeAdjacentThoughts(
+    flattenEvents(deduped, responsesByCallId),
+  )
 
   return (
     <div className="flex flex-col gap-3 px-6 py-4">
@@ -126,53 +141,11 @@ function Row({
           isPartial={row.isPartial}
         />
       )
-    case "function_call": {
-      const isPending = pendingCallIds.has(row.callId)
-      // Interactive widgets first — they only render while pending.
-      if (isPending && CONFIRMATION_NAMES.has(row.name)) {
-        // ADK's request_confirmation tool wraps the payload under
-        // `toolConfirmation.payload` (camelCase via Pydantic
-        // alias_generator). ConfirmationFormUiPlugin keeps the same
-        // shape when it rewrites the function name from
-        // adk_request_confirmation → adk_cc_confirmation_form, so
-        // both names land at the same path. Be defensive in case a
-        // future plugin variant flattens to args.payload directly.
-        const payload = extractConfirmPayload(row.args)
-        if (payload) {
-          return (
-            <ConfirmationCard
-              payload={payload}
-              disabled={submitDisabled}
-              onSubmit={(resp) =>
-                onSubmitFunctionResponse(row.callId, row.name, resp)
-              }
-            />
-          )
-        }
-      }
-      if (isPending && row.name === ASK_QUESTION_NAME) {
-        const args = row.args as AskUserQuestionArgsDef | undefined
-        if (args && Array.isArray(args.questions)) {
-          return (
-            <AskUserQuestionCard
-              args={args}
-              disabled={submitDisabled}
-              onSubmit={(resp) =>
-                onSubmitFunctionResponse(row.callId, row.name, resp)
-              }
-            />
-          )
-        }
-      }
-      return (
-        <ToolCallCard
-          callId={row.callId}
-          name={row.name}
-          args={row.args}
-        />
-      )
-    }
+    case "thought":
+      return <ThoughtBubble author={row.author} text={row.text} />
     case "function_response":
+      // Orphan response (no matching function_call in the event log)
+      // — rare, falls through to the generic response card.
       return (
         <ToolResponseCard
           callId={row.callId}
@@ -181,7 +154,47 @@ function Row({
         />
       )
     case "tool_pair": {
-      const { pairKind, callId, args, response } = row
+      const { pairKind, callId, name, args, response } = row
+      const isPending = pendingCallIds.has(callId)
+
+      // Interactive widgets while pending take precedence over the
+      // generic ToolCard. Once a response lands, the call+response
+      // pair falls through to the generic card so the user can see
+      // their answered question/confirmation as resolved history.
+      if (isPending && CONFIRMATION_NAMES.has(name)) {
+        // ADK wraps the payload under `toolConfirmation.payload`
+        // (camelCase via Pydantic alias_generator).
+        // ConfirmationFormUiPlugin keeps the same shape when it
+        // rewrites the function name. extractConfirmPayload also
+        // tolerates a flat `args.payload` for future plugin variants.
+        const payload = extractConfirmPayload(args)
+        if (payload) {
+          return (
+            <ConfirmationCard
+              payload={payload}
+              disabled={submitDisabled}
+              onSubmit={(resp) =>
+                onSubmitFunctionResponse(callId, name, resp)
+              }
+            />
+          )
+        }
+      }
+      if (isPending && name === ASK_QUESTION_NAME) {
+        const askArgs = args as AskUserQuestionArgsDef | undefined
+        if (askArgs && Array.isArray(askArgs.questions)) {
+          return (
+            <AskUserQuestionCard
+              args={askArgs}
+              disabled={submitDisabled}
+              onSubmit={(resp) =>
+                onSubmitFunctionResponse(callId, name, resp)
+              }
+            />
+          )
+        }
+      }
+
       switch (pairKind) {
         case "bash":
           return <BashTerminalCard callId={callId} args={args} response={response} />
@@ -221,9 +234,45 @@ function Row({
               response={response}
             />
           )
+        case "generic":
+          return (
+            <ToolCard
+              name={name}
+              callId={callId}
+              args={args}
+              response={response}
+            />
+          )
       }
     }
   }
+}
+
+/** Collapse adjacent thought rows from the same author into a single
+ * row. Some providers split internal thinking across multiple
+ * non-partial events (one part per event, or several short parts in
+ * one event); rendered as-is they show up as a stack of tiny faded
+ * bubbles. Merging keeps the thought as one coherent block — same
+ * cadence as Claude's thinking summaries. */
+function mergeAdjacentThoughts(rows: ChatRow[]): ChatRow[] {
+  const merged: ChatRow[] = []
+  for (const row of rows) {
+    const prev = merged[merged.length - 1]
+    if (
+      row.kind === "thought" &&
+      prev &&
+      prev.kind === "thought" &&
+      prev.author === row.author
+    ) {
+      merged[merged.length - 1] = {
+        ...prev,
+        text: prev.text + row.text,
+      }
+      continue
+    }
+    merged.push(row)
+  }
+  return merged
 }
 
 function extractConfirmPayload(args: unknown): ConfirmPayload | null {
@@ -247,11 +296,10 @@ type ChatRow =
       isPartial: boolean
     }
   | {
-      kind: "function_call"
+      kind: "thought"
       eventId: string
-      callId: string
-      name: string
-      args: unknown
+      author: string
+      text: string
     }
   | {
       kind: "function_response"
@@ -264,8 +312,18 @@ type ChatRow =
       kind: "tool_pair"
       eventId: string
       callId: string
-      /** Specialized renderer key — drives which card is used. */
-      pairKind: "bash" | "edit" | "write" | "plan_read" | "plan_write"
+      /** Tool function name — carried even into the generic case so
+       * the ToolCard header can print it. */
+      name: string
+      /** Specialized renderer key — drives which card is used.
+       * `"generic"` falls through to ToolCard. */
+      pairKind:
+        | "bash"
+        | "edit"
+        | "write"
+        | "plan_read"
+        | "plan_write"
+        | "generic"
       args: unknown
       /** null while the response hasn't landed yet. */
       response: unknown
@@ -276,50 +334,63 @@ function dedupePartials(events: RunEvent[]): RunEvent[] {
   // each `partial: true` event carries a DELTA chunk
   // ("The weather", " in Tokyo is", " sunny."), then one final
   // `partial: false` event arrives containing the full accumulated
-  // content. So we accumulate text per (invocation_id, author) group
-  // for as long as partials keep arriving, and replace the accumulated
-  // bubble with the final non-partial when it lands.
+  // content. So we accumulate per (invocation_id, author) group for
+  // as long as partials keep arriving, and replace the accumulated
+  // event with the final non-partial when it lands.
+  //
+  // We accumulate TWO streams in parallel: visible text and thought
+  // text. Some providers stream thought deltas the same way they
+  // stream body deltas, so dropping them would lose the model's
+  // reasoning entirely. The thought stream surfaces as a separate
+  // part (rendered by ThoughtBubble); the body text stream surfaces
+  // as a MessageBubble.
   const out: RunEvent[] = []
-  const open = new Map<string, { idx: number; text: string }>()
+  const open = new Map<string, { idx: number; text: string; thought: string }>()
 
   for (const e of events) {
     const key = `${e.invocation_id ?? ""}::${e.author ?? ""}`
 
     if (e.partial) {
-      // Only accumulate visible text — thought parts get filtered so
-      // the streaming bubble doesn't grow with internal-thinking noise.
-      const deltaText = (e.content?.parts ?? [])
-        .filter((p) => !p.thought)
-        .map((p) => (typeof p.text === "string" ? p.text : ""))
-        .join("")
+      let deltaText = ""
+      let deltaThought = ""
+      for (const part of e.content?.parts ?? []) {
+        if (typeof part.text !== "string") continue
+        if (part.thought) deltaThought += part.text
+        else deltaText += part.text
+      }
+
       const entry = open.get(key)
       if (entry) {
         entry.text += deltaText
-        // Replace the stored event's text part with the accumulated
-        // value so the rendered bubble grows instead of flicker-replacing.
-        out[entry.idx] = {
-          ...e,
-          content: { ...e.content, parts: [{ text: entry.text }] },
-        }
+        entry.thought += deltaThought
       } else {
-        open.set(key, { idx: out.length, text: deltaText })
-        out.push({
-          ...e,
-          content: { ...e.content, parts: [{ text: deltaText }] },
-        })
+        const created = { idx: out.length, text: deltaText, thought: deltaThought }
+        open.set(key, created)
+        out.push(e) // placeholder; rewritten below
+      }
+      const cur = open.get(key)!
+      out[cur.idx] = {
+        ...e,
+        content: {
+          ...e.content,
+          parts: [
+            ...(cur.thought ? [{ text: cur.thought, thought: true }] : []),
+            ...(cur.text ? [{ text: cur.text }] : []),
+          ],
+        },
       }
       continue
     }
 
-    // Non-partial. If this finalizes an open partial group, swap the
-    // accumulated bubble for the final event (which per ADK spec
-    // already contains the full text + any tool calls). Otherwise it
-    // stands on its own.
+    // Non-partial. If this finalizes an open partial group AND carries
+    // visible text/thought of its own, swap the accumulated event for
+    // the final one (per ADK spec it already contains the full body +
+    // any tool calls + the consolidated thought). Otherwise pass through.
     const entry = open.get(key)
-    const hasText = (e.content?.parts ?? []).some(
-      (p) => !p.thought && typeof p.text === "string" && p.text.trim().length > 0,
+    const hasMeaningfulText = (e.content?.parts ?? []).some(
+      (p) => typeof p.text === "string" && p.text.trim().length > 0,
     )
-    if (entry && hasText) {
+    if (entry && hasMeaningfulText) {
       out[entry.idx] = e
       open.delete(key)
     } else {
@@ -377,11 +448,22 @@ function flattenEvents(
     const author = e.author ?? "agent"
     const parts = e.content?.parts ?? []
     for (const part of parts) {
-      // Skip thought parts — those are the model's internal thinking
-      // output (Gemini thought summaries, etc.), not user-visible
-      // chat content. Surfacing them would create bubbles that look
-      // like assistant turns but carry no useful text.
-      if (part.thought) continue
+      // Thought parts (Gemini thought summaries, etc.) render as
+      // faded ThoughtBubbles so the reader can see the model's
+      // internal reasoning without confusing it with user-facing
+      // reply text. Partials are still filtered upstream in
+      // dedupePartials — only consolidated thoughts surface here.
+      if (part.thought) {
+        if (typeof part.text === "string" && part.text.trim().length > 0) {
+          rows.push({
+            kind: "thought",
+            eventId,
+            author,
+            text: part.text,
+          })
+        }
+        continue
+      }
 
       if (typeof part.text === "string" && part.text.trim().length > 0) {
         rows.push({
@@ -394,27 +476,24 @@ function flattenEvents(
       } else if (part.functionCall) {
         const callId = part.functionCall.id ?? ""
         const name = part.functionCall.name ?? "(unnamed)"
-        const pairKind = PAIRED_RENDERERS[name]
-        if (pairKind) {
-          const matched = callId ? responsesByCallId.get(callId) : undefined
-          rows.push({
-            kind: "tool_pair",
-            eventId,
-            callId,
-            pairKind,
-            args: part.functionCall.args,
-            response: matched ? matched.response : null,
-          })
+        if (HIDDEN_TOOL_NAMES.has(name)) {
+          // Skip the row AND eat the (rare) matching response so we
+          // don't leave an orphan ToolResponseCard below.
           if (callId) consumedResponseIds.add(callId)
-        } else {
-          rows.push({
-            kind: "function_call",
-            eventId,
-            callId,
-            name,
-            args: part.functionCall.args,
-          })
+          continue
         }
+        const pairKind = PAIRED_RENDERERS[name] ?? "generic"
+        const matched = callId ? responsesByCallId.get(callId) : undefined
+        rows.push({
+          kind: "tool_pair",
+          eventId,
+          callId,
+          name,
+          pairKind,
+          args: part.functionCall.args,
+          response: matched ? matched.response : null,
+        })
+        if (callId) consumedResponseIds.add(callId)
       } else if (part.functionResponse) {
         const callId = part.functionResponse.id ?? ""
         if (consumedResponseIds.has(callId)) continue

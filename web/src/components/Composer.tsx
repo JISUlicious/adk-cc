@@ -120,15 +120,8 @@ export function Composer({
   const isPlan = mode === "plan"
 
   return (
-    <div
-      className={cn(
-        "border-t bg-background px-4 py-3",
-        // Plan mode uses kami's brand-tint surface — the single accent
-        // already carries the "different mode" signal; no second hue.
-        isPlan && "border-t-primary bg-brand-tint",
-      )}
-    >
-      <div className="max-w-3xl mx-auto space-y-2 relative">
+    <div className="px-4 py-3 faded-top-edge">
+      <div className="max-w-3xl mx-auto relative">
         {slashOpen && (
           <div className="absolute bottom-full left-0 right-0 mb-2">
             <SlashCommandMenu
@@ -138,17 +131,32 @@ export function Composer({
             />
           </div>
         )}
-        {isPlan && (
-          <div className="flex items-center gap-1.5 text-[11px] text-primary">
-            <ClipboardList className="h-3.5 w-3.5" />
-            <span className="font-medium">Plan mode</span>
-            <span className="text-muted-foreground">
-              — agent will draft a plan; destructive tools are off until
-              you exit plan mode.
+        {/* Plan-mode decoration frames just the input. The wrapper +
+            badge slot are ALWAYS rendered so the footer height stays
+            constant across the mode toggle — only the border/bg/
+            badge-visibility light up when plan is active. */}
+        <div
+          className={cn(
+            "rounded-md border p-2 space-y-2 transition-colors",
+            isPlan
+              ? "border-primary/50 bg-brand-tint"
+              : "border-transparent bg-transparent",
+          )}
+        >
+          <div
+            className={cn(
+              "flex items-center gap-1.5 px-1 text-[11px] text-primary overflow-hidden",
+              !isPlan && "invisible",
+            )}
+          >
+            <ClipboardList className="h-3.5 w-3.5 shrink-0" />
+            <span className="font-medium shrink-0">Plan mode</span>
+            <span className="text-muted-foreground truncate">
+              — agent will draft a plan; destructive tools are off
+              until you exit plan mode.
             </span>
           </div>
-        )}
-        <div className="flex items-end gap-2">
+          <div className="flex items-end gap-2">
         <textarea
           ref={ref}
           value={value}
@@ -166,12 +174,7 @@ export function Composer({
           }
           disabled={disabled}
           rows={2}
-          className={cn(
-            "flex-1 resize-none rounded-md border bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 disabled:cursor-not-allowed disabled:opacity-50",
-            isPlan
-              ? "border-primary focus-visible:ring-primary"
-              : "border-input focus-visible:ring-ring",
-          )}
+          className="flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
         />
         {isStreaming ? (
           <Button
@@ -194,6 +197,7 @@ export function Composer({
             <Send className="h-4 w-4" />
           </Button>
         )}
+          </div>
         </div>
       </div>
     </div>

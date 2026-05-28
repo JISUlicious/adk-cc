@@ -70,10 +70,14 @@ class QuotaPlugin(BasePlugin):
             # don't enforce a quota we can't attribute.
             return None
         if not self._charge(tenant_id):
+            msg = (
+                f"tenant {tenant_id!r} exceeded {self._limit} tool calls/min"
+            )
+            # `error` key normalizes the failure shape for frontends doing
+            # key-presence status detection (see ToolCard.deriveStatus).
             return {
                 "status": "quota_exceeded",
-                "reason": (
-                    f"tenant {tenant_id!r} exceeded {self._limit} tool calls/min"
-                ),
+                "error": msg,
+                "reason": msg,
             }
         return None

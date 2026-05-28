@@ -146,8 +146,14 @@ class PermissionPlugin(BasePlugin):
         )
 
         if decision.behavior == "deny":
+            # `error` key carries the human-readable reason so frontends
+            # that drive their status display off key-presence (see
+            # `web/src/components/ToolCard.tsx::deriveStatus`) classify
+            # this as an error without needing to know
+            # `permission_denied` is failure semantics.
             return {
                 "status": "permission_denied",
+                "error": decision.reason,
                 "reason": decision.reason,
                 "matched_rule": (
                     decision.matched_rule.model_dump()
@@ -211,6 +217,7 @@ class PermissionPlugin(BasePlugin):
                     return None  # legacy back-compat path (bundled `adk web` UI)
                 return {
                     "status": "permission_denied_by_user",
+                    "error": "User declined the confirmation prompt.",
                     "reason": "User declined the confirmation prompt.",
                 }
 

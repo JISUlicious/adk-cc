@@ -159,3 +159,18 @@ em {
   font-style: normal;
   font-weight: 500;
 }
+
+/* Vertical fog at the top of an element: the top edge starts
+   transparent and reaches the full background color a short way
+   down. Used on the composer footer so the thread above doesn't
+   butt against a hard rectangle — the demarcation feels like a
+   gradual fade rather than a wall.
+   `var(--background)` keeps the gradient theme-aware. */
+.faded-top-edge {
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    var(--background) 28px,
+    var(--background) 100%
+  );
+}
