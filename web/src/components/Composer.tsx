@@ -120,7 +120,7 @@ export function Composer({
   const isPlan = mode === "plan"
 
   return (
-    <div className="border-t bg-background px-4 py-3">
+    <div className="bg-background px-4 py-3 relative z-10 shadow-[0_-6px_16px_-4px_rgba(20,20,19,0.10)] dark:shadow-[0_-6px_16px_-4px_rgba(0,0,0,0.50)]">
       <div className="max-w-3xl mx-auto relative">
         {slashOpen && (
           <div className="absolute bottom-full left-0 right-0 mb-2">
@@ -169,7 +169,7 @@ export function Composer({
           }
           disabled={disabled}
           rows={2}
-          className="flex-1 resize-none rounded-md bg-card px-3 py-2 text-sm shadow-[0_1px_3px_rgba(20,20,19,0.06)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          className="flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
         />
         {isStreaming ? (
           <Button
