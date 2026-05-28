@@ -9,6 +9,7 @@ import {
   AskUserQuestionCard,
   type AskUserQuestionArgsDef,
 } from "./AskUserQuestionCard"
+import { ArtifactChip } from "./ArtifactChip"
 import { BashTerminalCard } from "./BashTerminalCard"
 import { FileEditCard } from "./FileEditCard"
 import { PlanCard } from "./PlanCard"
@@ -75,6 +76,9 @@ export function Thread({
   events,
   isStreaming,
   onSubmitFunctionResponse,
+  appName,
+  userId,
+  sessionId,
 }: {
   events: RunEvent[]
   isStreaming: boolean
@@ -83,6 +87,10 @@ export function Thread({
     toolName: string,
     response: unknown,
   ) => void
+  /** Needed by ArtifactChip to construct the artifact download URL. */
+  appName: string
+  userId: string
+  sessionId: string
 }) {
   const deduped = dedupePartials(events)
   const pendingCallIds = collectPendingCallIds(deduped)
@@ -106,6 +114,9 @@ export function Thread({
           pendingCallIds={pendingCallIds}
           onSubmitFunctionResponse={onSubmitFunctionResponse}
           submitDisabled={isStreaming}
+          appName={appName}
+          userId={userId}
+          sessionId={sessionId}
         />
       ))}
       {isStreaming && (
@@ -122,6 +133,9 @@ function Row({
   pendingCallIds,
   onSubmitFunctionResponse,
   submitDisabled,
+  appName,
+  userId,
+  sessionId,
 }: {
   row: ChatRow
   pendingCallIds: Set<string>
@@ -131,6 +145,9 @@ function Row({
     response: unknown,
   ) => void
   submitDisabled: boolean
+  appName: string
+  userId: string
+  sessionId: string
 }) {
   switch (row.kind) {
     case "text":
@@ -143,6 +160,16 @@ function Row({
       )
     case "thought":
       return <ThoughtBubble author={row.author} text={row.text} />
+    case "artifact":
+      return (
+        <ArtifactChip
+          appName={appName}
+          userId={userId}
+          sessionId={sessionId}
+          filename={row.filename}
+          version={row.version}
+        />
+      )
     case "function_response":
       // Orphan response (no matching function_call in the event log)
       // — rare, falls through to the generic response card.
@@ -328,6 +355,12 @@ type ChatRow =
       /** null while the response hasn't landed yet. */
       response: unknown
     }
+  | {
+      kind: "artifact"
+      eventId: string
+      filename: string
+      version: number
+    }
 
 function dedupePartials(events: RunEvent[]): RunEvent[] {
   // ADK streaming protocol (google/adk/models/base_llm.py:96-101):
@@ -447,6 +480,25 @@ function flattenEvents(
     const eventId = (e.id as string | undefined) ?? ""
     const author = e.author ?? "agent"
     const parts = e.content?.parts ?? []
+
+    // Artifact deltas — one chip per (filename → version) entry.
+    // ADK populates event.actions.artifactDelta whenever a tool calls
+    // ctx.save_artifact() (in adk-cc that's `save_as_artifact`).
+    // Wire keys are camelCase via Pydantic's to_camel alias, but
+    // accept snake_case too for resilience.
+    const actions = (e.actions ?? {}) as Record<string, unknown>
+    const delta =
+      (actions.artifactDelta as Record<string, unknown> | undefined) ??
+      (actions.artifact_delta as Record<string, unknown> | undefined)
+    if (delta && typeof delta === "object") {
+      for (const [filename, ver] of Object.entries(delta)) {
+        if (typeof filename !== "string" || !filename) continue
+        const version = typeof ver === "number" ? ver : Number(ver)
+        if (!Number.isFinite(version)) continue
+        rows.push({ kind: "artifact", eventId, filename, version })
+      }
+    }
+
     for (const part of parts) {
       // Thought parts (Gemini thought summaries, etc.) render as
       // faded ThoughtBubbles so the reader can see the model's

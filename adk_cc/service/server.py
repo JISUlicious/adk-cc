@@ -61,9 +61,16 @@ def build_fastapi_app(
     """
     from google.adk.cli.fast_api import get_fast_api_app
 
+    # Artifact storage: in-memory default (fine for dev), env-driven
+    # override for persistence. ADK accepts URIs like
+    # `gs://bucket/prefix` for GCS; a local path string also works as
+    # of 1.31.1. The `save_as_artifact` tool relies on this service.
+    artifact_uri = os.environ.get("ADK_CC_ARTIFACT_STORAGE_URI") or None
+
     fastapi_app = get_fast_api_app(
         agents_dir=agents_dir,
         session_service_uri=session_service_uri,
+        artifact_service_uri=artifact_uri,
         web=serve_web,
     )
 
