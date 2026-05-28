@@ -120,7 +120,7 @@ export function Composer({
   const isPlan = mode === "plan"
 
   return (
-    <div className="bg-background px-4 py-3 relative z-10 shadow-[0_-6px_16px_-4px_rgba(20,20,19,0.10)] dark:shadow-[0_-6px_16px_-4px_rgba(0,0,0,0.50)]">
+    <div className="bg-background px-4 py-3 border-t border-border/60">
       <div className="max-w-3xl mx-auto relative">
         {slashOpen && (
           <div className="absolute bottom-full left-0 right-0 mb-2">
