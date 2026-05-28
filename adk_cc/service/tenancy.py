@@ -15,6 +15,7 @@ where this plugin reads it back.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -23,6 +24,8 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.tools.tool_context import ToolContext
 
 from ..sandbox import SandboxBackend, WorkspaceRoot, make_default_backend
+
+_log = logging.getLogger(__name__)
 
 
 def _safe_id(value: str, label: str) -> str:
@@ -194,11 +197,24 @@ class TenancyPlugin(BasePlugin):
 
                 # Best-effort workspace creation. Backends with no remote
                 # surface (Noop) mkdir locally; DockerBackend creates the
-                # dir on the sandbox VM via a one-shot helper container.
+                # dir on the sandbox VM via a one-shot helper container;
+                # DaytonaBackend / SandboxServiceBackend hit an external
+                # API. For the remote-API backends, a failure here means
+                # later tool calls hit a "backend used before
+                # ensure_workspace()" guard with no visible root cause —
+                # so we log the underlying exception at WARNING level
+                # before swallowing it.
                 try:
                     await backend.ensure_workspace(ws)
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log.warning(
+                        "ensure_workspace failed (backend=%s tenant=%s session=%s): %s: %s",
+                        type(backend).__name__,
+                        tenant.tenant_id,
+                        session_id,
+                        type(e).__name__,
+                        e,
+                    )
         except Exception:
             # Never crash the tool chain; missing tenancy degrades to
             # the default workspace + backend.
