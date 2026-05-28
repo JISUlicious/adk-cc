@@ -126,38 +126,48 @@ function JsonBlock({ label, value }: { label: string; value: unknown }) {
 /** Heuristic status read.
  *
  * Tools in adk-cc don't share a single response schema — most return
- * `{status: "ok"|"error"|"sandbox_denied"|"not_found"|...}` but
- * conventions drift. We recognize the common shapes:
+ * `{status: "..."}` but the actual status strings drift across tools
+ * and plugins. We recognize the common shapes:
  *
- *   - `response === null/undefined`            → called (still pending)
- *   - `response.error` is a non-empty string   → error
- *   - `response.status` matches an error word  → error
- *   - everything else                          → finished
+ *   - `response === null/undefined`           → called (still pending)
+ *   - `response.error` is a non-empty string  → error
+ *   - `response.status` matches a known error → error
+ *   - everything else                         → finished
  *
- * Liberal default: a tool that returns `null` or anything we don't
- * recognize as an error is shown as finished, not error — the
- * payload is still visible if the user expands the row.
+ * The status patterns cover what we've actually seen in events:
+ *   "error", "*_error", "error_*"           (generic error markers)
+ *   "failed", "failure", "*_failed"         (failure variants)
+ *   "*denied*"                              (sandbox_denied, permission_
+ *                                            denied_by_user, etc — the
+ *                                            previous exact `=== "denied"`
+ *                                            check missed these)
+ *   "rejected", "*_rejected"
+ *   "cancelled" / "canceled"                (en-US + en-GB)
+ *   "timeout"
+ *   "not_found"
  */
 function deriveStatus(response: unknown): Status {
   if (response === null || response === undefined) return "called"
   if (typeof response === "object") {
     const r = response as Record<string, unknown>
     if (typeof r.error === "string" && r.error.length > 0) return "error"
-    if (typeof r.status === "string") {
-      const s = r.status.toLowerCase()
-      if (
-        s === "error" ||
-        s === "failure" ||
-        s === "denied" ||
-        s === "timeout" ||
-        s === "not_found" ||
-        s.startsWith("sandbox_denied")
-      ) {
-        return "error"
-      }
+    if (typeof r.status === "string" && isErrorStatus(r.status)) {
+      return "error"
     }
   }
   return "finished"
+}
+
+function isErrorStatus(raw: string): boolean {
+  const s = raw.toLowerCase()
+  if (s === "error" || s.endsWith("_error") || s.startsWith("error_")) return true
+  if (s === "failed" || s === "failure" || s.endsWith("_failed")) return true
+  if (s.includes("denied")) return true
+  if (s === "rejected" || s.endsWith("_rejected")) return true
+  if (s === "cancelled" || s === "canceled") return true
+  if (s === "timeout") return true
+  if (s === "not_found") return true
+  return false
 }
 
 function extractError(response: unknown): string | null {
