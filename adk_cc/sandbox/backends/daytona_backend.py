@@ -171,6 +171,8 @@ class DaytonaBackend(SandboxBackend):
         delete_on_close: bool = False,
         start_timeout_s: float = 120.0,
         request_timeout_s: float = 30.0,
+        verify_ssl: bool = True,
+        ca_bundle: Optional[str] = None,
         client: Optional[httpx.AsyncClient] = None,
     ) -> None:
         self._session_id = session_id
@@ -190,6 +192,11 @@ class DaytonaBackend(SandboxBackend):
         self._delete_on_close = bool(delete_on_close)
         self._start_timeout_s = float(start_timeout_s)
         self._request_timeout_s = float(request_timeout_s)
+        # TLS verify policy. `verify=True` uses certifi (production
+        # default); a CA bundle path lets operators trust a private CA;
+        # `verify=False` disables verification entirely (dev/test only
+        # — self-signed Daytona instances).
+        self._verify: Any = ca_bundle if ca_bundle else verify_ssl
         # Daytona-side sandbox id. Set by `ensure_workspace()` on first
         # call; subsequent calls are no-ops.
         self._sandbox_id: Optional[str] = None
@@ -252,6 +259,7 @@ class DaytonaBackend(SandboxBackend):
         async with httpx.AsyncClient(
             headers={"Authorization": f"Bearer {token}"},
             timeout=self._request_timeout_s,
+            verify=self._verify,
         ) as client:
             yield client
 
@@ -656,4 +664,10 @@ def make_daytona_backend_from_env(
         delete_on_close=os.environ.get("ADK_CC_DAYTONA_DELETE_ON_CLOSE") == "1",
         start_timeout_s=_float_env("ADK_CC_DAYTONA_START_TIMEOUT_S", 120.0),
         request_timeout_s=_float_env("ADK_CC_DAYTONA_REQUEST_TIMEOUT_S", 30.0),
+        # TLS: default verify=True (certifi). For a private CA, point
+        # ADK_CC_DAYTONA_CA_BUNDLE at the PEM. For a self-signed
+        # dev/test Daytona, ADK_CC_DAYTONA_VERIFY_SSL=0 disables verify
+        # entirely (use only when the network path is otherwise trusted).
+        verify_ssl=os.environ.get("ADK_CC_DAYTONA_VERIFY_SSL", "1") != "0",
+        ca_bundle=os.environ.get("ADK_CC_DAYTONA_CA_BUNDLE") or None,
     )
