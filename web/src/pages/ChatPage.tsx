@@ -305,6 +305,9 @@ export function ChatPage() {
               events={events}
               isStreaming={isStreaming}
               onSubmitFunctionResponse={handleSubmitFunctionResponse}
+              appName={appName ?? ""}
+              userId={userId}
+              sessionId={session.id}
             />
           ) : (
             <div className="flex h-full items-center justify-center p-12">

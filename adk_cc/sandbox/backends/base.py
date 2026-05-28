@@ -89,6 +89,36 @@ class SandboxBackend(ABC):
     ) -> None:
         ...
 
+    async def read_bytes(self, path: str, *, fs_read: FsReadConfig) -> bytes:
+        """Read a file as raw bytes (binary-safe).
+
+        Default impl round-trips through `read_text` + utf-8 — works
+        for text files but corrupts binaries. Backends with a true
+        binary read path (DaytonaBackend's `files/download` already
+        returns bytes; SandboxServiceBackend's read endpoint too)
+        should override to skip the decode.
+
+        Used by `save_as_artifact` — when an agent publishes a PDF /
+        image / zip, the text fallback would mangle it.
+        """
+        return (await self.read_text(path, fs_read=fs_read)).encode("utf-8")
+
+    async def write_bytes(
+        self, path: str, content: bytes, *, fs_write: FsWriteConfig
+    ) -> None:
+        """Write raw bytes (binary-safe).
+
+        Default impl round-trips through `write_text` after a utf-8
+        decode — works only when the bytes are valid utf-8. Backends
+        with a true binary write path should override.
+
+        Used by `fetch_from_artifact` to materialize a user-uploaded
+        file into the agent's sandbox without lossy re-encoding.
+        """
+        await self.write_text(
+            path, content.decode("utf-8"), fs_write=fs_write
+        )
+
     async def ensure_workspace(self, ws: "WorkspaceRoot") -> None:
         """Create the workspace dir if it doesn't exist.
 

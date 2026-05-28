@@ -167,3 +167,32 @@ class WritePlanArgs(BaseModel):
 
 class ReadCurrentPlanArgs(BaseModel):
     pass  # no args; reads from session state
+
+
+class SaveAsArtifactArgs(BaseModel):
+    path: str = Field(
+        description=(
+            "Absolute path inside the workspace to publish as an "
+            "artifact. The file is read from the sandbox and stored "
+            "in ADK's artifact service, which the chat UI can render "
+            "as a download chip."
+        )
+    )
+    filename: Optional[str] = Field(
+        default=None,
+        description=(
+            "Artifact filename (display name + storage key). If "
+            "omitted, the basename of `path` is used. ADK auto-versions "
+            "saves with the same filename, so repeated publishes of the "
+            "same name bump a revision counter."
+        ),
+    )
+    scope: str = Field(
+        default="session",
+        description=(
+            "`session` (default): artifact belongs to the current "
+            "session and is gone when the session is cleaned. `user`: "
+            "artifact persists across this user's sessions (useful for "
+            "permanent reference material the user wants to keep)."
+        ),
+    )

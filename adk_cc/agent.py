@@ -89,6 +89,7 @@ from .tools import (
     TaskUpdateTool,
     WebFetchTool,
     WriteFileTool,
+    SaveAsArtifactTool,
     WritePlanTool,
     make_skill_toolset,
 )
@@ -176,6 +177,7 @@ _task_update = TaskUpdateTool()
 _exit_plan_mode = ExitPlanModeTool(default_mode=PERMISSION_MODE.value)
 _enter_plan_mode = EnterPlanModeTool(default_mode=PERMISSION_MODE.value)
 _write_plan = WritePlanTool()
+_save_as_artifact = SaveAsArtifactTool()
 _read_current_plan = ReadCurrentPlanTool()
 _skills = make_skill_toolset()  # None unless ADK_CC_SKILLS_DIR / skills/ has content
 
@@ -314,6 +316,7 @@ _coordinator_tools: list = [
     _enter_plan_mode,
     _write_plan,
     _read_current_plan,
+    _save_as_artifact,
 ]
 if _skills is not None:
     _coordinator_tools.append(_skills)

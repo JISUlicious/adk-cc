@@ -633,7 +633,11 @@ class DaytonaBackend(SandboxBackend):
         )
 
     async def read_text(self, path: str, *, fs_read: FsReadConfig) -> str:
-        self._check_allowed(path, fs_read, op="read_text")
+        raw = await self.read_bytes(path, fs_read=fs_read)
+        return raw.decode("utf-8", errors="replace")
+
+    async def read_bytes(self, path: str, *, fs_read: FsReadConfig) -> bytes:
+        self._check_allowed(path, fs_read, op="read_bytes")
         await self.ensure_workspace_inferred()
         sandbox_path = self._to_sandbox_path(path)
         async with self._client() as client:
@@ -644,21 +648,28 @@ class DaytonaBackend(SandboxBackend):
                 )
             except httpx.HTTPError as e:
                 raise RuntimeError(
-                    f"daytona: read_text transport error for {path!r}: {e}"
+                    f"daytona: read_bytes transport error for {path!r}: {e}"
                 ) from e
             if resp.status_code == 404:
                 raise FileNotFoundError(path)
             if resp.status_code >= 400:
                 raise RuntimeError(
-                    f"daytona: read_text returned {resp.status_code} for "
+                    f"daytona: read_bytes returned {resp.status_code} for "
                     f"{path!r}: {resp.text}"
                 )
-            return resp.content.decode("utf-8", errors="replace")
+            return resp.content
 
     async def write_text(
         self, path: str, content: str, *, fs_write: FsWriteConfig
     ) -> None:
-        self._check_allowed(path, fs_write, op="write_text")
+        await self.write_bytes(
+            path, content.encode("utf-8"), fs_write=fs_write
+        )
+
+    async def write_bytes(
+        self, path: str, content: bytes, *, fs_write: FsWriteConfig
+    ) -> None:
+        self._check_allowed(path, fs_write, op="write_bytes")
         await self.ensure_workspace_inferred()
         sandbox_path = self._to_sandbox_path(path)
         # Multipart upload: `path` is a QUERY parameter (not a form
@@ -666,7 +677,7 @@ class DaytonaBackend(SandboxBackend):
         # `in: query`). The form field name is `file`; the filename is
         # cosmetic (server uses the query path for placement).
         files = {
-            "file": ("payload", content.encode("utf-8"), "application/octet-stream"),
+            "file": ("payload", content, "application/octet-stream"),
         }
         async with self._client() as client:
             try:
@@ -677,11 +688,11 @@ class DaytonaBackend(SandboxBackend):
                 )
             except httpx.HTTPError as e:
                 raise RuntimeError(
-                    f"daytona: write_text transport error for {path!r}: {e}"
+                    f"daytona: write_bytes transport error for {path!r}: {e}"
                 ) from e
             if resp.status_code >= 400:
                 raise RuntimeError(
-                    f"daytona: write_text returned {resp.status_code} for "
+                    f"daytona: write_bytes returned {resp.status_code} for "
                     f"{path!r}: {resp.text}"
                 )
 
