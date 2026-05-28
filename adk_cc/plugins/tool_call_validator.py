@@ -87,6 +87,12 @@ class ToolCallValidatorPlugin(BasePlugin):
         hint = "\n".join(hint_lines)
         return {
             "status": "tool_unavailable",
+            # `error` key surfaces the failure to frontends doing
+            # key-presence status detection (ToolCard.deriveStatus).
+            "error": (
+                f"Tool {tool.name!r} is not available"
+                + (" in plan mode" if in_plan_mode else " for this agent")
+            ),
             "tool_name": tool.name,
             "args_attempted": tool_args,
             "available_tools": available,

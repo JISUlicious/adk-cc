@@ -123,58 +123,41 @@ function JsonBlock({ label, value }: { label: string; value: unknown }) {
   )
 }
 
-/** Heuristic status read.
+/** Status read — exact key matching against the adk-cc tool convention.
  *
- * Tools in adk-cc don't share a single response schema — most return
- * `{status: "..."}` but the actual status strings drift across tools
- * and plugins. We recognize the common shapes:
+ * adk-cc tools mark error responses with one of these keys (verified
+ * via grep across `adk_cc/tools/`):
  *
- *   - `response === null/undefined`           → called (still pending)
- *   - `response.error` is a non-empty string  → error
- *   - `response.status` matches a known error → error
- *   - everything else                         → finished
+ *   `error`  (string)  — the canonical error message. Every tool that
+ *                        fails sets this. Wins over any status field.
+ *   `errors` (array)   — pydantic input-validation failures emit a
+ *                        list here (see `adk_cc/tools/base.py:126`).
  *
- * The status patterns cover what we've actually seen in events:
- *   "error", "*_error", "error_*"           (generic error markers)
- *   "failed", "failure", "*_failed"         (failure variants)
- *   "*denied*"                              (sandbox_denied, permission_
- *                                            denied_by_user, etc — the
- *                                            previous exact `=== "denied"`
- *                                            check missed these)
- *   "rejected", "*_rejected"
- *   "cancelled" / "canceled"                (en-US + en-GB)
- *   "timeout"
- *   "not_found"
+ * The `status` field's values drift too widely to match reliably
+ * (`sandbox_denied`, `not_found`, `permission_denied_by_user`,
+ * `input_validation_error`, `awaiting_user_confirmation` — the
+ * last is NOT an error). Key presence is the stable signal; we
+ * don't inspect status strings at all.
  */
 function deriveStatus(response: unknown): Status {
   if (response === null || response === undefined) return "called"
   if (typeof response === "object") {
     const r = response as Record<string, unknown>
     if (typeof r.error === "string" && r.error.length > 0) return "error"
-    if (typeof r.status === "string" && isErrorStatus(r.status)) {
-      return "error"
-    }
+    if (Array.isArray(r.errors) && r.errors.length > 0) return "error"
   }
   return "finished"
-}
-
-function isErrorStatus(raw: string): boolean {
-  const s = raw.toLowerCase()
-  if (s === "error" || s.endsWith("_error") || s.startsWith("error_")) return true
-  if (s === "failed" || s === "failure" || s.endsWith("_failed")) return true
-  if (s.includes("denied")) return true
-  if (s === "rejected" || s.endsWith("_rejected")) return true
-  if (s === "cancelled" || s === "canceled") return true
-  if (s === "timeout") return true
-  if (s === "not_found") return true
-  return false
 }
 
 function extractError(response: unknown): string | null {
   if (!response || typeof response !== "object") return null
   const r = response as Record<string, unknown>
   if (typeof r.error === "string" && r.error.length > 0) return r.error
-  if (typeof r.status === "string") return r.status
+  if (Array.isArray(r.errors) && r.errors.length > 0) {
+    return r.errors
+      .map((e) => (typeof e === "string" ? e : JSON.stringify(e)))
+      .join("; ")
+  }
   return null
 }
 
