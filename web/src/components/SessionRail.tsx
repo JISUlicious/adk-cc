@@ -109,8 +109,10 @@ export function SessionRail({
   }
 
   return (
-    <aside className="flex w-72 flex-col border-r bg-muted/40">
-      <div className="border-b px-4 py-3">
+    // Layered look: no right border; a subtle warm shadow on the
+    // inner edge lifts the rail above the main thread instead.
+    <aside className="flex w-72 flex-col bg-muted/40 shadow-[4px_0_12px_-6px_rgba(20,20,19,0.08)] dark:shadow-[4px_0_12px_-6px_rgba(0,0,0,0.4)] relative z-10">
+      <div className="px-4 py-3">
         <label className="text-xs font-medium text-muted-foreground">
           Agent
         </label>
@@ -128,7 +130,7 @@ export function SessionRail({
           ))}
         </select>
       </div>
-      <div className="flex items-center justify-between px-4 py-3 border-b">
+      <div className="flex items-center justify-between px-4 py-3">
         <span className="text-xs font-medium text-muted-foreground">
           Sessions
         </span>
