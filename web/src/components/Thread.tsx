@@ -75,7 +75,9 @@ export function Thread({
   const deduped = dedupePartials(events)
   const pendingCallIds = collectPendingCallIds(deduped)
   const responsesByCallId = collectResponses(deduped)
-  const rows = flattenEvents(deduped, responsesByCallId)
+  const rows = mergeAdjacentThoughts(
+    flattenEvents(deduped, responsesByCallId),
+  )
 
   return (
     <div className="flex flex-col gap-3 px-6 py-4">
@@ -229,6 +231,33 @@ function Row({
   }
 }
 
+/** Collapse adjacent thought rows from the same author into a single
+ * row. Some providers split internal thinking across multiple
+ * non-partial events (one part per event, or several short parts in
+ * one event); rendered as-is they show up as a stack of tiny faded
+ * bubbles. Merging keeps the thought as one coherent block — same
+ * cadence as Claude's thinking summaries. */
+function mergeAdjacentThoughts(rows: ChatRow[]): ChatRow[] {
+  const merged: ChatRow[] = []
+  for (const row of rows) {
+    const prev = merged[merged.length - 1]
+    if (
+      row.kind === "thought" &&
+      prev &&
+      prev.kind === "thought" &&
+      prev.author === row.author
+    ) {
+      merged[merged.length - 1] = {
+        ...prev,
+        text: prev.text + row.text,
+      }
+      continue
+    }
+    merged.push(row)
+  }
+  return merged
+}
+
 function extractConfirmPayload(args: unknown): ConfirmPayload | null {
   if (!args || typeof args !== "object") return null
   const a = args as Record<string, unknown>
@@ -285,50 +314,63 @@ function dedupePartials(events: RunEvent[]): RunEvent[] {
   // each `partial: true` event carries a DELTA chunk
   // ("The weather", " in Tokyo is", " sunny."), then one final
   // `partial: false` event arrives containing the full accumulated
-  // content. So we accumulate text per (invocation_id, author) group
-  // for as long as partials keep arriving, and replace the accumulated
-  // bubble with the final non-partial when it lands.
+  // content. So we accumulate per (invocation_id, author) group for
+  // as long as partials keep arriving, and replace the accumulated
+  // event with the final non-partial when it lands.
+  //
+  // We accumulate TWO streams in parallel: visible text and thought
+  // text. Some providers stream thought deltas the same way they
+  // stream body deltas, so dropping them would lose the model's
+  // reasoning entirely. The thought stream surfaces as a separate
+  // part (rendered by ThoughtBubble); the body text stream surfaces
+  // as a MessageBubble.
   const out: RunEvent[] = []
-  const open = new Map<string, { idx: number; text: string }>()
+  const open = new Map<string, { idx: number; text: string; thought: string }>()
 
   for (const e of events) {
     const key = `${e.invocation_id ?? ""}::${e.author ?? ""}`
 
     if (e.partial) {
-      // Only accumulate visible text — thought parts get filtered so
-      // the streaming bubble doesn't grow with internal-thinking noise.
-      const deltaText = (e.content?.parts ?? [])
-        .filter((p) => !p.thought)
-        .map((p) => (typeof p.text === "string" ? p.text : ""))
-        .join("")
+      let deltaText = ""
+      let deltaThought = ""
+      for (const part of e.content?.parts ?? []) {
+        if (typeof part.text !== "string") continue
+        if (part.thought) deltaThought += part.text
+        else deltaText += part.text
+      }
+
       const entry = open.get(key)
       if (entry) {
         entry.text += deltaText
-        // Replace the stored event's text part with the accumulated
-        // value so the rendered bubble grows instead of flicker-replacing.
-        out[entry.idx] = {
-          ...e,
-          content: { ...e.content, parts: [{ text: entry.text }] },
-        }
+        entry.thought += deltaThought
       } else {
-        open.set(key, { idx: out.length, text: deltaText })
-        out.push({
-          ...e,
-          content: { ...e.content, parts: [{ text: deltaText }] },
-        })
+        const created = { idx: out.length, text: deltaText, thought: deltaThought }
+        open.set(key, created)
+        out.push(e) // placeholder; rewritten below
+      }
+      const cur = open.get(key)!
+      out[cur.idx] = {
+        ...e,
+        content: {
+          ...e.content,
+          parts: [
+            ...(cur.thought ? [{ text: cur.thought, thought: true }] : []),
+            ...(cur.text ? [{ text: cur.text }] : []),
+          ],
+        },
       }
       continue
     }
 
-    // Non-partial. If this finalizes an open partial group, swap the
-    // accumulated bubble for the final event (which per ADK spec
-    // already contains the full text + any tool calls). Otherwise it
-    // stands on its own.
+    // Non-partial. If this finalizes an open partial group AND carries
+    // visible text/thought of its own, swap the accumulated event for
+    // the final one (per ADK spec it already contains the full body +
+    // any tool calls + the consolidated thought). Otherwise pass through.
     const entry = open.get(key)
-    const hasText = (e.content?.parts ?? []).some(
-      (p) => !p.thought && typeof p.text === "string" && p.text.trim().length > 0,
+    const hasMeaningfulText = (e.content?.parts ?? []).some(
+      (p) => typeof p.text === "string" && p.text.trim().length > 0,
     )
-    if (entry && hasText) {
+    if (entry && hasMeaningfulText) {
       out[entry.idx] = e
       open.delete(key)
     } else {
