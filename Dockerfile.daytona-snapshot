@@ -39,5 +39,14 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
  && mv /root/.local/bin/uv /usr/local/bin/uv \
  && chmod +x /usr/local/bin/uv
 
+# Neutral workspace dir owned by the sandbox user. Using /workspace
+# (rather than the default /home/daytona) keeps the underlying sandbox
+# tool out of paths the agent surfaces to end users — `pwd`, tracebacks,
+# and shell output read `/workspace/...` instead of advertising
+# "daytona". A top-level dir isn't writable by the non-root `daytona`
+# user unless created + chowned here, so prepare it at build time.
+# Pair with `ADK_CC_DAYTONA_WORKSPACE_PATH=/workspace` on the agent host.
+RUN mkdir -p /workspace && chown daytona:daytona /workspace
+
 USER daytona
-WORKDIR /home/daytona
+WORKDIR /workspace
