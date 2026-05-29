@@ -40,11 +40,16 @@ class GlobFilesTool(AdkCcTool):
         ws = get_workspace(ctx)
         backend = get_backend(ctx)
 
-        # Anchor relative roots under the workspace; absolute roots
-        # are passed through (the sandbox's fs_read still gates them).
+        # Keep the root RELATIVE so `find` runs against the exec cwd —
+        # which the backend translates to the sandbox's own workspace
+        # path. Prepending `ws.abs_path` here would bake a host-side
+        # absolute path into the command STRING, and exec only
+        # translates the structured `cwd` arg, not the command text. On
+        # a remote sandbox (Daytona / SandboxService) that host path
+        # doesn't exist, so `find` would return nothing. Absolute roots
+        # the agent supplies are passed through unchanged (the sandbox's
+        # fs_read still gates them).
         root = args.root or "."
-        if not root.startswith("/"):
-            root = f"{ws.abs_path.rstrip('/')}/{root}".rstrip("/") or ws.abs_path
 
         # `find -path` for glob support; quote everything; cap output.
         # We use -name for simple basename patterns and -path for ones

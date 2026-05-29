@@ -5,7 +5,7 @@ from typing import Any
 from google.adk.tools.tool_context import ToolContext
 
 from ..sandbox import SandboxViolation, get_backend, get_workspace
-from ._fs import resolve
+from ._fs import display_path, resolve
 from .base import AdkCcTool, ToolMeta
 from .schemas import EditFileArgs
 
@@ -33,7 +33,7 @@ class EditFileTool(AdkCcTool):
         except SandboxViolation as e:
             return {"status": "sandbox_denied", "error": str(e)}
         except FileNotFoundError:
-            return {"status": "error", "error": f"file not found: {p}"}
+            return {"status": "error", "error": f"file not found: {display_path(p, ctx)}"}
         occurrences = text.count(args.old_string)
         if occurrences == 0:
             return {"status": "error", "error": "old_string not found"}
@@ -47,4 +47,4 @@ class EditFileTool(AdkCcTool):
             await backend.write_text(str(p), new_text, fs_write=ws.fs_write_config())
         except SandboxViolation as e:
             return {"status": "sandbox_denied", "error": str(e)}
-        return {"status": "ok", "path": str(p)}
+        return {"status": "ok", "path": display_path(p, ctx)}

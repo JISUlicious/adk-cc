@@ -8,7 +8,7 @@
 
 - **Discovery**: `adk web` / `adk run`은 모듈 레벨 export인 `adk_cc.agent.app`(권장) 또는 `adk_cc.agent.root_agent`로 에이전트를 찾습니다. 디렉터리 레이아웃은 ADK의 문서화된 관례를 따릅니다: `<AGENTS_DIR>/<agent_name>/{__init__.py, agent.py}`.
 - **Entry points**:
-  - 개발: `adk-cc/` 디렉터리에서 `adk web .` 또는 `adk run adk_cc`.
+  - 개발: repo 루트에서 `adk web agents` 또는 `adk run agents/adk_cc`. (`AGENTS_DIR`는 `agents/`이며 에이전트는 `agents/adk_cc/` — 로더가 실제 에이전트만 발견하고 repo의 `web/`, `docs/`, `tests/`는 무시.)
   - 단일 인스턴스 / 다중 테넌트 서버: `uvicorn adk_cc.service.server:make_app --factory` (auth middleware, quota, 설정 가능한 session storage를 갖춘 FastAPI 앱). 동일한 팩토리가 단일 테넌트 배포(팀 하나, 정적 토큰)와 다중 테넌트 프로덕션(JWT 인증, per-tenant 자원) 모두를 처리합니다 — 차이는 어떤 auth + per-tenant env 변수를 와이어링하느냐 뿐입니다.
 - **Configuration**: env 기반. 개발에서는 `adk_cc/.env`에서 자동 로드됩니다. 최소 요구사항: `ADK_CC_API_KEY`. 전체 surface는 [`.env.example`](../.env.example)에 문서화되어 있습니다 — model, permission, sandbox backend, audit, web fetch, skills, tasks, 다중 테넌트 service 변수.
 

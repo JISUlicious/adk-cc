@@ -94,6 +94,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import threading
 import time
 import uuid
@@ -300,6 +301,29 @@ class DaytonaBackend(SandboxBackend):
             return f"{self._workspace_path.rstrip('/')}/{tail}"
         return host_path
 
+    def _to_host_path(self, path: str) -> str:
+        """Inverse of `_to_sandbox_path`: map a sandbox-domain path back
+        to its host-workspace equivalent.
+
+        The allow-check (`_check_allowed`) runs against the host-rooted
+        workspace config, but the agent legitimately learns sandbox
+        paths from `run_bash` (`pwd` → `/home/daytona`) and may pass
+        e.g. `/home/daytona/hello.py` to read/write. Without this, that
+        path fails the host-domain allow-check even though it points
+        squarely inside the sandbox workspace. We map it back to the
+        host view so the check passes; host paths and out-of-workspace
+        paths pass through unchanged.
+        """
+        if not self._host_workspace:
+            return path
+        sw = self._workspace_path.rstrip("/")
+        if path == sw:
+            return self._host_workspace
+        if path.startswith(sw + "/"):
+            tail = path[len(sw) + 1:]
+            return f"{self._host_workspace}/{tail}"
+        return path
+
     def _normalize_error(self, response: httpx.Response, op: str) -> None:
         """Map a Daytona error response to our exception model.
 
@@ -421,7 +445,61 @@ class DaytonaBackend(SandboxBackend):
                     )
                 # Poll the same client (avoid reopening the connection).
                 await self._poll_until_started(client, sandbox_id)
+                # Best-effort: make sure the in-sandbox workspace dir
+                # exists and is writable before any file op targets it.
+                await self._ensure_workspace_dir(client, sandbox_id)
             self._sandbox_id = sandbox_id
+
+    async def _ensure_workspace_dir(
+        self, client: httpx.AsyncClient, sandbox_id: str
+    ) -> None:
+        """`mkdir -p <workspace_path>` inside the sandbox.
+
+        Daytona's default workspace (/home/daytona) already exists and is
+        owned by the sandbox user. A custom workspace path needs the dir
+        to exist before files/upload can write into it:
+
+          - A path under a writable parent (e.g. /home/daytona/work) is
+            created here at runtime — no snapshot change needed.
+          - A top-level path (e.g. /workspace) CANNOT be created by the
+            non-root sandbox user; it must be prepared in the snapshot
+            (`mkdir -p /workspace && chown daytona:daytona /workspace` in
+            Dockerfile.daytona-snapshot). If mkdir fails we log an
+            actionable warning rather than hard-failing — the subsequent
+            file op's 400 would otherwise be opaque.
+        """
+        try:
+            resp = await client.post(
+                self._proxy_url(f"/toolbox/{sandbox_id}/process/execute"),
+                json={"command": f"mkdir -p {shlex.quote(self._workspace_path)}"},
+            )
+            if resp.status_code >= 400:
+                log.warning(
+                    "daytona: could not prepare workspace dir %r (HTTP %s): %s",
+                    self._workspace_path,
+                    resp.status_code,
+                    resp.text[:200],
+                )
+                return
+            data = resp.json()
+            if int(data.get("exitCode", 0)) != 0:
+                log.warning(
+                    "daytona: workspace dir %r is not creatable by the "
+                    "sandbox user (mkdir exit %s: %s). A top-level path must "
+                    "be created + chowned in the snapshot "
+                    "(Dockerfile.daytona-snapshot); file ops will 400 until "
+                    "then. Set ADK_CC_DAYTONA_WORKSPACE_PATH to a path under "
+                    "the user's home, or fix the snapshot.",
+                    self._workspace_path,
+                    data.get("exitCode"),
+                    (data.get("result") or "")[:200],
+                )
+        except Exception as e:  # noqa: BLE001 — diagnostic only, never fatal
+            log.warning(
+                "daytona: workspace-dir preflight failed for %r: %s",
+                self._workspace_path,
+                e,
+            )
 
     async def _find_sandbox_id_by_name(
         self, client: httpx.AsyncClient, name: str
@@ -637,7 +715,10 @@ class DaytonaBackend(SandboxBackend):
         return raw.decode("utf-8", errors="replace")
 
     async def read_bytes(self, path: str, *, fs_read: FsReadConfig) -> bytes:
-        self._check_allowed(path, fs_read, op="read_bytes")
+        # Allow-check in the host domain — map a sandbox-domain path
+        # (e.g. the agent passing `/home/daytona/x` from `pwd`) back to
+        # its host equivalent first so it isn't spuriously rejected.
+        self._check_allowed(self._to_host_path(path), fs_read, op="read_bytes")
         await self.ensure_workspace_inferred()
         sandbox_path = self._to_sandbox_path(path)
         async with self._client() as client:
@@ -648,14 +729,16 @@ class DaytonaBackend(SandboxBackend):
                 )
             except httpx.HTTPError as e:
                 raise RuntimeError(
-                    f"daytona: read_bytes transport error for {path!r}: {e}"
+                    f"daytona: read_bytes transport error for "
+                    f"{sandbox_path!r} (requested {path!r}): {e}"
                 ) from e
             if resp.status_code == 404:
                 raise FileNotFoundError(path)
             if resp.status_code >= 400:
                 raise RuntimeError(
                     f"daytona: read_bytes returned {resp.status_code} for "
-                    f"{path!r}: {resp.text}"
+                    f"sandbox path {sandbox_path!r} (requested {path!r}): "
+                    f"{resp.text}"
                 )
             return resp.content
 
@@ -669,7 +752,7 @@ class DaytonaBackend(SandboxBackend):
     async def write_bytes(
         self, path: str, content: bytes, *, fs_write: FsWriteConfig
     ) -> None:
-        self._check_allowed(path, fs_write, op="write_bytes")
+        self._check_allowed(self._to_host_path(path), fs_write, op="write_bytes")
         await self.ensure_workspace_inferred()
         sandbox_path = self._to_sandbox_path(path)
         # Multipart upload: `path` is a QUERY parameter (not a form
@@ -688,12 +771,19 @@ class DaytonaBackend(SandboxBackend):
                 )
             except httpx.HTTPError as e:
                 raise RuntimeError(
-                    f"daytona: write_bytes transport error for {path!r}: {e}"
+                    f"daytona: write_bytes transport error for "
+                    f"{sandbox_path!r} (requested {path!r}): {e}"
                 ) from e
             if resp.status_code >= 400:
+                # Show the IN-SANDBOX path Daytona actually received, not
+                # just the requested host path — a 400 here usually means
+                # that sandbox dir isn't writable by the sandbox user
+                # (e.g. ADK_CC_DAYTONA_WORKSPACE_PATH points outside the
+                # user's home and the snapshot didn't create/chown it).
                 raise RuntimeError(
                     f"daytona: write_bytes returned {resp.status_code} for "
-                    f"{path!r}: {resp.text}"
+                    f"sandbox path {sandbox_path!r} (requested {path!r}): "
+                    f"{resp.text}"
                 )
 
     # --- internal -------------------------------------------------------

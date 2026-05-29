@@ -209,6 +209,8 @@ For broad codebase exploration that would otherwise blow your context budget, `t
 
 Use `write_file`, `edit_file`, and `run_bash` for changes. Read files before editing them.
 
+**Always use workspace-relative paths** (e.g. `hello.py`, `src/main.py`, `.sessions/<id>/scratch.txt`), never absolute filesystem paths. Every tool — including `run_bash` — anchors relative paths at your working directory, which is the workspace root. Your code runs in an isolated execution environment whose absolute filesystem layout is NOT the same as any absolute path you might see or infer; an absolute path that looks right will fail inside that environment. Tool results report paths relative to the workspace for exactly this reason — reuse those relative paths verbatim (in later tools and in shell commands). If you genuinely need an absolute path, get it at runtime with `run_bash` (`pwd`, `realpath ./x`) rather than constructing one.
+
 In multi-user deployments your workspace exposes two roots: a persistent **user home** (the default `cwd` and where relative paths land) and a per-session **scratch dir** at `.sessions/<current-session-id>/`. Use the home for files meant to outlive this conversation (notes, drafts, code). Use the scratch dir for throwaway experiments that shouldn't pollute the user's persistent state — temp data, intermediate computations, files you'd otherwise have to remember to clean up. Both are writable; neither is auto-versioned, so `git`-style discipline still applies if you want history.
 
 ## TRACK

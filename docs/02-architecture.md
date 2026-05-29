@@ -2,12 +2,21 @@
 
 ## 1. File layout
 
+The agent package lives at `agents/adk_cc/`. ADK's `AGENTS_DIR` is the
+`agents/` directory (the path you point `adk web` at) — it holds only
+agent packages, so the loader doesn't surface `web/`, `docs/`, `tests/`
+as bogus apps. setuptools uses `where=["agents"]`, so the package still
+installs and imports as top-level `adk_cc`. The tree below shows the
+package internals (rooted at `agents/adk_cc/`):
+
 ```
-adk-cc/                          ← AGENTS_DIR (the path you point `adk web` at)
-├── pyproject.toml               # google-adk==1.31.1, litellm>=1.50
+adk-cc/                          ← repo root
+├── pyproject.toml               # google-adk==1.31.1, litellm>=1.50; where=["agents"]
 ├── README.md
 ├── docs/                        # this directory
-└── adk_cc/                      # the agent module ADK discovers
+├── web/                         # React chat UI
+└── agents/                      # ← AGENTS_DIR (the path you point `adk web` at)
+    └── adk_cc/                  # the agent package ADK discovers (imports as `adk_cc`)
     ├── __init__.py              # `from . import agent`
     ├── agent.py                 # exposes `app` (preferred) and `root_agent`
     ├── prompts.py               # per-agent system prompts

@@ -39,6 +39,7 @@ from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
 from ..sandbox import SandboxViolation, get_backend, get_workspace
+from ._fs import resolve
 from .base import AdkCcTool, ToolMeta
 from .schemas import SaveAsArtifactArgs
 
@@ -67,6 +68,14 @@ class SaveAsArtifactTool(AdkCcTool):
         ws = get_workspace(ctx)
         backend = get_backend(ctx)
 
+        # Resolve the path the same way read_file / write_file do, so a
+        # workspace-relative path (`hello.py`) anchors at the workspace
+        # root and passes the backend's allow-check. Without this, a
+        # relative path slips through unanchored and an absolute path is
+        # taken verbatim — both common failure modes the other file
+        # tools avoid by resolving first.
+        p = resolve(args.path, ctx)
+
         filename = args.filename or Path(args.path).name
         if not filename:
             return {
@@ -89,7 +98,7 @@ class SaveAsArtifactTool(AdkCcTool):
         # DaytonaBackend's override skips the decode so PDFs etc.
         # survive.
         try:
-            raw = await backend.read_bytes(args.path, fs_read=ws.fs_read_config())
+            raw = await backend.read_bytes(str(p), fs_read=ws.fs_read_config())
         except FileNotFoundError:
             return {
                 "status": "not_found",

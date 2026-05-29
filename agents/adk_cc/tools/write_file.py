@@ -5,7 +5,7 @@ from typing import Any
 from google.adk.tools.tool_context import ToolContext
 
 from ..sandbox import SandboxViolation, get_backend, get_workspace
-from ._fs import resolve
+from ._fs import display_path, resolve
 from .base import AdkCcTool, ToolMeta
 from .schemas import WriteFileArgs
 
@@ -31,6 +31,6 @@ class WriteFileTool(AdkCcTool):
             return {"status": "sandbox_denied", "error": str(e)}
         return {
             "status": "ok",
-            "path": str(p),
+            "path": display_path(p, ctx),
             "bytes": len(args.content.encode("utf-8")),
         }

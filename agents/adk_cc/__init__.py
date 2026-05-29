@@ -36,8 +36,9 @@ def _bootstrap_dotenv() -> None:
     agents_dir = _os.environ.get("ADK_CC_AGENTS_DIR")
     if agents_dir:
         candidates.append(_Path(agents_dir) / ".env")
-    # <package-dir>/../.env — the typical editable-install repo root.
-    candidates.append(_Path(__file__).resolve().parent.parent / ".env")
+    # Repo root .env. This file is at <repo>/agents/adk_cc/__init__.py,
+    # so parents[2] is the repo root (parents[0]=adk_cc, [1]=agents).
+    candidates.append(_Path(__file__).resolve().parents[2] / ".env")
     candidates.append(_Path.cwd() / ".env")
 
     seen: set[_Path] = set()
