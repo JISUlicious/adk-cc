@@ -300,6 +300,29 @@ class DaytonaBackend(SandboxBackend):
             return f"{self._workspace_path.rstrip('/')}/{tail}"
         return host_path
 
+    def _to_host_path(self, path: str) -> str:
+        """Inverse of `_to_sandbox_path`: map a sandbox-domain path back
+        to its host-workspace equivalent.
+
+        The allow-check (`_check_allowed`) runs against the host-rooted
+        workspace config, but the agent legitimately learns sandbox
+        paths from `run_bash` (`pwd` → `/home/daytona`) and may pass
+        e.g. `/home/daytona/hello.py` to read/write. Without this, that
+        path fails the host-domain allow-check even though it points
+        squarely inside the sandbox workspace. We map it back to the
+        host view so the check passes; host paths and out-of-workspace
+        paths pass through unchanged.
+        """
+        if not self._host_workspace:
+            return path
+        sw = self._workspace_path.rstrip("/")
+        if path == sw:
+            return self._host_workspace
+        if path.startswith(sw + "/"):
+            tail = path[len(sw) + 1:]
+            return f"{self._host_workspace}/{tail}"
+        return path
+
     def _normalize_error(self, response: httpx.Response, op: str) -> None:
         """Map a Daytona error response to our exception model.
 
@@ -637,7 +660,10 @@ class DaytonaBackend(SandboxBackend):
         return raw.decode("utf-8", errors="replace")
 
     async def read_bytes(self, path: str, *, fs_read: FsReadConfig) -> bytes:
-        self._check_allowed(path, fs_read, op="read_bytes")
+        # Allow-check in the host domain — map a sandbox-domain path
+        # (e.g. the agent passing `/home/daytona/x` from `pwd`) back to
+        # its host equivalent first so it isn't spuriously rejected.
+        self._check_allowed(self._to_host_path(path), fs_read, op="read_bytes")
         await self.ensure_workspace_inferred()
         sandbox_path = self._to_sandbox_path(path)
         async with self._client() as client:
@@ -669,7 +695,7 @@ class DaytonaBackend(SandboxBackend):
     async def write_bytes(
         self, path: str, content: bytes, *, fs_write: FsWriteConfig
     ) -> None:
-        self._check_allowed(path, fs_write, op="write_bytes")
+        self._check_allowed(self._to_host_path(path), fs_write, op="write_bytes")
         await self.ensure_workspace_inferred()
         sandbox_path = self._to_sandbox_path(path)
         # Multipart upload: `path` is a QUERY parameter (not a form
