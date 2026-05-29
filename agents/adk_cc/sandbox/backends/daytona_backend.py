@@ -674,14 +674,16 @@ class DaytonaBackend(SandboxBackend):
                 )
             except httpx.HTTPError as e:
                 raise RuntimeError(
-                    f"daytona: read_bytes transport error for {path!r}: {e}"
+                    f"daytona: read_bytes transport error for "
+                    f"{sandbox_path!r} (requested {path!r}): {e}"
                 ) from e
             if resp.status_code == 404:
                 raise FileNotFoundError(path)
             if resp.status_code >= 400:
                 raise RuntimeError(
                     f"daytona: read_bytes returned {resp.status_code} for "
-                    f"{path!r}: {resp.text}"
+                    f"sandbox path {sandbox_path!r} (requested {path!r}): "
+                    f"{resp.text}"
                 )
             return resp.content
 
@@ -714,12 +716,19 @@ class DaytonaBackend(SandboxBackend):
                 )
             except httpx.HTTPError as e:
                 raise RuntimeError(
-                    f"daytona: write_bytes transport error for {path!r}: {e}"
+                    f"daytona: write_bytes transport error for "
+                    f"{sandbox_path!r} (requested {path!r}): {e}"
                 ) from e
             if resp.status_code >= 400:
+                # Show the IN-SANDBOX path Daytona actually received, not
+                # just the requested host path — a 400 here usually means
+                # that sandbox dir isn't writable by the sandbox user
+                # (e.g. ADK_CC_DAYTONA_WORKSPACE_PATH points outside the
+                # user's home and the snapshot didn't create/chown it).
                 raise RuntimeError(
                     f"daytona: write_bytes returned {resp.status_code} for "
-                    f"{path!r}: {resp.text}"
+                    f"sandbox path {sandbox_path!r} (requested {path!r}): "
+                    f"{resp.text}"
                 )
 
     # --- internal -------------------------------------------------------
