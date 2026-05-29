@@ -9,11 +9,37 @@ ultimately decide whether the resolved path is allowed).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from google.adk.tools.tool_context import ToolContext
 
 from ..sandbox import get_workspace
+
+
+def display_path(p: str | Path, ctx: ToolContext | None = None) -> str:
+    """Path string to show the model in tool results.
+
+    Returns the path RELATIVE to the workspace root when it falls under
+    it, otherwise the absolute path. Keeping host-absolute paths out of
+    the model's view is what stops it from copying a server path like
+    `/home/user/data/adk-cc/acme/alice/x.py` into a `run_bash` command —
+    that command executes inside the sandbox, where the file lives at a
+    different absolute path (e.g. `/home/daytona/x.py`). Relative paths
+    are portable across the host↔sandbox boundary because every tool
+    anchors them at the same workspace root / sandbox cwd.
+    """
+    if ctx is None:
+        return str(p)
+    try:
+        ws = get_workspace(ctx)
+        rel = os.path.relpath(str(p), ws.abs_path)
+        # `..` means the path escapes the workspace — show it absolute.
+        if not rel.startswith(".."):
+            return rel
+    except Exception:
+        pass
+    return str(p)
 
 
 def resolve(path: str, ctx: ToolContext | None = None) -> Path:

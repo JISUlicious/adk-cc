@@ -36,7 +36,7 @@ from typing import Any
 from google.adk.tools.tool_context import ToolContext
 
 from ..sandbox import SandboxViolation, get_backend, get_workspace
-from ._fs import resolve
+from ._fs import display_path, resolve
 from .base import AdkCcTool, ToolMeta
 from .schemas import ReadFileArgs
 
@@ -82,11 +82,11 @@ class ReadFileTool(AdkCcTool):
         except SandboxViolation as e:
             return {"status": "sandbox_denied", "error": str(e)}
         except FileNotFoundError:
-            return {"status": "error", "error": f"file not found: {p}"}
+            return {"status": "error", "error": f"file not found: {display_path(p, ctx)}"}
         except IsADirectoryError:
-            return {"status": "error", "error": f"not a regular file: {p}"}
+            return {"status": "error", "error": f"not a regular file: {display_path(p, ctx)}"}
         except UnicodeDecodeError:
-            return {"status": "error", "error": f"non-utf8 file: {p}"}
+            return {"status": "error", "error": f"non-utf8 file: {display_path(p, ctx)}"}
 
         total_bytes = len(text.encode("utf-8"))
         # splitlines() handles \n, \r\n, and \r uniformly and does not
@@ -114,7 +114,7 @@ class ReadFileTool(AdkCcTool):
         content = _format_with_line_numbers(out_lines, args.offset)
         return {
             "status": "ok",
-            "path": str(p),
+            "path": display_path(p, ctx),
             "content": content,
             "start_line": args.offset,
             "end_line": end_line,

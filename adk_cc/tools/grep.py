@@ -48,9 +48,13 @@ class GrepTool(AdkCcTool):
         ws = get_workspace(ctx)
         backend = get_backend(ctx)
 
+        # Keep the path RELATIVE so `grep -r` runs against the exec cwd,
+        # which the backend translates to the sandbox workspace. A
+        # host-side absolute path baked into the command string would
+        # not exist inside a remote sandbox (the `cwd` arg is
+        # translated; the command text is not). Absolute paths the
+        # agent supplies pass through unchanged.
         path = args.path or "."
-        if not path.startswith("/"):
-            path = f"{ws.abs_path.rstrip('/')}/{path}".rstrip("/") or ws.abs_path
 
         # Use grep -rn -E on the path, filtering by --include for the
         # glob (basename match — we don't translate the full glob).
