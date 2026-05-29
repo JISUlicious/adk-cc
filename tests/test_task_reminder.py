@@ -103,6 +103,16 @@ def _user_event():
     return types.SimpleNamespace(author="user", content=content, invocation_id="inv-2")
 
 
+def _tool_result_event():
+    """A tool result. ADK authors these "user" too, but they must NOT
+    count as a fresh turn — a function_response part, no user text."""
+    fr = types.SimpleNamespace(name="read_file", response={"ok": True})
+    content = types.SimpleNamespace(
+        parts=[types.SimpleNamespace(text=None, function_response=fr)]
+    )
+    return types.SimpleNamespace(author="user", content=content, invocation_id="inv-3")
+
+
 def _run(plugin, ctx, req):
     return asyncio.run(
         plugin.before_model_callback(callback_context=ctx, llm_request=req)
@@ -226,6 +236,33 @@ def test_fresh_turn_no_open_tasks_does_not_fire():
     print("OK test_fresh_turn_no_open_tasks_does_not_fire")
 
 
+def test_tool_result_is_not_a_fresh_turn():
+    # Same shape as the fires-immediately test, but the last event is a
+    # tool result (author "user", function_response, no text) instead of
+    # a real user message. ADK rides tool results back as user-role
+    # content, so author alone would mis-fire the catch on every mid-turn
+    # continuation. turns_since (2) is below the cadence threshold (3), so
+    # the ONLY path that could fire is the fresh-turn catch — and it must
+    # not, because this isn't a real turn opening.
+    tasks = [_FakeTask("ffff0001", TaskStatus.IN_PROGRESS, "Write tests")]
+    _install_runner(tasks)
+    p = TaskReminderPlugin()
+    ws = WorkspaceRoot(tenant_id="acme", session_id="s4", abs_path="/tmp")
+    state = _State({"temp:sandbox_workspace": ws})
+    events = [
+        _task_call_event(),
+        _plain_event(),
+        _plain_event(),
+        _tool_result_event(),
+    ]
+    req = _LlmReq()
+    _run(p, _Ctx(state=state, events=events), req)
+    assert req.config.system_instruction is None, (
+        "a tool result (user-authored) must not count as a fresh turn"
+    )
+    print("OK test_tool_result_is_not_a_fresh_turn")
+
+
 def test_specialist_skipped():
     _install_runner([_FakeTask("x", TaskStatus.IN_PROGRESS, "t")])
     p = TaskReminderPlugin()
@@ -247,5 +284,6 @@ if __name__ == "__main__":
     test_no_in_progress_holds_to_since_write()
     test_fresh_turn_with_open_tasks_fires_immediately()
     test_fresh_turn_no_open_tasks_does_not_fire()
+    test_tool_result_is_not_a_fresh_turn()
     test_specialist_skipped()
     print("\nall task-reminder tests passed")

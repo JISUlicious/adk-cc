@@ -57,6 +57,11 @@ _REMINDER_HEADER = (
 
 _LAST_REMINDER_KEY = "task_reminder_last_invocation_id"
 
+# Set ADK_CC_TASK_REMINDER_DEBUG=1 to log the fire decision (agent,
+# fresh_turn, turn counts, open-task count, fire/skip) to stderr. Off by
+# default; handy for confirming the reminder actually fires in a live run.
+_DEBUG = os.environ.get("ADK_CC_TASK_REMINDER_DEBUG") == "1"
+
 
 def _has_function_call(event: Any, names: set[str]) -> bool:
     """True if event.content has a function_call whose name is in `names`."""
@@ -84,6 +89,33 @@ def _is_thinking(event: Any) -> bool:
     if not parts:
         return False
     return all(getattr(p, "thought", False) for p in parts)
+
+
+def _is_new_user_turn(events: list[Any]) -> bool:
+    """True if the last event is a genuine new user message.
+
+    ADK appends the user's message before the opening model call, so the
+    last event identifies a turn boundary. But it ALSO rides tool results
+    back as user-role content (`function_response` parts authored
+    "user"), so `author == "user"` alone is true after every tool call.
+    A real user message has text and no function_response part — that's
+    the turn opening we want to fire the dangling-task catch on.
+    """
+    if not events:
+        return False
+    last = events[-1]
+    if getattr(last, "author", None) != "user":
+        return False
+    content = getattr(last, "content", None)
+    parts = getattr(content, "parts", None) or []
+    has_text = any(
+        isinstance(getattr(p, "text", None), str) and getattr(p, "text").strip()
+        for p in parts
+    )
+    has_func_response = any(
+        getattr(p, "function_response", None) is not None for p in parts
+    )
+    return has_text and not has_func_response
 
 
 def _turns_since_task_call(events: Iterable[Any]) -> int:
@@ -236,16 +268,19 @@ class TaskReminderPlugin(BasePlugin):
 
         events = list(getattr(callback_context.session, "events", []) or [])
 
-        # A "fresh turn" is the opening model call after a new user
-        # message — ADK appends the user message before invoking the
-        # model, so events[-1].author == "user" identifies it. If the
-        # previous turn ended with tasks still open, this is where we
-        # catch it: the agent declared done mid-turn, and we can't force
-        # closure after it already replied, but we CAN confront it the
-        # moment the next turn starts. (This is the "dangling task"
-        # check done without a persisted flag — robust for DB sessions
+        # A "fresh turn" is the opening model call after a NEW user
+        # message: that's where we confront tasks the previous turn left
+        # dangling — we can't force closure after the agent already
+        # replied, but we can the moment the next turn starts. (Done
+        # without a persisted flag, so it's robust for DB-backed sessions
         # where temp/ad-hoc state wouldn't survive the invocation.)
-        fresh_turn = bool(events) and getattr(events[-1], "author", None) == "user"
+        #
+        # NB: `events[-1].author == "user"` alone is NOT enough — ADK
+        # rides tool results back as user-role content too, so that test
+        # is true after EVERY tool call and the catch would fire on every
+        # mid-turn continuation. A genuine user message carries text and
+        # no function_response part; that's what _is_new_user_turn checks.
+        fresh_turn = _is_new_user_turn(events)
 
         turns_since = _turns_since_task_call(events)
         # Cheapest gate: on a non-fresh turn inside even the smallest
@@ -302,6 +337,16 @@ class TaskReminderPlugin(BasePlugin):
             cooldown = self._open_between if has_in_progress else self._turns_between
             if turns_since >= threshold and since_reminder >= cooldown:
                 fire = True
+
+        if _DEBUG:
+            print(
+                f"[task_reminder] agent={getattr(callback_context, 'agent_name', None)} "
+                f"fresh_turn={fresh_turn} turns_since={turns_since} "
+                f"open={len(open_tasks)} in_progress={has_in_progress} "
+                f"since_reminder={since_reminder} -> fire={fire}",
+                file=sys.stderr,
+                flush=True,
+            )
 
         if not fire:
             return None
