@@ -1,22 +1,18 @@
 import { useState } from "react"
-import { Download, FileDown } from "lucide-react"
-import { getToken } from "@/api/auth"
+import { Download, FileDown, RefreshCw } from "lucide-react"
+import { downloadArtifact } from "@/api/artifacts"
 
 /**
- * Download chip surfaced when an event carries `actions.artifactDelta`.
- * ADK populates that map with `{filename: revision}` entries whenever
- * `ctx.save_artifact(...)` (or our `save_as_artifact` tool) writes to
- * the artifact service mid-event. The chip resolves the artifact via
- * the standard REST surface ADK exposes:
+ * Inline download chip surfaced when an event carries
+ * `actions.artifactDelta`. ADK populates that map with
+ * `{filename: revision}` whenever `ctx.save_artifact(...)` (or the
+ * `save_as_artifact` tool) writes mid-event. Clicking fetches the
+ * exact version recorded in the delta and downloads it.
  *
- *   GET /apps/{app}/users/{user}/sessions/{session}/artifacts/{name}
- *   GET /apps/{app}/users/{user}/sessions/{session}/artifacts/{name}/versions/{v}
- *
- * Because the auth middleware gates that path, we can't just drop a
- * plain `<a download>` link — the browser doesn't send the Bearer
- * header on direct navigations. Instead we fetch through apiFetch-
- * equivalent (manual fetch + Bearer header), turn the response into
- * a blob, and trigger the download via an in-memory object URL.
+ * Download logic lives in `api/artifacts.ts::downloadArtifact` (shared
+ * with the header ArtifactsPanel) — it fetches with the Bearer header,
+ * decodes the base64 inline_data, and triggers a blob download (a plain
+ * <a download> can't carry auth on a direct navigation).
  */
 export function ArtifactChip({
   appName,
@@ -38,51 +34,7 @@ export function ArtifactChip({
     setBusy(true)
     setError(null)
     try {
-      const headers: Record<string, string> = {}
-      const tok = getToken()
-      if (tok) headers["Authorization"] = `Bearer ${tok}`
-
-      // We hit the versioned endpoint when version is known; ADK
-      // returns the inline_data bytes with the original MIME type.
-      const url =
-        `/apps/${encodeURIComponent(appName)}` +
-        `/users/${encodeURIComponent(userId)}` +
-        `/sessions/${encodeURIComponent(sessionId)}` +
-        `/artifacts/${encodeURIComponent(filename)}` +
-        `/versions/${encodeURIComponent(String(version))}`
-
-      const resp = await fetch(url, { headers })
-      if (!resp.ok) {
-        throw new Error(`${resp.status} ${resp.statusText}`)
-      }
-
-      // ADK serializes types.Part as JSON; the inline_data bytes are
-      // base64-encoded under `inline_data.data` (or `inlineData.data`
-      // depending on camelCase alias). Either way, decode → blob →
-      // object URL → click → revoke.
-      const payload = (await resp.json()) as Record<string, unknown>
-      const inline =
-        (payload.inline_data ?? payload.inlineData) as
-          | { data?: string; mime_type?: string; mimeType?: string }
-          | undefined
-      if (!inline?.data) {
-        throw new Error("artifact has no inline_data")
-      }
-      const mime =
-        inline.mime_type || inline.mimeType || "application/octet-stream"
-      const bytes = base64ToBytes(inline.data)
-      // TS 5.7 narrowed Blob to ArrayBufferView<ArrayBuffer>; our
-      // Uint8Array is typed ArrayBufferLike. The runtime accepts it
-      // either way — explicit BlobPart cast is the standard escape.
-      const blob = new Blob([bytes as BlobPart], { type: mime })
-      const objectUrl = URL.createObjectURL(blob)
-      const a = document.createElement("a")
-      a.href = objectUrl
-      a.download = filename
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(objectUrl)
+      await downloadArtifact(appName, userId, sessionId, filename, version)
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -103,7 +55,11 @@ export function ArtifactChip({
         <span className="text-[10px] text-muted-foreground shrink-0">
           v{version}
         </span>
-        <Download className="h-3.5 w-3.5 text-muted-foreground ml-auto shrink-0" />
+        {busy ? (
+          <RefreshCw className="h-3.5 w-3.5 text-muted-foreground ml-auto shrink-0 animate-spin" />
+        ) : (
+          <Download className="h-3.5 w-3.5 text-muted-foreground ml-auto shrink-0" />
+        )}
         {error && (
           <span className="text-[10px] text-destructive ml-2 shrink-0">
             {error}
@@ -112,11 +68,4 @@ export function ArtifactChip({
       </button>
     </div>
   )
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  const bin = atob(b64)
-  const out = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
-  return out
 }
