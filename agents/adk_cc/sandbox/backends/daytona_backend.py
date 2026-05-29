@@ -94,6 +94,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import threading
 import time
 import uuid
@@ -444,7 +445,61 @@ class DaytonaBackend(SandboxBackend):
                     )
                 # Poll the same client (avoid reopening the connection).
                 await self._poll_until_started(client, sandbox_id)
+                # Best-effort: make sure the in-sandbox workspace dir
+                # exists and is writable before any file op targets it.
+                await self._ensure_workspace_dir(client, sandbox_id)
             self._sandbox_id = sandbox_id
+
+    async def _ensure_workspace_dir(
+        self, client: httpx.AsyncClient, sandbox_id: str
+    ) -> None:
+        """`mkdir -p <workspace_path>` inside the sandbox.
+
+        Daytona's default workspace (/home/daytona) already exists and is
+        owned by the sandbox user. A custom workspace path needs the dir
+        to exist before files/upload can write into it:
+
+          - A path under a writable parent (e.g. /home/daytona/work) is
+            created here at runtime — no snapshot change needed.
+          - A top-level path (e.g. /workspace) CANNOT be created by the
+            non-root sandbox user; it must be prepared in the snapshot
+            (`mkdir -p /workspace && chown daytona:daytona /workspace` in
+            Dockerfile.daytona-snapshot). If mkdir fails we log an
+            actionable warning rather than hard-failing — the subsequent
+            file op's 400 would otherwise be opaque.
+        """
+        try:
+            resp = await client.post(
+                self._proxy_url(f"/toolbox/{sandbox_id}/process/execute"),
+                json={"command": f"mkdir -p {shlex.quote(self._workspace_path)}"},
+            )
+            if resp.status_code >= 400:
+                log.warning(
+                    "daytona: could not prepare workspace dir %r (HTTP %s): %s",
+                    self._workspace_path,
+                    resp.status_code,
+                    resp.text[:200],
+                )
+                return
+            data = resp.json()
+            if int(data.get("exitCode", 0)) != 0:
+                log.warning(
+                    "daytona: workspace dir %r is not creatable by the "
+                    "sandbox user (mkdir exit %s: %s). A top-level path must "
+                    "be created + chowned in the snapshot "
+                    "(Dockerfile.daytona-snapshot); file ops will 400 until "
+                    "then. Set ADK_CC_DAYTONA_WORKSPACE_PATH to a path under "
+                    "the user's home, or fix the snapshot.",
+                    self._workspace_path,
+                    data.get("exitCode"),
+                    (data.get("result") or "")[:200],
+                )
+        except Exception as e:  # noqa: BLE001 — diagnostic only, never fatal
+            log.warning(
+                "daytona: workspace-dir preflight failed for %r: %s",
+                self._workspace_path,
+                e,
+            )
 
     async def _find_sandbox_id_by_name(
         self, client: httpx.AsyncClient, name: str
