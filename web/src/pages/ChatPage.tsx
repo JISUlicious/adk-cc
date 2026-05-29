@@ -17,6 +17,7 @@ import { SessionRail } from "@/components/SessionRail"
 import { Thread } from "@/components/Thread"
 import { Composer } from "@/components/Composer"
 import { TaskSidebar } from "@/components/TaskSidebar"
+import { ArtifactsPanel } from "@/components/ArtifactsPanel"
 import { SettingsDialog } from "@/components/SettingsDialog"
 import { type SlashAction } from "@/components/SlashCommandMenu"
 import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/lib/theme"
@@ -284,6 +285,13 @@ export function ChatPage() {
             <span className="text-sm text-muted-foreground">
               Signed in as <span className="font-mono">{userId}</span>
             </span>
+            {appName && session && (
+              <ArtifactsPanel
+                appName={appName}
+                userId={userId}
+                sessionId={session.id}
+              />
+            )}
             <Button
               variant="outline"
               size="icon"
