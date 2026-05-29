@@ -3,7 +3,11 @@ import { ChevronDown, ChevronRight, Sparkles } from "lucide-react"
 
 /**
  * Renders a model "thought" part — Gemini's `thought: true` summary
- * content. Collapsed by default; expand to read the full reasoning.
+ * content. Collapsed by default; click to expand and read the full
+ * reasoning. Once expanded it STAYS expanded as more tokens stream in
+ * — the row key is stable across partials (see dedupePartials), so the
+ * bubble no longer remounts and snaps shut on every new token. Expand
+ * it once and watch the reasoning fill in live.
  *
  * When collapsed: chevron + sparkles + first line preview (truncated
  * if long), single row. When expanded: full multi-paragraph thought

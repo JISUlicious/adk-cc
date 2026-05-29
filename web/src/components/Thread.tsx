@@ -452,7 +452,10 @@ function dedupePartials(events: RunEvent[]): RunEvent[] {
   // part (rendered by ThoughtBubble); the body text stream surfaces
   // as a MessageBubble.
   const out: RunEvent[] = []
-  const open = new Map<string, { idx: number; text: string; thought: string }>()
+  const open = new Map<
+    string,
+    { idx: number; text: string; thought: string; id?: string }
+  >()
 
   for (const e of events) {
     const key = `${e.invocation_id ?? ""}::${e.author ?? ""}`
@@ -471,13 +474,23 @@ function dedupePartials(events: RunEvent[]): RunEvent[] {
         entry.text += deltaText
         entry.thought += deltaThought
       } else {
-        const created = { idx: out.length, text: deltaText, thought: deltaThought }
+        const created = {
+          idx: out.length,
+          text: deltaText,
+          thought: deltaThought,
+          // Pin the FIRST partial's event id for the whole group. ADK
+          // mints a fresh id per partial; without pinning, the row key
+          // (which includes eventId) changes every token and React
+          // remounts the row — collapsing the ThoughtBubble mid-stream.
+          id: e.id as string | undefined,
+        }
         open.set(key, created)
         out.push(e) // placeholder; rewritten below
       }
       const cur = open.get(key)!
       out[cur.idx] = {
         ...e,
+        ...(cur.id !== undefined ? { id: cur.id } : {}),
         content: {
           ...e.content,
           parts: [
@@ -498,7 +511,10 @@ function dedupePartials(events: RunEvent[]): RunEvent[] {
       (p) => typeof p.text === "string" && p.text.trim().length > 0,
     )
     if (entry && hasMeaningfulText) {
-      out[entry.idx] = e
+      // Keep the group's pinned id so the row key doesn't flip on the
+      // final swap (which would remount the bubble right as it settles).
+      out[entry.idx] =
+        entry.id !== undefined ? { ...e, id: entry.id } : e
       open.delete(key)
     } else {
       out.push(e)
