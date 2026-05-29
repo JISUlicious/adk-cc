@@ -1,3 +1,4 @@
+import { type ReactNode } from "react"
 import { type RunEvent } from "@/api/sse"
 import { MessageBubble } from "./MessageBubble"
 import { ToolResponseCard } from "./ToolResponseCard"
@@ -15,6 +16,7 @@ import { FileEditCard } from "./FileEditCard"
 import { PlanCard } from "./PlanCard"
 import { ThoughtBubble } from "./ThoughtBubble"
 import { ToolCard } from "./ToolCard"
+import { ToolCallGroup } from "./ToolCallGroup"
 
 /**
  * Renders the linear event stream as chat rows.
@@ -39,6 +41,12 @@ import { ToolCard } from "./ToolCard"
  * Anything else: ToolCard — call+response merged with a status chip
  *   (called / finished / error). Orphan function_responses (no matching
  *   call) still fall through to ToolResponseCard.
+ *
+ * Accumulation: a run of MORE THAN TWO consecutive tool rows (the
+ * generic/paired cards above + orphan responses, but never a pending
+ * interactive widget) collapses into one ToolCallGroup annotation
+ * showing the count, expandable to the individual cards. Runs of one
+ * or two render inline. See `isGroupableToolRow` / `summarizeTools`.
  *
  * Partial events: the SSE stream emits incremental `partial: true`
  * events as the model streams tokens. We dedupe partials so only the
@@ -99,6 +107,53 @@ export function Thread({
     flattenEvents(deduped, responsesByCallId),
   )
 
+  const renderRow = (row: ChatRow, key: string) => (
+    <Row
+      key={key}
+      row={row}
+      pendingCallIds={pendingCallIds}
+      onSubmitFunctionResponse={onSubmitFunctionResponse}
+      submitDisabled={isStreaming}
+      appName={appName}
+      userId={userId}
+      sessionId={sessionId}
+    />
+  )
+
+  // Accumulate runs of >2 consecutive tool rows into one collapsible
+  // ToolCallGroup; everything else renders inline.
+  const body: ReactNode[] = []
+  for (let i = 0; i < rows.length; ) {
+    if (!isGroupableToolRow(rows[i], pendingCallIds)) {
+      body.push(renderRow(rows[i], `${rows[i].eventId}:${rows[i].kind}:${i}`))
+      i++
+      continue
+    }
+    let j = i
+    while (j < rows.length && isGroupableToolRow(rows[j], pendingCallIds)) j++
+    const run = rows.slice(i, j)
+    if (run.length > 2) {
+      const hasPending = run.some(
+        (r) => r.kind === "tool_pair" && pendingCallIds.has(r.callId),
+      )
+      body.push(
+        <ToolCallGroup
+          key={`group:${run[0].eventId}:${i}`}
+          count={run.length}
+          summary={summarizeTools(run)}
+          defaultOpen={hasPending && isStreaming}
+        >
+          {run.map((r, k) => renderRow(r, `${r.eventId}:${r.kind}:${i + k}`))}
+        </ToolCallGroup>,
+      )
+    } else {
+      run.forEach((r, k) =>
+        body.push(renderRow(r, `${r.eventId}:${r.kind}:${i + k}`)),
+      )
+    }
+    i = j
+  }
+
   return (
     <div className="flex flex-col gap-3 px-6 py-4">
       {rows.length === 0 && !isStreaming && (
@@ -107,18 +162,7 @@ export function Thread({
           adk-cc agent on the server.
         </p>
       )}
-      {rows.map((row, i) => (
-        <Row
-          key={`${row.eventId}:${row.kind}:${i}`}
-          row={row}
-          pendingCallIds={pendingCallIds}
-          onSubmitFunctionResponse={onSubmitFunctionResponse}
-          submitDisabled={isStreaming}
-          appName={appName}
-          userId={userId}
-          sessionId={sessionId}
-        />
-      ))}
+      {body}
       {isStreaming && (
         <p className="text-xs text-muted-foreground italic px-2">
           agent is working…
@@ -310,6 +354,36 @@ function extractConfirmPayload(args: unknown): ConfirmPayload | null {
   const direct = a.payload as ConfirmPayload | undefined
   if (direct && typeof direct === "object") return direct
   return null
+}
+
+/** A row eligible to be folded into a ToolCallGroup: any tool card or
+ * orphan response, EXCEPT a pending interactive widget (confirmation /
+ * question) — those must stay visible so the user can act on them. */
+function isGroupableToolRow(
+  row: ChatRow,
+  pendingCallIds: Set<string>,
+): boolean {
+  if (row.kind === "function_response") return true
+  if (row.kind === "tool_pair") {
+    const interactive =
+      pendingCallIds.has(row.callId) &&
+      (CONFIRMATION_NAMES.has(row.name) || row.name === ASK_QUESTION_NAME)
+    return !interactive
+  }
+  return false
+}
+
+/** Compact, deduped tool-name preview for a grouped run's header
+ * ("read_file · grep · run_bash +2"). Order-preserving; first 3 names. */
+function summarizeTools(run: ChatRow[]): string {
+  const names: string[] = []
+  for (const r of run) {
+    const n =
+      r.kind === "tool_pair" || r.kind === "function_response" ? r.name : ""
+    if (n && !names.includes(n)) names.push(n)
+  }
+  const head = names.slice(0, 3).join(" · ")
+  return names.length > 3 ? `${head} +${names.length - 3}` : head
 }
 
 // --- internals ---
