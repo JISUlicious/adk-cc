@@ -3,11 +3,11 @@ import { ChevronDown, ChevronRight, Layers } from "lucide-react"
 
 /**
  * Accumulates a run of consecutive tool-call rows into a single
- * collapsible annotation. `Thread.tsx` wraps any run of MORE THAN TWO
+ * collapsible annotation. `Thread.tsx` wraps any run of TWO OR MORE
  * adjacent tool rows (tool_pair cards + orphan function_responses, but
- * never pending interactive widgets) in this component so a long chain
- * of reads/greps/edits collapses to one line — "N tool calls" — instead
- * of flooding the transcript. Runs of one or two render inline as before.
+ * never pending interactive widgets) in this component so a chain of
+ * reads/greps/edits collapses to one line — "N tool calls" — instead
+ * of flooding the transcript. A lone tool call renders inline.
  *
  * Collapsed: the annotation row only (count + a compact name summary).
  * Expanded: the same header plus every wrapped card stacked under a

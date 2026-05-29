@@ -42,11 +42,11 @@ import { ToolCallGroup } from "./ToolCallGroup"
  *   (called / finished / error). Orphan function_responses (no matching
  *   call) still fall through to ToolResponseCard.
  *
- * Accumulation: a run of MORE THAN TWO consecutive tool rows (the
+ * Accumulation: a run of TWO OR MORE consecutive tool rows (the
  * generic/paired cards above + orphan responses, but never a pending
  * interactive widget) collapses into one ToolCallGroup annotation
- * showing the count, expandable to the individual cards. Runs of one
- * or two render inline. See `isGroupableToolRow` / `summarizeTools`.
+ * showing the count, expandable to the individual cards. A lone tool
+ * call renders inline. See `isGroupableToolRow` / `summarizeTools`.
  *
  * Partial events: the SSE stream emits incremental `partial: true`
  * events as the model streams tokens. We dedupe partials so only the
@@ -132,7 +132,7 @@ export function Thread({
     let j = i
     while (j < rows.length && isGroupableToolRow(rows[j], pendingCallIds)) j++
     const run = rows.slice(i, j)
-    if (run.length > 2) {
+    if (run.length > 1) {
       const hasPending = run.some(
         (r) => r.kind === "tool_pair" && pendingCallIds.has(r.callId),
       )
