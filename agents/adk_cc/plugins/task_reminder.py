@@ -256,17 +256,21 @@ class TaskReminderPlugin(BasePlugin):
         ):
             return None
 
-        # Resolve the SAME (tenant, session) bucket the task tools wrote
-        # to. get_workspace returns the seeded WorkspaceRoot in prod and
-        # the local/local default in dev — matching task_create either
-        # way. (The old code read the dataclass as a dict and always got
-        # local/local, so prod reminders showed an empty list.)
+        # Resolve the SAME bucket the task tools wrote to. The task tools
+        # (tools/task/*.py) all pass workspace_path=ws.abs_path, which
+        # anchors storage at <workspace>/.adk-cc/tasks/<session>/. We MUST
+        # pass it too — without it, JsonFileTaskStorage.list() falls back
+        # to the legacy root ~/.adk-cc/tasks/<tenant>/<session>/, which is
+        # empty in any workspace-anchored deployment. That bug made the
+        # reminder read an empty list (so the completion-aware + fresh-turn
+        # paths never fired), even after the earlier tenant/session fix.
         try:
             ws = get_workspace(callback_context)
             runner = get_runner()
             all_tasks = await runner.storage.list(
                 tenant_id=ws.tenant_id or "local",
                 session_id=ws.session_id or "local",
+                workspace_path=ws.abs_path,
             )
         except Exception:
             all_tasks = []

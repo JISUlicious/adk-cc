@@ -42,14 +42,16 @@ class _FakeTask:
 
 
 class _FakeStorage:
-    """Records the (tenant_id, session_id) it was queried with."""
+    """Records the (tenant_id, session_id, workspace_path) it was queried with."""
 
     def __init__(self, tasks):
         self._tasks = tasks
         self.queried_with = None
+        self.queried_workspace_path = "<unset>"
 
-    async def list(self, *, tenant_id, session_id):
+    async def list(self, *, tenant_id, session_id, workspace_path=None):
         self.queried_with = (tenant_id, session_id)
+        self.queried_workspace_path = workspace_path
         return self._tasks
 
 
@@ -133,9 +135,10 @@ def test_disabled_toggle_noops():
 
 
 def test_bucket_uses_workspace_not_local():
-    _install_runner([])
     p = TaskReminderPlugin()
-    ws = WorkspaceRoot(tenant_id="acme", session_id="sess-123", abs_path="/tmp")
+    ws = WorkspaceRoot(
+        tenant_id="acme", session_id="sess-123", abs_path="/work/acme/alice"
+    )
     storage = _install_runner([])
     state = _State({"temp:sandbox_workspace": ws})
     # No prior task call → turns_since = maxsize → fires; we only care
@@ -144,6 +147,13 @@ def test_bucket_uses_workspace_not_local():
     _run(p, ctx, _LlmReq())
     assert storage.queried_with == ("acme", "sess-123"), (
         f"expected real bucket, got {storage.queried_with}"
+    )
+    # Must forward workspace_path — without it, JsonFileTaskStorage.list
+    # reads the legacy ~/.adk-cc/tasks root and finds nothing in any
+    # workspace-anchored deployment (the bug that made the reminder inert).
+    assert storage.queried_workspace_path == "/work/acme/alice", (
+        f"reminder must pass workspace_path=ws.abs_path, "
+        f"got {storage.queried_workspace_path!r}"
     )
     print("OK test_bucket_uses_workspace_not_local")
 
