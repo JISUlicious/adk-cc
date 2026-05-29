@@ -6,9 +6,9 @@
 
 ## Surface
 
-- **Discovery**: `adk web` / `adk run` finds the agent via the module-level export `adk_cc.agent.app` (preferred) or `adk_cc.agent.root_agent`. The directory layout matches ADK's documented convention: `<AGENTS_DIR>/<agent_name>/{__init__.py, agent.py}`.
+- **Discovery**: `adk web` / `adk run` finds the agent via the module-level export `adk_cc.agent.app` (preferred) or `adk_cc.agent.root_agent`. The directory layout matches ADK's documented convention: `<AGENTS_DIR>/<agent_name>/{__init__.py, agent.py}` — here `AGENTS_DIR` is `agents/` and the agent is `agents/adk_cc/`, so the loader discovers only real agents (not the repo's `web/`, `docs/`, `tests/`).
 - **Entry points**:
-  - Development: `adk web .` or `adk run adk_cc` from the `adk-cc/` directory.
+  - Development: `adk web agents` or `adk run agents/adk_cc` from the repo root.
   - Single-instance / multi-tenant server: `uvicorn adk_cc.service.server:make_app --factory` (FastAPI app with auth middleware, quotas, configurable session storage). The same factory serves both single-tenant deployments (one team, static tokens) and multi-tenant production (JWT auth, per-tenant resources) — what differs is which auth + per-tenant env vars are wired.
 - **Configuration**: env-driven, loaded from `adk_cc/.env` automatically in dev. Required minimum: `ADK_CC_API_KEY`. The full surface is documented in [`.env.example`](../.env.example) — model, permissions, sandbox backend, audit, web fetch, skills, tasks, and the multi-tenant service variables.
 

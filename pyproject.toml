@@ -12,5 +12,12 @@ dependencies = [
     "httpx>=0.27",
 ]
 
+# The agent package lives under `agents/` so that directory can serve as
+# ADK's AGENTS_DIR (only real agents are discovered there, not the repo's
+# web/ docs/ tests/ scaffolding). setuptools treats `agents/` as the source
+# root but still installs the package under its own name `adk_cc`, so
+# `import adk_cc` and the uvicorn factory `adk_cc.service.server:make_app`
+# are unchanged.
 [tool.setuptools.packages.find]
+where = ["agents"]
 include = ["adk_cc*"]

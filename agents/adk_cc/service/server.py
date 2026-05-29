@@ -221,8 +221,9 @@ def make_app():
             ui_dist_dir = explicit
         else:
             # Default: <repo_root>/web/dist. server.py lives at
-            # adk_cc/service/server.py, so repo_root is two parents up.
-            ui_dist_dir = str(Path(__file__).resolve().parents[2] / "web" / "dist")
+            # agents/adk_cc/service/server.py, so repo_root is three
+            # parents up (service → adk_cc → agents → repo).
+            ui_dist_dir = str(Path(__file__).resolve().parents[3] / "web" / "dist")
 
     return build_fastapi_app(
         agents_dir=agents_dir,

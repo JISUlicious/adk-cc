@@ -21,8 +21,8 @@ Claude Code 스타일의 **gather → plan → act → verify** 에이전트 루
 ## 디렉터리 구조
 
 ```
-adk-cc/                           ← AGENTS_DIR (adk_cc/의 상위)
-├── pyproject.toml
+adk-cc/                           ← repo 루트
+├── pyproject.toml                ← packages.find where=["agents"] → adk_cc 설치
 ├── Dockerfile.sandbox            ← per-session sandbox 이미지
 ├── .env.example                  ← 전체 설정 surface (~65개 ADK_CC_* 변수)
 ├── docs/                         ← 아키텍처, 프롬프트, 배포 런북
@@ -30,20 +30,23 @@ adk-cc/                           ← AGENTS_DIR (adk_cc/의 상위)
 ├── tests/                        ← unit + e2e 테스트 ("Tests" 절 참고)
 ├── web/                          ← React 챗 UI (Vite + Tailwind v4 + shadcn/ui)
 │   └── src/{api,components,pages,lib}
-└── adk_cc/                       ← 에이전트 패키지
-    ├── __init__.py               ← `from . import agent`
-    ├── agent.py                  ← `app`(권장)과 `root_agent` export
-    ├── prompts.py                ← 에이전트별 instruction
-    ├── logging_setup.py          ← ADK_CC_LOG_* 설정
-    ├── tools/                    ← AdkCcTool 서브클래스 (read/write/exec/task/HITL/plan/skills/MCP)
-    ├── plugins/                  ← ADK BasePlugin 통합
-    ├── permissions/              ← 규칙 엔진 + 확인 페이로드
-    ├── sandbox/                  ← SandboxBackend ABC + 구현
-    │   └── backends/{noop,docker,sandbox_service,e2b}.py
-    ├── tasks/                    ← task 추적 + JSON 저장소 (filelock 안전)
-    ├── credentials/              ← per-tenant 시크릿 저장소
-    └── service/                  ← FastAPI 팩토리 + 인증 + 테넌시 + admin
+└── agents/                       ← AGENTS_DIR (ADK가 여기서만 에이전트 발견)
+    └── adk_cc/                   ← 에이전트 패키지 (`adk_cc`로 import)
+        ├── __init__.py           ← .env bootstrap + `from . import agent`
+        ├── agent.py              ← `app`(권장)과 `root_agent` export
+        ├── prompts.py            ← 에이전트별 instruction
+        ├── logging_setup.py      ← ADK_CC_LOG_* 설정
+        ├── tools/                ← AdkCcTool 서브클래스 (read/write/exec/task/HITL/plan/skills/MCP)
+        ├── plugins/              ← ADK BasePlugin 통합
+        ├── permissions/          ← 규칙 엔진 + 확인 페이로드
+        ├── sandbox/              ← SandboxBackend ABC + 구현
+        │   └── backends/{noop,docker,sandbox_service,daytona,e2b}.py
+        ├── tasks/                ← task 추적 + JSON 저장소 (filelock 안전)
+        ├── credentials/          ← per-tenant 시크릿 저장소
+        └── service/              ← FastAPI 팩토리 + 인증 + 테넌시 + admin
 ```
+
+`agents/`는 ADK의 `AGENTS_DIR`입니다 — 에이전트 패키지만 담고 있어 로더가 에이전트만 발견합니다(`web/`, `docs/`, `tests/` 제외). 패키지는 top-level `adk_cc`로 설치·import됩니다(setuptools `where=["agents"]`); uvicorn 팩토리는 `adk_cc.service.server:make_app`.
 
 ## 빠른 시작
 
@@ -55,11 +58,11 @@ uv pip install -e .
 # .env — 최소한 모델 서버의 API 키
 echo 'ADK_CC_API_KEY=sk-your-model-server-key' > .env
 
-# 옵션 A: ADK 번들 웹 UI
-adk web .
+# 옵션 A: ADK 번들 웹 UI (agents/ 디렉터리를 가리킴)
+adk web agents
 
 # 옵션 B: 한 번만 실행 (CLI)
-adk run adk_cc
+adk run agents/adk_cc
 
 # 옵션 C: FastAPI + 커스텀 React UI ("웹 UI" 절 참고)
 ```
@@ -76,7 +79,7 @@ npm --prefix web install
 npm --prefix web run build
 
 # 2. FastAPI 서버를 UI 마운트와 함께 시작
-ADK_CC_AGENTS_DIR=$(pwd) \
+ADK_CC_AGENTS_DIR=$(pwd)/agents \
 ADK_CC_AUTH_TOKENS='devtok=alice:acme' \
 ADK_CC_SERVE_UI=1 \
 .venv/bin/uvicorn adk_cc.service.server:make_app --factory \

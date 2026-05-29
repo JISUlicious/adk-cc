@@ -21,8 +21,8 @@ Deeper docs in [`docs/`](./docs/): [specification](./docs/01-specification.md), 
 ## Layout
 
 ```
-adk-cc/                           ← AGENTS_DIR (parent of adk_cc/)
-├── pyproject.toml
+adk-cc/                           ← repo root
+├── pyproject.toml                ← packages.find where=["agents"] → installs adk_cc
 ├── Dockerfile.sandbox            ← per-session sandbox image
 ├── .env.example                  ← full config surface (~65 ADK_CC_* vars)
 ├── docs/                         ← architecture, prompts, deployment runbooks
@@ -30,20 +30,23 @@ adk-cc/                           ← AGENTS_DIR (parent of adk_cc/)
 ├── tests/                        ← unit tests + e2e suites (see "Tests")
 ├── web/                          ← React chat UI (Vite + Tailwind v4 + shadcn/ui)
 │   └── src/{api,components,pages,lib}
-└── adk_cc/                       ← agent package
-    ├── __init__.py               ← `from . import agent`
-    ├── agent.py                  ← exposes `app` (preferred) and `root_agent`
-    ├── prompts.py                ← per-agent instructions
-    ├── logging_setup.py          ← ADK_CC_LOG_* configuration
-    ├── tools/                    ← AdkCcTool subclasses (read/write/exec/task/HITL/plan/skills/MCP)
-    ├── plugins/                  ← ADK BasePlugin integrations
-    ├── permissions/              ← rule engine + confirmation payloads
-    ├── sandbox/                  ← SandboxBackend ABC + impls
-    │   └── backends/{noop,docker,sandbox_service,e2b}.py
-    ├── tasks/                    ← task tracking + JSON storage (filelock-safe)
-    ├── credentials/              ← per-tenant secret storage
-    └── service/                  ← FastAPI factory + auth + tenancy + admin
+└── agents/                       ← AGENTS_DIR (ADK discovers agents here, nothing else)
+    └── adk_cc/                   ← agent package (imported as `adk_cc`)
+        ├── __init__.py           ← .env bootstrap + `from . import agent`
+        ├── agent.py              ← exposes `app` (preferred) and `root_agent`
+        ├── prompts.py            ← per-agent instructions
+        ├── logging_setup.py      ← ADK_CC_LOG_* configuration
+        ├── tools/                ← AdkCcTool subclasses (read/write/exec/task/HITL/plan/skills/MCP)
+        ├── plugins/              ← ADK BasePlugin integrations
+        ├── permissions/          ← rule engine + confirmation payloads
+        ├── sandbox/              ← SandboxBackend ABC + impls
+        │   └── backends/{noop,docker,sandbox_service,daytona,e2b}.py
+        ├── tasks/                ← task tracking + JSON storage (filelock-safe)
+        ├── credentials/          ← per-tenant secret storage
+        └── service/              ← FastAPI factory + auth + tenancy + admin
 ```
+
+`agents/` is ADK's `AGENTS_DIR` — it holds only agent packages, so the loader discovers just the agents (not `web/`, `docs/`, `tests/`). The package installs and imports as top-level `adk_cc` (setuptools `where=["agents"]`); the uvicorn factory is `adk_cc.service.server:make_app`.
 
 ## Quick start
 
@@ -55,11 +58,11 @@ uv pip install -e .
 # .env file — at minimum the API key for your model server
 echo 'ADK_CC_API_KEY=sk-your-model-server-key' > .env
 
-# Option A: bundled ADK web UI
-adk web .
+# Option A: bundled ADK web UI (point it at the agents/ dir)
+adk web agents
 
 # Option B: one-shot CLI
-adk run adk_cc
+adk run agents/adk_cc
 
 # Option C: FastAPI + custom React UI (see "Web UI" below)
 ```
@@ -76,7 +79,7 @@ npm --prefix web install
 npm --prefix web run build
 
 # 2. Start the FastAPI server with the UI mounted at /
-ADK_CC_AGENTS_DIR=$(pwd) \
+ADK_CC_AGENTS_DIR=$(pwd)/agents \
 ADK_CC_AUTH_TOKENS='devtok=alice:acme' \
 ADK_CC_SERVE_UI=1 \
 .venv/bin/uvicorn adk_cc.service.server:make_app --factory \

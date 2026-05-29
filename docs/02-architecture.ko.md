@@ -2,12 +2,16 @@
 
 ## 1. 파일 레이아웃
 
+에이전트 패키지는 `agents/adk_cc/`에 있습니다. ADK의 `AGENTS_DIR`은 `agents/` 디렉터리(`adk web`이 가리킬 경로)로, 에이전트 패키지만 담고 있어 로더가 `web/`, `docs/`, `tests/`를 가짜 app으로 노출하지 않습니다. setuptools가 `where=["agents"]`를 사용하므로 패키지는 여전히 top-level `adk_cc`로 설치·import됩니다. 아래 트리는 (`agents/adk_cc/`에 루팅된) 패키지 내부를 보여줍니다:
+
 ```
-adk-cc/                          ← AGENTS_DIR (`adk web`이 가리킬 경로)
-├── pyproject.toml               # google-adk==1.31.1, litellm>=1.50
+adk-cc/                          ← repo 루트
+├── pyproject.toml               # google-adk==1.31.1, litellm>=1.50; where=["agents"]
 ├── README.md
 ├── docs/                        # 이 디렉터리
-└── adk_cc/                      # ADK가 발견하는 에이전트 모듈
+├── web/                         # React 챗 UI
+└── agents/                      # ← AGENTS_DIR (`adk web`이 가리킬 경로)
+    └── adk_cc/                  # ADK가 발견하는 에이전트 패키지 (`adk_cc`로 import)
     ├── __init__.py              # `from . import agent`
     ├── agent.py                 # `app`(권장)과 `root_agent` export
     ├── prompts.py               # 에이전트별 system prompt
