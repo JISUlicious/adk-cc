@@ -8,6 +8,7 @@ from ...sandbox import get_workspace
 from ...tasks import TaskNotFound, get_runner
 from ..base import AdkCcTool, ToolMeta
 from ..schemas import TaskGetArgs
+from ._common import task_not_found_error
 
 
 class TaskGetTool(AdkCcTool):
@@ -26,6 +27,6 @@ class TaskGetTool(AdkCcTool):
             task = await runner.storage.get(
                 args.task_id, tenant_id=ws.tenant_id, workspace_path=ws.abs_path,
             )
-        except TaskNotFound as e:
-            return {"status": "not_found", "error": str(e)}
+        except TaskNotFound:
+            return await task_not_found_error(args.task_id, runner, ws)
         return {"status": "ok", "task": task.model_dump(mode="json")}

@@ -9,6 +9,7 @@ from ...sandbox import get_workspace
 from ...tasks import TaskNotFound, TaskStatus, get_runner
 from ..base import AdkCcTool, ToolMeta
 from ..schemas import TaskUpdateArgs
+from ._common import task_not_found_error
 
 
 class TaskUpdateTool(AdkCcTool):
@@ -32,8 +33,13 @@ class TaskUpdateTool(AdkCcTool):
             task = await runner.storage.get(
                 args.task_id, tenant_id=ws.tenant_id, workspace_path=ws.abs_path,
             )
-        except TaskNotFound as e:
-            return {"status": "not_found", "error": str(e)}
+        except TaskNotFound:
+            # Models routinely pass a stale or fabricated id here, then —
+            # on a bare "not found for tenant X" — wrongly conclude the
+            # session is fresh/unpersisted and ABANDON tracking. Surface
+            # the actual task ids so the model can self-correct (retry
+            # with the right id) instead of giving up.
+            return await task_not_found_error(args.task_id, runner, ws)
 
         if args.status is not None:
             try:
