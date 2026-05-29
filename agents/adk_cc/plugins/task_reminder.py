@@ -205,6 +205,14 @@ class TaskReminderPlugin(BasePlugin):
         self._open_turns = int(
             os.environ.get("ADK_CC_TASK_REMINDER_OPEN_TURNS", "3")
         )
+        # Cooldown between reminders while an in_progress task is open.
+        # Lower than `_turns_between` so the "close it out" nudge keeps
+        # firing as the agent winds down — the regular 10-turn cooldown
+        # silences it right when the agent is wrapping up with tasks
+        # still open. Set >= _turns_between to disable.
+        self._open_between = int(
+            os.environ.get("ADK_CC_TASK_REMINDER_OPEN_BETWEEN", "2")
+        )
 
     async def before_model_callback(
         self,
@@ -228,13 +236,24 @@ class TaskReminderPlugin(BasePlugin):
 
         events = list(getattr(callback_context.session, "events", []) or [])
 
-        # Cheapest gate first: the smallest threshold that could ever
-        # fire is `_open_turns` (completion-aware path). If we're inside
-        # even that window, bail before touching storage.
+        # A "fresh turn" is the opening model call after a new user
+        # message — ADK appends the user message before invoking the
+        # model, so events[-1].author == "user" identifies it. If the
+        # previous turn ended with tasks still open, this is where we
+        # catch it: the agent declared done mid-turn, and we can't force
+        # closure after it already replied, but we CAN confront it the
+        # moment the next turn starts. (This is the "dangling task"
+        # check done without a persisted flag — robust for DB sessions
+        # where temp/ad-hoc state wouldn't survive the invocation.)
+        fresh_turn = bool(events) and getattr(events[-1], "author", None) == "user"
+
         turns_since = _turns_since_task_call(events)
-        if turns_since < min(self._open_turns, self._turns_since_write):
-            return None
-        if _turns_since_reminder(events, callback_context.state) < self._turns_between:
+        # Cheapest gate: on a non-fresh turn inside even the smallest
+        # cadence window, bail before touching storage. A fresh turn
+        # always checks (it might need to confront dangling tasks).
+        if not fresh_turn and turns_since < min(
+            self._open_turns, self._turns_since_write
+        ):
             return None
 
         # Resolve the SAME (tenant, session) bucket the task tools wrote
@@ -253,7 +272,7 @@ class TaskReminderPlugin(BasePlugin):
             all_tasks = []
 
         # Open = anything not completed; in_progress drives the
-        # aggressive cadence.
+        # aggressive cadence + shorter cooldown.
         open_tasks = [
             t for t in all_tasks
             if getattr(t, "status", None) != TaskStatus.COMPLETED
@@ -263,11 +282,24 @@ class TaskReminderPlugin(BasePlugin):
             for t in all_tasks
         )
 
-        # Completion-aware threshold: an open in_progress task fires the
-        # reminder sooner so "close it out" actually reaches the model
-        # mid-task instead of only after 10 idle turns.
-        threshold = self._open_turns if has_in_progress else self._turns_since_write
-        if turns_since < threshold:
+        since_reminder = _turns_since_reminder(events, callback_context.state)
+
+        # Dangling-task confrontation: a new turn that opens with tasks
+        # still open fires immediately, bypassing the cooldown — this is
+        # what actually catches "declared done last turn with open tasks."
+        fire = fresh_turn and bool(open_tasks)
+
+        if not fire:
+            # Periodic / completion-aware cadence. in_progress shortens
+            # both the trigger threshold and the cooldown so the nudge
+            # reaches the model mid-task and again as it winds down,
+            # rather than only after 10 idle turns.
+            threshold = self._open_turns if has_in_progress else self._turns_since_write
+            cooldown = self._open_between if has_in_progress else self._turns_between
+            if turns_since >= threshold and since_reminder >= cooldown:
+                fire = True
+
+        if not fire:
             return None
 
         _append_to_system_instruction(

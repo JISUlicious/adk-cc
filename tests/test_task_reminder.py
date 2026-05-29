@@ -96,6 +96,11 @@ def _task_call_event(name="task_create"):
     )
 
 
+def _user_event():
+    content = types.SimpleNamespace(parts=[types.SimpleNamespace(text="next request")])
+    return types.SimpleNamespace(author="user", content=content, invocation_id="inv-2")
+
+
 def _run(plugin, ctx, req):
     return asyncio.run(
         plugin.before_model_callback(callback_context=ctx, llm_request=req)
@@ -175,6 +180,42 @@ def test_no_in_progress_holds_to_since_write():
     print("OK test_no_in_progress_holds_to_since_write")
 
 
+def test_fresh_turn_with_open_tasks_fires_immediately():
+    # New turn opens (events[-1] is a user msg) with an open task, but
+    # turns_since (2) is below open_turns(3) and there's no cooldown
+    # window yet — the dangling-task catch must fire anyway.
+    tasks = [_FakeTask("dddd0001", TaskStatus.IN_PROGRESS, "Write tests")]
+    _install_runner(tasks)
+    p = TaskReminderPlugin()
+    ws = WorkspaceRoot(tenant_id="acme", session_id="s2", abs_path="/tmp")
+    state = _State({"temp:sandbox_workspace": ws})
+    events = [_task_call_event(), _plain_event(), _plain_event(), _user_event()]
+    req = _LlmReq()
+    _run(p, _Ctx(state=state, events=events), req)
+    assert req.config.system_instruction is not None, (
+        "fresh turn with open tasks must fire even inside the cadence window"
+    )
+    assert "dddd0001" in req.config.system_instruction
+    print("OK test_fresh_turn_with_open_tasks_fires_immediately")
+
+
+def test_fresh_turn_no_open_tasks_does_not_fire():
+    # Fresh turn but everything completed → nothing to confront, and
+    # turns_since is small → no periodic fire either.
+    tasks = [_FakeTask("eeee0001", TaskStatus.COMPLETED, "done thing")]
+    _install_runner(tasks)
+    p = TaskReminderPlugin()
+    ws = WorkspaceRoot(tenant_id="acme", session_id="s3", abs_path="/tmp")
+    state = _State({"temp:sandbox_workspace": ws})
+    events = [_task_call_event(), _plain_event(), _user_event()]
+    req = _LlmReq()
+    _run(p, _Ctx(state=state, events=events), req)
+    assert req.config.system_instruction is None, (
+        "fresh turn with only completed tasks should not fire the dangling catch"
+    )
+    print("OK test_fresh_turn_no_open_tasks_does_not_fire")
+
+
 def test_specialist_skipped():
     _install_runner([_FakeTask("x", TaskStatus.IN_PROGRESS, "t")])
     p = TaskReminderPlugin()
@@ -194,5 +235,7 @@ if __name__ == "__main__":
     test_bucket_uses_workspace_not_local()
     test_completion_aware_fires_for_in_progress()
     test_no_in_progress_holds_to_since_write()
+    test_fresh_turn_with_open_tasks_fires_immediately()
+    test_fresh_turn_no_open_tasks_does_not_fire()
     test_specialist_skipped()
     print("\nall task-reminder tests passed")
