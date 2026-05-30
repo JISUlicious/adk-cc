@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Plus, Trash2 } from "lucide-react"
+import { Plus, Trash2, X } from "lucide-react"
 import {
   createSession,
   deleteSession,
@@ -27,6 +27,10 @@ export function SessionRail({
   /** Bumped by ChatPage when a new turn lands so the rail can refresh
    * lastUpdateTime + ordering. */
   refreshTick,
+  /** Mobile drawer state. Ignored at lg+ where the rail is a static
+   * column (always visible). */
+  open,
+  onClose,
 }: {
   userId: string
   appName: string | null
@@ -34,6 +38,8 @@ export function SessionRail({
   sessionId: string | null
   onSelect: (s: Session | null) => void
   refreshTick: number
+  open: boolean
+  onClose: () => void
 }) {
   const [apps, setApps] = useState<string[]>([])
   const [sessions, setSessions] = useState<Session[]>([])
@@ -109,7 +115,35 @@ export function SessionRail({
   }
 
   return (
-    <aside className="flex w-72 flex-col bg-muted/40 border-r border-border/60">
+    <>
+      {/* Mobile backdrop — tap to dismiss. Hidden at lg+ where the rail
+          is a permanent column. */}
+      {open && (
+        <div
+          className="fixed inset-0 z-30 bg-foreground/30 lg:hidden"
+          aria-hidden
+          onClick={onClose}
+        />
+      )}
+      <aside
+        className={cn(
+          "flex w-72 max-w-[85vw] flex-col bg-muted/40 border-r border-border/60",
+          // Mobile: fixed drawer that slides in from the left.
+          "fixed inset-y-0 left-0 z-40 transform transition-transform duration-200 ease-out",
+          // lg+: static column, always on-screen.
+          "lg:static lg:z-auto lg:max-w-none lg:translate-x-0 lg:transition-none",
+          open ? "translate-x-0" : "-translate-x-full",
+        )}
+      >
+      {/* Mobile-only close button. */}
+      <button
+        type="button"
+        onClick={onClose}
+        className="absolute right-2 top-2 z-10 rounded-md p-1.5 text-muted-foreground hover:bg-accent lg:hidden"
+        title="Close"
+      >
+        <X className="h-4 w-4" />
+      </button>
       <div className="px-4 py-3">
         <label className="text-xs font-medium text-muted-foreground">
           Agent
@@ -195,6 +229,7 @@ export function SessionRail({
           ))}
         </ul>
       </div>
-    </aside>
+      </aside>
+    </>
   )
 }

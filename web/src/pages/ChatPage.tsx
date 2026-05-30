@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react"
-import { Settings as SettingsIcon } from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { Settings as SettingsIcon, Menu, ListChecks } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { clearToken, getUser } from "@/api/auth"
 import {
@@ -16,7 +16,7 @@ import {
 import { SessionRail } from "@/components/SessionRail"
 import { Thread } from "@/components/Thread"
 import { Composer } from "@/components/Composer"
-import { TaskSidebar } from "@/components/TaskSidebar"
+import { TaskSidebar, deriveTasks } from "@/components/TaskSidebar"
 import { ArtifactsPanel } from "@/components/ArtifactsPanel"
 import { SettingsDialog } from "@/components/SettingsDialog"
 import { type SlashAction } from "@/components/SlashCommandMenu"
@@ -27,6 +27,10 @@ import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/lib/theme"
  * tasks (right rail, conditionally rendered). The rail owns its own
  * data fetching; ChatPage owns the currently-displayed session and
  * the in-flight SSE stream.
+ *
+ * Responsive: at lg+ all three panes sit side by side. Below lg the two
+ * side rails become slide-in drawers (toggled from the header) so the
+ * thread gets the full width on phones/tablets.
  *
  * Event sources merged into one rendered list:
  *   1. Session.events loaded on selection — historical truth.
@@ -45,8 +49,15 @@ export function ChatPage() {
   const [refreshTick, setRefreshTick] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Mobile drawer state (no effect at lg+, where the rails are static).
+  const [railOpen, setRailOpen] = useState(false)
+  const [tasksOpen, setTasksOpen] = useState(false)
   const abortRef = useRef<(() => void) | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  // Whether there are any tasks — drives the header's mobile tasks
+  // toggle (the right rail itself renders nothing when empty).
+  const taskCount = useMemo(() => deriveTasks(events).length, [events])
 
   // When the selected session changes, fetch its full event log + state.
   useEffect(() => {
@@ -257,7 +268,7 @@ export function ChatPage() {
       : undefined
 
   return (
-    <div className="flex h-screen">
+    <div className="flex h-screen overflow-hidden">
       <SessionRail
         userId={userId}
         appName={appName}
@@ -266,23 +277,38 @@ export function ChatPage() {
           setSession(null)
         }}
         sessionId={session?.id ?? null}
-        onSelect={(s) => setSession(s)}
+        onSelect={(s) => {
+          setSession(s)
+          setRailOpen(false) // dismiss the mobile drawer after picking
+        }}
         refreshTick={refreshTick}
+        open={railOpen}
+        onClose={() => setRailOpen(false)}
       />
       <div className="flex flex-1 flex-col min-w-0">
-        <header className="flex items-center justify-between px-6 py-3 border-b border-border/60">
-          <div className="flex items-center gap-3 min-w-0">
-            <span className="text-lg font-semibold tracking-tight">
+        <header className="flex items-center justify-between gap-2 px-3 sm:px-6 py-3 border-b border-border/60">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+            {/* Mobile: open the session rail. */}
+            <Button
+              variant="outline"
+              size="icon"
+              className="lg:hidden shrink-0"
+              onClick={() => setRailOpen(true)}
+              title="Sessions"
+            >
+              <Menu className="h-4 w-4" />
+            </Button>
+            <span className="text-lg font-semibold tracking-tight shrink-0">
               adk-cc
             </span>
             {session && (
-              <span className="text-xs font-mono text-muted-foreground truncate">
+              <span className="hidden sm:inline text-xs font-mono text-muted-foreground truncate">
                 {session.id}
               </span>
             )}
           </div>
-          <div className="flex items-center gap-3">
-            <span className="text-sm text-muted-foreground">
+          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+            <span className="hidden md:inline text-sm text-muted-foreground">
               Signed in as <span className="font-mono">{userId}</span>
             </span>
             {appName && session && (
@@ -291,6 +317,21 @@ export function ChatPage() {
                 userId={userId}
                 sessionId={session.id}
               />
+            )}
+            {/* Mobile: open the tasks drawer (only when there are tasks). */}
+            {session && taskCount > 0 && (
+              <Button
+                variant="outline"
+                size="icon"
+                className="lg:hidden relative"
+                onClick={() => setTasksOpen(true)}
+                title="Tasks"
+              >
+                <ListChecks className="h-4 w-4" />
+                <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[9px] font-medium text-primary-foreground">
+                  {taskCount}
+                </span>
+              </Button>
             )}
             <Button
               variant="outline"
@@ -335,7 +376,13 @@ export function ChatPage() {
           mode={permissionMode}
         />
       </div>
-      {session && <TaskSidebar events={events} />}
+      {session && (
+        <TaskSidebar
+          events={events}
+          open={tasksOpen}
+          onClose={() => setTasksOpen(false)}
+        />
+      )}
       <SettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}

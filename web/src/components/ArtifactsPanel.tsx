@@ -117,7 +117,7 @@ export function ArtifactsPanel({
         title="Session artifacts"
       >
         <Paperclip className="h-4 w-4" />
-        Artifacts
+        <span className="hidden sm:inline">Artifacts</span>
         <ChevronDown
           className={cn(
             "h-3.5 w-3.5 transition-transform",

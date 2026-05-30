@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react"
-import { ListChecks, Circle, CircleDashed, CheckCircle2 } from "lucide-react"
+import { ListChecks, Circle, CircleDashed, CheckCircle2, X } from "lucide-react"
 import { type RunEvent } from "@/api/sse"
 import { cn } from "@/lib/utils"
 
@@ -27,67 +27,112 @@ interface TaskRow {
   status: "pending" | "in_progress" | "completed"
 }
 
-export function TaskSidebar({ events }: { events: RunEvent[] }) {
+export function TaskSidebar({
+  events,
+  /** Mobile drawer state. Ignored at lg+ (static column). */
+  open,
+  onClose,
+}: {
+  events: RunEvent[]
+  open: boolean
+  onClose: () => void
+}) {
   const tasks = useMemo(() => deriveTasks(events), [events])
   const [collapsed, setCollapsed] = useState(false)
 
   if (tasks.length === 0) return null
 
+  const openCount = tasks.filter((t) => t.status !== "completed").length
+
   return (
-    <aside
-      className={cn(
-        "bg-muted/40 flex flex-col transition-all border-l border-border/60",
-        collapsed ? "w-10" : "w-64",
+    <>
+      {/* Mobile backdrop — tap to dismiss. */}
+      {open && (
+        <div
+          className="fixed inset-0 z-30 bg-foreground/30 lg:hidden"
+          aria-hidden
+          onClick={onClose}
+        />
       )}
-    >
-      <button
-        type="button"
-        className="flex items-center gap-2 px-3 py-3 text-left hover:bg-accent"
-        onClick={() => setCollapsed((c) => !c)}
-        title={collapsed ? "Expand tasks" : "Collapse tasks"}
+      <aside
+        className={cn(
+          "bg-muted/40 flex flex-col border-l border-border/60",
+          // Mobile: fixed drawer sliding in from the right.
+          "fixed inset-y-0 right-0 z-40 w-72 max-w-[85vw] transform transition-transform duration-200 ease-out",
+          open ? "translate-x-0" : "translate-x-full",
+          // lg+: static column; width follows the desktop collapse toggle.
+          "lg:static lg:z-auto lg:translate-x-0 lg:transition-none",
+          collapsed ? "lg:w-10" : "lg:w-64",
+        )}
       >
-        <ListChecks className="h-4 w-4 text-muted-foreground" />
-        {!collapsed && (
-          <>
-            <span className="text-xs font-medium">Tasks</span>
-            <span className="ml-auto text-[10px] text-muted-foreground">
-              {tasks.filter((t) => t.status !== "completed").length}/{tasks.length}
+        {/* Desktop header: click to collapse/expand. */}
+        <button
+          type="button"
+          className="hidden lg:flex items-center gap-2 px-3 py-3 text-left hover:bg-accent"
+          onClick={() => setCollapsed((c) => !c)}
+          title={collapsed ? "Expand tasks" : "Collapse tasks"}
+        >
+          <ListChecks className="h-4 w-4 text-muted-foreground" />
+          {!collapsed && (
+            <>
+              <span className="text-xs font-medium">Tasks</span>
+              <span className="ml-auto text-[10px] text-muted-foreground">
+                {openCount}/{tasks.length}
+              </span>
+            </>
+          )}
+          {collapsed && (
+            <span className="text-[10px] text-muted-foreground absolute mt-7">
+              {tasks.length}
             </span>
-          </>
-        )}
-        {collapsed && (
-          <span className="text-[10px] text-muted-foreground absolute mt-7">
-            {tasks.length}
+          )}
+        </button>
+        {/* Mobile header: title + close (the desktop collapse toggle
+            isn't reachable here, so `collapsed` stays false on mobile
+            and the list below always renders). */}
+        <div className="flex lg:hidden items-center gap-2 px-3 py-3 border-b border-border/60">
+          <ListChecks className="h-4 w-4 text-muted-foreground" />
+          <span className="text-xs font-medium">Tasks</span>
+          <span className="text-[10px] text-muted-foreground">
+            {openCount}/{tasks.length}
           </span>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto rounded-md p-1 text-muted-foreground hover:bg-accent"
+            title="Close"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        {!collapsed && (
+          <ul className="flex-1 overflow-y-auto">
+            {tasks.map((t) => (
+              <li
+                key={t.id}
+                className="flex items-start gap-2 px-3 py-2"
+              >
+                <StatusIcon status={t.status} />
+                <div className="min-w-0 flex-1">
+                  <div
+                    className={cn(
+                      "text-xs",
+                      t.status === "completed" &&
+                        "line-through text-muted-foreground",
+                    )}
+                  >
+                    {t.title}
+                  </div>
+                  <div className="text-[10px] font-mono text-muted-foreground truncate">
+                    {t.id.slice(0, 12)}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
         )}
-      </button>
-      {!collapsed && (
-        <ul className="flex-1 overflow-y-auto">
-          {tasks.map((t) => (
-            <li
-              key={t.id}
-              className="flex items-start gap-2 px-3 py-2"
-            >
-              <StatusIcon status={t.status} />
-              <div className="min-w-0 flex-1">
-                <div
-                  className={cn(
-                    "text-xs",
-                    t.status === "completed" &&
-                      "line-through text-muted-foreground",
-                  )}
-                >
-                  {t.title}
-                </div>
-                <div className="text-[10px] font-mono text-muted-foreground truncate">
-                  {t.id.slice(0, 12)}
-                </div>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </aside>
+      </aside>
+    </>
   )
 }
 
@@ -108,7 +153,7 @@ function StatusIcon({ status }: { status: TaskRow["status"] }) {
 // Re-export for tests / other consumers
 export type { TaskRow }
 
-function deriveTasks(events: RunEvent[]): TaskRow[] {
+export function deriveTasks(events: RunEvent[]): TaskRow[] {
   const byId = new Map<string, TaskRow>()
 
   for (const e of events) {
