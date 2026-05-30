@@ -66,6 +66,7 @@ from .plugins import (
     ProjectContextPlugin,
     ConfirmationFormUiPlugin,
     ContextGuardPlugin,
+    McpExportArtifactPlugin,
     PermissionPlugin,
     PlanModeReminderPlugin,
     QuotaPlugin,
@@ -757,6 +758,13 @@ _app_kwargs = dict(
         # REJECT at 95%. ADK's EventsCompactionConfig (set above) is
         # the primary defense; this is the fail-soft safety net.
         ContextGuardPlugin(),
+        # Auto-persists file-bearing content (embedded resource /
+        # resource_link) returned by `mcp__*` tool calls into the artifact
+        # store, so MCP export tools yield a downloadable artifact. No-ops
+        # unless ADK_CC_MCP_AUTOSAVE_EXPORTS=1 (same cheap-gate pattern as
+        # ModelIOTracePlugin). after_tool_callback overrides the result to
+        # strip inline bytes once saved.
+        McpExportArtifactPlugin(),
         # Raw model request/response trace for debugging model behavior.
         # Always registered; the plugin no-ops when `ADK_CC_LOG_MODEL_IO`
         # isn't `1`, so the per-turn cost is a single attribute check.
