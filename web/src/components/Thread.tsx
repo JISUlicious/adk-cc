@@ -155,7 +155,7 @@ export function Thread({
   }
 
   return (
-    <div className="flex flex-col gap-3 px-6 py-4">
+    <div className="flex flex-col gap-3 px-3 sm:px-6 py-4">
       {rows.length === 0 && !isStreaming && (
         <p className="text-center text-sm text-muted-foreground py-12">
           Start a conversation. Your messages go straight to the
