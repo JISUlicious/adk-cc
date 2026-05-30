@@ -12,16 +12,19 @@ Gated OFF by default (`ADK_CC_MCP_AUTOSAVE_EXPORTS=1` to enable) — like
 ModelIOTracePlugin, the per-call cost when disabled is one attribute
 check. Registered in `App.plugins` (agent.py).
 
-v1 scope:
+Handled content:
   - `EmbeddedResource` (inline text/blob) → saved; the inline bytes are
     STRIPPED from the returned result (they're already persisted) to keep
     them out of the model's context.
-  - `ResourceLink` with an `https://` or `s3://` URI → fetched/referenced
-    and saved; the link is left in the result, augmented with the
-    artifact ref so the model knows it's downloadable.
-  - `ResourceLink` with `file://` / a custom scheme → needs a raw-URI read
-    through the producing server's MCP session; logged + skipped in v1
-    (follow-up). The link stays in the result untouched.
+  - `ResourceLink` → saved by URI scheme, link left in the result
+    augmented with the artifact ref:
+      * `https://` — client-fetchable per spec → httpx GET.
+      * `s3://`    — already in object storage → recorded as a reference
+        (no re-copy).
+      * `mcp://` / `file://` / custom — per the spec these mean "read it
+        back through the server", so we do a raw-URI read on the PRODUCING
+        tool's MCP session (`session.read_resource(uri=...)`), which works
+        even for URIs not advertised in `resources/list`.
 
 Never raises — a failed autosave logs a warning and leaves the tool
 result unchanged.
@@ -127,7 +130,7 @@ class McpExportArtifactPlugin(BasePlugin):
                         saved.append(res)
                         strip_indices.add(idx)
                 else:  # ResourceLink
-                    res = await self._save_link(c, tool_context)
+                    res = await self._save_link(c, tool_context, tool)
                     if res is not None and res.get("status") == "ok":
                         saved.append(res)
             except Exception as e:  # noqa: BLE001 — never break the tool chain
@@ -175,9 +178,17 @@ class McpExportArtifactPlugin(BasePlugin):
         return bool(audience) and "user" in audience
 
     async def _save_link(
-        self, link: Any, tool_context: ToolContext
+        self, link: Any, tool_context: ToolContext, tool: Any
     ) -> Optional[dict]:
-        """Persist a ResourceLink by URI scheme (v1: https / s3 only)."""
+        """Persist a ResourceLink by URI scheme.
+
+        - http/https : client-fetchable per spec → httpx GET.
+        - s3         : already in object storage → record a reference.
+        - everything else (mcp/file/custom) : per the MCP spec these are
+          "read it back through the server" URIs → raw-URI read on the
+          PRODUCING tool's MCP session (`session.read_resource(uri=...)`),
+          which works even for URIs not in resources/list.
+        """
         uri = str(getattr(link, "uri", "") or "")
         scheme = urlparse(uri).scheme.lower()
         fname = _safe_name(getattr(link, "name", None) or uri)
@@ -201,18 +212,48 @@ class McpExportArtifactPlugin(BasePlugin):
                 return None
 
         if scheme == "s3":
-            # The export already lives in object storage. v1: record a
-            # reference rather than re-downloading + re-uploading. A full
-            # implementation would register it in the artifact index by
-            # canonical URI; for now we surface it so the model/UI sees it.
+            # The export already lives in object storage. Record a
+            # reference rather than re-downloading + re-uploading.
             _log.info("mcp_export_artifact: s3 resource_link recorded (no re-copy): %s", uri)
             return {"status": "ok", "filename": fname, "version": -1,
                     "scope": "reference", "bytes": getattr(link, "size", None),
                     "canonical_uri": uri}
 
-        # file:// or custom scheme → needs a raw-URI MCP session read.
-        _log.info(
-            "mcp_export_artifact: skipping %s resource_link (raw-URI session "
-            "read not implemented in v1): %s", scheme or "?", uri,
-        )
+        # mcp:// / file:// / custom scheme → read it back through the
+        # producing tool's MCP session. The tool ADK passed us IS the
+        # McpTool that returned this link, so it carries the session
+        # manager bound to the right server.
+        return await self._save_via_session(uri, fname, tool, tool_context)
+
+    async def _save_via_session(
+        self, uri: str, fname: str, tool: Any, tool_context: ToolContext
+    ) -> Optional[dict]:
+        """Raw-URI read on the producing McpTool's session → artifact."""
+        mgr = getattr(tool, "_mcp_session_manager", None)
+        if mgr is None:
+            _log.info(
+                "mcp_export_artifact: cannot read %s — tool %r exposes no MCP "
+                "session manager", uri, getattr(tool, "name", "?"),
+            )
+            return None
+        try:
+            from pydantic import AnyUrl
+
+            session = await mgr.create_session()
+            result = await session.read_resource(uri=AnyUrl(uri))
+            contents = getattr(result, "contents", None) or []
+        except Exception as e:  # noqa: BLE001
+            _log.warning("mcp_export_artifact: read_resource(%s) failed: %s", uri, e)
+            return None
+
+        # A resource may return multiple contents; save the first usable one
+        # (the link names a single file). mcp_content_to_part handles
+        # text/blob; unsupported → None.
+        for content in contents:
+            part = mcp_content_to_part(content)
+            if part is not None:
+                return await save_part_as_artifact(
+                    tool_context, filename=fname, part=part, scope="session"
+                )
+        _log.info("mcp_export_artifact: %s returned no usable content", uri)
         return None
