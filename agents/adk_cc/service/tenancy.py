@@ -84,6 +84,12 @@ class TenantContext:
 # serializable; persisting risks json.dumps failures and stale-session
 # timestamp skew during HITL flows (e.g. tool-confirmation pause/resume).
 _STATE_TENANT_KEY = "temp:tenant_context"
+# Separate guard for the (potentially expensive) ensure_workspace call.
+# State seeding now happens at invocation start (before_run_callback), so
+# `_STATE_TENANT_KEY is None` no longer reliably marks "first tool call" —
+# we track the backend bring-up with its own temp flag instead, so it
+# still runs exactly once per invocation, at the first tool call.
+_WS_ENSURED_KEY = "temp:sandbox_workspace_ensured"
 
 
 class TenancyPlugin(BasePlugin):
@@ -168,6 +174,67 @@ class TenancyPlugin(BasePlugin):
             workspace_root_path=self._default_root,
         )
 
+    def _seed_state(self, state, *, user_id: str, session) -> None:
+        """Resolve the tenant and seed workspace + backend into state.
+
+        Cheap and idempotent: resolves once per invocation (guarded by
+        the temp tenant key) and does NOT call ensure_workspace — backend
+        bring-up stays lazy at the first tool call. Called from both
+        before_run_callback (so get_workspace resolves the real bucket at
+        a turn's OPENING, before any tool runs — the task reminder needs
+        this) and before_tool_callback (belt-and-suspenders).
+        """
+        if state.get(_STATE_TENANT_KEY) is not None:
+            return
+        tenant = self._tenant_resolver(user_id or "")
+        state[_STATE_TENANT_KEY] = tenant
+
+        # Seed sandbox workspace + backend so the tool layer's
+        # get_workspace / get_backend — and the task reminder — find them.
+        from types import SimpleNamespace
+
+        from ..sandbox import set_backend, set_workspace
+
+        session_id = getattr(session, "id", None) or "local"
+        ws = tenant.workspace(session_id)
+        backend = self._backend_factory(tenant, session_id)
+        # set_workspace / set_backend only touch ctx.state; a thin shim
+        # lets us reuse them from before_run (which hands us an
+        # InvocationContext, not a ToolContext).
+        shim = SimpleNamespace(state=state)
+        set_workspace(shim, ws)
+        set_backend(shim, backend)
+
+    async def before_run_callback(
+        self,
+        *,
+        invocation_context,  # noqa: ANN001 — typed by ADK
+    ) -> None:
+        """Seed tenant/workspace state at invocation start.
+
+        Runs before the first model call — and before TaskReminderPlugin,
+        since TenancyPlugin is registered first — so get_workspace()
+        resolves the per-tenant bucket from the very first
+        before_model_callback, not just after the first tool call. The
+        fresh-turn task reminder (which fires at a turn's opening) depends
+        on this; without it the reminder reads the default `local`
+        workspace and never sees the user's tasks.
+        """
+        try:
+            session = getattr(invocation_context, "session", None)
+            state = getattr(session, "state", None)
+            if state is None:
+                return
+            self._seed_state(
+                state,
+                user_id=getattr(session, "user_id", "") or "",
+                session=session,
+            )
+        except Exception:
+            # Never block the run; missing tenancy degrades to the
+            # default workspace + backend at tool time.
+            pass
+
     async def before_tool_callback(
         self,
         *,
@@ -175,43 +242,37 @@ class TenancyPlugin(BasePlugin):
         tool_args: dict[str, Any],
         tool_context: ToolContext,
     ) -> Optional[dict]:
-        # Lazy seeding: cheaper than wiring every session-creation path,
-        # and idempotent — we re-check the keys per call but only write
-        # once per session.
         try:
             state = tool_context.state
-            if state.get(_STATE_TENANT_KEY) is None:
-                tenant = self._tenant_resolver(getattr(tool_context, "user_id", ""))
-                state[_STATE_TENANT_KEY] = tenant
+            # Idempotent — before_run_callback usually seeded this first.
+            self._seed_state(
+                state,
+                user_id=getattr(tool_context, "user_id", ""),
+                session=getattr(tool_context, "session", None),
+            )
 
-                # Seed sandbox workspace + backend so the tool layer's
-                # get_workspace / get_backend find them.
-                from ..sandbox import set_backend, set_workspace
+            # Backend bring-up: once per invocation, at the first tool
+            # call. Guarded by its OWN flag (not the tenant key, which is
+            # now set earlier in before_run). Backends with no remote
+            # surface (Noop) mkdir locally; DockerBackend creates the dir
+            # on the sandbox VM; DaytonaBackend / SandboxServiceBackend
+            # hit an external API. A failure here leaves later tool calls
+            # hitting a "backend used before ensure_workspace()" guard
+            # with no visible root cause — so we log before swallowing.
+            if not state.get(_WS_ENSURED_KEY):
+                state[_WS_ENSURED_KEY] = True
+                from ..sandbox import get_backend, get_workspace
 
-                session = getattr(tool_context, "session", None)
-                session_id = getattr(session, "id", None) or "local"
-                ws = tenant.workspace(session_id)
-                backend = self._backend_factory(tenant, session_id)
-                set_workspace(tool_context, ws)
-                set_backend(tool_context, backend)
-
-                # Best-effort workspace creation. Backends with no remote
-                # surface (Noop) mkdir locally; DockerBackend creates the
-                # dir on the sandbox VM via a one-shot helper container;
-                # DaytonaBackend / SandboxServiceBackend hit an external
-                # API. For the remote-API backends, a failure here means
-                # later tool calls hit a "backend used before
-                # ensure_workspace()" guard with no visible root cause —
-                # so we log the underlying exception at WARNING level
-                # before swallowing it.
+                ws = get_workspace(tool_context)
+                backend = get_backend(tool_context)
                 try:
                     await backend.ensure_workspace(ws)
                 except Exception as e:
                     _log.warning(
                         "ensure_workspace failed (backend=%s tenant=%s session=%s): %s: %s",
                         type(backend).__name__,
-                        tenant.tenant_id,
-                        session_id,
+                        getattr(ws, "tenant_id", "?"),
+                        getattr(ws, "session_id", "?"),
                         type(e).__name__,
                         e,
                     )

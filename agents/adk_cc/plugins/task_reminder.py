@@ -37,6 +37,7 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
+from ..sandbox import get_workspace
 from ..tasks import TaskStatus, get_runner
 
 _SPECIALIST_AGENTS = frozenset({"Explore", "verification"})
@@ -55,6 +56,11 @@ _REMINDER_HEADER = (
 )
 
 _LAST_REMINDER_KEY = "task_reminder_last_invocation_id"
+
+# Set ADK_CC_TASK_REMINDER_DEBUG=1 to log the fire decision (agent,
+# fresh_turn, turn counts, open-task count, fire/skip) to stderr. Off by
+# default; handy for confirming the reminder actually fires in a live run.
+_DEBUG = os.environ.get("ADK_CC_TASK_REMINDER_DEBUG") == "1"
 
 
 def _has_function_call(event: Any, names: set[str]) -> bool:
@@ -83,6 +89,33 @@ def _is_thinking(event: Any) -> bool:
     if not parts:
         return False
     return all(getattr(p, "thought", False) for p in parts)
+
+
+def _is_new_user_turn(events: list[Any]) -> bool:
+    """True if the last event is a genuine new user message.
+
+    ADK appends the user's message before the opening model call, so the
+    last event identifies a turn boundary. But it ALSO rides tool results
+    back as user-role content (`function_response` parts authored
+    "user"), so `author == "user"` alone is true after every tool call.
+    A real user message has text and no function_response part — that's
+    the turn opening we want to fire the dangling-task catch on.
+    """
+    if not events:
+        return False
+    last = events[-1]
+    if getattr(last, "author", None) != "user":
+        return False
+    content = getattr(last, "content", None)
+    parts = getattr(content, "parts", None) or []
+    has_text = any(
+        isinstance(getattr(p, "text", None), str) and getattr(p, "text").strip()
+        for p in parts
+    )
+    has_func_response = any(
+        getattr(p, "function_response", None) is not None for p in parts
+    )
+    return has_text and not has_func_response
 
 
 def _turns_since_task_call(events: Iterable[Any]) -> int:
@@ -129,11 +162,29 @@ def _turns_since_reminder(events: Iterable[Any], state: Any) -> int:
     return sys.maxsize
 
 
-def _render_reminder(tasks: list[Any]) -> str:
-    body = _REMINDER_HEADER
+def _status_str(t: Any) -> str:
+    s = getattr(t, "status", None)
+    return s.value if hasattr(s, "value") else str(s)
+
+
+def _render_reminder(tasks: list[Any], *, has_open: bool) -> str:
+    """Render the reminder. When there are open (in_progress/pending)
+    tasks, lead with an explicit close-them-out instruction and list
+    them with ids the model can pass to task_update — that's the lever
+    that actually drives completion, vs. the generic header alone."""
+    if has_open:
+        body = (
+            "You have open tasks below. Before moving on or reporting "
+            "completion: mark each finished task `completed` via "
+            "task_update, and keep exactly one `in_progress` at a time. "
+            "Only the items you've genuinely finished — don't close work "
+            "that isn't done. Never mention this reminder to the user."
+        )
+    else:
+        body = _REMINDER_HEADER
     if tasks:
         items = "\n".join(
-            f"#{getattr(t, 'id', '?')[:8]}. [{getattr(t, 'status', '?').value if hasattr(getattr(t, 'status', None), 'value') else getattr(t, 'status', '?')}] {getattr(t, 'title', '?')}"
+            f"#{getattr(t, 'id', '?')[:8]}. [{_status_str(t)}] {getattr(t, 'title', '?')}"
             for t in tasks
         )
         body += f"\n\nHere are the existing tasks:\n\n{items}"
@@ -170,11 +221,29 @@ class TaskReminderPlugin(BasePlugin):
         # `ADK_CC_PERMISSION_MODE=plan` would emit task reminders even
         # though task tools are filtered out by PlanModeReminderPlugin.
         self._default_mode = (default_mode or "default").lower()
+        # Master on/off. `ADK_CC_TASK_REMINDER=0` disables the periodic
+        # reminder injection entirely (the task TOOLS still work).
+        self._enabled = os.environ.get("ADK_CC_TASK_REMINDER", "1") != "0"
         self._turns_since_write = int(
             os.environ.get("ADK_CC_TASK_REMINDER_TURNS_SINCE_WRITE", "10")
         )
         self._turns_between = int(
             os.environ.get("ADK_CC_TASK_REMINDER_TURNS_BETWEEN", "10")
+        )
+        # Completion-aware cadence: when an in_progress task is open, fire
+        # after this many turns instead of `_turns_since_write` — the
+        # "you left this open, close it" nudge. Set >= _turns_since_write
+        # to disable the aggressive path and keep only the old cadence.
+        self._open_turns = int(
+            os.environ.get("ADK_CC_TASK_REMINDER_OPEN_TURNS", "3")
+        )
+        # Cooldown between reminders while an in_progress task is open.
+        # Lower than `_turns_between` so the "close it out" nudge keeps
+        # firing as the agent winds down — the regular 10-turn cooldown
+        # silences it right when the agent is wrapping up with tasks
+        # still open. Set >= _turns_between to disable.
+        self._open_between = int(
+            os.environ.get("ADK_CC_TASK_REMINDER_OPEN_BETWEEN", "2")
         )
 
     async def before_model_callback(
@@ -183,6 +252,8 @@ class TaskReminderPlugin(BasePlugin):
         callback_context: CallbackContext,
         llm_request: LlmRequest,
     ) -> Optional[LlmResponse]:
+        if not self._enabled:
+            return None
         agent_name = getattr(callback_context, "agent_name", None)
         if agent_name in _SPECIALIST_AGENTS:
             return None
@@ -197,31 +268,93 @@ class TaskReminderPlugin(BasePlugin):
 
         events = list(getattr(callback_context.session, "events", []) or [])
 
-        if _turns_since_task_call(events) < self._turns_since_write:
-            return None
-        if _turns_since_reminder(events, callback_context.state) < self._turns_between:
+        # A "fresh turn" is the opening model call after a NEW user
+        # message: that's where we confront tasks the previous turn left
+        # dangling — we can't force closure after the agent already
+        # replied, but we can the moment the next turn starts. (Done
+        # without a persisted flag, so it's robust for DB-backed sessions
+        # where temp/ad-hoc state wouldn't survive the invocation.)
+        #
+        # NB: `events[-1].author == "user"` alone is NOT enough — ADK
+        # rides tool results back as user-role content too, so that test
+        # is true after EVERY tool call and the catch would fire on every
+        # mid-turn continuation. A genuine user message carries text and
+        # no function_response part; that's what _is_new_user_turn checks.
+        fresh_turn = _is_new_user_turn(events)
+
+        turns_since = _turns_since_task_call(events)
+        # Cheapest gate: on a non-fresh turn inside even the smallest
+        # cadence window, bail before touching storage. A fresh turn
+        # always checks (it might need to confront dangling tasks).
+        if not fresh_turn and turns_since < min(
+            self._open_turns, self._turns_since_write
+        ):
             return None
 
-        # Pull active tasks for this session. Best-effort — never let a
-        # storage hiccup tank the request.
+        # Resolve the SAME bucket the task tools wrote to. The task tools
+        # (tools/task/*.py) all pass workspace_path=ws.abs_path, which
+        # anchors storage at <workspace>/.adk-cc/tasks/<session>/. We MUST
+        # pass it too — without it, JsonFileTaskStorage.list() falls back
+        # to the legacy root ~/.adk-cc/tasks/<tenant>/<session>/, which is
+        # empty in any workspace-anchored deployment. That bug made the
+        # reminder read an empty list (so the completion-aware + fresh-turn
+        # paths never fired), even after the earlier tenant/session fix.
         try:
-            ws = callback_context.state.get("temp:sandbox_workspace") or {}
-            tenant_id = ws.get("tenant_id") if isinstance(ws, dict) else "local"
-            session_id = ws.get("session_id") if isinstance(ws, dict) else "local"
+            ws = get_workspace(callback_context)
             runner = get_runner()
-            tasks = await runner.storage.list(
-                tenant_id=tenant_id or "local",
-                session_id=session_id or "local",
+            all_tasks = await runner.storage.list(
+                tenant_id=ws.tenant_id or "local",
+                session_id=ws.session_id or "local",
+                workspace_path=ws.abs_path,
             )
-            # Only show non-terminal tasks (most actionable).
-            tasks = [
-                t for t in tasks
-                if getattr(t, "status", None) not in (TaskStatus.COMPLETED,)
-            ]
         except Exception:
-            tasks = []
+            all_tasks = []
 
-        _append_to_system_instruction(llm_request, _render_reminder(tasks))
+        # Open = anything not completed; in_progress drives the
+        # aggressive cadence + shorter cooldown.
+        open_tasks = [
+            t for t in all_tasks
+            if getattr(t, "status", None) != TaskStatus.COMPLETED
+        ]
+        has_in_progress = any(
+            getattr(t, "status", None) == TaskStatus.IN_PROGRESS
+            for t in all_tasks
+        )
+
+        since_reminder = _turns_since_reminder(events, callback_context.state)
+
+        # Dangling-task confrontation: a new turn that opens with tasks
+        # still open fires immediately, bypassing the cooldown — this is
+        # what actually catches "declared done last turn with open tasks."
+        fire = fresh_turn and bool(open_tasks)
+
+        if not fire:
+            # Periodic / completion-aware cadence. in_progress shortens
+            # both the trigger threshold and the cooldown so the nudge
+            # reaches the model mid-task and again as it winds down,
+            # rather than only after 10 idle turns.
+            threshold = self._open_turns if has_in_progress else self._turns_since_write
+            cooldown = self._open_between if has_in_progress else self._turns_between
+            if turns_since >= threshold and since_reminder >= cooldown:
+                fire = True
+
+        if _DEBUG:
+            print(
+                f"[task_reminder] agent={getattr(callback_context, 'agent_name', None)} "
+                f"fresh_turn={fresh_turn} turns_since={turns_since} "
+                f"open={len(open_tasks)} in_progress={has_in_progress} "
+                f"since_reminder={since_reminder} -> fire={fire}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        if not fire:
+            return None
+
+        _append_to_system_instruction(
+            llm_request,
+            _render_reminder(open_tasks, has_open=bool(open_tasks)),
+        )
         try:
             callback_context.state[_LAST_REMINDER_KEY] = (
                 getattr(callback_context, "invocation_id", None)
