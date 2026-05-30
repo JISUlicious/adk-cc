@@ -56,7 +56,10 @@ export function TaskSidebar({
       )}
       <aside
         className={cn(
-          "bg-muted/40 flex flex-col border-l border-border/60",
+          "flex flex-col border-l border-border/60",
+          // Opaque while it's a drawer over the thread; the subtle 40%
+          // tint only makes sense as a static column at lg+.
+          "bg-muted shadow-xl lg:bg-muted/40 lg:shadow-none",
           // Mobile: fixed drawer sliding in from the right.
           "fixed inset-y-0 right-0 z-40 w-72 max-w-[85vw] transform transition-transform duration-200 ease-out",
           open ? "translate-x-0" : "translate-x-full",

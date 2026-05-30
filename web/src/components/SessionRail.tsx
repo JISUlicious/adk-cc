@@ -127,7 +127,10 @@ export function SessionRail({
       )}
       <aside
         className={cn(
-          "flex w-72 max-w-[85vw] flex-col bg-muted/40 border-r border-border/60",
+          "flex w-72 max-w-[85vw] flex-col border-r border-border/60",
+          // Opaque while it's a drawer over the thread; the subtle 40%
+          // tint only makes sense as a static column at lg+.
+          "bg-muted shadow-xl lg:bg-muted/40 lg:shadow-none",
           // Mobile: fixed drawer that slides in from the left.
           "fixed inset-y-0 left-0 z-40 transform transition-transform duration-200 ease-out",
           // lg+: static column, always on-screen.
