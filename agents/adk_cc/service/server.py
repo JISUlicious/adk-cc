@@ -67,6 +67,16 @@ def build_fastapi_app(
     # of 1.31.1. The `save_as_artifact` tool relies on this service.
     artifact_uri = os.environ.get("ADK_CC_ARTIFACT_STORAGE_URI") or None
 
+    # adk-cc adds an `s3://` artifact scheme (AWS S3 + S3-compatible
+    # stores: MinIO / R2 / Wasabi / B2 / Ceph) on top of ADK's built-in
+    # memory:// / file:// / gs://. Register it before get_fast_api_app
+    # resolves the URI. Connection details (endpoint, region, creds) come
+    # from the environment — see register_s3_artifact_scheme().
+    if artifact_uri and artifact_uri.startswith("s3://"):
+        from ..artifacts import register_s3_artifact_scheme
+
+        register_s3_artifact_scheme()
+
     fastapi_app = get_fast_api_app(
         agents_dir=agents_dir,
         session_service_uri=session_service_uri,

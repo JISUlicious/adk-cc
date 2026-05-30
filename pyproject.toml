@@ -12,6 +12,13 @@ dependencies = [
     "httpx>=0.27",
 ]
 
+[project.optional-dependencies]
+# S3 / S3-compatible artifact storage (S3ArtifactService, s3:// URI).
+# Only needed when ADK_CC_ARTIFACT_STORAGE_URI=s3://… — install with
+# `pip install 'adk-cc[s3]'`. Mirrors how GCS support needs
+# google-cloud-storage.
+s3 = ["boto3>=1.34"]
+
 # The agent package lives under `agents/` so that directory can serve as
 # ADK's AGENTS_DIR (only real agents are discovered there, not the repo's
 # web/ docs/ tests/ scaffolding). setuptools treats `agents/` as the source
