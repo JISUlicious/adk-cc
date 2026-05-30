@@ -38,9 +38,28 @@ class _FakeCtx:
     )
 
 
+class _FakeSession:
+    def __init__(self, contents):
+        self._contents = contents
+
+    async def read_resource(self, uri):
+        return pytypes.SimpleNamespace(contents=self._contents)
+
+
+class _FakeSessionManager:
+    def __init__(self, contents):
+        self._contents = contents
+
+    async def create_session(self, headers=None):
+        return _FakeSession(self._contents)
+
+
 class _Tool:
-    def __init__(self, name):
+    def __init__(self, name, session_contents=None):
         self.name = name
+        # Present only when we want the raw-URI read path to succeed.
+        if session_contents is not None:
+            self._mcp_session_manager = _FakeSessionManager(session_contents)
 
 
 def _embedded(text=None, blob=None, mime="text/csv", audience=("user",)):
@@ -73,10 +92,11 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _call(plugin, tool_name, result, ctx=None):
+def _call(plugin, tool_name, result, ctx=None, session_contents=None):
     ctx = ctx or _FakeCtx()
     out = _run(plugin.after_tool_callback(
-        tool=_Tool(tool_name), tool_args={}, tool_context=ctx, result=result))
+        tool=_Tool(tool_name, session_contents=session_contents),
+        tool_args={}, tool_context=ctx, result=result))
     return out, ctx
 
 
@@ -194,13 +214,31 @@ def test_malformed_result_noops():
     print("OK test_malformed_result_noops")
 
 
-def test_file_scheme_link_skipped():
+def test_custom_scheme_link_read_via_session():
+    # mcp:// (custom scheme) → raw-URI read on the producing tool's
+    # session. The fake tool carries a session manager returning a text
+    # content; the plugin reads it back and saves it.
+    p = McpExportArtifactPlugin()
+    csv = pytypes.SimpleNamespace(text="a,b\n1,2\n", blob=None, mimeType="text/csv")
+    out, ctx = _call(p, "mcp__db__export",
+                     _result([_link("mcp://resource/orders.csv")]),
+                     session_contents=[csv])
+    assert ctx.saved and ctx.saved[0][0] == "orders.csv"
+    assert out is not None and out["_artifacts"][0]["bytes"] == len(b"a,b\n1,2\n")
+    # link is NOT stripped (only embedded inline bytes are)
+    assert any(c.get("type") == "resource_link" for c in out["content"])
+    print("OK test_custom_scheme_link_read_via_session")
+
+
+def test_custom_scheme_link_no_session_manager_skips():
+    # Same mcp:// link but the tool exposes no session manager → can't
+    # read it back → nothing saved → None (result untouched).
     p = McpExportArtifactPlugin()
     out, ctx = _call(p, "mcp__db__export",
-                     _result([_link("file:///tmp/orders.csv")]))
-    # file:// needs raw-URI session read (v1 skip) -> nothing saved -> None
+                     _result([_link("mcp://resource/orders.csv")]),
+                     session_contents=None)
     assert out is None and not ctx.saved
-    print("OK test_file_scheme_link_skipped")
+    print("OK test_custom_scheme_link_no_session_manager_skips")
 
 
 if __name__ == "__main__":
@@ -214,5 +252,6 @@ if __name__ == "__main__":
     test_audience_filter_off_saves_all()
     test_no_file_content_noops()
     test_malformed_result_noops()
-    test_file_scheme_link_skipped()
+    test_custom_scheme_link_read_via_session()
+    test_custom_scheme_link_no_session_manager_skips()
     print("\nall mcp-export-artifact-plugin tests passed")
