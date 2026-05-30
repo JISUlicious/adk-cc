@@ -235,6 +235,60 @@ def _make_tenant_mcp_toolset():
 _tenant_mcp = _make_tenant_mcp_toolset()
 
 
+def _make_static_mcp_toolset():
+    """Wire a single static MCP server from env (single-tenant / dev).
+
+    Returns None unless `ADK_CC_MCP_SERVER` is set. Env:
+      - ADK_CC_MCP_SERVER     : the stdio command line to launch the server
+                                (e.g. "python tests/fixtures/csv_mcp_server.py").
+      - ADK_CC_MCP_SERVER_NAME: logical name / tool prefix (default "mcp").
+      - ADK_CC_MCP_TRANSPORT  : stdio | sse | http (default stdio). For
+                                sse/http, ADK_CC_MCP_SERVER is the URL.
+      - ADK_CC_MCP_SAVE_RESOURCES_AS_ARTIFACTS : 1 to add the
+                                save_resource_as_artifact tool (Pattern A).
+      - ADK_CC_MCP_USE_RESOURCES : 1 to add load_mcp_resource + inject the
+                                resource catalog into context.
+    """
+    server = os.environ.get("ADK_CC_MCP_SERVER")
+    if not server:
+        return None
+    from .tools.mcp import make_mcp_toolset
+
+    name = os.environ.get("ADK_CC_MCP_SERVER_NAME", "mcp")
+    transport = os.environ.get("ADK_CC_MCP_TRANSPORT", "stdio").lower()
+    if transport == "stdio":
+        import shlex
+
+        from mcp import StdioServerParameters
+
+        parts = shlex.split(server)
+        params = StdioServerParameters(command=parts[0], args=parts[1:])
+    elif transport == "sse":
+        from google.adk.tools.mcp_tool.mcp_session_manager import SseConnectionParams
+
+        params = SseConnectionParams(url=server)
+    elif transport == "http":
+        from google.adk.tools.mcp_tool.mcp_session_manager import (
+            StreamableHTTPConnectionParams,
+        )
+
+        params = StreamableHTTPConnectionParams(url=server)
+    else:
+        raise ValueError(f"unknown ADK_CC_MCP_TRANSPORT: {transport!r}")
+
+    return make_mcp_toolset(
+        server_name=name,
+        connection_params=params,
+        save_resources_as_artifacts=(
+            os.environ.get("ADK_CC_MCP_SAVE_RESOURCES_AS_ARTIFACTS") == "1"
+        ),
+        use_mcp_resources=(os.environ.get("ADK_CC_MCP_USE_RESOURCES") == "1"),
+    )
+
+
+_static_mcp = _make_static_mcp_toolset()
+
+
 def _make_tenant_skill_toolset():
     """Construct the per-tenant skill toolset if env config is present.
 
@@ -321,6 +375,8 @@ _coordinator_tools: list = [
 ]
 if _skills is not None:
     _coordinator_tools.append(_skills)
+if _static_mcp is not None:
+    _coordinator_tools.append(_static_mcp)
 if _tenant_mcp is not None:
     _coordinator_tools.append(_tenant_mcp)
 if _tenant_skills is not None:
