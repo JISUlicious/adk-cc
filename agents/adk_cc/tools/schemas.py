@@ -196,3 +196,28 @@ class SaveAsArtifactArgs(BaseModel):
             "permanent reference material the user wants to keep)."
         ),
     )
+
+
+class SaveMcpResourceAsArtifactArgs(BaseModel):
+    resource_name: str = Field(
+        description=(
+            "Name of the resource to read from THIS MCP server (as listed "
+            "by the server's resource catalog). The resource's bytes are "
+            "read and stored as a downloadable artifact in the chat UI."
+        )
+    )
+    filename: Optional[str] = Field(
+        default=None,
+        description=(
+            "Artifact filename. If omitted, derived from `resource_name` "
+            "(scheme + path separators sanitized). When the resource "
+            "yields multiple contents, each is saved as `{filename}.{i}`."
+        ),
+    )
+    scope: str = Field(
+        default="session",
+        description=(
+            "`session` (default): tied to this session, shows a download "
+            "chip. `user`: persists across this user's future sessions."
+        ),
+    )

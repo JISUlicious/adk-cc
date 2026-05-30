@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from ..credentials import CredentialProvider
 from ..service.registry import TenantResourceRegistry
+from .save_mcp_resource_as_artifact import SaveMcpResourceAsArtifactTool
 
 _log = logging.getLogger(__name__)
 
@@ -53,6 +54,21 @@ class McpServerConfig(BaseModel):
     require_confirmation: bool = Field(
         default=False,
         description="If True, every MCP call goes through ADK's request_confirmation flow.",
+    )
+    save_resources_as_artifacts: bool = Field(
+        default=False,
+        description=(
+            "If True, expose a `save_resource_as_artifact` tool bound to "
+            "this server so the agent can persist a named resource into "
+            "the artifact store."
+        ),
+    )
+    use_mcp_resources: bool = Field(
+        default=False,
+        description=(
+            "If True, also add ADK's `load_mcp_resource` tool and inject "
+            "the server's resource catalog into the agent's context."
+        ),
     )
 
 
@@ -145,9 +161,30 @@ class TenantMcpToolset(BaseToolset):
                     tool_filter=cfg.tool_filter,
                     tool_name_prefix=f"mcp__{cfg.server_name}__",
                     require_confirmation=cfg.require_confirmation,
+                    use_mcp_resources=cfg.use_mcp_resources,
                 )
                 tools = await inner.get_tools_with_prefix(readonly_context)
                 out.extend(tools)
+                if cfg.save_resources_as_artifacts:
+                    # Appended AFTER get_tools_with_prefix already prefixed
+                    # the inner tools, so prefix this one ourselves to the
+                    # same `mcp__{server}___save_resource_as_artifact` shape
+                    # (note the trailing `_` separator base_toolset inserts).
+                    save_tool = SaveMcpResourceAsArtifactTool(
+                        mcp_toolset=inner, server_name=cfg.server_name
+                    )
+                    prefixed = f"mcp__{cfg.server_name}___{save_tool.name}"
+                    save_tool.name = prefixed
+                    _orig_decl = save_tool._get_declaration
+
+                    def _prefixed_decl(_orig=_orig_decl, _name=prefixed):
+                        decl = _orig()
+                        if decl is not None:
+                            decl.name = _name
+                        return decl
+
+                    save_tool._get_declaration = _prefixed_decl
+                    out.append(save_tool)
             except Exception as e:  # noqa: BLE001 — one bad MCP shouldn't kill the rest
                 _log.warning(
                     "TenantMcpToolset: skipping server %r for tenant %r: %s",
