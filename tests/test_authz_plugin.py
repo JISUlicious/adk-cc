@@ -75,18 +75,31 @@ def test_policy_deny_short_circuits():
     print("OK test_policy_deny_short_circuits")
 
 
-def test_role_required_for_tool():
-    # deny non-admins from a deploy tool; admins permitted.
+def test_role_based_deny():
+    # Role-based DENY is the supported way to gate a tool by role on the
+    # tool-call path: deny a tool for subjects holding a role; everyone else
+    # falls to the ownership baseline (a tool call is self-owned via
+    # resource_from_tool, so the baseline permits it).
+    #
+    # NOTE the asymmetry — "permit ONLY for role R" is NOT expressible on the
+    # tool-call path: the baseline already permits all callers, and
+    # DENY-override means a blanket deny meant to carve a role exception would
+    # also block that role. Gate privileged tools with role-based DENY (here),
+    # or with a closed-world resource where the caller is not the owner.
     pols = [
-        AbacPolicy(effect="permit", roles=frozenset({"admin"}), action="deploy", name="admin-deploy"),
-        AbacPolicy(effect="deny", action="deploy", name="default-no-deploy"),
+        AbacPolicy(
+            effect="deny",
+            roles=frozenset({"restricted"}),
+            action="deploy",
+            name="restricted-no-deploy",
+        ),
     ]
     p = _enabled_plugin(pols)
-    denied = _call(p, "deploy", {}, _Ctx(_principal(roles=())))
-    permitted = _call(p, "deploy", {}, _Ctx(_principal(roles=("admin",))))
+    denied = _call(p, "deploy", {}, _Ctx(_principal(roles=("restricted",))))
+    permitted = _call(p, "deploy", {}, _Ctx(_principal(roles=())))
     assert denied is not None and denied["status"] == "authz_denied"
-    assert permitted is None
-    print("OK test_role_required_for_tool")
+    assert permitted is None  # baseline permits the non-restricted self-owned call
+    print("OK test_role_based_deny")
 
 
 def test_mcp_tool_is_gated():
@@ -125,7 +138,7 @@ if __name__ == "__main__":
     test_disabled_by_default_inert()
     test_owner_baseline_permits_self()
     test_policy_deny_short_circuits()
-    test_role_required_for_tool()
+    test_role_based_deny()
     test_mcp_tool_is_gated()
     test_closed_world_denies_unowned_unmatched()
     test_eval_error_fails_closed()

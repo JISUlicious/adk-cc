@@ -8,9 +8,7 @@ weaken it:
     guardrail DENY rule still denies (the engine evaluates DENY *before*
     the bypass short-circuit). "Is this operation forbidden for anyone?"
   - `dontAsk` is a DISTINCT mode (NOT an alias of bypass): it converts
-    every ask to deny. Regression guard for the modes.py enum, where
-    DONT_ASK was once accidentally aliased to "bypassPermissions" — which
-    silently turned the safe "deny all asks" posture into "allow all".
+    every ask to deny.
   - AuthzPlugin owns subject-aware AUTHORIZATION. It runs BEFORE
     PermissionPlugin and ignores mode entirely, so an authz DENY holds
     under bypassPermissions too. "May THIS subject act on THIS resource?"
@@ -22,9 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+from typing import Any, ClassVar
 
 os.environ.setdefault("ADK_CC_SKIP_DOTENV", "1")
 os.environ.setdefault("ADK_CC_API_KEY", "stub")
+
+from pydantic import BaseModel
 
 from adk_cc.authz import AbacPolicy, AbacPolicyDecisionPoint
 from adk_cc.permissions.modes import PermissionMode
@@ -35,10 +36,30 @@ from adk_cc.plugins.permissions import PermissionPlugin
 from adk_cc.tools.base import AdkCcTool, ToolMeta
 
 
+class _Args(BaseModel):
+    command: str = ""
+
+
+class _StubTool(AdkCcTool):
+    """A destructive run_bash stand-in (mirrors the ClassVar-meta pattern
+    used by the other permission tests)."""
+
+    meta: ClassVar[ToolMeta] = ToolMeta(
+        name="run_bash",
+        is_read_only=False,
+        is_concurrency_safe=False,
+        is_destructive=True,
+    )
+    input_model: ClassVar[type[BaseModel]] = _Args
+    description: ClassVar[str] = "stub bash"
+
+    async def _execute(self, args: BaseModel, ctx: Any) -> dict:
+        return {"ok": True}
+
+
 class _FakeActions:
     def __init__(self):
         self.skip_summarization = False
-        self.requested_tool_confirmations = []
 
 
 class _FakeToolContext:
@@ -47,21 +68,6 @@ class _FakeToolContext:
         self.function_call_id = function_call_id
         self.tool_confirmation = None
         self.actions = _FakeActions()
-
-
-class _StubTool(AdkCcTool):
-    def __init__(self, name="run_bash", *, destructive=True, read_only=False):
-        super().__init__(
-            ToolMeta(
-                name=name,
-                description="stub",
-                is_destructive=destructive,
-                is_read_only=read_only,
-            )
-        )
-
-    async def _run(self, **kwargs):
-        return {"ok": True}
 
 
 def _run(coro):
@@ -106,9 +112,7 @@ def test_bypass_skips_confirmation():
     ctx = _FakeToolContext()
     out = _run(
         plugin.before_tool_callback(
-            tool=_StubTool(destructive=True),
-            tool_args={"command": "ls"},
-            tool_context=ctx,
+            tool=_StubTool(), tool_args={"command": "ls"}, tool_context=ctx
         )
     )
     assert out is None, out  # allowed, no needs_confirmation
@@ -116,8 +120,7 @@ def test_bypass_skips_confirmation():
 
 
 def test_dontask_is_distinct_and_denies_ask():
-    """dontAsk must NOT be bypass: it converts a destructive ask to deny.
-    (Regression guard for the modes.py enum aliasing bug.)"""
+    """dontAsk must NOT be bypass: it converts a destructive ask to deny."""
     assert PermissionMode.DONT_ASK is not PermissionMode.BYPASS_PERMISSIONS
     assert PermissionMode.DONT_ASK.value == "dontAsk"
     plugin = PermissionPlugin(
@@ -127,9 +130,7 @@ def test_dontask_is_distinct_and_denies_ask():
     ctx = _FakeToolContext()
     out = _run(
         plugin.before_tool_callback(
-            tool=_StubTool(destructive=True),
-            tool_args={"command": "ls"},
-            tool_context=ctx,
+            tool=_StubTool(), tool_args={"command": "ls"}, tool_context=ctx
         )
     )
     assert out is not None and out["status"] == "permission_denied", out

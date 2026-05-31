@@ -182,7 +182,10 @@ def make_app():
       ADK_CC_JWT_AUDIENCE      (optional, used with JWKS_URL)
       ADK_CC_JWT_USER_CLAIM    (optional, default "sub")
       ADK_CC_JWT_TENANT_CLAIM  (optional, default "tenant")
+      ADK_CC_JWT_ROLES_CLAIM   (optional, default "roles"; feeds authZ subject)
+      ADK_CC_JWT_SCOPES_CLAIM  (optional, default "scope"; feeds authZ subject)
       ADK_CC_AUTH_TOKENS       (optional fallback, see auth.BearerTokenExtractor)
+      ADK_CC_AUTHZ             (optional; "1" enables the authZ gates, default off)
       ADK_CC_ALLOW_NO_AUTH     (optional dev escape — see below)
       ADK_CC_SERVE_UI          (optional; "1" to mount the custom UI bundle)
       ADK_CC_UI_DIST           (optional; dir to serve; default: <repo>/web/dist)
@@ -215,6 +218,8 @@ def make_app():
             audience=os.environ.get("ADK_CC_JWT_AUDIENCE"),
             user_claim=os.environ.get("ADK_CC_JWT_USER_CLAIM", "sub"),
             tenant_claim=os.environ.get("ADK_CC_JWT_TENANT_CLAIM", "tenant"),
+            roles_claim=os.environ.get("ADK_CC_JWT_ROLES_CLAIM", "roles"),
+            scopes_claim=os.environ.get("ADK_CC_JWT_SCOPES_CLAIM", "scope"),
         )
     elif os.environ.get("ADK_CC_AUTH_TOKENS"):
         from .auth import BearerTokenExtractor
