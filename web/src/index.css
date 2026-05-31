@@ -28,8 +28,12 @@
   --ivory: #faf9f5;
   --sand: #e8e6dc;
   --brand: #1B365D;
-  --brand-tint: #EFEEF7;
-  --brand-tint-strong: #E4ECF5;
+  /* Soft ink-blue accent surface. Toned down from a bright cool lavender
+     (#EFEEF7) to a calmer, slightly desaturated blue-gray that sits
+     better on the warm parchment canvas and reads as a gentle table-
+     header / selected-row tint rather than a bright highlight. */
+  --brand-tint: #E6E9F1;
+  --brand-tint-strong: #D8DFEB;
   --near-black: #141413;
   --dark-warm: #3d3d3a;
   --olive: #504e49;

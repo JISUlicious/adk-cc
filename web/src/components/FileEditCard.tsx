@@ -156,14 +156,18 @@ function CodeBlock({
   // are functional, not decorative — but we tune them warmer so they
   // sit on a parchment canvas without screaming. Olive-green for add
   // ("#5a6e3a"-ish), warm rust for remove ("#9a3325" via destructive).
+  // Only the LABEL + the tinted BACKGROUND are hardcoded (the tint reads
+  // on both themes). The block TEXT uses `text-foreground` so it follows
+  // the theme — a hardcoded dark color was near-invisible on the dark-
+  // mode block.
   const labelStyle =
     variant === "add"
       ? { color: "#5a6e3a" }
       : { color: "#9a3325" }
   const blockStyle =
     variant === "add"
-      ? { background: "rgba(132, 145, 95, 0.12)", color: "#3d3d3a" }
-      : { background: "rgba(154, 51, 37, 0.10)", color: "#3d3d3a" }
+      ? { background: "rgba(132, 145, 95, 0.12)" }
+      : { background: "rgba(154, 51, 37, 0.10)" }
   return (
     <div className="min-w-0">
       <div
@@ -173,7 +177,7 @@ function CodeBlock({
         {label}
       </div>
       <pre
-        className="rounded p-2 text-xs leading-relaxed font-mono overflow-x-auto max-h-64 whitespace-pre-wrap break-all"
+        className="rounded p-2 text-xs leading-relaxed font-mono overflow-x-auto max-h-64 whitespace-pre-wrap break-all text-foreground"
         style={blockStyle}
       >
         {content || <span className="opacity-50">(empty)</span>}
