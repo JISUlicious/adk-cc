@@ -102,6 +102,23 @@ def _call(plugin, tool_name, result, ctx=None, session_contents=None):
 
 # --- tests ----------------------------------------------------------------
 
+def test_enabled_by_default():
+    # No ADK_CC_MCP_AUTOSAVE_EXPORTS set → plugin is ON (default behavior).
+    saved = os.environ.pop("ADK_CC_MCP_AUTOSAVE_EXPORTS", None)
+    try:
+        assert McpExportArtifactPlugin()._enabled is True
+    finally:
+        if saved is not None:
+            os.environ["ADK_CC_MCP_AUTOSAVE_EXPORTS"] = saved
+    # And explicitly disabled with "0".
+    os.environ["ADK_CC_MCP_AUTOSAVE_EXPORTS"] = "0"
+    try:
+        assert McpExportArtifactPlugin()._enabled is False
+    finally:
+        os.environ["ADK_CC_MCP_AUTOSAVE_EXPORTS"] = "1"  # restore for other tests
+    print("OK test_enabled_by_default")
+
+
 def test_disabled_gate_noops():
     p = McpExportArtifactPlugin()
     p._enabled = False
@@ -244,6 +261,7 @@ def test_custom_scheme_link_no_session_manager_skips():
 
 
 if __name__ == "__main__":
+    test_enabled_by_default()
     test_disabled_gate_noops()
     test_non_mcp_tool_noops()
     test_embedded_text_saved_and_stripped()

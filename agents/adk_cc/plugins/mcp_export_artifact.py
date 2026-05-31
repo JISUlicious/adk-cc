@@ -8,9 +8,11 @@ after any `mcp__*` tool call, it detects file-bearing content blocks and
 saves them to the artifact store (S3/MinIO), so DB-export-style tools
 "just work" with a downloadable artifact and no agent decision.
 
-Gated OFF by default (`ADK_CC_MCP_AUTOSAVE_EXPORTS=1` to enable) — like
-ModelIOTracePlugin, the per-call cost when disabled is one attribute
-check. Registered in `App.plugins` (agent.py).
+Enabled by DEFAULT — set `ADK_CC_MCP_AUTOSAVE_EXPORTS=0` to turn it off.
+When disabled the per-call cost is a single attribute check (the gate at
+the top of after_tool_callback), so it's cheap to leave on. The audience
+filter (default on) keeps it from sweeping up the model's own working
+blobs. Registered in `App.plugins` (agent.py).
 
 Handled content:
   - `EmbeddedResource` (inline text/blob) → saved; the inline bytes are
@@ -53,7 +55,7 @@ class McpExportArtifactPlugin(BasePlugin):
 
     def __init__(self, name: str = "adk_cc_mcp_export_artifact") -> None:
         super().__init__(name=name)
-        self._enabled = os.environ.get("ADK_CC_MCP_AUTOSAVE_EXPORTS") == "1"
+        self._enabled = os.environ.get("ADK_CC_MCP_AUTOSAVE_EXPORTS", "1") != "0"
         # Default ON: only auto-save content meant for the user (audience
         # includes "user"), so the model's own working blobs aren't swept up.
         self._user_only = (

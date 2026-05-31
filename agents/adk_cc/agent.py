@@ -798,10 +798,11 @@ _app_kwargs = dict(
         ContextGuardPlugin(),
         # Auto-persists file-bearing content (embedded resource /
         # resource_link) returned by `mcp__*` tool calls into the artifact
-        # store, so MCP export tools yield a downloadable artifact. No-ops
-        # unless ADK_CC_MCP_AUTOSAVE_EXPORTS=1 (same cheap-gate pattern as
-        # ModelIOTracePlugin). after_tool_callback overrides the result to
-        # strip inline bytes once saved.
+        # store, so MCP export tools yield a downloadable artifact.
+        # ENABLED BY DEFAULT; set ADK_CC_MCP_AUTOSAVE_EXPORTS=0 to disable
+        # (then it's a single cheap gate check per tool call).
+        # after_tool_callback overrides the result to strip inline bytes
+        # once saved.
         McpExportArtifactPlugin(),
         # Raw model request/response trace for debugging model behavior.
         # Always registered; the plugin no-ops when `ADK_CC_LOG_MODEL_IO`
