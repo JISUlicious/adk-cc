@@ -62,6 +62,7 @@ configure_logging()
 from .plugins import (
     AskUserQuestionUiHintPlugin,
     AuditPlugin,
+    AuthzPlugin,
     ModelIOTracePlugin,
     ProjectContextPlugin,
     ConfirmationFormUiPlugin,
