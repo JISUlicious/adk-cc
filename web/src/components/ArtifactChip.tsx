@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { Download, FileDown, RefreshCw } from "lucide-react"
-import { downloadArtifact } from "@/api/artifacts"
+import { downloadArtifact, isHtmlArtifact } from "@/api/artifacts"
+import { HtmlArtifactPreview } from "./HtmlArtifactPreview"
 
 /**
  * Inline download chip surfaced when an event carries
@@ -13,6 +14,10 @@ import { downloadArtifact } from "@/api/artifacts"
  * with the header ArtifactsPanel) — it fetches with the Bearer header,
  * decodes the base64 inline_data, and triggers a blob download (a plain
  * <a download> can't carry auth on a direct navigation).
+ *
+ * HTML artifacts ALSO auto-render below the chip in a strictly sandboxed
+ * iframe (see HtmlArtifactPreview) — HTML/CSS shows, scripts are inert.
+ * Detected by filename extension (the artifactDelta carries no MIME).
  */
 export function ArtifactChip({
   appName,
@@ -29,6 +34,7 @@ export function ArtifactChip({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const isHtml = isHtmlArtifact(filename)
 
   async function handleDownload() {
     setBusy(true)
@@ -43,12 +49,12 @@ export function ArtifactChip({
   }
 
   return (
-    <div className="flex justify-start">
+    <div className="flex flex-col items-start gap-2 max-w-[80%]">
       <button
         type="button"
         onClick={handleDownload}
         disabled={busy}
-        className="max-w-[80%] flex items-center gap-2 rounded-md border border-primary/40 bg-brand-tint px-3 py-2 text-sm hover:bg-brand-tint-strong transition-colors disabled:opacity-50"
+        className="w-full flex items-center gap-2 rounded-md border border-primary/40 bg-brand-tint px-3 py-2 text-sm hover:bg-brand-tint-strong transition-colors disabled:opacity-50"
       >
         <FileDown className="h-4 w-4 text-primary shrink-0" />
         <span className="font-mono text-xs truncate">{filename}</span>
@@ -66,6 +72,15 @@ export function ArtifactChip({
           </span>
         )}
       </button>
+      {isHtml && (
+        <HtmlArtifactPreview
+          appName={appName}
+          userId={userId}
+          sessionId={sessionId}
+          filename={filename}
+          version={version}
+        />
+      )}
     </div>
   )
 }

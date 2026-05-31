@@ -53,18 +53,24 @@ export async function listArtifactVersions(
   )
 }
 
+/** One artifact's decoded payload. */
+export interface ArtifactContent {
+  bytes: Uint8Array
+  mime: string
+}
+
 /**
- * Fetch one artifact and trigger a browser download. When `version` is
- * omitted, the latest version is downloaded. Throws on HTTP / decode
- * errors so the caller can surface them.
+ * Fetch one artifact's content (bytes + MIME). When `version` is omitted,
+ * the latest version is fetched. Shared by the download + preview paths.
+ * Throws on HTTP / decode errors so callers can surface them.
  */
-export async function downloadArtifact(
+export async function fetchArtifact(
   appName: string,
   userId: string,
   sessionId: string,
   filename: string,
   version?: number,
-): Promise<void> {
+): Promise<ArtifactContent> {
   const base = `${artifactsBase(appName, userId, sessionId)}/${encodeURIComponent(filename)}`
   const url =
     version === undefined
@@ -88,8 +94,47 @@ export async function downloadArtifact(
     throw new Error("artifact has no inline_data")
   }
   const mime = inline.mime_type || inline.mimeType || "application/octet-stream"
-  const bytes = base64ToBytes(inline.data)
-  // TS narrowed Blob to ArrayBufferView<ArrayBuffer>; the Uint8Array is
+  return { bytes: base64ToBytes(inline.data), mime }
+}
+
+/** Fetch an artifact and decode it as UTF-8 text (for HTML/text preview). */
+export async function fetchArtifactText(
+  appName: string,
+  userId: string,
+  sessionId: string,
+  filename: string,
+  version?: number,
+): Promise<{ text: string; mime: string }> {
+  const { bytes, mime } = await fetchArtifact(
+    appName,
+    userId,
+    sessionId,
+    filename,
+    version,
+  )
+  return { text: new TextDecoder("utf-8").decode(bytes), mime }
+}
+
+/**
+ * Fetch one artifact and trigger a browser download. When `version` is
+ * omitted, the latest version is downloaded. Throws on HTTP / decode
+ * errors so the caller can surface them.
+ */
+export async function downloadArtifact(
+  appName: string,
+  userId: string,
+  sessionId: string,
+  filename: string,
+  version?: number,
+): Promise<void> {
+  const { bytes, mime } = await fetchArtifact(
+    appName,
+    userId,
+    sessionId,
+    filename,
+    version,
+  )
+  // TS narrows Blob to ArrayBufferView<ArrayBuffer>; the Uint8Array is
   // typed ArrayBufferLike. Runtime accepts it — explicit BlobPart cast.
   const blob = new Blob([bytes as BlobPart], { type: mime })
   const objectUrl = URL.createObjectURL(blob)
@@ -107,6 +152,18 @@ function base64ToBytes(b64: string): Uint8Array {
   const out = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
   return out
+}
+
+/**
+ * True if an artifact is HTML — checked by MIME first (from the delta we
+ * don't have one, so) falling back to the filename extension. Used by the
+ * UI to decide whether to auto-render a sandboxed preview.
+ */
+export function isHtmlArtifact(filename: string, mime?: string): boolean {
+  if (mime && mime.split(";")[0].trim().toLowerCase() === "text/html") {
+    return true
+  }
+  return /\.x?html?$/i.test(filename)
 }
 
 /**
