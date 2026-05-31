@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react"
-import { Paperclip, Download, ChevronDown, RefreshCw } from "lucide-react"
+import { Paperclip, Download, ChevronDown, RefreshCw, Upload } from "lucide-react"
 import { Button } from "./ui/button"
 import {
   listArtifacts,
   listArtifactVersions,
   downloadArtifact,
+  uploadArtifact,
 } from "@/api/artifacts"
 import { cn } from "@/lib/utils"
 
@@ -36,7 +37,9 @@ export function ArtifactsPanel({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [downloading, setDownloading] = useState<string | null>(null)
+  const [uploading, setUploading] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   async function load() {
     setLoading(true)
@@ -108,6 +111,23 @@ export function ArtifactsPanel({
     }
   }
 
+  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    // Reset the input so selecting the same file again re-fires onChange.
+    e.target.value = ""
+    if (!file) return
+    setUploading(true)
+    setError(null)
+    try {
+      await uploadArtifact(appName, userId, sessionId, file)
+      await load() // refresh the list so the new artifact appears
+    } catch (err) {
+      setError(`upload ${file.name}: ${(err as Error).message}`)
+    } finally {
+      setUploading(false)
+    }
+  }
+
   return (
     <div ref={wrapRef} className="relative">
       <Button
@@ -132,17 +152,38 @@ export function ArtifactsPanel({
             <span className="text-xs font-medium text-muted-foreground">
               Artifacts
             </span>
-            <button
-              type="button"
-              onClick={() => void load()}
-              disabled={loading}
-              className="text-muted-foreground hover:text-foreground disabled:opacity-50"
-              title="Refresh"
-            >
-              <RefreshCw
-                className={cn("h-3.5 w-3.5", loading && "animate-spin")}
+            <div className="flex items-center gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                onChange={(e) => void handleUpload(e)}
               />
-            </button>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+                className="text-muted-foreground hover:text-foreground disabled:opacity-50"
+                title="Upload a file as an artifact"
+              >
+                {uploading ? (
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Upload className="h-3.5 w-3.5" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => void load()}
+                disabled={loading}
+                className="text-muted-foreground hover:text-foreground disabled:opacity-50"
+                title="Refresh"
+              >
+                <RefreshCw
+                  className={cn("h-3.5 w-3.5", loading && "animate-spin")}
+                />
+              </button>
+            </div>
           </div>
 
           {error && (

@@ -108,3 +108,45 @@ function base64ToBytes(b64: string): Uint8Array {
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
   return out
 }
+
+/**
+ * Upload a user-selected file as a session artifact via ADK's POST
+ * artifacts route. The body is a SaveArtifactRequest: the file bytes are
+ * base64-encoded into a genai Part (`inlineData.data` + `mimeType`).
+ * Returns the saved version's metadata (`{version, ...}`). ADK
+ * auto-versions same-named uploads, so re-uploading bumps the revision.
+ */
+export async function uploadArtifact(
+  appName: string,
+  userId: string,
+  sessionId: string,
+  file: File,
+): Promise<{ version: number }> {
+  const data = await fileToBase64(file)
+  const mimeType = file.type || "application/octet-stream"
+  return apiFetch<{ version: number }>(
+    artifactsBase(appName, userId, sessionId),
+    {
+      method: "POST",
+      body: JSON.stringify({
+        filename: file.name,
+        artifact: { inlineData: { data, mimeType } },
+      }),
+    },
+  )
+}
+
+/** Read a File as a base64 string (no data: prefix). */
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error ?? new Error("file read failed"))
+    reader.onload = () => {
+      // result is a data: URL — strip the "data:<mime>;base64," prefix.
+      const s = String(reader.result)
+      const comma = s.indexOf(",")
+      resolve(comma >= 0 ? s.slice(comma + 1) : s)
+    }
+    reader.readAsDataURL(file)
+  })
+}
