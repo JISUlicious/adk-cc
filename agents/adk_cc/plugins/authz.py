@@ -21,20 +21,20 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Optional
 
 from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
-# NOTE: the `..authz` package is imported LAZILY (inside __init__ / methods),
-# NOT at module top. This plugin is imported via plugins/__init__ during
-# `agent.py`'s `from .plugins import ...`, which itself runs during
-# `adk_cc/__init__`'s `from . import agent` — a top-level `from ..authz
-# import` here closes a circular-import loop. Deferring it breaks the cycle
-# (matches the codebase's lazy-import convention).
-if TYPE_CHECKING:  # for type hints only — not evaluated at runtime
-    from ..authz import PolicyDecisionPoint
+from ..authz import (
+    AbacPolicyDecisionPoint,
+    Action,
+    AuthzContext,
+    PolicyDecisionPoint,
+    resource_from_tool,
+    subject_from_state,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class AuthzPlugin(BasePlugin):
     def __init__(
         self,
         *,
-        pdp: "Optional[PolicyDecisionPoint]" = None,
+        pdp: Optional[PolicyDecisionPoint] = None,
         name: str = "adk_cc_authz",
     ) -> None:
         super().__init__(name=name)
@@ -66,13 +66,6 @@ class AuthzPlugin(BasePlugin):
 
         tool_name = getattr(tool, "name", None) or getattr(
             getattr(tool, "meta", None), "name", ""
-        )
-        # Lazy import (cycle-break — see module note).
-        from ..authz import (
-            Action,
-            AuthzContext,
-            resource_from_tool,
-            subject_from_state,
         )
         try:
             subject = subject_from_state(tool_context.state)
@@ -99,8 +92,13 @@ class AuthzPlugin(BasePlugin):
         if decision.effect == "deny":
             return {
                 "status": "authz_denied",
-                "error": f"Tool {tool_name!r} denied by authorization: {decision.reason}",
+                # `error` is the model-/user-visible message: clean human
+                # text only — no internal policy identifiers. The detailed
+                # PDP reason (which may name the matched policy) goes in
+                # `reason`; the policy name is carried in `matched`.
+                "error": f"Tool {tool_name!r} denied by authorization policy.",
                 "reason": decision.reason,
+                "matched": decision.matched,
             }
         return None  # permit → fall through to PermissionPlugin (confirmation)
 
@@ -109,8 +107,6 @@ def _default_pdp() -> PolicyDecisionPoint:
     """Build the default ABAC PDP from ADK_CC_PERMISSIONS_YAML (policies:
     block). Empty policy list when no file / no policies — the baseline
     (owner/tenant) still applies."""
-    from ..authz import AbacPolicyDecisionPoint  # lazy — cycle-break
-
     path = os.environ.get("ADK_CC_PERMISSIONS_YAML")
     policies = []
     if path:
