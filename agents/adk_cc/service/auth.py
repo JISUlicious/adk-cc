@@ -27,6 +27,54 @@ import time
 from typing import Any, Awaitable, Callable, Optional, Protocol
 
 
+class AuthPrincipal(tuple):
+    """The authenticated caller: (user_id, tenant_id) + roles/scopes.
+
+    Subclasses `tuple` and IS the `(user_id, tenant_id)` pair, so all the
+    existing `user_id, tenant_id = auth` unpacking and `auth[0]`/`auth[1]`
+    access keeps working unchanged (back-compat shim). The authZ layer
+    reads the richer `.roles` / `.scopes` for subject-aware decisions.
+    """
+
+    roles: frozenset[str]
+    scopes: frozenset[str]
+
+    def __new__(
+        cls,
+        user_id: str,
+        tenant_id: str,
+        roles: frozenset[str] = frozenset(),
+        scopes: frozenset[str] = frozenset(),
+    ) -> "AuthPrincipal":
+        self = super().__new__(cls, (user_id, tenant_id))
+        self.roles = frozenset(roles)
+        self.scopes = frozenset(scopes)
+        return self
+
+    @property
+    def user_id(self) -> str:
+        return self[0]
+
+    @property
+    def tenant_id(self) -> str:
+        return self[1]
+
+
+def _coerce_str_set(value: Any) -> frozenset[str]:
+    """Normalize a claim into a set of strings.
+
+    Accepts a list/tuple/set of strings, a single space-delimited string
+    (the OAuth `scope` convention), or None. Anything else → empty.
+    """
+    if value is None:
+        return frozenset()
+    if isinstance(value, str):
+        return frozenset(value.split())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return frozenset(str(v) for v in value)
+    return frozenset()
+
+
 # Per-request auth context, scoped to the asyncio task chain handling
 # one HTTP request. Set by the auth middleware before invoking the
 # downstream handler; read by `TenancyPlugin._default_resolver` so it
@@ -34,7 +82,10 @@ from typing import Any, Awaitable, Callable, Optional, Protocol
 # operator to wire a custom resolver. Defaults to None outside of an
 # authenticated request (so dev `adk web .` and unit tests just see
 # None and fall back to the legacy "local" tenant).
-_AUTH_CTX: contextvars.ContextVar[Optional[tuple[str, str]]] = (
+# Holds an AuthPrincipal — which IS a (user_id, tenant_id) tuple, so
+# get_auth_context() still returns the 2-tuple existing callers expect,
+# while get_auth_principal() exposes the roles/scopes too.
+_AUTH_CTX: contextvars.ContextVar[Optional[AuthPrincipal]] = (
     contextvars.ContextVar("adk_cc_auth", default=None)
 )
 
@@ -45,20 +96,33 @@ def get_auth_context() -> Optional[tuple[str, str]]:
 
     Plugins (notably TenancyPlugin) call this to bridge auth-extracted
     tenancy into ADK's plugin layer, since ADK's tool_context doesn't
-    carry the FastAPI request.state directly.
+    carry the FastAPI request.state directly. The returned value is an
+    AuthPrincipal but unpacks as a 2-tuple — back-compatible.
     """
     return _AUTH_CTX.get()
 
 
-def set_auth_context(user_id: str, tenant_id: str) -> contextvars.Token:
-    """Stash the (user_id, tenant_id) pair into the current async task's
-    context. Returns a Token the caller can use to reset.
+def get_auth_principal() -> Optional[AuthPrincipal]:
+    """Return the full AuthPrincipal (user/tenant + roles/scopes) for the
+    current request, or None. Used by the authZ layer for subject-aware
+    decisions; `get_auth_context()` remains the 2-tuple-only accessor."""
+    return _AUTH_CTX.get()
+
+
+def set_auth_context(
+    user_id: str,
+    tenant_id: str,
+    roles: frozenset[str] = frozenset(),
+    scopes: frozenset[str] = frozenset(),
+) -> contextvars.Token:
+    """Stash the AuthPrincipal into the current async task's context.
+    Returns a Token the caller can use to reset.
 
     Public so operators with a non-FastAPI deployment shape (e.g. a
     custom transport, or unit tests that want to simulate authenticated
     requests) can drive the same code path the middleware uses.
     """
-    return _AUTH_CTX.set((user_id, tenant_id))
+    return _AUTH_CTX.set(AuthPrincipal(user_id, tenant_id, roles, scopes))
 
 # fastapi is an optional dep — only imported when the server module is used.
 try:
@@ -71,36 +135,47 @@ except ImportError:  # pragma: no cover
 
 
 class AuthExtractor(Protocol):
-    """Inspect a request, return (user_id, tenant_id), or raise."""
+    """Inspect a request, return an AuthPrincipal (or a bare
+    `(user_id, tenant_id)` tuple — the middleware normalizes), or raise."""
 
     async def __call__(self, request: "Request") -> tuple[str, str]: ...
 
 
 class BearerTokenExtractor:
-    """Trivial token → (user_id, tenant_id) lookup.
+    """Trivial token → AuthPrincipal lookup.
 
-    Tokens load from `ADK_CC_AUTH_TOKENS` as `token1=user1:tenant1,token2=user2:tenant2`.
-    Suitable for local testing; replace with a real JWT validator for prod.
+    Tokens load from `ADK_CC_AUTH_TOKENS` as
+    `token1=user1:tenant1,token2=user2:tenant2`. An optional THIRD
+    `:roles` segment carries `|`-delimited roles for authZ testing:
+    `tok=alice:acme:admin|deployer`. Suitable for local testing; replace
+    with a real JWT validator for prod.
     """
 
-    def __init__(self, tokens: dict[str, tuple[str, str]] | None = None) -> None:
+    def __init__(self, tokens: dict[str, AuthPrincipal] | None = None) -> None:
         if tokens is None:
             tokens = self._parse_env(os.environ.get("ADK_CC_AUTH_TOKENS", ""))
         self._tokens = tokens
 
     @staticmethod
-    def _parse_env(raw: str) -> dict[str, tuple[str, str]]:
-        out: dict[str, tuple[str, str]] = {}
+    def _parse_env(raw: str) -> dict[str, AuthPrincipal]:
+        out: dict[str, AuthPrincipal] = {}
         for entry in raw.split(","):
             entry = entry.strip()
             if not entry or "=" not in entry:
                 continue
             token, who = entry.split("=", 1)
-            user, _, tenant = who.partition(":")
-            out[token.strip()] = (user.strip() or "user", tenant.strip() or "default")
+            parts = who.split(":")
+            user = (parts[0].strip() if len(parts) > 0 else "") or "user"
+            tenant = (parts[1].strip() if len(parts) > 1 else "") or "default"
+            roles = (
+                frozenset(r.strip() for r in parts[2].split("|") if r.strip())
+                if len(parts) > 2
+                else frozenset()
+            )
+            out[token.strip()] = AuthPrincipal(user, tenant, roles)
         return out
 
-    async def __call__(self, request: "Request") -> tuple[str, str]:
+    async def __call__(self, request: "Request") -> AuthPrincipal:
         if not _FASTAPI_AVAILABLE:
             raise RuntimeError("fastapi is not installed")
         header = request.headers.get("Authorization", "")
@@ -142,6 +217,8 @@ class JwtAuthExtractor:
         audience: Optional[str] = None,
         user_claim: str = "sub",
         tenant_claim: str = "tenant",
+        roles_claim: str = "roles",
+        scopes_claim: str = "scope",
         jwks_cache_ttl_seconds: int = 300,
     ) -> None:
         if jwks_url is None and jwks is None:
@@ -151,6 +228,8 @@ class JwtAuthExtractor:
         self._audience = audience
         self._user_claim = user_claim
         self._tenant_claim = tenant_claim
+        self._roles_claim = roles_claim
+        self._scopes_claim = scopes_claim
         self._ttl = jwks_cache_ttl_seconds
 
         # If a static `jwks` dict was passed, prime the cache and skip
@@ -246,7 +325,9 @@ class JwtAuthExtractor:
             raise HTTPException(
                 status_code=401, detail=f"missing {self._tenant_claim} claim"
             )
-        return (str(user_id), str(tenant_id))
+        roles = _coerce_str_set(claims.get(self._roles_claim))
+        scopes = _coerce_str_set(claims.get(self._scopes_claim))
+        return AuthPrincipal(str(user_id), str(tenant_id), roles, scopes)
 
 
 def make_auth_middleware(
@@ -298,13 +379,17 @@ def make_auth_middleware(
                 return await call_next(request)
 
             try:
-                user_id, tenant_id = await extractor(request)
+                principal = await extractor(request)
             except HTTPException as e:
                 return Response(
                     content=e.detail, status_code=e.status_code, media_type="text/plain"
                 )
-            request.state.adk_cc_auth = (user_id, tenant_id)
-            token = _AUTH_CTX.set((user_id, tenant_id))
+            # Normalize: an extractor may return a bare (user, tenant)
+            # tuple (older custom extractors) or a full AuthPrincipal.
+            if not isinstance(principal, AuthPrincipal):
+                principal = AuthPrincipal(principal[0], principal[1])
+            request.state.adk_cc_auth = principal
+            token = _AUTH_CTX.set(principal)
             try:
                 return await call_next(request)
             finally:
