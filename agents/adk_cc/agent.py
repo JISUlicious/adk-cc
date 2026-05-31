@@ -252,29 +252,11 @@ def _make_static_mcp_toolset():
     server = os.environ.get("ADK_CC_MCP_SERVER")
     if not server:
         return None
-    from .tools.mcp import make_mcp_toolset
+    from .tools.mcp import connection_params_for, make_mcp_toolset
 
     name = os.environ.get("ADK_CC_MCP_SERVER_NAME", "mcp")
-    transport = os.environ.get("ADK_CC_MCP_TRANSPORT", "stdio").lower()
-    if transport == "stdio":
-        import shlex
-
-        from mcp import StdioServerParameters
-
-        parts = shlex.split(server)
-        params = StdioServerParameters(command=parts[0], args=parts[1:])
-    elif transport == "sse":
-        from google.adk.tools.mcp_tool.mcp_session_manager import SseConnectionParams
-
-        params = SseConnectionParams(url=server)
-    elif transport == "http":
-        from google.adk.tools.mcp_tool.mcp_session_manager import (
-            StreamableHTTPConnectionParams,
-        )
-
-        params = StreamableHTTPConnectionParams(url=server)
-    else:
-        raise ValueError(f"unknown ADK_CC_MCP_TRANSPORT: {transport!r}")
+    transport = os.environ.get("ADK_CC_MCP_TRANSPORT", "stdio")
+    params = connection_params_for(transport, server)
 
     return make_mcp_toolset(
         server_name=name,

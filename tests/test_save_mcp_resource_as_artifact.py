@@ -16,10 +16,8 @@ import types as pytypes
 os.environ.setdefault("ADK_CC_SKIP_DOTENV", "1")
 os.environ.setdefault("ADK_CC_API_KEY", "stub")
 
-from adk_cc.tools.save_mcp_resource_as_artifact import (
-    SaveMcpResourceAsArtifactTool,
-    _safe_name,
-)
+from adk_cc.tools._mcp_content import safe_artifact_name
+from adk_cc.tools.save_mcp_resource_as_artifact import SaveMcpResourceAsArtifactTool
 
 
 # --- fakes ----------------------------------------------------------------
@@ -79,10 +77,11 @@ def _run(coro):
 # --- tests ----------------------------------------------------------------
 
 def test_safe_name():
-    assert _safe_name("db://schema/users") == "schema_users"
-    assert _safe_name("report.csv") == "report.csv"
-    assert _safe_name("file:///a/b/c.txt") == "a_b_c.txt"
-    assert _safe_name("///") == "resource"
+    # Shared safe_artifact_name uses basename-of-path semantics.
+    assert safe_artifact_name("db://schema/users") == "users"
+    assert safe_artifact_name("report.csv") == "report.csv"
+    assert safe_artifact_name("file:///a/b/c.txt") == "c.txt"
+    assert safe_artifact_name("///") == "resource"
     print("OK test_safe_name")
 
 
@@ -120,7 +119,7 @@ def test_filename_default_from_resource_name():
     ts = _FakeToolset([_text("x")])
     ctx = _FakeCtx()
     out = _run(_tool(ts).run_async(args={"resource_name": "db://schema/orders"}, tool_context=ctx))
-    assert out["filename"] == "schema_orders"
+    assert out["filename"] == "orders"
     print("OK test_filename_default_from_resource_name")
 
 

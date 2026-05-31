@@ -19,8 +19,9 @@ Handled content:
   - `ResourceLink` → saved by URI scheme, link left in the result
     augmented with the artifact ref:
       * `https://` — client-fetchable per spec → httpx GET.
-      * `s3://`    — already in object storage → recorded as a reference
-        (no re-copy).
+      * `s3://`    — bytes already in object storage; register-by-reference
+        isn't wired yet, so it's skipped + logged (NOT faked as an
+        artifact).
       * `mcp://` / `file://` / custom — per the spec these mean "read it
         back through the server", so we do a raw-URI read on the PRODUCING
         tool's MCP session (`session.read_resource(uri=...)`), which works
@@ -34,7 +35,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -43,21 +43,9 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
 from ..tools._artifact import save_part_as_artifact
-from ..tools._mcp_content import mcp_content_to_part
+from ..tools._mcp_content import mcp_content_to_part, safe_artifact_name
 
 _log = logging.getLogger(__name__)
-
-
-def _safe_name(name_or_uri: str) -> str:
-    """Flat artifact filename from a resource name / URI (basename-ish)."""
-    raw = name_or_uri
-    parsed = urlparse(name_or_uri)
-    if parsed.scheme and parsed.path:
-        raw = parsed.path
-    raw = raw.strip("/").split("/")[-1] or name_or_uri
-    raw = re.sub(r"[/\\:\s]+", "_", raw)
-    raw = re.sub(r"[^A-Za-z0-9._\-]", "", raw)
-    return raw or "export"
 
 
 class McpExportArtifactPlugin(BasePlugin):
@@ -120,7 +108,7 @@ class McpExportArtifactPlugin(BasePlugin):
                     part = mcp_content_to_part(c.resource)
                     if part is None:
                         continue
-                    fname = _safe_name(
+                    fname = safe_artifact_name(
                         str(getattr(c.resource, "uri", None) or f"{name}_embedded")
                     )
                     res = await save_part_as_artifact(
@@ -191,7 +179,7 @@ class McpExportArtifactPlugin(BasePlugin):
         """
         uri = str(getattr(link, "uri", "") or "")
         scheme = urlparse(uri).scheme.lower()
-        fname = _safe_name(getattr(link, "name", None) or uri)
+        fname = safe_artifact_name(getattr(link, "name", None) or uri)
         mime = getattr(link, "mimeType", None) or "application/octet-stream"
 
         if scheme in ("http", "https"):
@@ -212,17 +200,23 @@ class McpExportArtifactPlugin(BasePlugin):
                 return None
 
         if scheme == "s3":
-            # The export already lives in object storage. Record a
-            # reference rather than re-downloading + re-uploading.
-            _log.info("mcp_export_artifact: s3 resource_link recorded (no re-copy): %s", uri)
-            return {"status": "ok", "filename": fname, "version": -1,
-                    "scope": "reference", "bytes": getattr(link, "size", None),
-                    "canonical_uri": uri}
+            # The bytes already live in object storage. Registering an
+            # existing object as an artifact by reference (no re-copy) isn't
+            # wired yet, so we DON'T fake an artifact entry — we skip and
+            # log. (A real impl would register the canonical s3:// uri with
+            # the artifact index.) Returning None leaves the link in the
+            # result untouched; nothing claims to be downloadable that isn't.
+            _log.info(
+                "mcp_export_artifact: s3 resource_link not auto-persisted "
+                "(register-by-reference not implemented): %s", uri,
+            )
+            return None
 
         # mcp:// / file:// / custom scheme → read it back through the
         # producing tool's MCP session. The tool ADK passed us IS the
         # McpTool that returned this link, so it carries the session
-        # manager bound to the right server.
+        # manager bound to the right server. (External schemes like s3://
+        # are handled above; only server-resolved schemes reach here.)
         return await self._save_via_session(uri, fname, tool, tool_context)
 
     async def _save_via_session(

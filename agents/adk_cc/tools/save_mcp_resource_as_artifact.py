@@ -18,8 +18,7 @@ injected at construction.
 from __future__ import annotations
 
 import logging
-import re
-from typing import Any, Optional
+from typing import Any
 
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
@@ -27,23 +26,10 @@ from google.genai import types
 from pydantic import ValidationError
 
 from ._artifact import save_part_as_artifact
-from ._mcp_content import mcp_content_to_part
+from ._mcp_content import mcp_content_to_part, safe_artifact_name
 from .schemas import SaveMcpResourceAsArtifactArgs
 
 _log = logging.getLogger(__name__)
-
-
-def _safe_name(resource_name: str) -> str:
-    """Derive a flat artifact filename from a resource name / URI.
-
-    Strips a `scheme://` prefix and replaces path separators and other
-    filesystem-hostile chars so `db://schema/users` → `schema_users`.
-    """
-    name = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", "", resource_name)
-    name = name.strip("/")
-    name = re.sub(r"[/\\:\s]+", "_", name)
-    name = re.sub(r"[^A-Za-z0-9._\-]", "", name)
-    return name or "resource"
 
 
 class SaveMcpResourceAsArtifactTool(BaseTool):
@@ -102,7 +88,7 @@ class SaveMcpResourceAsArtifactTool(BaseTool):
                 "error": f"resource {a.resource_name!r} returned no contents",
             }
 
-        base = a.filename or _safe_name(a.resource_name)
+        base = a.filename or safe_artifact_name(a.resource_name)
         multi = len(contents) > 1
 
         saved: list[dict] = []

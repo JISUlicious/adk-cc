@@ -167,15 +167,17 @@ def test_https_link_fetched(monkeypatch_httpx=None):
     print("OK test_https_link_fetched")
 
 
-def test_s3_link_referenced_no_copy():
+def test_s3_link_skipped_not_faked():
+    # s3 bytes already live in object storage; register-by-reference isn't
+    # wired, so we DON'T fabricate an artifact entry — skip + return None
+    # (result untouched), rather than claim a non-downloadable "_artifacts".
     p = McpExportArtifactPlugin()
     out, ctx = _call(p, "mcp__db__export",
                      _result([_link("s3://adk-cc-test-bucket/exports/orders.parquet",
                                     name="orders.parquet")]))
-    # s3 link recorded as a reference (no ctx.save_artifact call)
     assert not ctx.saved
-    assert out is not None and out["_artifacts"], out
-    print("OK test_s3_link_referenced_no_copy")
+    assert out is None
+    print("OK test_s3_link_skipped_not_faked")
 
 
 def test_audience_user_only_filters_assistant():
@@ -247,7 +249,7 @@ if __name__ == "__main__":
     test_embedded_text_saved_and_stripped()
     test_embedded_blob_saved()
     test_https_link_fetched()
-    test_s3_link_referenced_no_copy()
+    test_s3_link_skipped_not_faked()
     test_audience_user_only_filters_assistant()
     test_audience_filter_off_saves_all()
     test_no_file_content_noops()

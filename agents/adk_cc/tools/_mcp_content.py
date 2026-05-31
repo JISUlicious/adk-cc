@@ -16,9 +16,34 @@ Handles the two shapes MCP delivers files in:
 from __future__ import annotations
 
 import base64
+import re
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from google.genai import types
+
+
+def safe_artifact_name(name_or_uri: str) -> str:
+    """Derive a flat, filesystem-safe artifact filename from a name / URI.
+
+    Takes the basename of a URI path (so `db://schema/users` → `users`,
+    `file:///a/b/c.csv` → `c.csv`), then replaces separators / hostile
+    chars. Falls back to "resource" when nothing usable remains. Shared by
+    both the save-resource tool and the auto-persist plugin so a given
+    resource yields the SAME filename whichever path saves it.
+    """
+    raw = name_or_uri
+    parsed = urlparse(name_or_uri)
+    if parsed.scheme and parsed.path:
+        raw = parsed.path
+    raw = raw.strip("/").split("/")[-1] or name_or_uri
+    raw = re.sub(r"[/\\:\s]+", "_", raw)
+    raw = re.sub(r"[^A-Za-z0-9._\-]", "", raw)
+    # Collapse a result that's only separators/dots (e.g. "///" → "_") to
+    # the fallback so we never produce a junk filename.
+    if not raw.strip("_.-"):
+        return "resource"
+    return raw
 
 
 def mcp_content_to_part(content: Any) -> Optional[types.Part]:

@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 
 from ..credentials import CredentialProvider
 from ..service.registry import TenantResourceRegistry
-from .save_mcp_resource_as_artifact import SaveMcpResourceAsArtifactTool
+from .mcp import bind_save_tool, connection_params_for
 
 _log = logging.getLogger(__name__)
 
@@ -75,35 +75,14 @@ class McpServerConfig(BaseModel):
 def _build_connection_params(cfg: McpServerConfig, secret: Optional[str]):
     """Translate `(McpServerConfig, secret)` → ADK MCP connection params.
 
-    ADK ships three transport-specific param classes; we pick by
-    `cfg.transport`. Secrets land in the `Authorization: Bearer ...`
-    header for HTTP-based transports, which is the common shape.
-    Operators with non-bearer auth (e.g. API key in a custom header)
-    write a custom toolset.
+    Delegates the transport→params mapping to `connection_params_for`
+    (shared with the static wiring). Secrets land in the
+    `Authorization: Bearer ...` header for HTTP-based transports, which is
+    the common shape; operators with non-bearer auth write a custom
+    toolset.
     """
     headers = {"Authorization": f"Bearer {secret}"} if secret else None
-
-    if cfg.transport == "sse":
-        from google.adk.tools.mcp_tool.mcp_session_manager import SseConnectionParams
-
-        return SseConnectionParams(url=cfg.url, headers=headers)
-    if cfg.transport == "http":
-        from google.adk.tools.mcp_tool.mcp_session_manager import (
-            StreamableHTTPConnectionParams,
-        )
-
-        return StreamableHTTPConnectionParams(url=cfg.url, headers=headers)
-    if cfg.transport == "stdio":
-        from mcp import StdioServerParameters
-
-        # cfg.url for stdio is the command line; we tokenize naively.
-        # Operators wanting full control over stdio args write a
-        # custom toolset.
-        import shlex
-
-        parts = shlex.split(cfg.url)
-        return StdioServerParameters(command=parts[0], args=parts[1:])
-    raise ValueError(f"unknown MCP transport: {cfg.transport!r}")
+    return connection_params_for(cfg.transport, cfg.url, headers=headers)
 
 
 class TenantMcpToolset(BaseToolset):
@@ -166,25 +145,10 @@ class TenantMcpToolset(BaseToolset):
                 tools = await inner.get_tools_with_prefix(readonly_context)
                 out.extend(tools)
                 if cfg.save_resources_as_artifacts:
-                    # Appended AFTER get_tools_with_prefix already prefixed
-                    # the inner tools, so prefix this one ourselves to the
-                    # same `mcp__{server}___save_resource_as_artifact` shape
-                    # (note the trailing `_` separator base_toolset inserts).
-                    save_tool = SaveMcpResourceAsArtifactTool(
-                        mcp_toolset=inner, server_name=cfg.server_name
-                    )
-                    prefixed = f"mcp__{cfg.server_name}___{save_tool.name}"
-                    save_tool.name = prefixed
-                    _orig_decl = save_tool._get_declaration
-
-                    def _prefixed_decl(_orig=_orig_decl, _name=prefixed):
-                        decl = _orig()
-                        if decl is not None:
-                            decl.name = _name
-                        return decl
-
-                    save_tool._get_declaration = _prefixed_decl
-                    out.append(save_tool)
+                    # Appended AFTER the inner tools were already prefixed,
+                    # so bind_save_tool returns it with a matching
+                    # mcp__{server}___ name (shared with the static wiring).
+                    out.append(bind_save_tool(inner, cfg.server_name))
             except Exception as e:  # noqa: BLE001 — one bad MCP shouldn't kill the rest
                 _log.warning(
                     "TenantMcpToolset: skipping server %r for tenant %r: %s",
