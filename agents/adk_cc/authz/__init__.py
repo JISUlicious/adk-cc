@@ -16,6 +16,7 @@ Default-OFF: inert unless `ADK_CC_AUTHZ=1`. Dev / single-tenant behavior
 is unchanged when disabled.
 """
 
+from .attributes import resource_from_tool, subject_from_state
 from .model import (
     Action,
     AuthzContext,
@@ -25,6 +26,7 @@ from .model import (
     Subject,
 )
 from .pdp import AbacPolicy, AbacPolicyDecisionPoint, PolicyDecisionPoint
+from .policy_loader import load_policies_from_yaml
 
 __all__ = [
     "Action",
@@ -36,4 +38,7 @@ __all__ = [
     "AbacPolicy",
     "AbacPolicyDecisionPoint",
     "PolicyDecisionPoint",
+    "load_policies_from_yaml",
+    "subject_from_state",
+    "resource_from_tool",
 ]
