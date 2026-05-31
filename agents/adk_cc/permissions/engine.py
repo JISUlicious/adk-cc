@@ -1,9 +1,18 @@
 """The permission decision flow.
 
+Scope: this is the CONFIRMATION layer's decision function. Its DENY step is
+a subject-BLIND guardrail blocklist ("is this operation forbidden for
+*anyone*?"), NOT authorization ("may *this subject* do it?"). Subject-aware
+authorization lives in `authz/pdp.py` + `plugins/authz.py`, which gate the
+call earlier and independently. See `plugins/permissions.py` for the full
+layer-boundary note.
+
 A 4-step decision (collapsed from upstream's 7 — drop classifier path,
 drop separate user-interaction phase, drop shadowed-rule diagnostics):
 
-  1. If any rule matches with behavior=DENY → deny.
+  1. If any rule matches with behavior=DENY → deny. (Guardrail blocklist —
+     subject-blind; evaluated BEFORE the bypass short-circuit in step 2b so
+     bypassPermissions cannot skip it.)
   2. Mode override:
         - PLAN mode blocks any tool whose meta marks it as not read-only.
         - DONT_ASK mode converts every ask outcome (rule-based or destructive
