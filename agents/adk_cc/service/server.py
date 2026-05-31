@@ -97,6 +97,16 @@ def build_fastapi_app(
         else:
             exempt_exact = ()
             exempt_prefixes = ()
+        # REST authZ gate (closes trust-the-path). Added BEFORE the auth
+        # middleware so it ends up INNER: Starlette runs the last-added
+        # middleware outermost, so auth (added next) runs first and sets
+        # request.state.adk_cc_auth, then this inner gate reads it. No-op
+        # unless ADK_CC_AUTHZ=1 (checked per-request inside the middleware).
+        from .authz_routes import make_authz_middleware
+        from ..plugins.authz import _default_pdp
+
+        fastapi_app.add_middleware(make_authz_middleware(_default_pdp()))
+
         fastapi_app.add_middleware(
             make_auth_middleware(
                 auth_extractor,
