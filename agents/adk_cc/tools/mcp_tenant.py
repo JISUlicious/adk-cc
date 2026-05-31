@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from ..credentials import CredentialProvider
 from ..service.registry import TenantResourceRegistry
+from .mcp import bind_save_tool, connection_params_for
 
 _log = logging.getLogger(__name__)
 
@@ -54,40 +55,34 @@ class McpServerConfig(BaseModel):
         default=False,
         description="If True, every MCP call goes through ADK's request_confirmation flow.",
     )
+    save_resources_as_artifacts: bool = Field(
+        default=False,
+        description=(
+            "If True, expose a `save_resource_as_artifact` tool bound to "
+            "this server so the agent can persist a named resource into "
+            "the artifact store."
+        ),
+    )
+    use_mcp_resources: bool = Field(
+        default=False,
+        description=(
+            "If True, also add ADK's `load_mcp_resource` tool and inject "
+            "the server's resource catalog into the agent's context."
+        ),
+    )
 
 
 def _build_connection_params(cfg: McpServerConfig, secret: Optional[str]):
     """Translate `(McpServerConfig, secret)` → ADK MCP connection params.
 
-    ADK ships three transport-specific param classes; we pick by
-    `cfg.transport`. Secrets land in the `Authorization: Bearer ...`
-    header for HTTP-based transports, which is the common shape.
-    Operators with non-bearer auth (e.g. API key in a custom header)
-    write a custom toolset.
+    Delegates the transport→params mapping to `connection_params_for`
+    (shared with the static wiring). Secrets land in the
+    `Authorization: Bearer ...` header for HTTP-based transports, which is
+    the common shape; operators with non-bearer auth write a custom
+    toolset.
     """
     headers = {"Authorization": f"Bearer {secret}"} if secret else None
-
-    if cfg.transport == "sse":
-        from google.adk.tools.mcp_tool.mcp_session_manager import SseConnectionParams
-
-        return SseConnectionParams(url=cfg.url, headers=headers)
-    if cfg.transport == "http":
-        from google.adk.tools.mcp_tool.mcp_session_manager import (
-            StreamableHTTPConnectionParams,
-        )
-
-        return StreamableHTTPConnectionParams(url=cfg.url, headers=headers)
-    if cfg.transport == "stdio":
-        from mcp import StdioServerParameters
-
-        # cfg.url for stdio is the command line; we tokenize naively.
-        # Operators wanting full control over stdio args write a
-        # custom toolset.
-        import shlex
-
-        parts = shlex.split(cfg.url)
-        return StdioServerParameters(command=parts[0], args=parts[1:])
-    raise ValueError(f"unknown MCP transport: {cfg.transport!r}")
+    return connection_params_for(cfg.transport, cfg.url, headers=headers)
 
 
 class TenantMcpToolset(BaseToolset):
@@ -145,9 +140,15 @@ class TenantMcpToolset(BaseToolset):
                     tool_filter=cfg.tool_filter,
                     tool_name_prefix=f"mcp__{cfg.server_name}__",
                     require_confirmation=cfg.require_confirmation,
+                    use_mcp_resources=cfg.use_mcp_resources,
                 )
                 tools = await inner.get_tools_with_prefix(readonly_context)
                 out.extend(tools)
+                if cfg.save_resources_as_artifacts:
+                    # Appended AFTER the inner tools were already prefixed,
+                    # so bind_save_tool returns it with a matching
+                    # mcp__{server}___ name (shared with the static wiring).
+                    out.append(bind_save_tool(inner, cfg.server_name))
             except Exception as e:  # noqa: BLE001 — one bad MCP shouldn't kill the rest
                 _log.warning(
                     "TenantMcpToolset: skipping server %r for tenant %r: %s",

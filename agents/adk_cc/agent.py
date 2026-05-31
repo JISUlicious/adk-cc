@@ -66,6 +66,7 @@ from .plugins import (
     ProjectContextPlugin,
     ConfirmationFormUiPlugin,
     ContextGuardPlugin,
+    McpExportArtifactPlugin,
     PermissionPlugin,
     PlanModeReminderPlugin,
     QuotaPlugin,
@@ -234,6 +235,42 @@ def _make_tenant_mcp_toolset():
 _tenant_mcp = _make_tenant_mcp_toolset()
 
 
+def _make_static_mcp_toolset():
+    """Wire a single static MCP server from env (single-tenant / dev).
+
+    Returns None unless `ADK_CC_MCP_SERVER` is set. Env:
+      - ADK_CC_MCP_SERVER     : the stdio command line to launch the server
+                                (e.g. "python tests/fixtures/csv_mcp_server.py").
+      - ADK_CC_MCP_SERVER_NAME: logical name / tool prefix (default "mcp").
+      - ADK_CC_MCP_TRANSPORT  : stdio | sse | http (default stdio). For
+                                sse/http, ADK_CC_MCP_SERVER is the URL.
+      - ADK_CC_MCP_SAVE_RESOURCES_AS_ARTIFACTS : 1 to add the
+                                save_resource_as_artifact tool (Pattern A).
+      - ADK_CC_MCP_USE_RESOURCES : 1 to add load_mcp_resource + inject the
+                                resource catalog into context.
+    """
+    server = os.environ.get("ADK_CC_MCP_SERVER")
+    if not server:
+        return None
+    from .tools.mcp import connection_params_for, make_mcp_toolset
+
+    name = os.environ.get("ADK_CC_MCP_SERVER_NAME", "mcp")
+    transport = os.environ.get("ADK_CC_MCP_TRANSPORT", "stdio")
+    params = connection_params_for(transport, server)
+
+    return make_mcp_toolset(
+        server_name=name,
+        connection_params=params,
+        save_resources_as_artifacts=(
+            os.environ.get("ADK_CC_MCP_SAVE_RESOURCES_AS_ARTIFACTS") == "1"
+        ),
+        use_mcp_resources=(os.environ.get("ADK_CC_MCP_USE_RESOURCES") == "1"),
+    )
+
+
+_static_mcp = _make_static_mcp_toolset()
+
+
 def _make_tenant_skill_toolset():
     """Construct the per-tenant skill toolset if env config is present.
 
@@ -320,6 +357,8 @@ _coordinator_tools: list = [
 ]
 if _skills is not None:
     _coordinator_tools.append(_skills)
+if _static_mcp is not None:
+    _coordinator_tools.append(_static_mcp)
 if _tenant_mcp is not None:
     _coordinator_tools.append(_tenant_mcp)
 if _tenant_skills is not None:
@@ -757,6 +796,14 @@ _app_kwargs = dict(
         # REJECT at 95%. ADK's EventsCompactionConfig (set above) is
         # the primary defense; this is the fail-soft safety net.
         ContextGuardPlugin(),
+        # Auto-persists file-bearing content (embedded resource /
+        # resource_link) returned by `mcp__*` tool calls into the artifact
+        # store, so MCP export tools yield a downloadable artifact.
+        # ENABLED BY DEFAULT; set ADK_CC_MCP_AUTOSAVE_EXPORTS=0 to disable
+        # (then it's a single cheap gate check per tool call).
+        # after_tool_callback overrides the result to strip inline bytes
+        # once saved.
+        McpExportArtifactPlugin(),
         # Raw model request/response trace for debugging model behavior.
         # Always registered; the plugin no-ops when `ADK_CC_LOG_MODEL_IO`
         # isn't `1`, so the per-turn cost is a single attribute check.

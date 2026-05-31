@@ -39,6 +39,7 @@ from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
 from ..sandbox import SandboxViolation, get_backend, get_workspace
+from ._artifact import save_part_as_artifact
 from ._fs import resolve
 from .base import AdkCcTool, ToolMeta
 from .schemas import SaveAsArtifactArgs
@@ -86,12 +87,7 @@ class SaveAsArtifactTool(AdkCcTool):
                 ),
             }
 
-        scope = (args.scope or "session").lower()
-        if scope not in ("session", "user"):
-            return {
-                "status": "error",
-                "error": f"unknown scope {args.scope!r}; valid: session|user",
-            }
+        scope = args.scope or "session"
 
         # Read raw bytes — never text. The default ABC impl round-trips
         # via read_text/utf-8 for backends that haven't overridden;
@@ -115,48 +111,8 @@ class SaveAsArtifactTool(AdkCcTool):
         mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
         part = types.Part(inline_data=types.Blob(data=raw, mime_type=mime))
 
-        ic = getattr(ctx, "_invocation_context", None)
-        artifact_service = (
-            getattr(ic, "artifact_service", None) if ic is not None else None
+        # Scope validation + artifact-service plumbing + save lives in the
+        # shared helper (also used by the MCP-resource save tool).
+        return await save_part_as_artifact(
+            ctx, filename=filename, part=part, scope=scope
         )
-        if artifact_service is None:
-            return {
-                "status": "error",
-                "error": (
-                    "artifact_service is not configured on this runtime — "
-                    "set ADK_CC_ARTIFACT_STORAGE_URI or wire a "
-                    "BaseArtifactService into get_fast_api_app()"
-                ),
-            }
-
-        try:
-            if scope == "session":
-                # ctx.save_artifact also records artifact_delta on the
-                # event so the UI sees it via the SSE stream.
-                version = await ctx.save_artifact(filename, part)
-            else:
-                # session_id=None → user-scoped. We don't get the
-                # artifact_delta side-effect here; the UI surfaces user-
-                # scoped artifacts via a future "library" view, not via
-                # the per-event chip.
-                version = await artifact_service.save_artifact(
-                    app_name=ic.app_name,
-                    user_id=ic.user_id,
-                    session_id=None,
-                    filename=filename,
-                    artifact=part,
-                )
-        except Exception as e:  # noqa: BLE001
-            return {
-                "status": "error",
-                "error": f"save_artifact failed for {filename!r}: {e}",
-            }
-
-        return {
-            "status": "ok",
-            "filename": filename,
-            "version": version,
-            "scope": scope,
-            "bytes": len(raw),
-            "mime_type": mime,
-        }
