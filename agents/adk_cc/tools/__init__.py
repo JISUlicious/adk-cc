@@ -15,6 +15,7 @@ from .enter_plan_mode import EnterPlanModeTool
 from .exit_plan_mode import ExitPlanModeTool
 from .glob_files import GlobFilesTool
 from .grep import GrepTool
+from .load_artifact_to_sandbox import LoadArtifactToSandboxTool
 from .mcp import make_mcp_toolset
 from .read_current_plan import ReadCurrentPlanTool
 from .read_file import ReadFileTool
@@ -40,6 +41,7 @@ __all__ = [
     "ExitPlanModeTool",
     "GlobFilesTool",
     "GrepTool",
+    "LoadArtifactToSandboxTool",
     "ReadCurrentPlanTool",
     "ReadFileTool",
     "SaveAsArtifactTool",

@@ -221,3 +221,44 @@ class SaveMcpResourceAsArtifactArgs(BaseModel):
             "chip. `user`: persists across this user's future sessions."
         ),
     )
+
+
+class LoadArtifactToSandboxArgs(BaseModel):
+    filename: str = Field(
+        description=(
+            "Name of the artifact to copy into the sandbox (as listed by "
+            "the chat UI / artifact store). Includes user-uploaded files "
+            "and anything previously saved with save_as_artifact."
+        )
+    )
+    dest_path: str = Field(
+        description=(
+            "Destination path inside the workspace to write the file to. "
+            "Relative paths anchor at the workspace root. Parent dirs are "
+            "created as needed."
+        )
+    )
+    version: Optional[int] = Field(
+        default=None,
+        description=(
+            "Artifact version to load (0-based). Omit for the latest "
+            "version. The copy is a point-in-time snapshot — editing the "
+            "sandbox file afterward does NOT change the artifact, and "
+            "vice versa."
+        ),
+    )
+    scope: str = Field(
+        default="session",
+        description=(
+            "Where to look for the artifact: `session` (default) or "
+            "`user` (cross-session). Must match the scope it was saved "
+            "under."
+        ),
+    )
+    overwrite: bool = Field(
+        default=False,
+        description=(
+            "If the destination already exists, refuse unless this is "
+            "true. Guards against silently clobbering sandbox edits."
+        ),
+    )
