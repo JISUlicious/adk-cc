@@ -148,7 +148,16 @@ export async function downloadArtifact(
 }
 
 function base64ToBytes(b64: string): Uint8Array {
-  const bin = atob(b64)
+  // ADK serializes Part.inline_data.data as base64URL (RFC 4648 §5):
+  // it uses `-`/`_` instead of `+`/`/` and may drop `=` padding. atob()
+  // only accepts standard base64, so normalize first — otherwise any
+  // payload containing those chars throws "string is not correctly
+  // encoded" (hit by HTML/binary artifacts, not just preview but also
+  // download). Translate the alphabet and re-pad to a multiple of 4.
+  let s = b64.replace(/-/g, "+").replace(/_/g, "/")
+  const pad = s.length % 4
+  if (pad) s += "=".repeat(4 - pad)
+  const bin = atob(s)
   const out = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
   return out
