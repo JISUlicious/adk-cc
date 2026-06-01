@@ -79,6 +79,11 @@ class ToolMeta(BaseModel):
     needs_sandbox: bool = False
     long_running: bool = False
     requires_user_approval: bool = False
+    # Capability permissions a subject must hold to use this tool (authZ
+    # capability gate, AND semantics — the subject must hold ALL). Empty =
+    # ungated by capability. Enforced only when ADK_CC_AUTHZ=1; the YAML
+    # `requirements:` block can augment or replace this per deployment.
+    required_permissions: frozenset[str] = frozenset()
 
 
 class AdkCcTool(BaseTool):

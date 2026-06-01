@@ -84,6 +84,10 @@ class TenantContext:
 # serializable; persisting risks json.dumps failures and stale-session
 # timestamp skew during HITL flows (e.g. tool-confirmation pause/resume).
 _STATE_TENANT_KEY = "temp:tenant_context"
+# Authenticated principal (user/tenant/roles/scopes/permissions) seeded for
+# the authZ layer's PIP (`authz/attributes.subject_from_state`). `temp:` so
+# it isn't persisted (same rationale as the tenant context above).
+_STATE_PRINCIPAL_KEY = "temp:auth_principal"
 # Separate guard for the (potentially expensive) ensure_workspace call.
 # State seeding now happens at invocation start (before_run_callback), so
 # `_STATE_TENANT_KEY is None` no longer reliably marks "first tool call" —
@@ -203,6 +207,7 @@ class TenancyPlugin(BasePlugin):
                     "tenant_id": principal.tenant_id,
                     "roles": sorted(principal.roles),
                     "scopes": sorted(principal.scopes),
+                    "permissions": sorted(getattr(principal, "permissions", ()) or ()),
                 }
         except Exception:  # noqa: BLE001 — never block on principal seeding
             pass

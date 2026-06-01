@@ -33,6 +33,7 @@ def subject_from_state(state: Any) -> Subject:
             tenant_id=str(principal.get("tenant_id") or "local"),
             roles=frozenset(principal.get("roles") or ()),
             scopes=frozenset(principal.get("scopes") or ()),
+            permissions=frozenset(principal.get("permissions") or ()),
         )
     tenant = _safe_get(state, _TENANT_KEY)
     user_id = getattr(tenant, "user_id", None) or "local"

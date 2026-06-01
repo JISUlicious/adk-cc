@@ -1,20 +1,33 @@
-"""Tool-call Policy Enforcement Point (PEP).
+"""Policy Enforcement Points (PEPs) for the authZ layer.
 
-The in-loop authZ gate: before any tool runs, build the subject (from the
-authenticated principal seeded in session state), the action (tool name)
-and the resource (tool args), ask the PDP, and DENY by returning a dict
-(ADK's before_tool_callback short-circuit) or fall through (None) to the
-confirmation layer.
+Two in-loop gates, both subject-aware and both running BEFORE the
+confirmation layer:
+
+  - `before_tool_callback` — gates every tool call (incl. `mcp__*` and
+    sub-agent-invoked tools; it does NOT inherit PermissionPlugin's
+    `isinstance(AdkCcTool)` skip). Builds subject + action + resource and
+    asks the PDP, additionally injecting the tool's CAPABILITY REQUIREMENT
+    (ToolMeta.required_permissions ∪ matching YAML `requirements:`) so the
+    PDP's requirement gate can enforce "only holders of permission X may
+    use this tool."
+
+  - `before_agent_callback` — gates SUB-AGENT invocation (e.g. the
+    coordinator handing off to `Explore` / `verification`). Looks up the
+    agent's capability requirement (the `AGENT_REQUIRED_PERMISSIONS`
+    registry ∪ matching YAML `requirements:` with target agent) and denies
+    the handoff (returns a `types.Content`, ADK's documented short-circuit)
+    when the subject lacks it.
 
 Distinct from PermissionPlugin (confirmation): this is hard, subject-aware
-authorization. It runs BEFORE PermissionPlugin and gates ALL tools —
-including `mcp__*` and sub-agent-invoked tools (it does NOT inherit the
-`isinstance(AdkCcTool)` skip).
+authorization, and it ignores permission mode (so a deny holds under
+`bypassPermissions`).
 
 Default-OFF: inert unless `ADK_CC_AUTHZ=1`. When enabled the PDP is
 closed-world (unmatched ⇒ deny), so operators MUST grant tool access via
 `policies:` (or rely on the ownership/tenant baseline, which permits a
-subject's self-directed tool use by default).
+subject's self-directed tool use by default). The capability requirement
+gate is additionally inert per-action unless that action declares a
+requirement.
 """
 
 from __future__ import annotations
@@ -32,6 +45,7 @@ from ..authz import (
     Action,
     AuthzContext,
     PolicyDecisionPoint,
+    RequirementResolver,
     resource_from_tool,
     subject_from_state,
 )
@@ -40,12 +54,14 @@ _log = logging.getLogger(__name__)
 
 
 class AuthzPlugin(BasePlugin):
-    """Hard subject×action×resource authorization gate on tool calls."""
+    """Hard subject×action×resource authorization gate on tools + agents."""
 
     def __init__(
         self,
         *,
         pdp: Optional[PolicyDecisionPoint] = None,
+        resolver: Optional[RequirementResolver] = None,
+        agent_requirements: Optional[dict[str, frozenset[str]]] = None,
         name: str = "adk_cc_authz",
     ) -> None:
         super().__init__(name=name)
@@ -53,6 +69,16 @@ class AuthzPlugin(BasePlugin):
         # PDP is injectable (tests / external engines); default is the
         # ABAC PDP loaded from the same YAML the permission layer uses.
         self._pdp = pdp if pdp is not None else _default_pdp()
+        # Requirement resolver maps a tool/agent name → its effective
+        # capability requirement (code default ∪ YAML). Default loads the
+        # YAML `requirements:` block; tests can inject one.
+        self._resolver = resolver if resolver is not None else _default_resolver()
+        # Code-owned per-agent requirement defaults (name → perms). Lazily
+        # defaults to agent.py's AGENT_REQUIRED_PERMISSIONS — imported lazily
+        # to avoid a plugins→agent import cycle at module load.
+        self._agent_requirements = agent_requirements
+
+    # -- tool-call PEP --------------------------------------------------
 
     async def before_tool_callback(
         self,
@@ -71,20 +97,27 @@ class AuthzPlugin(BasePlugin):
             subject = subject_from_state(tool_context.state)
             resource = resource_from_tool(tool_name, tool_args, subject)
             mode = _safe_mode(tool_context)
+            # Effective capability requirement: the tool's declared
+            # ToolMeta.required_permissions augmented/overridden by matching
+            # YAML `requirements:` (target tool).
+            base = _tool_required_permissions(tool)
+            required = self._resolver.resolve(
+                tool_name, target="tool", base=base
+            )
             decision = self._pdp.authorize(
                 subject,
                 Action(tool_name),
                 resource,
-                AuthzContext(mode=mode),
+                AuthzContext(mode=mode, required_permissions=required),
             )
         except Exception as e:  # noqa: BLE001 — fail CLOSED on authZ errors
             _log.warning("authz: evaluation error for %s: %s", tool_name, e)
-            decision_denied_reason = f"authz evaluation error: {e}"
-            _emit(tool_name, tool_args, "deny", decision_denied_reason, None)
+            reason = f"authz evaluation error: {e}"
+            _emit(tool_name, tool_args, "deny", reason, None)
             return {
                 "status": "authz_denied",
-                "error": f"Tool {tool_name!r} denied: {decision_denied_reason}",
-                "reason": decision_denied_reason,
+                "error": f"Tool {tool_name!r} denied: {reason}",
+                "reason": reason,
             }
 
         _emit(tool_name, tool_args, decision.effect, decision.reason, decision.matched)
@@ -102,6 +135,87 @@ class AuthzPlugin(BasePlugin):
             }
         return None  # permit → fall through to PermissionPlugin (confirmation)
 
+    # -- sub-agent PEP --------------------------------------------------
+
+    async def before_agent_callback(
+        self,
+        *,
+        agent,  # noqa: ANN001 — BaseAgent, typed by ADK
+        callback_context,  # noqa: ANN001 — CallbackContext, typed by ADK
+    ):
+        """Gate (sub-)agent invocation by capability.
+
+        Returns a `types.Content` to DENY the handoff (ADK short-circuits
+        the agent and surfaces this content), or None to allow. Default-OFF
+        and inert unless the agent declares a requirement, so the root
+        coordinator (no requirement) is never blocked.
+        """
+        if not self._enabled:
+            return None
+
+        agent_name = getattr(agent, "name", "") or ""
+        try:
+            base = self._agent_required(agent_name)
+            required = self._resolver.resolve(
+                agent_name, target="agent", base=base
+            )
+            # No requirement for this agent → nothing to enforce. Skip even
+            # building the subject (keeps the ungated path cheap + avoids
+            # closed-world denying every agent: agents have no resource, so
+            # we gate ONLY on the explicit capability requirement).
+            if not required:
+                return None
+            state = getattr(callback_context, "state", None)
+            subject = subject_from_state(state if state is not None else {})
+            missing = required - subject.permissions
+        except Exception as e:  # noqa: BLE001 — fail CLOSED on authZ errors
+            _log.warning("authz: agent eval error for %s: %s", agent_name, e)
+            _emit(f"agent:{agent_name}", {}, "deny", f"agent authz error: {e}", None)
+            return _deny_content(
+                f"Access to agent {agent_name!r} denied (authorization error)."
+            )
+
+        if missing:
+            reason = "subject lacks required permission(s): " + ", ".join(
+                sorted(missing)
+            )
+            _emit(f"agent:{agent_name}", {}, "deny", reason, "requirement")
+            return _deny_content(
+                f"Access to agent {agent_name!r} denied by authorization policy."
+            )
+        _emit(f"agent:{agent_name}", {}, "permit", "agent requirement met", "requirement")
+        return None
+
+    def _agent_required(self, agent_name: str) -> frozenset[str]:
+        """Code-owned requirement for an agent (registry lookup).
+
+        Falls back to agent.py's AGENT_REQUIRED_PERMISSIONS when no explicit
+        map was injected. Lazy import avoids a plugins→agent cycle.
+        """
+        reg = self._agent_requirements
+        if reg is None:
+            try:
+                from ..agent import AGENT_REQUIRED_PERMISSIONS
+
+                reg = AGENT_REQUIRED_PERMISSIONS
+            except Exception:  # noqa: BLE001 — registry optional
+                reg = {}
+        return frozenset(reg.get(agent_name, ()))
+
+
+def _tool_required_permissions(tool: BaseTool) -> frozenset[str]:
+    """Pull required_permissions off a tool's ToolMeta, if any."""
+    meta = getattr(tool, "meta", None)
+    perms = getattr(meta, "required_permissions", None)
+    return frozenset(perms) if perms else frozenset()
+
+
+def _deny_content(message: str):
+    """Build the ADK short-circuit Content for an agent-handoff denial."""
+    from google.genai import types
+
+    return types.Content(role="model", parts=[types.Part(text=message)])
+
 
 def _default_pdp() -> PolicyDecisionPoint:
     """Build the default ABAC PDP from ADK_CC_PERMISSIONS_YAML (policies:
@@ -117,6 +231,20 @@ def _default_pdp() -> PolicyDecisionPoint:
         except Exception as e:  # noqa: BLE001 — bad policy file shouldn't crash boot
             _log.error("authz: failed to load policies from %s: %s", path, e)
     return AbacPolicyDecisionPoint(policies)
+
+
+def _default_resolver() -> RequirementResolver:
+    """Build the requirement resolver from the YAML `requirements:` block."""
+    path = os.environ.get("ADK_CC_PERMISSIONS_YAML")
+    reqs = []
+    if path:
+        try:
+            from ..authz.policy_loader import load_requirements_from_yaml
+
+            reqs = load_requirements_from_yaml(path)
+        except Exception as e:  # noqa: BLE001 — bad file shouldn't crash boot
+            _log.error("authz: failed to load requirements from %s: %s", path, e)
+    return RequirementResolver(reqs)
 
 
 def _safe_mode(tool_context: ToolContext) -> Optional[str]:

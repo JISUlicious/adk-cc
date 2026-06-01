@@ -378,6 +378,18 @@ root_agent = LlmAgent(
 )
 
 
+# ---------- agent capability requirements (authZ) ----------
+# Code-owned default requirements for sub-agent invocation: to hand off to
+# an agent, the subject must hold ALL listed capability permissions. Agents
+# have no ToolMeta slot, so this name→perms map is the equivalent of a
+# tool's `required_permissions`. Empty/absent = ungated by capability.
+# Enforced by AuthzPlugin.before_agent_callback only when ADK_CC_AUTHZ=1;
+# the YAML `requirements:` block (target: agent) can augment/replace these.
+# Default empty so existing deployments are unchanged — operators opt in by
+# adding entries here or in YAML.
+AGENT_REQUIRED_PERMISSIONS: dict[str, frozenset[str]] = {}
+
+
 # ---------- ADK events compaction (primary context-length defense) ----------
 # When configured via env, ADK runs token-threshold or sliding-window
 # compaction post-invocation via LlmEventSummarizer. The thin

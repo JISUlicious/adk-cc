@@ -26,7 +26,11 @@ from .model import (
     Subject,
 )
 from .pdp import AbacPolicy, AbacPolicyDecisionPoint, PolicyDecisionPoint
-from .policy_loader import load_policies_from_yaml
+from .policy_loader import (
+    load_policies_from_yaml,
+    load_requirements_from_yaml,
+)
+from .requirements import Requirement, RequirementResolver
 
 __all__ = [
     "Action",
@@ -39,6 +43,9 @@ __all__ = [
     "AbacPolicyDecisionPoint",
     "PolicyDecisionPoint",
     "load_policies_from_yaml",
+    "load_requirements_from_yaml",
+    "Requirement",
+    "RequirementResolver",
     "subject_from_state",
     "resource_from_tool",
 ]

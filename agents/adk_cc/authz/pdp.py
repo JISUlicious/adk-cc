@@ -97,16 +97,23 @@ class AbacPolicy:
 class AbacPolicyDecisionPoint(PolicyDecisionPoint):
     """Default PDP. Evaluation order (first decisive wins):
 
-      1. Any matching DENY policy   → deny (deny always wins).
-      2. Any matching PERMIT policy → permit.
-      3. Ownership/tenant baseline  → permit if the subject owns the
+      1. Any matching DENY policy    → deny (deny always wins).
+      2. Any matching PERMIT policy  → permit (operator override — can
+         grant access even when a capability requirement is unmet).
+      3. Capability requirement gate → deny if the action declares
+         required permissions (context.required_permissions) and the
+         subject does NOT hold ALL of them (AND semantics). This is the
+         capability gate: it bites BEFORE the ownership baseline, so
+         "only holders of X may use this tool/agent" actually enforces.
+      4. Ownership/tenant baseline   → permit if the subject owns the
          resource or it's in the subject's own tenant (and the resource
          carries an owner/tenant to compare).
-      4. Closed-world default       → deny.
+      5. Closed-world default        → deny.
 
-    The baseline (step 3) means the common "users act on their own stuff"
+    The baseline (step 4) means the common "users act on their own stuff"
     case needs no explicit policy; operators add policies only to GRANT
-    cross-tenant/role access or to DENY specific things.
+    cross-tenant/role access or to DENY specific things. The requirement
+    gate (step 3) is empty/inert unless an action declares a requirement.
     """
 
     def __init__(self, policies: Optional[list[AbacPolicy]] = None) -> None:
@@ -123,11 +130,25 @@ class AbacPolicyDecisionPoint(PolicyDecisionPoint):
         for p in self._policies:
             if p.effect == "deny" and p.matches(subject, action, resource):
                 return Decision("deny", f"denied by policy {p.name!r}", p.name)
-        # 2. explicit PERMIT.
+        # 2. explicit PERMIT (operator override — wins over the
+        #    requirement gate below, so a policy can deliberately grant
+        #    access to a subject that lacks the declared capability).
         for p in self._policies:
             if p.effect == "permit" and p.matches(subject, action, resource):
                 return Decision("permit", f"permitted by policy {p.name!r}", p.name)
-        # 3. ownership / same-tenant baseline.
+        # 3. capability requirement gate (AND): the action declares
+        #    required permissions; the subject must hold ALL of them.
+        required = context.required_permissions
+        if required:
+            missing = required - subject.permissions
+            if missing:
+                return Decision(
+                    "deny",
+                    "subject lacks required permission(s): "
+                    + ", ".join(sorted(missing)),
+                    "requirement",
+                )
+        # 4. ownership / same-tenant baseline.
         if (
             resource.owner_user_id is not None
             and resource.owner_user_id == subject.user_id

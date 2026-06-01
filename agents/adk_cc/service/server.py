@@ -107,11 +107,17 @@ def build_fastapi_app(
 
         fastapi_app.add_middleware(make_authz_middleware(_default_pdp()))
 
+        # Optional gateway-injected capability permissions. Only trusted
+        # when adk-cc sits behind a gateway that is the sole ingress and
+        # strips this header from client requests (see make_auth_middleware
+        # docstring). Off unless the operator sets the header name.
+        gateway_perms_header = os.environ.get("ADK_CC_GATEWAY_PERMS_HEADER") or None
         fastapi_app.add_middleware(
             make_auth_middleware(
                 auth_extractor,
                 exempt_path_prefixes=exempt_prefixes,
                 exempt_exact_paths=exempt_exact,
+                gateway_permissions_header=gateway_perms_header,
             )
         )
 
@@ -220,6 +226,9 @@ def make_app():
             tenant_claim=os.environ.get("ADK_CC_JWT_TENANT_CLAIM", "tenant"),
             roles_claim=os.environ.get("ADK_CC_JWT_ROLES_CLAIM", "roles"),
             scopes_claim=os.environ.get("ADK_CC_JWT_SCOPES_CLAIM", "scope"),
+            permissions_claim=os.environ.get(
+                "ADK_CC_JWT_PERMISSIONS_CLAIM", "permissions"
+            ),
         )
     elif os.environ.get("ADK_CC_AUTH_TOKENS"):
         from .auth import BearerTokenExtractor

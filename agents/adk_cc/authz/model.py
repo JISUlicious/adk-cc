@@ -15,12 +15,21 @@ Effect = Literal["permit", "deny"]
 
 @dataclass(frozen=True)
 class Subject:
-    """WHO is acting. Built from the authenticated principal (PIP)."""
+    """WHO is acting. Built from the authenticated principal (PIP).
+
+    `permissions` is the subject's capability list — a flat set of grants
+    resolved upstream (an IdP minting a `permissions` claim, or a gateway
+    that did the role→capability expansion). It's the dimension the
+    capability gate checks against a tool/agent's declared requirement.
+    Kept distinct from `scopes` (raw OAuth `scope`, which a token may carry
+    for unrelated reasons) and `roles` (coarse identity groupings).
+    """
 
     user_id: str
     tenant_id: str
     roles: frozenset[str] = frozenset()
     scopes: frozenset[str] = frozenset()
+    permissions: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -49,10 +58,18 @@ class Resource:
 
 @dataclass(frozen=True)
 class AuthzContext:
-    """Ambient context for the decision (permission mode, environment)."""
+    """Ambient context for the decision (permission mode, environment).
+
+    `required_permissions` is the capability requirement the PEP resolved
+    for THIS action (from the tool/agent's declared attribute ∪ matching
+    YAML `requirements:`), injected here so the PDP stays pure — it
+    evaluates the requirement it's handed rather than reaching for tool
+    metadata itself. Empty = no capability gate for this action.
+    """
 
     mode: Optional[str] = None
     env: Optional[str] = None
+    required_permissions: frozenset[str] = frozenset()
     extra: dict[str, Any] = field(default_factory=dict)
 
 

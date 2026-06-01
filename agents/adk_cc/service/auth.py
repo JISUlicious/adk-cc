@@ -28,16 +28,19 @@ from typing import Any, Awaitable, Callable, Optional, Protocol
 
 
 class AuthPrincipal(tuple):
-    """The authenticated caller: (user_id, tenant_id) + roles/scopes.
+    """The authenticated caller: (user_id, tenant_id) + roles/scopes/perms.
 
     Subclasses `tuple` and IS the `(user_id, tenant_id)` pair, so all the
     existing `user_id, tenant_id = auth` unpacking and `auth[0]`/`auth[1]`
     access keeps working unchanged (back-compat shim). The authZ layer
-    reads the richer `.roles` / `.scopes` for subject-aware decisions.
+    reads the richer `.roles` / `.scopes` / `.permissions` for
+    subject-aware decisions. `permissions` is the capability list the
+    capability gate checks against an agent/tool's declared requirement.
     """
 
     roles: frozenset[str]
     scopes: frozenset[str]
+    permissions: frozenset[str]
 
     def __new__(
         cls,
@@ -45,10 +48,12 @@ class AuthPrincipal(tuple):
         tenant_id: str,
         roles: frozenset[str] = frozenset(),
         scopes: frozenset[str] = frozenset(),
+        permissions: frozenset[str] = frozenset(),
     ) -> "AuthPrincipal":
         self = super().__new__(cls, (user_id, tenant_id))
         self.roles = frozenset(roles)
         self.scopes = frozenset(scopes)
+        self.permissions = frozenset(permissions)
         return self
 
     @property
@@ -114,6 +119,7 @@ def set_auth_context(
     tenant_id: str,
     roles: frozenset[str] = frozenset(),
     scopes: frozenset[str] = frozenset(),
+    permissions: frozenset[str] = frozenset(),
 ) -> contextvars.Token:
     """Stash the AuthPrincipal into the current async task's context.
     Returns a Token the caller can use to reset.
@@ -122,7 +128,9 @@ def set_auth_context(
     custom transport, or unit tests that want to simulate authenticated
     requests) can drive the same code path the middleware uses.
     """
-    return _AUTH_CTX.set(AuthPrincipal(user_id, tenant_id, roles, scopes))
+    return _AUTH_CTX.set(
+        AuthPrincipal(user_id, tenant_id, roles, scopes, permissions)
+    )
 
 # fastapi is an optional dep — only imported when the server module is used.
 try:
@@ -146,9 +154,11 @@ class BearerTokenExtractor:
 
     Tokens load from `ADK_CC_AUTH_TOKENS` as
     `token1=user1:tenant1,token2=user2:tenant2`. An optional THIRD
-    `:roles` segment carries `|`-delimited roles for authZ testing:
-    `tok=alice:acme:admin|deployer`. Suitable for local testing; replace
-    with a real JWT validator for prod.
+    `:roles` segment carries `|`-delimited roles, and an optional FOURTH
+    `:perms` segment carries `|`-delimited capability permissions, both
+    for authZ testing:
+    `tok=alice:acme:admin|deployer:tool:deploy|agent:Explore`. Suitable for
+    local testing; replace with a real JWT validator for prod.
     """
 
     def __init__(self, tokens: dict[str, AuthPrincipal] | None = None) -> None:
@@ -164,7 +174,11 @@ class BearerTokenExtractor:
             if not entry or "=" not in entry:
                 continue
             token, who = entry.split("=", 1)
-            parts = who.split(":")
+            # maxsplit=3 → at most 4 segments (user:tenant:roles:perms).
+            # Capping the split lets permission names keep internal colons
+            # (e.g. `tool:deploy`), which is the perm naming convention;
+            # only the first 3 colons act as segment separators.
+            parts = who.split(":", 3)
             user = (parts[0].strip() if len(parts) > 0 else "") or "user"
             tenant = (parts[1].strip() if len(parts) > 1 else "") or "default"
             roles = (
@@ -172,7 +186,16 @@ class BearerTokenExtractor:
                 if len(parts) > 2
                 else frozenset()
             )
-            out[token.strip()] = AuthPrincipal(user, tenant, roles)
+            perms = (
+                frozenset(p.strip() for p in parts[3].split("|") if p.strip())
+                if len(parts) > 3
+                else frozenset()
+            )
+            # Dev tokens don't carry scopes (use JWT for those) — pass
+            # empty scopes, perms into the 5th (permissions) slot.
+            out[token.strip()] = AuthPrincipal(
+                user, tenant, roles, frozenset(), perms
+            )
         return out
 
     async def __call__(self, request: "Request") -> AuthPrincipal:
@@ -219,6 +242,7 @@ class JwtAuthExtractor:
         tenant_claim: str = "tenant",
         roles_claim: str = "roles",
         scopes_claim: str = "scope",
+        permissions_claim: str = "permissions",
         jwks_cache_ttl_seconds: int = 300,
     ) -> None:
         if jwks_url is None and jwks is None:
@@ -230,6 +254,7 @@ class JwtAuthExtractor:
         self._tenant_claim = tenant_claim
         self._roles_claim = roles_claim
         self._scopes_claim = scopes_claim
+        self._permissions_claim = permissions_claim
         self._ttl = jwks_cache_ttl_seconds
 
         # If a static `jwks` dict was passed, prime the cache and skip
@@ -327,7 +352,10 @@ class JwtAuthExtractor:
             )
         roles = _coerce_str_set(claims.get(self._roles_claim))
         scopes = _coerce_str_set(claims.get(self._scopes_claim))
-        return AuthPrincipal(str(user_id), str(tenant_id), roles, scopes)
+        permissions = _coerce_str_set(claims.get(self._permissions_claim))
+        return AuthPrincipal(
+            str(user_id), str(tenant_id), roles, scopes, permissions
+        )
 
 
 def make_auth_middleware(
@@ -335,6 +363,7 @@ def make_auth_middleware(
     *,
     exempt_path_prefixes: tuple[str, ...] = (),
     exempt_exact_paths: tuple[str, ...] = (),
+    gateway_permissions_header: Optional[str] = None,
 ):
     """Build a Starlette middleware that calls `extractor`, stashes the
     result on `request.state.adk_cc_auth = (user_id, tenant_id)`, AND
@@ -364,6 +393,20 @@ def make_auth_middleware(
         SPA bundle (`/assets/...`) load before the user has signed in.
       exempt_exact_paths: paths that match exactly are also passed through.
         Used for the SPA index (`/`) and `/favicon.svg`.
+      gateway_permissions_header: when set (e.g. "X-Auth-Permissions"),
+        the middleware reads `|`- or space-delimited capability
+        permissions from that request header and UNIONS them onto the
+        authenticated principal's `permissions`. This supports
+        deployments where an upstream gateway/PDP did the role→capability
+        resolution and forwards the result.
+
+        SECURITY — trust boundary: a request header is caller-controlled
+        unless something upstream guarantees otherwise. Enabling this is
+        only safe when adk-cc sits BEHIND a trusted gateway that is the
+        SOLE ingress and STRIPS this header from inbound client requests
+        before injecting its own. If clients can reach adk-cc directly (or
+        smuggle the header through), they can grant themselves arbitrary
+        permissions. Default off (None) → header ignored entirely.
     """
     if not _FASTAPI_AVAILABLE:
         raise RuntimeError("fastapi is not installed")
@@ -388,6 +431,24 @@ def make_auth_middleware(
             # tuple (older custom extractors) or a full AuthPrincipal.
             if not isinstance(principal, AuthPrincipal):
                 principal = AuthPrincipal(principal[0], principal[1])
+            # Gateway-injected permissions (opt-in; see trust note above):
+            # union the header's capability list onto the principal.
+            if gateway_permissions_header:
+                raw = request.headers.get(gateway_permissions_header)
+                if raw:
+                    extra = frozenset(
+                        p.strip()
+                        for p in raw.replace("|", " ").split()
+                        if p.strip()
+                    )
+                    if extra:
+                        principal = AuthPrincipal(
+                            principal.user_id,
+                            principal.tenant_id,
+                            principal.roles,
+                            principal.scopes,
+                            principal.permissions | extra,
+                        )
             request.state.adk_cc_auth = principal
             token = _AUTH_CTX.set(principal)
             try:
