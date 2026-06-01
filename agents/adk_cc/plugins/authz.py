@@ -46,6 +46,7 @@ from ..authz import (
     AuthzContext,
     PolicyDecisionPoint,
     RequirementResolver,
+    Resource,
     resource_from_tool,
     subject_from_state,
 )
@@ -160,14 +161,30 @@ class AuthzPlugin(BasePlugin):
                 agent_name, target="agent", base=base
             )
             # No requirement for this agent → nothing to enforce. Skip even
-            # building the subject (keeps the ungated path cheap + avoids
-            # closed-world denying every agent: agents have no resource, so
-            # we gate ONLY on the explicit capability requirement).
+            # building the subject so the ungated path stays cheap and the
+            # root coordinator (no requirement) is never blocked.
             if not required:
                 return None
             state = getattr(callback_context, "state", None)
             subject = subject_from_state(state if state is not None else {})
-            missing = required - subject.permissions
+            # Route through the SAME PDP as tools — do NOT do an inline
+            # subset check here, or a swapped-in custom PDP (OPA/Cerbos)
+            # would govern tools but silently NOT agents. The agent is the
+            # resource, owned by the subject, so a met requirement falls
+            # through to the ownership baseline → permit (mirrors tools).
+            resource = Resource(
+                type="agent",
+                id=agent_name,
+                owner_user_id=subject.user_id,
+                tenant_id=subject.tenant_id,
+                attrs={"agent": agent_name},
+            )
+            decision = self._pdp.authorize(
+                subject,
+                Action(f"invoke_agent:{agent_name}"),
+                resource,
+                AuthzContext(required_permissions=required),
+            )
         except Exception as e:  # noqa: BLE001 — fail CLOSED on authZ errors
             _log.warning("authz: agent eval error for %s: %s", agent_name, e)
             _emit(f"agent:{agent_name}", {}, "deny", f"agent authz error: {e}", None)
@@ -175,15 +192,11 @@ class AuthzPlugin(BasePlugin):
                 f"Access to agent {agent_name!r} denied (authorization error)."
             )
 
-        if missing:
-            reason = "subject lacks required permission(s): " + ", ".join(
-                sorted(missing)
-            )
-            _emit(f"agent:{agent_name}", {}, "deny", reason, "requirement")
+        _emit(f"agent:{agent_name}", {}, decision.effect, decision.reason, decision.matched)
+        if decision.effect == "deny":
             return _deny_content(
                 f"Access to agent {agent_name!r} denied by authorization policy."
             )
-        _emit(f"agent:{agent_name}", {}, "permit", "agent requirement met", "requirement")
         return None
 
     def _agent_required(self, agent_name: str) -> frozenset[str]:
