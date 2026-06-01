@@ -189,6 +189,24 @@ class TenancyPlugin(BasePlugin):
         tenant = self._tenant_resolver(user_id or "")
         state[_STATE_TENANT_KEY] = tenant
 
+        # Seed the authenticated principal's roles/scopes for the authZ
+        # layer. Best-effort: only present on authenticated requests; dev /
+        # unauthenticated runs leave it unset and the authZ plugin (which
+        # is default-off anyway) treats the subject as role-less.
+        try:
+            from .auth import get_auth_principal
+
+            principal = get_auth_principal()
+            if principal is not None:
+                state[_STATE_PRINCIPAL_KEY] = {
+                    "user_id": principal.user_id,
+                    "tenant_id": principal.tenant_id,
+                    "roles": sorted(principal.roles),
+                    "scopes": sorted(principal.scopes),
+                }
+        except Exception:  # noqa: BLE001 — never block on principal seeding
+            pass
+
         # Seed sandbox workspace + backend so the tool layer's
         # get_workspace / get_backend — and the task reminder — find them.
         from types import SimpleNamespace

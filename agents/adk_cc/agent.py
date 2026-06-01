@@ -62,6 +62,7 @@ configure_logging()
 from .plugins import (
     AskUserQuestionUiHintPlugin,
     AuditPlugin,
+    AuthzPlugin,
     ModelIOTracePlugin,
     ProjectContextPlugin,
     ConfirmationFormUiPlugin,
@@ -749,6 +750,11 @@ _app_kwargs = dict(
         TenancyPlugin(
             default_workspace_root=os.environ.get("ADK_CC_WORKSPACE_ROOT")
         ),
+        # AuthZ hard gate (subject×action×resource). Runs after Tenancy
+        # (identity seeded) and BEFORE PermissionPlugin, so a hard deny
+        # never reaches the confirmation prompt. Default-OFF: inert unless
+        # ADK_CC_AUTHZ=1. Gates ALL tools incl. mcp__* (unlike Permission).
+        AuthzPlugin(),
         PermissionPlugin(SETTINGS, default_mode=PERMISSION_MODE),
         # Per-tenant tool-call rate cap. Runs after Permission so a
         # denied call doesn't count against the quota.

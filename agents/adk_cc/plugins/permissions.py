@@ -3,6 +3,18 @@
 Registered on `Runner(plugins=[...])`. Runs `before_tool_callback` for
 every tool call across every agent.
 
+Layer boundary (read this before adding "deny" logic here):
+  This is the CONFIRMATION + mode layer, plus a subject-BLIND guardrail
+  deny-list. It answers *"is this operation forbidden for anyone, and does
+  it need human confirmation?"* — NOT *"may this subject do it?"*. Its DENY
+  rules are an intrinsic-danger blocklist (à la Claude Code's
+  `permissions.deny`): subject-blind, default-on, keyed on tool + one arg.
+  Real, subject-aware AUTHORIZATION (roles/scopes/tenant/ownership) is a
+  *separate* concern owned by AuthzPlugin (`plugins/authz.py`), which runs
+  BEFORE this plugin and ignores permission modes. The two layers are
+  complementary — a guardrail blocklist is not a substitute for authZ, and
+  authZ does not replace the guardrail. Do not move one into the other.
+
 Behavior:
   - For non-AdkCcTool tools (e.g. ADK built-ins, MCP tools without a
     ToolMeta), the plugin passes through. Tighten this by listing
