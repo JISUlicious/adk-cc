@@ -106,11 +106,11 @@ def mount_tenant_admin(
     @router.get("/credentials")
     async def list_creds(tenant_id: str, request: Request):
         await _maybe_await(authorize(request, tenant_id))
-        # We don't expose values via HTTP — only key existence.
-        # Stock providers don't list keys; returning an empty list here
-        # is a deliberate placeholder until a CredentialProvider.list_keys
-        # method is added.
-        return {"keys": []}
+        # Key NAMES only — values are never exposed over HTTP. The ABC
+        # default returns [] (external providers opt in by overriding
+        # list_keys); the stock in-memory + encrypted-file providers list.
+        keys = await credentials.list_keys(tenant_id=tenant_id)
+        return {"keys": keys}
 
     @router.put("/credentials/{key}")
     async def put_cred(tenant_id: str, key: str, request: Request):

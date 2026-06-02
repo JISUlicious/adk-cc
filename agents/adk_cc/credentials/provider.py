@@ -47,3 +47,13 @@ class CredentialProvider(ABC):
     @abstractmethod
     async def delete(self, *, tenant_id: str, key: str) -> None:
         """Remove a secret. No-op if absent."""
+
+    async def list_keys(self, *, tenant_id: str) -> list[str]:
+        """Return the credential KEY NAMES stored for a tenant (never values).
+
+        Powers the admin panel's credential list. NOT abstract — defaults to
+        an empty list so existing external implementations (Vault, etc.) keep
+        working without change; override to surface key names. The stock
+        in-memory + encrypted-file providers override this.
+        """
+        return []
