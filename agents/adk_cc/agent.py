@@ -274,6 +274,29 @@ def _make_static_mcp_toolset():
 _static_mcp = _make_static_mcp_toolset()
 
 
+def _make_static_mcp_toolsets():
+    """All boot-time MCP toolsets: the single `ADK_CC_MCP_SERVER` server (if
+    set) PLUS every server listed in `ADK_CC_MCP_SERVERS_FILE` (a JSON array
+    of McpServerConfig). The single env server stays fully back-compatible;
+    the file is additive. A file entry whose server_name collides with the
+    single env server is dropped (the loader warns), since the
+    `mcp__<name>__` tool prefixes would clash."""
+    from .tools.mcp import load_static_mcp_servers
+
+    toolsets = []
+    exclude = set()
+    if _static_mcp is not None:
+        toolsets.append(_static_mcp)
+        # The single env server's logical name (default "mcp") — exclude it
+        # from the file load so a same-named file entry can't double-wire it.
+        exclude.add(os.environ.get("ADK_CC_MCP_SERVER_NAME", "mcp"))
+    toolsets.extend(load_static_mcp_servers(exclude_names=frozenset(exclude)))
+    return toolsets
+
+
+_static_mcp_toolsets = _make_static_mcp_toolsets()
+
+
 def _make_tenant_skill_toolset():
     """Construct the per-tenant skill toolset if env config is present.
 
@@ -361,8 +384,9 @@ _coordinator_tools: list = [
 ]
 if _skills is not None:
     _coordinator_tools.append(_skills)
-if _static_mcp is not None:
-    _coordinator_tools.append(_static_mcp)
+# Static MCP servers: the single ADK_CC_MCP_SERVER (back-compat) plus any
+# from ADK_CC_MCP_SERVERS_FILE — see _make_static_mcp_toolsets().
+_coordinator_tools.extend(_static_mcp_toolsets)
 if _tenant_mcp is not None:
     _coordinator_tools.append(_tenant_mcp)
 if _tenant_skills is not None:

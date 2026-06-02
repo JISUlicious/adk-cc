@@ -25,51 +25,18 @@ from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
 from google.adk.tools.mcp_tool import McpToolset
-from pydantic import BaseModel, Field
 
 from ..credentials import CredentialProvider
 from ..service.registry import TenantResourceRegistry
-from .mcp import bind_save_tool, connection_params_for
+# McpServerConfig now lives in tools/mcp.py (the shared base, so the static
+# multi-server loader can reuse it without a circular import). Re-exported
+# here so existing `from ...tools.mcp_tenant import McpServerConfig` imports
+# (agent.py, admin_routes.py, tests, docs) keep working unchanged.
+from .mcp import McpServerConfig, bind_save_tool, connection_params_for
 
 _log = logging.getLogger(__name__)
 
-
-class McpServerConfig(BaseModel):
-    """Per-tenant MCP server config persisted in the registry."""
-
-    server_name: str = Field(description="Logical name; also the tool prefix")
-    transport: str = Field(description="One of: 'sse', 'http', 'stdio'")
-    url: str = Field(description="Server URL or stdio command")
-    credential_key: Optional[str] = Field(
-        default=None,
-        description=(
-            "Optional CredentialProvider key whose value is substituted "
-            "into the connection's auth header. None = unauthenticated."
-        ),
-    )
-    tool_filter: Optional[list[str]] = Field(
-        default=None,
-        description="Optional subset of tool names to expose; None = all.",
-    )
-    require_confirmation: bool = Field(
-        default=False,
-        description="If True, every MCP call goes through ADK's request_confirmation flow.",
-    )
-    save_resources_as_artifacts: bool = Field(
-        default=False,
-        description=(
-            "If True, expose a `save_resource_as_artifact` tool bound to "
-            "this server so the agent can persist a named resource into "
-            "the artifact store."
-        ),
-    )
-    use_mcp_resources: bool = Field(
-        default=False,
-        description=(
-            "If True, also add ADK's `load_mcp_resource` tool and inject "
-            "the server's resource catalog into the agent's context."
-        ),
-    )
+__all__ = ["McpServerConfig", "TenantMcpToolset"]
 
 
 def _build_connection_params(cfg: McpServerConfig, secret: Optional[str]):
