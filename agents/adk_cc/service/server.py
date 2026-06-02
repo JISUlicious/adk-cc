@@ -304,10 +304,36 @@ def _prepare_admin_env() -> None:
     os.environ["ADK_CC_ADMIN_DATA_DIR"] = base
     os.environ.setdefault("ADK_CC_TENANT_REGISTRY_DIR", str(Path(base) / "registry"))
     os.environ.setdefault("ADK_CC_TENANT_SKILLS_DIR", str(Path(base) / "skills"))
+    # Model-endpoint registry file — the agent reads this at import to wrap
+    # MODEL in a SelectableLlm (live model switching). Same default-dir base.
+    os.environ.setdefault(
+        "ADK_CC_MODEL_REGISTRY_FILE", str(Path(base) / "model-endpoints.json")
+    )
     # Dev default for the credential store: in-memory (lost on restart).
     # Operators set ADK_CC_CREDENTIAL_PROVIDER=encrypted_file (+ KEY +
     # STORE_DIR) for persistence — same vars the tenant path already uses.
     os.environ.setdefault("ADK_CC_CREDENTIAL_PROVIDER", "memory")
+    # Seed the boot model (from env) as endpoint #1 so it appears in the
+    # panel and stays the default until an operator activates another. The
+    # agent's SelectableLlm resolves this file lazily per request.
+    _seed_model_registry()
+
+
+def _seed_model_registry() -> None:
+    """Seed the model-endpoint registry with the boot model (idempotent)."""
+    from ..models import ModelEndpointConfig, ModelEndpointRegistry
+
+    path = os.environ.get("ADK_CC_MODEL_REGISTRY_FILE")
+    if not path:
+        return
+    ModelEndpointRegistry(path).seed_default(
+        ModelEndpointConfig(
+            name=os.environ.get("ADK_CC_MODEL_DEFAULT_NAME", "default"),
+            model=os.environ.get("ADK_CC_MODEL", "openai/Qwen3.6-35B-A3B-UD-MLX-4bit"),
+            api_base=os.environ.get("ADK_CC_API_BASE", "http://localhost:18000/v1"),
+            api_key_env="ADK_CC_API_KEY",
+        )
+    )
 
 
 def _build_credential_provider():
@@ -344,7 +370,7 @@ def _make_admin_role_extractor():
     required_role = os.environ.get("ADK_CC_ADMIN_ROLE", "admin")
     global_tenant = _global_tenant_id()
 
-    def authorize(request, target_tenant: str) -> None:
+    def authorize(request, target: str) -> None:
         auth = getattr(request.state, "adk_cc_auth", None)
         if auth is None:
             raise HTTPException(status_code=401, detail="not authenticated")
@@ -353,7 +379,11 @@ def _make_admin_role_extractor():
             raise HTTPException(
                 status_code=403, detail=f"admin role {required_role!r} required"
             )
-        if target_tenant != global_tenant:
+        # Tenant-scoped routes pass a tenant id as `target` and must match the
+        # one global tenant. Global routes (e.g. model endpoints) pass a
+        # non-tenant scope string in `_GLOBAL_SCOPES`, which is exempt from
+        # the tenant check (the role check above already gated them).
+        if target not in _GLOBAL_SCOPES and target != global_tenant:
             raise HTTPException(
                 status_code=403,
                 detail=f"admin panel manages the global tenant {global_tenant!r} only",
@@ -362,14 +392,22 @@ def _make_admin_role_extractor():
     return authorize
 
 
+# Non-tenant admin scope strings passed to the authorize hook by global
+# (not tenant-scoped) admin routes — exempt from the global-tenant match.
+_GLOBAL_SCOPES = frozenset({"model-endpoints"})
+
+
 def _mount_admin_if_enabled(app) -> None:
     """Mount the tenant-admin routes for the global tenant when the admin
     panel is enabled. No-op otherwise (default)."""
     if not _admin_enabled():
         return
+    from ..models import ModelEndpointRegistry
     from ..service.registry import JsonFileTenantResourceRegistry
     from ..tools.mcp_tenant import McpServerConfig
-    from .admin_routes import mount_tenant_admin
+    from .admin_routes import mount_model_admin, mount_tenant_admin
+
+    authorize = _make_admin_role_extractor()
 
     registry_dir = os.environ["ADK_CC_TENANT_REGISTRY_DIR"]  # set by _prepare_admin_env
     registry = JsonFileTenantResourceRegistry[McpServerConfig](
@@ -383,5 +421,12 @@ def _mount_admin_if_enabled(app) -> None:
         registry=registry,
         credentials=_build_credential_provider(),
         skill_root=os.environ.get("ADK_CC_TENANT_SKILLS_DIR"),
-        admin_extractor=_make_admin_role_extractor(),
+        admin_extractor=authorize,
+    )
+    # Model-endpoint routes share the same admin gate + the registry file the
+    # agent's SelectableLlm reads, so an activate here switches the live model.
+    mount_model_admin(
+        app,
+        registry=ModelEndpointRegistry(os.environ["ADK_CC_MODEL_REGISTRY_FILE"]),
+        authorize=authorize,
     )

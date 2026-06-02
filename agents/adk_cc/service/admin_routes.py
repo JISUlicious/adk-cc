@@ -223,6 +223,70 @@ def mount_tenant_admin(
     app.include_router(router)
 
 
+def mount_model_admin(
+    app,
+    *,
+    registry,  # ModelEndpointRegistry
+    authorize: Callable[..., object],
+) -> None:
+    """Mount model-endpoint admin routes (GLOBAL — the model is one
+    deployment-wide resource, not tenant-scoped).
+
+    Routes (under /admin/model-endpoints):
+      - GET    /admin/model-endpoints              → list (secrets masked) + active
+      - PUT    /admin/model-endpoints/{name}       → upsert {model, api_base, api_key_env?}
+      - DELETE /admin/model-endpoints/{name}       → remove (guards last/active)
+      - POST   /admin/model-endpoints/{name}/activate → set active
+
+    `authorize(request, target)` is the same admin gate used for tenant
+    routes; here `target` is the literal "model-endpoints" scope string.
+    """
+    from ..models import ModelEndpointConfig
+
+    router = APIRouter(prefix="/admin/model-endpoints")
+
+    @router.get("")
+    async def list_endpoints(request: Request):
+        await _maybe_await(authorize(request, "model-endpoints"))
+        return {
+            "endpoints": [e.masked() for e in registry.list()],
+            "active": registry.active_name(),
+        }
+
+    @router.put("/{name}")
+    async def put_endpoint(name: str, request: Request):
+        await _maybe_await(authorize(request, "model-endpoints"))
+        _ensure_safe_id(name, "endpoint name")
+        body = await request.json()
+        body["name"] = name  # path wins
+        try:
+            cfg = ModelEndpointConfig.model_validate(body)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"invalid endpoint: {e}")
+        registry.upsert(cfg)
+        return {"status": "ok"}
+
+    @router.delete("/{name}")
+    async def delete_endpoint(name: str, request: Request):
+        await _maybe_await(authorize(request, "model-endpoints"))
+        try:
+            registry.remove(name)
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        return {"status": "ok"}
+
+    @router.post("/{name}/activate")
+    async def activate_endpoint(name: str, request: Request):
+        await _maybe_await(authorize(request, "model-endpoints"))
+        try:
+            registry.activate(name)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        return {"status": "ok", "active": name}
+
+    app.include_router(router)
+
+
 async def _maybe_await(value):
     """Authorize hook may be sync or async; normalize."""
     import inspect
