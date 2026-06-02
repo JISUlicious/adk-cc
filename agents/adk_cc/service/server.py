@@ -91,8 +91,16 @@ def build_fastapi_app(
         # auth — the React app *itself* is what asks the user to sign in,
         # so the HTML + JS + CSS must load anonymously. API routes
         # (/run, /run_sse, /list-apps, /apps/*, /debug/*) stay gated.
+        #
+        # The admin SPA PAGE routes (the shell HTML) must load anonymously so
+        # the React app can boot and THEN make authenticated, admin-gated API
+        # calls. These are EXACT page paths only — we deliberately do NOT
+        # exempt the `/admin/` prefix, because the admin API lives under
+        # `/admin/model-endpoints` and must stay behind auth + the admin-role
+        # gate. (The tenant admin API at `/tenants/*` is likewise gated.)
         if ui_dist_dir:
-            exempt_exact = ("/", "/favicon.svg", "/favicon.ico")
+            admin_pages = ("/admin", "/admin/mcp", "/admin/skills", "/admin/models")
+            exempt_exact = ("/", "/favicon.svg", "/favicon.ico") + admin_pages
             exempt_prefixes = ("/assets/",)
         else:
             exempt_exact = ()
@@ -114,6 +122,12 @@ def build_fastapi_app(
                 exempt_exact_paths=exempt_exact,
             )
         )
+
+    # Admin panel routes (default-OFF). Mounted BEFORE the UI StaticFiles
+    # mount — the SPA is mounted at `/` (a catch-all) and would otherwise
+    # shadow the admin API routes. Built against the same registry /
+    # credential store / skills dir the agent reads, so edits hot-reload.
+    _mount_admin_if_enabled(fastapi_app)
 
     if ui_dist_dir:
         _mount_ui(fastapi_app, ui_dist_dir)
@@ -154,14 +168,27 @@ def _mount_ui(app, dist_dir: str) -> None:
             f"{index_html} not found. Did the Vite build complete?"
         )
 
-    # Catch-all SPA fallback. Registered before the StaticFiles mount so
-    # `/` and arbitrary subpaths return index.html when they don't match
-    # an API route or a real static asset. We register only specific
-    # subpath prefixes to avoid swallowing 404s for legitimately missing
-    # API routes (which should still surface as 404, not as the SPA).
+    # SPA fallback. Registered before the StaticFiles mount so `/` and the
+    # known client-side routes return index.html on hard refresh / deep link
+    # (react-router then renders the right page). We enumerate the SPA route
+    # prefixes explicitly rather than a blanket catch-all, so genuinely
+    # missing API routes still surface as 404 instead of silently returning
+    # the SPA shell.
     @app.get("/", include_in_schema=False)
     def _spa_root() -> FileResponse:
         return FileResponse(index_html)
+
+    # Client-side routes (react-router). Enumerated EXACTLY — NOT a
+    # `/admin/{path}` catch-all, which would shadow the admin API routes
+    # (e.g. /admin/model-endpoints) that get registered later. Add new SPA
+    # page tabs here as they're created.
+    for _spa_path in ("/admin", "/admin/mcp", "/admin/skills", "/admin/models"):
+        app.add_api_route(
+            _spa_path,
+            lambda: FileResponse(index_html),
+            methods=["GET"],
+            include_in_schema=False,
+        )
 
     app.mount("/", StaticFiles(directory=str(dist), html=False), name="ui")
 
@@ -258,17 +285,13 @@ def make_app():
             # parents up (service → adk_cc → agents → repo).
             ui_dist_dir = str(Path(__file__).resolve().parents[3] / "web" / "dist")
 
-    app = build_fastapi_app(
+    # build_fastapi_app mounts the admin panel (when enabled) before the UI.
+    return build_fastapi_app(
         agents_dir=agents_dir,
         session_service_uri=os.environ.get("ADK_CC_SESSION_DSN"),
         auth_extractor=extractor,
         ui_dist_dir=ui_dist_dir,
     )
-    # Mount the admin panel routes (default-OFF). Built against the same
-    # registry / credential store / skills dir the agent now reads, so admin
-    # edits hot-reload into the running agent.
-    _mount_admin_if_enabled(app)
-    return app
 
 
 # --- Admin panel wiring ---------------------------------------------------
@@ -402,6 +425,9 @@ def _mount_admin_if_enabled(app) -> None:
     panel is enabled. No-op otherwise (default)."""
     if not _admin_enabled():
         return
+    # Idempotent — ensures the registry/skills/model env vars are defaulted
+    # even when build_fastapi_app is called directly (not via make_app).
+    _prepare_admin_env()
     from ..models import ModelEndpointRegistry
     from ..service.registry import JsonFileTenantResourceRegistry
     from ..tools.mcp_tenant import McpServerConfig
