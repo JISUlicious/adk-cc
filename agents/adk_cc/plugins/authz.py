@@ -82,10 +82,7 @@ class AuthzPlugin(BasePlugin):
         if requirement_provider is not None:
             self._provider = requirement_provider
         else:
-            resolver = resolver if resolver is not None else _default_resolver()
-            self._provider = DeclaredRequirementProvider(
-                resolver, agent_requirements
-            )
+            self._provider = _default_provider(resolver, agent_requirements)
 
     # -- tool-call PEP --------------------------------------------------
 
@@ -212,6 +209,30 @@ def _deny_content(message: str):
     from google.genai import types
 
     return types.Content(role="model", parts=[types.Part(text=message)])
+
+
+def _default_provider(
+    resolver: Optional[RequirementResolver],
+    agent_requirements: Optional[dict[str, frozenset[str]]],
+) -> RequirementProvider:
+    """Pick the default requirement provider from the environment.
+
+    `ADK_CC_GRANT_HEADER=1` selects the gateway presence scheme (the
+    gateway is authoritative; requirement = presence in the grant). Otherwise
+    the declared scheme (ToolMeta ∪ YAML `requirements:` + agent registry).
+    An explicitly injected provider/resolver always takes precedence over
+    this (handled by the caller)."""
+    if resolver is None:
+        try:
+            from ..service.grant_header_auth import grant_provider_from_env
+
+            grant = grant_provider_from_env()
+            if grant is not None:
+                return grant
+        except Exception as e:  # noqa: BLE001 — never block boot on the adapter
+            _log.error("authz: grant provider init failed: %s", e)
+    resolver = resolver if resolver is not None else _default_resolver()
+    return DeclaredRequirementProvider(resolver, agent_requirements)
 
 
 def _default_pdp() -> PolicyDecisionPoint:

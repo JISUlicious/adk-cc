@@ -1,50 +1,56 @@
 """Edge adapter for a gateway-resolved authorization grant header.
 
-This wires a specific upstream grant format into the generic authZ layer
-WITHOUT touching the PDP or the PEPs. It supplies two of the layer's
-swappable seams:
+The gateway is FULLY AUTHORITATIVE: it has already decided what each user
+may use, and forwards that decision as a per-request grant header. adk-cc's
+job is only to ENFORCE it — if a (agent, tool) pair is present in the grant,
+the call is allowed; if not, it's denied. There is no level/role/dept
+comparison and no per-tool requirement map to maintain: the requirement is
+*presence in the grant*, derived from the call itself.
 
-  - an `AuthExtractor` (`GrantHeaderExtractor`) that reads the per-user
-    grant from a request header and FLATTENS it into capability permission
-    strings on `Subject.permissions`, and
-  - a `RequirementProvider` (`ScopedLevelRequirementProvider`) that, for a
-    given (invoking agent, tool, level), produces the matching required
-    string — so the PDP's `required ⊆ held` check enforces it.
+This wires the gateway's format into the generic authZ layer WITHOUT
+touching the PDP or the PEPs, via two swappable seams:
+
+  - `GrantHeaderExtractor` (an `AuthExtractor`): reads the per-user grant
+    from a request header and FLATTENS it into presence strings on
+    `Subject.permissions`.
+  - `PresenceRequirementProvider` (a `RequirementProvider`): for a tool call
+    under agent A, requires `svc:A:func:{tool}`; for an agent handoff,
+    requires `svc:{agent}`. The PDP's `required ⊆ held` check then enforces
+    presence.
 
 The header shape (per the gateway):
 
     {"auth": [
         {"resolvedAt": "...", "authList": [
-            {"authYn": true, "authType": "MANAGER", "authSource": "PERSONAL",
-             "authSourceDeptCode": null, "authSourceDeptCodes": null,
-             "serviceName": "<AGENT NAME>", "authLevel": [1],
-             "detailedAuth": [
-                 {"funcId": "<TOOL NAME>", "authLevel": 1, ...}
-             ]}
+            {"authYn": true, "serviceName": "<AGENT NAME>",
+             "detailedAuth": [{"funcId": "<TOOL NAME>", ...}],
+             ...other fields ignored...}
         ]}
     ]}
 
 `serviceName` is the ADK AGENT name and `detailedAuth[].funcId` is the ADK
-TOOL name (used verbatim — no mapping table). Levels are DISCRETE (each is a
-distinct grant; access is exact match, not ≥). Tool grants are PER-AGENT:
+TOOL name (used verbatim — no mapping table). Tool grants are PER-AGENT:
 `read_file` under agent A is a different grant than under agent B.
 
-Flattened permission vocabulary (a held grant and a required permission use
-the SAME strings, so subset-match enforces them):
+Flattened presence vocabulary (held grant and required permission use the
+SAME strings, so subset-match enforces them):
 
-    svc:{agent}:level:{n}              # service-level access level
-    svc:{agent}:role:{authType}        # e.g. svc:Explore:role:MANAGER
-    svc:{agent}:source:{authSource}    # e.g. svc:Explore:source:PERSONAL
-    svc:{agent}:dept:{code}            # per dept code (service-scoped)
-    svc:{agent}:func:{tool}:level:{n}  # PER-AGENT tool access level
+    svc:{agent}                 # may invoke this agent
+    svc:{agent}:func:{tool}     # may use this tool UNDER this agent
 
-`authYn:false` entries are skipped (not granted). `resolvedAt` is not
-enforced (freshness is the gateway/transport's job). `objectId` is ignored.
+`authYn:false` entries are skipped (not granted). `authLevel`, `authType`,
+`authSource`, dept codes, `resolvedAt`, and `objectId` are all IGNORED — the
+gateway's grant/deny decision is the whole signal.
+
+Entry-agent exemption: ADK fires the agent gate for the ROOT agent too, so
+the entry agent (the coordinator) must be exempt or every session would be
+denied. `PresenceRequirementProvider(exempt_agents=...)` returns no
+requirement for those names.
 
 SECURITY: a request header is caller-controlled unless something upstream
-guarantees otherwise. This extractor is only safe when adk-cc sits behind a
-trusted gateway that is the SOLE ingress and STRIPS this header from inbound
-client requests before injecting its own. See `make_auth_middleware`'s
+guarantees otherwise. This is only safe when adk-cc sits behind a trusted
+gateway that is the SOLE ingress and STRIPS this header from inbound client
+requests before injecting its own. See `make_auth_middleware`'s
 gateway-header note for the same boundary.
 """
 
@@ -66,43 +72,25 @@ except ImportError:  # pragma: no cover
 
 # -- shared string format (held grant == required permission) --------------
 
-def perm_service_level(agent: str, level: Any) -> str:
-    return f"svc:{agent}:level:{level}"
+def perm_agent(agent: str) -> str:
+    """Presence string: may invoke this agent."""
+    return f"svc:{agent}"
 
 
-def perm_service_role(agent: str, role: str) -> str:
-    return f"svc:{agent}:role:{role}"
-
-
-def perm_service_source(agent: str, source: str) -> str:
-    return f"svc:{agent}:source:{source}"
-
-
-def perm_service_dept(agent: str, code: str) -> str:
-    return f"svc:{agent}:dept:{code}"
-
-
-def perm_tool_level(agent: str, tool: str, level: Any) -> str:
-    return f"svc:{agent}:func:{tool}:level:{level}"
-
-
-def _dept_codes(item: dict) -> list[str]:
-    """Tolerate both the singular and plural dept fields; either may be null."""
-    out: list[str] = []
-    one = item.get("authSourceDeptCode")
-    if one:
-        out.append(str(one))
-    many = item.get("authSourceDeptCodes")
-    if isinstance(many, (list, tuple)):
-        out.extend(str(c) for c in many if c)
-    return out
+def perm_tool(agent: str, tool: str) -> str:
+    """Presence string: may use this tool UNDER this agent (per-agent)."""
+    return f"svc:{agent}:func:{tool}"
 
 
 def flatten_grant(auth: list) -> frozenset[str]:
-    """Flatten the gateway grant (`header.auth`) into capability strings.
+    """Flatten the gateway grant (`header.auth`) into presence strings.
 
-    Skips `authYn:false` entries and entries without a serviceName. Unions
-    across all `auth[]` batches and all `authList[]` items.
+    Emits `svc:{serviceName}` for each granted service and
+    `svc:{serviceName}:func:{funcId}` for each granted function. Skips
+    `authYn:false` entries and entries without a serviceName. Unions across
+    all `auth[]` batches and `authList[]` items. All other fields (levels,
+    role, source, dept, resolvedAt, objectId) are ignored — presence is the
+    whole signal.
     """
     perms: set[str] = set()
     for batch in auth or []:
@@ -112,18 +100,11 @@ def flatten_grant(auth: list) -> frozenset[str]:
             svc = item.get("serviceName")
             if not svc:
                 continue
-            for lvl in item.get("authLevel") or []:
-                perms.add(perm_service_level(svc, lvl))
-            if item.get("authType"):
-                perms.add(perm_service_role(svc, item["authType"]))
-            if item.get("authSource"):
-                perms.add(perm_service_source(svc, item["authSource"]))
-            for code in _dept_codes(item):
-                perms.add(perm_service_dept(svc, code))
+            perms.add(perm_agent(svc))
             for d in item.get("detailedAuth") or []:
-                fid, flvl = d.get("funcId"), d.get("authLevel")
-                if fid is not None and flvl is not None:
-                    perms.add(perm_tool_level(svc, fid, flvl))
+                fid = d.get("funcId")
+                if fid:
+                    perms.add(perm_tool(svc, fid))
     return frozenset(perms)
 
 
@@ -133,9 +114,9 @@ class GrantHeaderExtractor:
     """AuthExtractor that builds the principal from the gateway grant header.
 
     The grant (a JSON object with an `auth` array) is read from
-    `header_name` (default `X-Auth-Grant`); the user/tenant come from their
-    own headers (the grant carries authorization, not identity). All three
-    header names are configurable. Flattened grant → `Subject.permissions`.
+    `header_name` (default `X-Auth-Grant`); user/tenant come from their own
+    headers (the grant carries authorization, not identity). All header
+    names are configurable. Flattened grant → `Subject.permissions`.
     """
 
     def __init__(
@@ -174,38 +155,29 @@ class GrantHeaderExtractor:
         return AuthPrincipal(user, tenant, frozenset(), frozenset(), permissions)
 
 
-# -- RequirementProvider: per-agent, exact-level ---------------------------
+# -- RequirementProvider: presence, per-agent ------------------------------
 
-class ScopedLevelRequirementProvider(RequirementProvider):
-    """Per-agent, exact-level requirement provider for the grant scheme.
+class PresenceRequirementProvider(RequirementProvider):
+    """Presence-based requirement provider (gateway fully authoritative).
 
-    Maps the action (invoking agent + tool/agent name) to the SAME string
-    format `flatten_grant` emits, so the held grant and the required
-    permission line up under the PDP's subset check:
+    Derives the required permission from the call itself — no per-tool/agent
+    config map. The PDP then checks it against the flattened grant:
 
-      - tool  → `svc:{invoking_agent}:func:{tool}:level:{N}`
-      - agent → `svc:{agent}:level:{N}`
+      - tool  → `svc:{invoking_agent}:func:{tool}` must be present
+      - agent → `svc:{agent}` must be present
 
-    The level `N` is declared per (agent, tool) / per agent via the config
-    maps (the gateway header is the user's GRANT; these maps are the
-    deployment's REQUIREMENT spec). Names absent from the maps are ungated
-    (empty requirement) unless `closed_world=True`, in which case an
-    unmapped tool/agent is given an unsatisfiable requirement (deny).
+    Tool requirements are PER-AGENT: the same tool under a different agent
+    requires a different presence string, so a grant for `read_file` under
+    `Explore` does not authorize `read_file` under another agent.
+
+    `exempt_agents` are returned ungated (empty requirement) — required for
+    the ENTRY agent, since ADK fires the agent gate for the root too and it
+    is normally not part of any grant. Defaults to the configured entry
+    agent name.
     """
 
-    def __init__(
-        self,
-        *,
-        tool_levels: Optional[dict[tuple[str, str], Any]] = None,
-        agent_levels: Optional[dict[str, Any]] = None,
-        agent_roles: Optional[dict[str, str]] = None,
-        closed_world: bool = False,
-    ) -> None:
-        # tool_levels keyed by (agent_name, tool_name) → required level.
-        self._tool_levels = dict(tool_levels or {})
-        self._agent_levels = dict(agent_levels or {})
-        self._agent_roles = dict(agent_roles or {})
-        self._closed_world = closed_world
+    def __init__(self, *, exempt_agents: Optional[set[str]] = None) -> None:
+        self._exempt = set(exempt_agents or ())
 
     def for_tool(
         self,
@@ -214,26 +186,49 @@ class ScopedLevelRequirementProvider(RequirementProvider):
         tool_meta: Any = None,
         invoking_agent: Optional[str] = None,
     ) -> frozenset[str]:
-        agent = invoking_agent or ""
-        key = (agent, tool_name)
-        if key in self._tool_levels:
-            return frozenset(
-                {perm_tool_level(agent, tool_name, self._tool_levels[key])}
-            )
-        if self._closed_world:
-            # Unmapped tool under closed-world → unsatisfiable (no grant can
-            # match this sentinel), so the PDP denies.
-            return frozenset({f"svc:{agent}:func:{tool_name}:DENY"})
-        return frozenset()
+        # No invoking agent known (shouldn't happen in normal flow) → cannot
+        # form a per-agent presence string; fail closed with an unsatisfiable
+        # requirement so the PDP denies rather than silently allowing.
+        if not invoking_agent:
+            return frozenset({f"svc:?:func:{tool_name}"})
+        if invoking_agent in self._exempt:
+            return frozenset()
+        return frozenset({perm_tool(invoking_agent, tool_name)})
 
     def for_agent(self, agent_name: str) -> frozenset[str]:
-        required: set[str] = set()
-        if agent_name in self._agent_levels:
-            required.add(perm_service_level(agent_name, self._agent_levels[agent_name]))
-        if agent_name in self._agent_roles:
-            required.add(perm_service_role(agent_name, self._agent_roles[agent_name]))
-        if required:
-            return frozenset(required)
-        if self._closed_world:
-            return frozenset({f"svc:{agent_name}:DENY"})
-        return frozenset()
+        if agent_name in self._exempt:
+            return frozenset()
+        return frozenset({perm_agent(agent_name)})
+
+
+# -- env-driven construction (configurable, no code edits) -----------------
+
+def grant_provider_from_env() -> Optional[PresenceRequirementProvider]:
+    """Build a PresenceRequirementProvider when the grant scheme is enabled.
+
+    Enabled by `ADK_CC_GRANT_HEADER=1`. `ADK_CC_GRANT_EXEMPT_AGENTS` is a
+    comma-separated list of agent names to leave ungated (the entry agent);
+    defaults to "coordinator". Returns None when the scheme is off, so the
+    caller falls back to the default declared-requirement provider.
+    """
+    if os.environ.get("ADK_CC_GRANT_HEADER") != "1":
+        return None
+    raw = os.environ.get("ADK_CC_GRANT_EXEMPT_AGENTS", "coordinator")
+    exempt = {a.strip() for a in raw.split(",") if a.strip()}
+    return PresenceRequirementProvider(exempt_agents=exempt)
+
+
+def grant_extractor_from_env() -> Optional[GrantHeaderExtractor]:
+    """Build a GrantHeaderExtractor when the grant scheme is enabled.
+
+    Enabled by `ADK_CC_GRANT_HEADER=1`. Header names are overridable via
+    `ADK_CC_GRANT_HEADER_NAME`, `ADK_CC_GRANT_USER_HEADER`,
+    `ADK_CC_GRANT_TENANT_HEADER`. Returns None when the scheme is off.
+    """
+    if os.environ.get("ADK_CC_GRANT_HEADER") != "1":
+        return None
+    return GrantHeaderExtractor(
+        header_name=os.environ.get("ADK_CC_GRANT_HEADER_NAME", "X-Auth-Grant"),
+        user_header=os.environ.get("ADK_CC_GRANT_USER_HEADER", "X-Auth-User"),
+        tenant_header=os.environ.get("ADK_CC_GRANT_TENANT_HEADER", "X-Auth-Tenant"),
+    )
