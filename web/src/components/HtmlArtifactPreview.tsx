@@ -3,25 +3,39 @@ import { RefreshCw, AlertTriangle } from "lucide-react"
 import { fetchArtifactText } from "@/api/artifacts"
 
 /**
- * Renders an HTML artifact inside a STRICTLY sandboxed <iframe srcdoc>.
+ * Renders an HTML artifact inside a sandboxed <iframe srcdoc>.
  *
- * Security model — this is agent/user-generated HTML, i.e. untrusted:
- *   - `sandbox=""` (empty) — the most restrictive setting. No scripts
- *     run (no allow-scripts), the frame is treated as a unique opaque
- *     origin (no allow-same-origin), so it CANNOT reach the parent app's
- *     DOM, cookies, localStorage, or the bearer token. Forms/popups/
- *     top-navigation are all disallowed too. HTML + CSS render; JS is
- *     inert. This is the safe default for rendering arbitrary HTML.
- *   - `srcdoc` (not src) keeps the content inline — no extra authed
- *     fetch from the iframe, and nothing hits the network as the frame's
- *     origin.
+ * Security model — this is agent/user-generated HTML, i.e. untrusted.
  *
- * The iframe auto-grows to its content height via a ResizeObserver on the
- * inner document — but only works while same-origin reads are allowed,
- * which they are NOT under `sandbox=""`. So instead we cap the height and
- * let the frame scroll; the user can open the raw file via the chip's
- * download if they want the full page.
+ * DEFAULT (`sandbox=""`): the most restrictive setting. No scripts run, the
+ * frame is a unique opaque origin (no allow-same-origin), so it CANNOT reach
+ * the parent app's DOM, cookies, localStorage, or the bearer token.
+ * Forms/popups/top-navigation are disallowed too. HTML + CSS render; JS is
+ * inert. Safe for arbitrary HTML, but JS-built content (Plotly, Chart.js,
+ * frameworks) renders BLANK because its drawing code never runs.
+ *
+ * OPT-IN interactive mode (`VITE_ADK_CC_HTML_PREVIEW_ALLOW_SCRIPTS=1`, baked
+ * at build time): flips the sandbox to `allow-scripts` so JS-driven artifacts
+ * (interactive Plotly etc.) render. Tradeoff: untrusted, model/user-generated
+ * JS then EXECUTES in the user's browser and can make network requests (e.g.
+ * fetch a CDN, or phone home with anything in the artifact itself). What it
+ * still CANNOT do — because we keep `allow-same-origin` HARD-OFF — is read the
+ * parent's bearer token / cookies / localStorage / DOM, or navigate the top
+ * window. (Verified: allow-scripts WITHOUT allow-same-origin keeps the frame
+ * on an opaque origin, so cross-frame access throws SecurityError.) NEVER add
+ * `allow-same-origin` here — `allow-scripts` + `allow-same-origin` together is
+ * the dangerous combo that would let the frame exfiltrate the token.
+ *
+ * `srcdoc` (not src) keeps the content inline. Height is capped with internal
+ * scroll (auto-grow needs same-origin reads we don't allow).
  */
+
+// Build-time flag (mirrors VITE_ADK_CC_GLOBAL_TENANT in api/admin.ts). Default
+// OFF — operators opt in to executing untrusted JS in users' browsers.
+const ALLOW_SCRIPTS =
+  String(import.meta.env.VITE_ADK_CC_HTML_PREVIEW_ALLOW_SCRIPTS ?? "") === "1"
+// allow-same-origin is intentionally ABSENT — see the security note above.
+const SANDBOX = ALLOW_SCRIPTS ? "allow-scripts" : ""
 export function HtmlArtifactPreview({
   appName,
   userId,
@@ -74,12 +88,22 @@ export function HtmlArtifactPreview({
   }
 
   return (
-    <iframe
-      // sandbox="" → no scripts, no same-origin: fully isolated.
-      sandbox=""
-      srcDoc={html}
-      title={`${filename} (preview)`}
-      className="w-full h-96 rounded-md border border-border bg-white"
-    />
+    <div className="space-y-1">
+      {ALLOW_SCRIPTS && (
+        <p className="text-[10px] text-muted-foreground">
+          interactive preview — scripts run in an isolated sandbox (no access
+          to your session)
+        </p>
+      )}
+      <iframe
+        // SANDBOX: "" (no scripts) by default, "allow-scripts" when the
+        // build-time flag is on. allow-same-origin is NEVER set — that
+        // combination would let the frame read the parent's token.
+        sandbox={SANDBOX}
+        srcDoc={html}
+        title={`${filename} (preview)`}
+        className="w-full h-96 rounded-md border border-border bg-white"
+      />
+    </div>
   )
 }

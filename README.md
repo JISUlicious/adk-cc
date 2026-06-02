@@ -108,6 +108,7 @@ For HMR development against the same server use `npm --prefix web run dev` (Vite
   - `BashTerminalCard` (`run_bash`) — `$ command` prompt, stdout/stderr coloring, exit-code chip.
   - `FileEditCard` (`edit_file`, `write_file`) — side-by-side before/after for edits, single green block for writes.
   - `PlanCard` (`write_plan`, `read_current_plan`) — markdown content + storage path + collapsible history.
+  - `HtmlArtifactPreview` (`.html` / `text/html` artifacts) — renders inline in a sandboxed `<iframe srcdoc>`. Default `sandbox=""` (no scripts) — static HTML/CSS shows, JS is inert, so JS-built content (e.g. Plotly) is blank. Opt in to interactive previews with the build-time flag `VITE_ADK_CC_HTML_PREVIEW_ALLOW_SCRIPTS=1`, which flips it to `sandbox="allow-scripts"` (runs untrusted JS, but `allow-same-origin` stays off so the frame can't reach your token/cookies/DOM). See [`.env.example`](./.env.example).
 - **Task sidebar** — derives the live task list from `task_create` / `task_update` / `task_list` function-responses; no extra endpoint.
 - **Plan mode** — when `session.state.permission_mode === "plan"`, the composer gets a violet badge + tinted border so the active mode is unambiguous at the moment of typing.
 - **Slash commands** — `/help`, `/clear` (new session), `/plan` and `/exit-plan` (flip `permission_mode` directly via `PATCH /apps/.../sessions/{id}` with a `state_delta` — deterministic, no LLM round-trip), `/theme` (cycle light → dark → system), `/settings`, `/signout`.

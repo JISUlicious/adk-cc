@@ -109,6 +109,7 @@ ADK_CC_SERVE_UI=1 \
   - `BashTerminalCard` (`run_bash`) — `$ command` 프롬프트, stdout/stderr 컬러링, exit-code 칩.
   - `FileEditCard` (`edit_file`, `write_file`) — 편집은 좌우 before/after 비교, 쓰기는 단일 녹색 블록.
   - `PlanCard` (`write_plan`, `read_current_plan`) — markdown 본문 + 저장 경로 + 접기/펴기 가능한 히스토리.
+  - `HtmlArtifactPreview` (`.html` / `text/html` 아티팩트) — 샌드박스된 `<iframe srcdoc>`로 인라인 렌더링. 기본값 `sandbox=""`(스크립트 비실행) — 정적 HTML/CSS는 표시되지만 JS는 비활성화되어 JS로 그리는 콘텐츠(예: Plotly)는 빈 화면. 인터랙티브 프리뷰는 빌드타임 플래그 `VITE_ADK_CC_HTML_PREVIEW_ALLOW_SCRIPTS=1`로 옵트인 — `sandbox="allow-scripts"`로 전환되어 (신뢰할 수 없는 JS를 실행하지만 `allow-same-origin`은 끈 상태라 토큰/쿠키/DOM 접근 불가). [`.env.example`](./.env.example) 참고.
 - **Task sidebar** — `task_create` / `task_update` / `task_list` function-response로부터 실시간 task 목록을 도출 (별도 엔드포인트 없음).
 - **Plan mode** — `session.state.permission_mode === "plan"`일 때 composer에 보라색 배지 + 테두리 색상이 적용되어 입력 순간 현재 모드를 분명히 알 수 있습니다.
 - **Slash 명령어** — `/help`, `/clear` (새 세션), `/plan`과 `/exit-plan` (`PATCH /apps/.../sessions/{id}`에 `state_delta`를 보내 `permission_mode`를 직접 전환 — 결정적이며 LLM round-trip 없음), `/theme` (light → dark → system 순환), `/settings`, `/signout`.
