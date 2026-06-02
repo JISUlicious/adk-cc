@@ -107,11 +107,61 @@ def test_upload_skill_via_api_then_listed_in_ui(page):
     print("OK skill uploaded + listed in UI")
 
 
+def test_no_token_shows_login(page):
+    # Fresh browser state, no token → /admin must render the login form,
+    # never the admin shell.
+    page.goto(BASE + "/")
+    page.evaluate("() => localStorage.clear()")
+    page.goto(BASE + "/admin")
+    page.wait_for_load_state("networkidle")
+    body = page.content()
+    assert "Sign in to adk-cc" in body, "no-token should show login"
+    assert "Model Endpoints" not in body, "no-token must NOT show admin shell"
+    print("OK no token → login form (admin shell blocked)")
+
+
+def test_bad_token_shows_login(page):
+    # A stale/invalid token must NOT render the admin shell (which would then
+    # 401 on every call). The gate verifies the token and drops to login.
+    page.goto(BASE + "/")
+    page.evaluate(
+        "() => { localStorage.setItem('adk_cc.token','BOGUS'); localStorage.setItem('adk_cc.user','x'); }"
+    )
+    page.goto(BASE + "/admin")
+    page.wait_for_load_state("networkidle")
+    page.wait_for_timeout(800)
+    body = page.content()
+    assert "Sign in to adk-cc" in body, "bad token should drop to login"
+    assert "Model Endpoints" not in body, "bad token must NOT show admin shell"
+    print("OK invalid token → login form (no broken 401 page)")
+
+
+def test_nonadmin_stays_logged_in_with_forbidden(page):
+    # A VALID non-admin token: stays in the app (not kicked to login) but the
+    # admin tab shows a clear Forbidden message rather than data.
+    page.goto(BASE + "/")
+    page.evaluate(
+        "() => { localStorage.setItem('adk_cc.token','usertok'); localStorage.setItem('adk_cc.user','bob'); }"
+    )
+    page.goto(BASE + "/admin/models")
+    page.wait_for_load_state("networkidle")
+    page.wait_for_timeout(1000)
+    body = page.content()
+    assert "Sign in to adk-cc" not in body, "valid non-admin must NOT be kicked to login"
+    assert ("Forbidden" in body or "admin role" in body), "should show a clear forbidden message"
+    print("OK valid non-admin → stays logged in, shows Forbidden")
+
+
 def main():
     test_non_admin_blocked_by_api()
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
+        # --- auth gating (must run before seeding a good token) ---
+        test_no_token_shows_login(page)
+        test_bad_token_shows_login(page)
+        test_nonadmin_stays_logged_in_with_forbidden(page)
+        # --- admin happy path ---
         _seed_token(page, ADMIN)
         test_add_mcp_via_ui(page)
         test_add_and_activate_model_via_ui(page)

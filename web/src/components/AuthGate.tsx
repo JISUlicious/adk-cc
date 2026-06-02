@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -9,11 +9,14 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { apiFetch, ApiError } from "@/api/client"
-import { getToken, setToken, getUser } from "@/api/auth"
+import { getToken, setToken, getUser, onAuthCleared } from "@/api/auth"
 
 /**
- * Wraps the app. Renders a login form when no token is stored OR the
- * stored token fails its first probe; renders children once auth works.
+ * Wraps the app. Renders a login form when no token is stored, the stored
+ * token fails verification, or any later API call returns 401 (the token
+ * was revoked/expired mid-session). Renders children only once a stored
+ * token has been VERIFIED against the server — presence alone is not
+ * trusted, so a stale/invalid token can't render a broken, 401-ing page.
  *
  * Production OIDC redirect: future. v1 form-pastes a JWT (works with
  * either JwtAuthExtractor or BearerTokenExtractor — same Authorization
@@ -24,8 +27,50 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [user, setLocalUser] = useState<string>(getUser())
   const [verifying, setVerifying] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // null = not yet checked; true = verified good; false = needs login.
+  const [verified, setVerified] = useState<boolean | null>(
+    getToken() ? null : false,
+  )
 
-  if (token) {
+  // Verify a pre-existing stored token on mount. Until it succeeds we do
+  // NOT render children — otherwise a stale token shows the app, whose API
+  // calls then 401. On failure, clear + drop to the login form.
+  useEffect(() => {
+    let cancelled = false
+    if (getToken() && verified === null) {
+      apiFetch<string[]>("/list-apps")
+        .then(() => !cancelled && setVerified(true))
+        .catch(() => {
+          if (cancelled) return
+          setToken("", "")
+          setLocalToken(null)
+          setVerified(false)
+        })
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [verified])
+
+  // A 401 from ANY later API call clears the token (apiFetch) and fires
+  // this callback — bounce back to the login form instead of leaving a
+  // broken page showing 401 errors.
+  useEffect(() => {
+    return onAuthCleared(() => {
+      setLocalToken(null)
+      setVerified(false)
+    })
+  }, [])
+
+  if (token && verified === null) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <p className="text-sm text-muted-foreground">Verifying session…</p>
+      </div>
+    )
+  }
+
+  if (token && verified) {
     return <>{children}</>
   }
 
@@ -48,6 +93,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       await apiFetch<string[]>("/list-apps")
       setLocalToken(t)
       setLocalUser(u)
+      setVerified(true)
     } catch (err) {
       setToken("", "") // clear cleanly
       if (err instanceof ApiError && err.status === 401) {
