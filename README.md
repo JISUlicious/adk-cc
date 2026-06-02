@@ -189,9 +189,34 @@ The first match wins. Disable via `ADK_CC_DISABLE_PROJECT_CONTEXT=1`. Override t
 
 ## MCP servers
 
-Connect external MCP servers via the per-tenant registry. Set `ADK_CC_TENANT_REGISTRY_DIR` and store one `mcp.json` per tenant. The `TenantMcpToolset` resolves servers per-invocation from the active tenant's config; credentials substitute from the credential provider.
+Attach external MCP servers to the coordinator. Three ways, by scale — all expose their tools as `mcp__<server_name>__*` so permission rules can target a server (e.g. deny `mcp__github__*`):
 
-For single-tenant deployments, you can use one tenant_id (defaults to `"local"` in dev). See [`.env.example`](./.env.example) for the registry / credential env vars.
+**One static server (dev / quick start)** — env vars:
+
+```bash
+ADK_CC_MCP_SERVER="python tests/fixtures/csv_mcp_server.py"  # stdio command, or URL for sse/http
+ADK_CC_MCP_SERVER_NAME=csv          # tool prefix → mcp__csv__*
+ADK_CC_MCP_TRANSPORT=stdio          # stdio | sse | http
+```
+
+**Multiple static servers (single-tenant, several servers)** — a JSON file, same for every user:
+
+```bash
+ADK_CC_MCP_SERVERS_FILE=/etc/adk-cc/mcp.json
+```
+```json
+[
+  {"server_name": "github", "transport": "http", "url": "https://api.github.com/mcp",
+   "credential_key": "GITHUB_MCP_TOKEN", "tool_filter": ["list_repos", "create_issue"]},
+  {"server_name": "csv", "transport": "stdio", "url": "python tests/fixtures/csv_mcp_server.py"}
+]
+```
+
+A JSON array of `McpServerConfig` objects, loaded at boot and merged with the single `ADK_CC_MCP_SERVER` above (a duplicate `server_name` is dropped with a warning). Fault-isolated: a bad file, or one bad entry, is logged and skipped — boot is never blocked. For a server needing auth, `credential_key` names an **env var** holding the bearer token (no credential store exists at boot); a missing var wires the server unauthenticated with a warning.
+
+**Per-tenant servers (multi-tenant, different per user)** — the registry. Set `ADK_CC_TENANT_REGISTRY_DIR` and store one `mcp.json` per tenant. The `TenantMcpToolset` resolves servers per-invocation from the active tenant's config (hot-reloaded), credentials substitute from the credential provider, and an admin HTTP API can add/remove servers at runtime. For single-tenant deployments you can use one tenant_id (defaults to `"local"` in dev).
+
+See [`.env.example`](./.env.example) for every MCP / registry / credential env var, and `docs/05-production-deployment.md` for the tenant admin API.
 
 ## Single-instance server deployment
 
