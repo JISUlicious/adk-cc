@@ -208,6 +208,14 @@ def make_app():
     if not agents_dir:
         raise RuntimeError("ADK_CC_AGENTS_DIR must be set for make_app()")
 
+    # Admin panel (default-OFF). When enabled, default the tenant registry /
+    # skills dirs in the environment BEFORE the agent module loads (it reads
+    # them at import time, inside build_fastapi_app → get_fast_api_app), so
+    # the agent's tenant MCP/skill toolsets resolve against the SAME store
+    # the admin routes write to — that's what makes edits take effect live.
+    # Must run before build_fastapi_app(). See _prepare_admin_env().
+    _prepare_admin_env()
+
     extractor = None
     if os.environ.get("ADK_CC_JWT_JWKS_URL"):
         from .auth import JwtAuthExtractor
@@ -250,9 +258,130 @@ def make_app():
             # parents up (service → adk_cc → agents → repo).
             ui_dist_dir = str(Path(__file__).resolve().parents[3] / "web" / "dist")
 
-    return build_fastapi_app(
+    app = build_fastapi_app(
         agents_dir=agents_dir,
         session_service_uri=os.environ.get("ADK_CC_SESSION_DSN"),
         auth_extractor=extractor,
         ui_dist_dir=ui_dist_dir,
+    )
+    # Mount the admin panel routes (default-OFF). Built against the same
+    # registry / credential store / skills dir the agent now reads, so admin
+    # edits hot-reload into the running agent.
+    _mount_admin_if_enabled(app)
+    return app
+
+
+# --- Admin panel wiring ---------------------------------------------------
+
+# Global-mode defaults: the admin panel manages ONE deployment-wide config
+# set. It rides the per-tenant registry machinery (which hot-reloads per
+# invocation) pinned to a single tenant id — matching what TenancyPlugin's
+# default resolver produces for an unauthenticated / single-tenant run.
+_ADMIN_DEFAULT_DATA_DIR = ".adk-cc/admin-data"
+
+
+def _admin_enabled() -> bool:
+    return os.environ.get("ADK_CC_ADMIN_PANEL") == "1"
+
+
+def _global_tenant_id() -> str:
+    return os.environ.get("ADK_CC_GLOBAL_TENANT_ID", "local")
+
+
+def _prepare_admin_env() -> None:
+    """Default the tenant registry/skills dirs in os.environ when the admin
+    panel is on, so the agent module (loaded next, inside build_fastapi_app)
+    wires its tenant MCP/skill toolsets against the admin-managed store.
+
+    No-op if the admin panel is off, or if the operator already set the
+    tenant env vars (those win). Idempotent.
+    """
+    if not _admin_enabled():
+        return
+    base = os.environ.get("ADK_CC_ADMIN_DATA_DIR") or str(
+        (Path.cwd() / _ADMIN_DEFAULT_DATA_DIR).resolve()
+    )
+    os.environ["ADK_CC_ADMIN_DATA_DIR"] = base
+    os.environ.setdefault("ADK_CC_TENANT_REGISTRY_DIR", str(Path(base) / "registry"))
+    os.environ.setdefault("ADK_CC_TENANT_SKILLS_DIR", str(Path(base) / "skills"))
+    # Dev default for the credential store: in-memory (lost on restart).
+    # Operators set ADK_CC_CREDENTIAL_PROVIDER=encrypted_file (+ KEY +
+    # STORE_DIR) for persistence — same vars the tenant path already uses.
+    os.environ.setdefault("ADK_CC_CREDENTIAL_PROVIDER", "memory")
+
+
+def _build_credential_provider():
+    """Build the CredentialProvider from env (same selection as the agent's
+    tenant path: memory | encrypted_file)."""
+    from ..credentials import (
+        EncryptedFileCredentialProvider,
+        InMemoryCredentialProvider,
+    )
+
+    kind = os.environ.get("ADK_CC_CREDENTIAL_PROVIDER", "memory").lower()
+    if kind == "encrypted_file":
+        store_dir = os.environ.get("ADK_CC_CREDENTIAL_STORE_DIR")
+        if not store_dir:
+            raise RuntimeError(
+                "ADK_CC_CREDENTIAL_PROVIDER=encrypted_file requires "
+                "ADK_CC_CREDENTIAL_STORE_DIR"
+            )
+        return EncryptedFileCredentialProvider(root=store_dir)
+    if kind == "memory":
+        return InMemoryCredentialProvider()
+    raise RuntimeError(
+        f"unknown ADK_CC_CREDENTIAL_PROVIDER={kind!r}; valid: memory, encrypted_file"
+    )
+
+
+def _make_admin_role_extractor():
+    """Build the admin authorization hook: require the admin role on the
+    authenticated principal (configurable name via ADK_CC_ADMIN_ROLE,
+    default 'admin'), and, in global mode, that the target tenant is the
+    global tenant. Raises HTTPException(401/403) on denial."""
+    from fastapi import HTTPException
+
+    required_role = os.environ.get("ADK_CC_ADMIN_ROLE", "admin")
+    global_tenant = _global_tenant_id()
+
+    def authorize(request, target_tenant: str) -> None:
+        auth = getattr(request.state, "adk_cc_auth", None)
+        if auth is None:
+            raise HTTPException(status_code=401, detail="not authenticated")
+        roles = getattr(auth, "roles", frozenset()) or frozenset()
+        if required_role not in roles:
+            raise HTTPException(
+                status_code=403, detail=f"admin role {required_role!r} required"
+            )
+        if target_tenant != global_tenant:
+            raise HTTPException(
+                status_code=403,
+                detail=f"admin panel manages the global tenant {global_tenant!r} only",
+            )
+
+    return authorize
+
+
+def _mount_admin_if_enabled(app) -> None:
+    """Mount the tenant-admin routes for the global tenant when the admin
+    panel is enabled. No-op otherwise (default)."""
+    if not _admin_enabled():
+        return
+    from ..service.registry import JsonFileTenantResourceRegistry
+    from ..tools.mcp_tenant import McpServerConfig
+    from .admin_routes import mount_tenant_admin
+
+    registry_dir = os.environ["ADK_CC_TENANT_REGISTRY_DIR"]  # set by _prepare_admin_env
+    registry = JsonFileTenantResourceRegistry[McpServerConfig](
+        root=registry_dir,
+        kind="mcp",
+        model=McpServerConfig,
+        id_attr="server_name",
+    )
+    mount_tenant_admin(
+        app,
+        registry=registry,
+        credentials=_build_credential_provider(),
+        skill_root=os.environ.get("ADK_CC_TENANT_SKILLS_DIR"),
+        admin_extractor=_make_admin_role_extractor(),
     )

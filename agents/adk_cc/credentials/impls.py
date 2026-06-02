@@ -28,8 +28,22 @@ from .provider import CredentialProvider
 
 
 class InMemoryCredentialProvider(CredentialProvider):
-    def __init__(self) -> None:
-        self._store: dict[tuple[str, str], str] = {}
+    """Dev/test credential store, lost on restart.
+
+    The backing dict is a PROCESS-WIDE singleton (shared across all
+    instances) so the agent's tenant toolset and the admin-panel routes —
+    which each construct their own provider — observe the same secrets in a
+    single-process dev deployment. Encrypted-file is file-backed and shares
+    state inherently; in-memory needs this to match that behavior. Pass
+    `shared=False` for an isolated store (tests).
+    """
+
+    _SHARED_STORE: dict[tuple[str, str], str] = {}
+
+    def __init__(self, *, shared: bool = True) -> None:
+        self._store: dict[tuple[str, str], str] = (
+            InMemoryCredentialProvider._SHARED_STORE if shared else {}
+        )
 
     async def get(self, *, tenant_id: str, key: str) -> str | None:
         return self._store.get((tenant_id, key))
@@ -39,6 +53,9 @@ class InMemoryCredentialProvider(CredentialProvider):
 
     async def delete(self, *, tenant_id: str, key: str) -> None:
         self._store.pop((tenant_id, key), None)
+
+    async def list_keys(self, *, tenant_id: str) -> list[str]:
+        return sorted(k for (t, k) in self._store if t == tenant_id)
 
 
 class EncryptedFileCredentialProvider(CredentialProvider):
@@ -106,3 +123,20 @@ class EncryptedFileCredentialProvider(CredentialProvider):
                     p.unlink()
 
         await asyncio.to_thread(_delete)
+
+    async def list_keys(self, *, tenant_id: str) -> list[str]:
+        t = self._safe_component(tenant_id, "tenant_id")
+        tenant_dir = self._root / t
+
+        def _list() -> list[str]:
+            if not tenant_dir.is_dir():
+                return []
+            # One file per key: `<key>.enc`. Strip the suffix; ignore the
+            # sibling `.lock` files.
+            return sorted(
+                p.name[: -len(".enc")]
+                for p in tenant_dir.iterdir()
+                if p.is_file() and p.name.endswith(".enc")
+            )
+
+        return await asyncio.to_thread(_list)
