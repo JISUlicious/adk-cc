@@ -219,6 +219,25 @@ ADK_CC_MCP_SERVERS_FILE=/etc/adk-cc/mcp.json
 
 모든 MCP / 레지스트리 / 자격 증명 env 변수는 [`.env.example`](./.env.example), 테넌트 admin API는 `docs/05-production-deployment.md` 참고.
 
+## 어드민 패널
+
+**MCP 서버, 스킬, 모델 엔드포인트를 런타임에 관리**하는 내장 어드민 UI입니다 — 재시작 없이, 서버 파일을 직접 편집하지 않고. 기본 비활성화이며 `ADK_CC_ADMIN_PANEL=1`로 켭니다:
+
+```bash
+ADK_CC_ADMIN_PANEL=1 \
+ADK_CC_SERVE_UI=1 ADK_CC_UI_DIST=$(pwd)/web/dist \
+ADK_CC_AUTH_TOKENS='admintok=alice:local:admin' \
+ADK_CC_AGENTS_DIR=$(pwd)/agents \
+.venv/bin/uvicorn adk_cc.service.server:make_app --factory --port 8000
+# http://127.0.0.1:8000/admin 접속 (admin 역할을 가진 principal의 토큰으로 로그인)
+```
+
+- **관리 대상** — 세 개의 탭: **MCP 서버**(추가/수정/삭제; 서버별 transport, tool filter, credential key), **스킬**(`SKILL.md`가 든 `.zip` 업로드, 삭제), **모델 엔드포인트**(백엔드를 추가하고 하나를 **활성화**하면 라이브 모델이 전환됨 — 에이전트는 활성 엔드포인트를 호출마다 해석하는 `SelectableLlm`을 통해 다음 요청부터 반영).
+- **글로벌 모드** — 배포 전체의 단일 설정 집합을 관리하며 `ADK_CC_GLOBAL_TENANT_ID`(기본 `local`)에 고정됩니다. invocation마다 hot-reload되는 per-tenant 레지스트리 메커니즘을 그대로 타므로 편집이 즉시 반영됩니다.
+- **인증** — `/admin` 페이지는 익명으로 로드되지만(React shell), 모든 어드민 **API** 호출은 admin 역할(`ADK_CC_ADMIN_ROLE`, 기본 `admin`; JWT roles 클레임 또는 dev 토큰의 `:roles` 세그먼트)로 게이트됩니다. 비밀값은 HTTP로 절대 반환되지 않습니다(credential·모델 엔드포인트 키는 env 변수 이름으로 참조하며, 목록은 키 *이름*만 노출).
+
+[`.env.example`](./.env.example) (`ADK_CC_ADMIN_PANEL`, `ADK_CC_ADMIN_ROLE`, `ADK_CC_GLOBAL_TENANT_ID`, `ADK_CC_ADMIN_DATA_DIR`, `ADK_CC_MODEL_REGISTRY_FILE`)와 라우트 레퍼런스는 `docs/05-production-deployment.md` 참고.
+
 ## 단일 인스턴스 서버 배포
 
 `adk web .`은 개발용으로 좋습니다. 장기 실행 단일 인스턴스 서버(예: dev VM, 신뢰할 수 있는 내부 팀, 단일 테넌트 배포)에는 FastAPI 팩토리를 사용하세요:
