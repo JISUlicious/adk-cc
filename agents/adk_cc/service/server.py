@@ -91,8 +91,16 @@ def build_fastapi_app(
         # auth — the React app *itself* is what asks the user to sign in,
         # so the HTML + JS + CSS must load anonymously. API routes
         # (/run, /run_sse, /list-apps, /apps/*, /debug/*) stay gated.
+        #
+        # The admin SPA PAGE routes (the shell HTML) must load anonymously so
+        # the React app can boot and THEN make authenticated, admin-gated API
+        # calls. These are EXACT page paths only — we deliberately do NOT
+        # exempt the `/admin/` prefix, because the admin API lives under
+        # `/admin/model-endpoints` and must stay behind auth + the admin-role
+        # gate. (The tenant admin API at `/tenants/*` is likewise gated.)
         if ui_dist_dir:
-            exempt_exact = ("/", "/favicon.svg", "/favicon.ico")
+            admin_pages = ("/admin", "/admin/mcp", "/admin/skills", "/admin/models")
+            exempt_exact = ("/", "/favicon.svg", "/favicon.ico") + admin_pages
             exempt_prefixes = ("/assets/",)
         else:
             exempt_exact = ()
@@ -114,6 +122,12 @@ def build_fastapi_app(
                 exempt_exact_paths=exempt_exact,
             )
         )
+
+    # Admin panel routes (default-OFF). Mounted BEFORE the UI StaticFiles
+    # mount — the SPA is mounted at `/` (a catch-all) and would otherwise
+    # shadow the admin API routes. Built against the same registry /
+    # credential store / skills dir the agent reads, so edits hot-reload.
+    _mount_admin_if_enabled(fastapi_app)
 
     if ui_dist_dir:
         _mount_ui(fastapi_app, ui_dist_dir)
@@ -154,14 +168,27 @@ def _mount_ui(app, dist_dir: str) -> None:
             f"{index_html} not found. Did the Vite build complete?"
         )
 
-    # Catch-all SPA fallback. Registered before the StaticFiles mount so
-    # `/` and arbitrary subpaths return index.html when they don't match
-    # an API route or a real static asset. We register only specific
-    # subpath prefixes to avoid swallowing 404s for legitimately missing
-    # API routes (which should still surface as 404, not as the SPA).
+    # SPA fallback. Registered before the StaticFiles mount so `/` and the
+    # known client-side routes return index.html on hard refresh / deep link
+    # (react-router then renders the right page). We enumerate the SPA route
+    # prefixes explicitly rather than a blanket catch-all, so genuinely
+    # missing API routes still surface as 404 instead of silently returning
+    # the SPA shell.
     @app.get("/", include_in_schema=False)
     def _spa_root() -> FileResponse:
         return FileResponse(index_html)
+
+    # Client-side routes (react-router). Enumerated EXACTLY — NOT a
+    # `/admin/{path}` catch-all, which would shadow the admin API routes
+    # (e.g. /admin/model-endpoints) that get registered later. Add new SPA
+    # page tabs here as they're created.
+    for _spa_path in ("/admin", "/admin/mcp", "/admin/skills", "/admin/models"):
+        app.add_api_route(
+            _spa_path,
+            lambda: FileResponse(index_html),
+            methods=["GET"],
+            include_in_schema=False,
+        )
 
     app.mount("/", StaticFiles(directory=str(dist), html=False), name="ui")
 
@@ -208,6 +235,14 @@ def make_app():
     if not agents_dir:
         raise RuntimeError("ADK_CC_AGENTS_DIR must be set for make_app()")
 
+    # Admin panel (default-OFF). When enabled, default the tenant registry /
+    # skills dirs in the environment BEFORE the agent module loads (it reads
+    # them at import time, inside build_fastapi_app → get_fast_api_app), so
+    # the agent's tenant MCP/skill toolsets resolve against the SAME store
+    # the admin routes write to — that's what makes edits take effect live.
+    # Must run before build_fastapi_app(). See _prepare_admin_env().
+    _prepare_admin_env()
+
     extractor = None
     if os.environ.get("ADK_CC_JWT_JWKS_URL"):
         from .auth import JwtAuthExtractor
@@ -250,9 +285,174 @@ def make_app():
             # parents up (service → adk_cc → agents → repo).
             ui_dist_dir = str(Path(__file__).resolve().parents[3] / "web" / "dist")
 
+    # build_fastapi_app mounts the admin panel (when enabled) before the UI.
     return build_fastapi_app(
         agents_dir=agents_dir,
         session_service_uri=os.environ.get("ADK_CC_SESSION_DSN"),
         auth_extractor=extractor,
         ui_dist_dir=ui_dist_dir,
+    )
+
+
+# --- Admin panel wiring ---------------------------------------------------
+
+# Global-mode defaults: the admin panel manages ONE deployment-wide config
+# set. It rides the per-tenant registry machinery (which hot-reloads per
+# invocation) pinned to a single tenant id — matching what TenancyPlugin's
+# default resolver produces for an unauthenticated / single-tenant run.
+_ADMIN_DEFAULT_DATA_DIR = ".adk-cc/admin-data"
+
+
+def _admin_enabled() -> bool:
+    return os.environ.get("ADK_CC_ADMIN_PANEL") == "1"
+
+
+def _global_tenant_id() -> str:
+    return os.environ.get("ADK_CC_GLOBAL_TENANT_ID", "local")
+
+
+def _prepare_admin_env() -> None:
+    """Default the tenant registry/skills dirs in os.environ when the admin
+    panel is on, so the agent module (loaded next, inside build_fastapi_app)
+    wires its tenant MCP/skill toolsets against the admin-managed store.
+
+    No-op if the admin panel is off, or if the operator already set the
+    tenant env vars (those win). Idempotent.
+    """
+    if not _admin_enabled():
+        return
+    base = os.environ.get("ADK_CC_ADMIN_DATA_DIR") or str(
+        (Path.cwd() / _ADMIN_DEFAULT_DATA_DIR).resolve()
+    )
+    os.environ["ADK_CC_ADMIN_DATA_DIR"] = base
+    os.environ.setdefault("ADK_CC_TENANT_REGISTRY_DIR", str(Path(base) / "registry"))
+    os.environ.setdefault("ADK_CC_TENANT_SKILLS_DIR", str(Path(base) / "skills"))
+    # Model-endpoint registry file — the agent reads this at import to wrap
+    # MODEL in a SelectableLlm (live model switching). Same default-dir base.
+    os.environ.setdefault(
+        "ADK_CC_MODEL_REGISTRY_FILE", str(Path(base) / "model-endpoints.json")
+    )
+    # Dev default for the credential store: in-memory (lost on restart).
+    # Operators set ADK_CC_CREDENTIAL_PROVIDER=encrypted_file (+ KEY +
+    # STORE_DIR) for persistence — same vars the tenant path already uses.
+    os.environ.setdefault("ADK_CC_CREDENTIAL_PROVIDER", "memory")
+    # Seed the boot model (from env) as endpoint #1 so it appears in the
+    # panel and stays the default until an operator activates another. The
+    # agent's SelectableLlm resolves this file lazily per request.
+    _seed_model_registry()
+
+
+def _seed_model_registry() -> None:
+    """Seed the model-endpoint registry with the boot model (idempotent)."""
+    from ..models import ModelEndpointConfig, ModelEndpointRegistry
+
+    path = os.environ.get("ADK_CC_MODEL_REGISTRY_FILE")
+    if not path:
+        return
+    ModelEndpointRegistry(path).seed_default(
+        ModelEndpointConfig(
+            name=os.environ.get("ADK_CC_MODEL_DEFAULT_NAME", "default"),
+            model=os.environ.get("ADK_CC_MODEL", "openai/Qwen3.6-35B-A3B-UD-MLX-4bit"),
+            api_base=os.environ.get("ADK_CC_API_BASE", "http://localhost:18000/v1"),
+            api_key_env="ADK_CC_API_KEY",
+        )
+    )
+
+
+def _build_credential_provider():
+    """Build the CredentialProvider from env (same selection as the agent's
+    tenant path: memory | encrypted_file)."""
+    from ..credentials import (
+        EncryptedFileCredentialProvider,
+        InMemoryCredentialProvider,
+    )
+
+    kind = os.environ.get("ADK_CC_CREDENTIAL_PROVIDER", "memory").lower()
+    if kind == "encrypted_file":
+        store_dir = os.environ.get("ADK_CC_CREDENTIAL_STORE_DIR")
+        if not store_dir:
+            raise RuntimeError(
+                "ADK_CC_CREDENTIAL_PROVIDER=encrypted_file requires "
+                "ADK_CC_CREDENTIAL_STORE_DIR"
+            )
+        return EncryptedFileCredentialProvider(root=store_dir)
+    if kind == "memory":
+        return InMemoryCredentialProvider()
+    raise RuntimeError(
+        f"unknown ADK_CC_CREDENTIAL_PROVIDER={kind!r}; valid: memory, encrypted_file"
+    )
+
+
+def _make_admin_role_extractor():
+    """Build the admin authorization hook: require the admin role on the
+    authenticated principal (configurable name via ADK_CC_ADMIN_ROLE,
+    default 'admin'), and, in global mode, that the target tenant is the
+    global tenant. Raises HTTPException(401/403) on denial."""
+    from fastapi import HTTPException
+
+    required_role = os.environ.get("ADK_CC_ADMIN_ROLE", "admin")
+    global_tenant = _global_tenant_id()
+
+    def authorize(request, target: str) -> None:
+        auth = getattr(request.state, "adk_cc_auth", None)
+        if auth is None:
+            raise HTTPException(status_code=401, detail="not authenticated")
+        roles = getattr(auth, "roles", frozenset()) or frozenset()
+        if required_role not in roles:
+            raise HTTPException(
+                status_code=403, detail=f"admin role {required_role!r} required"
+            )
+        # Tenant-scoped routes pass a tenant id as `target` and must match the
+        # one global tenant. Global routes (e.g. model endpoints) pass a
+        # non-tenant scope string in `_GLOBAL_SCOPES`, which is exempt from
+        # the tenant check (the role check above already gated them).
+        if target not in _GLOBAL_SCOPES and target != global_tenant:
+            raise HTTPException(
+                status_code=403,
+                detail=f"admin panel manages the global tenant {global_tenant!r} only",
+            )
+
+    return authorize
+
+
+# Non-tenant admin scope strings passed to the authorize hook by global
+# (not tenant-scoped) admin routes — exempt from the global-tenant match.
+_GLOBAL_SCOPES = frozenset({"model-endpoints"})
+
+
+def _mount_admin_if_enabled(app) -> None:
+    """Mount the tenant-admin routes for the global tenant when the admin
+    panel is enabled. No-op otherwise (default)."""
+    if not _admin_enabled():
+        return
+    # Idempotent — ensures the registry/skills/model env vars are defaulted
+    # even when build_fastapi_app is called directly (not via make_app).
+    _prepare_admin_env()
+    from ..models import ModelEndpointRegistry
+    from ..service.registry import JsonFileTenantResourceRegistry
+    from ..tools.mcp_tenant import McpServerConfig
+    from .admin_routes import mount_model_admin, mount_tenant_admin
+
+    authorize = _make_admin_role_extractor()
+
+    registry_dir = os.environ["ADK_CC_TENANT_REGISTRY_DIR"]  # set by _prepare_admin_env
+    registry = JsonFileTenantResourceRegistry[McpServerConfig](
+        root=registry_dir,
+        kind="mcp",
+        model=McpServerConfig,
+        id_attr="server_name",
+    )
+    mount_tenant_admin(
+        app,
+        registry=registry,
+        credentials=_build_credential_provider(),
+        skill_root=os.environ.get("ADK_CC_TENANT_SKILLS_DIR"),
+        admin_extractor=authorize,
+    )
+    # Model-endpoint routes share the same admin gate + the registry file the
+    # agent's SelectableLlm reads, so an activate here switches the live model.
+    mount_model_admin(
+        app,
+        registry=ModelEndpointRegistry(os.environ["ADK_CC_MODEL_REGISTRY_FILE"]),
+        authorize=authorize,
     )

@@ -129,11 +129,40 @@ def _force_coordinator_continuation(callback_context: Context) -> types.Content:
 #   ADK_CC_MODEL=openai/<model-id>
 #   ADK_CC_API_BASE=http://host:port/v1
 #   ADK_CC_API_KEY=<token>
-MODEL = LiteLlm(
-    model=os.environ.get("ADK_CC_MODEL", "openai/Qwen3.6-35B-A3B-UD-MLX-4bit"),
-    api_base=os.environ.get("ADK_CC_API_BASE", "http://localhost:18000/v1"),
+_BOOT_MODEL_ID = os.environ.get("ADK_CC_MODEL", "openai/Qwen3.6-35B-A3B-UD-MLX-4bit")
+_BOOT_API_BASE = os.environ.get("ADK_CC_API_BASE", "http://localhost:18000/v1")
+_boot_litellm = LiteLlm(
+    model=_BOOT_MODEL_ID,
+    api_base=_BOOT_API_BASE,
     api_key=os.environ["ADK_CC_API_KEY"],
 )
+
+
+def _make_model():
+    """The agent's model — ALWAYS a SelectableLlm wrapping the boot LiteLlm.
+
+    The SelectableLlm resolves the active endpoint LAZILY from
+    ADK_CC_MODEL_REGISTRY_FILE on each request. This object is built at
+    package import (eager), which is BEFORE make_app's _prepare_admin_env
+    sets that env var — so resolution must be lazy, not at construction.
+
+    When no registry file is configured / no active endpoint exists (admin
+    panel off — the default), SelectableLlm falls through to the boot
+    LiteLlm delegate, so behavior is IDENTICAL to the pre-panel single
+    model. When the panel is on, _prepare_admin_env sets the env var and
+    seeds the boot model as endpoint #1, and an admin activate switches the
+    live model with no restart.
+    """
+    from .models import SelectableLlm
+
+    return SelectableLlm(
+        registry_path_env="ADK_CC_MODEL_REGISTRY_FILE",
+        default_delegate=_boot_litellm,
+        default_model_id=_BOOT_MODEL_ID,
+    )
+
+
+MODEL = _make_model()
 
 # ---------- permission mode (env-driven) ----------
 # Hoisted above tool instantiation so the plan-mode tools can use it as

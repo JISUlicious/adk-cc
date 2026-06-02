@@ -1,8 +1,8 @@
 import { useEffect } from "react"
-import { X, Moon, Sun, Monitor, LogOut } from "lucide-react"
+import { X, Moon, Sun, Monitor, LogOut, Shield } from "lucide-react"
 import { Button } from "./ui/button"
 import { useTheme, type ThemeMode } from "@/lib/theme"
-import { clearToken, getToken, getUser } from "@/api/auth"
+import { clearToken, getToken, getUser, maybeAdmin } from "@/api/auth"
 import { cn } from "@/lib/utils"
 
 /**
@@ -101,6 +101,17 @@ export function SettingsDialog({
             <ReadOnlyRow label="User id" value={getUser()} />
             <ReadOnlyRow label="Bearer token" value={masked} mono />
           </section>
+
+          {maybeAdmin() && (
+            <section className="pt-2 border-t">
+              <a href="/admin">
+                <Button variant="outline" size="sm" className="w-full">
+                  <Shield className="h-3.5 w-3.5" />
+                  Admin panel
+                </Button>
+              </a>
+            </section>
+          )}
 
           <section className="pt-2 border-t">
             <Button

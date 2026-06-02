@@ -218,6 +218,25 @@ A JSON array of `McpServerConfig` objects, loaded at boot and merged with the si
 
 See [`.env.example`](./.env.example) for every MCP / registry / credential env var, and `docs/05-production-deployment.md` for the tenant admin API.
 
+## Admin panel
+
+A built-in admin UI to manage **MCP servers, skills, and model endpoints at runtime** — no restart, no editing files on the box. Default-OFF; enable with `ADK_CC_ADMIN_PANEL=1`:
+
+```bash
+ADK_CC_ADMIN_PANEL=1 \
+ADK_CC_SERVE_UI=1 ADK_CC_UI_DIST=$(pwd)/web/dist \
+ADK_CC_AUTH_TOKENS='admintok=alice:local:admin' \
+ADK_CC_AGENTS_DIR=$(pwd)/agents \
+.venv/bin/uvicorn adk_cc.service.server:make_app --factory --port 8000
+# open http://127.0.0.1:8000/admin  (sign in with a token whose principal holds the admin role)
+```
+
+- **What it manages** — three tabs: **MCP servers** (add/edit/delete; per-server transport, tool filter, credential key), **Skills** (upload a `.zip` with a `SKILL.md`, delete), **Model endpoints** (add backends and **activate** one to switch the live model — the agent picks it up on the next request via a `SelectableLlm` that resolves the active endpoint per call).
+- **Global mode** — manages one deployment-wide config set, pinned to `ADK_CC_GLOBAL_TENANT_ID` (default `local`). It rides the per-tenant registry machinery (hot-reloaded per invocation), so edits take effect live.
+- **Auth** — the `/admin` page loads anonymously (it's the React shell); every admin **API** call is gated on the admin role (`ADK_CC_ADMIN_ROLE`, default `admin`), from the JWT roles claim or the dev token's `:roles` segment. Secrets are never returned over HTTP (credential + model-endpoint keys are referenced by env-var name; lists show key *names* only).
+
+See [`.env.example`](./.env.example) (`ADK_CC_ADMIN_PANEL`, `ADK_CC_ADMIN_ROLE`, `ADK_CC_GLOBAL_TENANT_ID`, `ADK_CC_ADMIN_DATA_DIR`, `ADK_CC_MODEL_REGISTRY_FILE`) and `docs/05-production-deployment.md` for the route reference.
+
 ## Single-instance server deployment
 
 `adk web .` is great for dev. For a long-running single-instance server (e.g. a dev VM, a trusted internal team, a one-tenant deployment), use the FastAPI factory:
