@@ -183,6 +183,22 @@ _write_plan = WritePlanTool()
 _save_as_artifact = SaveAsArtifactTool()
 _load_artifact_to_sandbox = LoadArtifactToSandboxTool()
 _read_current_plan = ReadCurrentPlanTool()
+
+
+def _artifacts_supported() -> bool:
+    """Whether the artifact tools (save_as_artifact / load_artifact_to_sandbox)
+    should be exposed.
+
+    They move bytes between ADK's artifact store and the sandbox filesystem,
+    which only makes sense with a REAL sandbox. Under the `noop` backend
+    (dev / host-exec, the default) there's no sandbox to load into — the
+    base backend even decodes bytes as UTF-8, so loading a binary artifact
+    would crash. So we don't list these tools when the backend is noop.
+
+    Decided here from ADK_CC_SANDBOX_BACKEND (known at construction, default
+    "noop"); a per-session backend override is caught by the tools' own
+    runtime guard."""
+    return os.environ.get("ADK_CC_SANDBOX_BACKEND", "noop").lower() != "noop"
 _skills = make_skill_toolset()  # None unless ADK_CC_SKILLS_DIR / skills/ has content
 
 
@@ -356,9 +372,14 @@ _coordinator_tools: list = [
     _enter_plan_mode,
     _write_plan,
     _read_current_plan,
-    _save_as_artifact,
-    _load_artifact_to_sandbox,
 ]
+# Artifact tools only make sense with a real sandbox — omit them under the
+# noop backend (default dev/host-exec) so the model never calls a tool that
+# can't meaningfully run. See _artifacts_supported(); the tools also guard
+# at call time against a per-session noop override.
+if _artifacts_supported():
+    _coordinator_tools.append(_save_as_artifact)
+    _coordinator_tools.append(_load_artifact_to_sandbox)
 if _skills is not None:
     _coordinator_tools.append(_skills)
 if _static_mcp is not None:

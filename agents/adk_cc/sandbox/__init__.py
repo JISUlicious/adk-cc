@@ -114,6 +114,16 @@ def set_backend(ctx: ToolContext, backend: SandboxBackend) -> None:
     ctx.state[_STATE_KEY] = backend
 
 
+def is_noop_backend(backend: SandboxBackend) -> bool:
+    """True if `backend` is the no-isolation host-exec NoopBackend.
+
+    Used by the artifact tools to refuse at call time when the RESOLVED
+    backend is noop (e.g. a per-session/tenant override the
+    construction-time env check didn't see). Checks the backend's `name`
+    so it works for any Noop-shaped backend without importing the class."""
+    return getattr(backend, "name", None) == "noop"
+
+
 __all__ = [
     "SandboxBackend",
     "NoopBackend",
@@ -133,4 +143,5 @@ __all__ = [
     "make_default_backend",
     "get_backend",
     "set_backend",
+    "is_noop_backend",
 ]
