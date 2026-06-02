@@ -30,12 +30,7 @@ from .policy_loader import (
     load_policies_from_yaml,
     load_requirements_from_yaml,
 )
-from .requirements import (
-    DeclaredRequirementProvider,
-    Requirement,
-    RequirementProvider,
-    RequirementResolver,
-)
+from .requirements import Requirement, RequirementResolver
 
 __all__ = [
     "Action",
@@ -51,8 +46,6 @@ __all__ = [
     "load_requirements_from_yaml",
     "Requirement",
     "RequirementResolver",
-    "RequirementProvider",
-    "DeclaredRequirementProvider",
     "subject_from_state",
     "resource_from_tool",
 ]

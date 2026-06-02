@@ -44,9 +44,7 @@ from ..authz import (
     AbacPolicyDecisionPoint,
     Action,
     AuthzContext,
-    DeclaredRequirementProvider,
     PolicyDecisionPoint,
-    RequirementProvider,
     RequirementResolver,
     Resource,
     resource_from_tool,
@@ -65,7 +63,6 @@ class AuthzPlugin(BasePlugin):
         pdp: Optional[PolicyDecisionPoint] = None,
         resolver: Optional[RequirementResolver] = None,
         agent_requirements: Optional[dict[str, frozenset[str]]] = None,
-        requirement_provider: Optional[RequirementProvider] = None,
         name: str = "adk_cc_authz",
     ) -> None:
         super().__init__(name=name)
@@ -73,16 +70,14 @@ class AuthzPlugin(BasePlugin):
         # PDP is injectable (tests / external engines); default is the
         # ABAC PDP loaded from the same YAML the permission layer uses.
         self._pdp = pdp if pdp is not None else _default_pdp()
-        # The requirement source is the RequirementProvider seam (what a
-        # tool/agent demands). When one is injected, it wins; otherwise we
-        # build the DEFAULT DeclaredRequirementProvider from the resolver
-        # (YAML `requirements:` ∪ ToolMeta) + the agent registry — identical
-        # to the prior behavior. A custom provider (e.g. the grant-header
-        # scheme) can template requirements with the invoking agent.
-        if requirement_provider is not None:
-            self._provider = requirement_provider
-        else:
-            self._provider = _default_provider(resolver, agent_requirements)
+        # Requirement resolver maps a tool/agent name → its effective
+        # capability requirement (code default ∪ YAML). Default loads the
+        # YAML `requirements:` block; tests can inject one.
+        self._resolver = resolver if resolver is not None else _default_resolver()
+        # Code-owned per-agent requirement defaults (name → perms). Lazily
+        # defaults to agent.py's AGENT_REQUIRED_PERMISSIONS — imported lazily
+        # to avoid a plugins→agent import cycle at module load.
+        self._agent_requirements = agent_requirements
 
     # -- tool-call PEP --------------------------------------------------
 
@@ -103,14 +98,12 @@ class AuthzPlugin(BasePlugin):
             subject = subject_from_state(tool_context.state)
             resource = resource_from_tool(tool_name, tool_args, subject)
             mode = _safe_mode(tool_context)
-            # Effective capability requirement from the provider seam. The
-            # invoking agent (ToolContext.agent_name — populated from the
-            # live invocation context) is passed so a provider can scope the
-            # tool requirement per agent (e.g. svc:{agent}:func:{tool}).
-            required = self._provider.for_tool(
-                tool_name,
-                tool_meta=getattr(tool, "meta", None),
-                invoking_agent=getattr(tool_context, "agent_name", None),
+            # Effective capability requirement: the tool's declared
+            # ToolMeta.required_permissions augmented/overridden by matching
+            # YAML `requirements:` (target tool).
+            base = _tool_required_permissions(tool)
+            required = self._resolver.resolve(
+                tool_name, target="tool", base=base
             )
             decision = self._pdp.authorize(
                 subject,
@@ -163,7 +156,10 @@ class AuthzPlugin(BasePlugin):
 
         agent_name = getattr(agent, "name", "") or ""
         try:
-            required = self._provider.for_agent(agent_name)
+            base = self._agent_required(agent_name)
+            required = self._resolver.resolve(
+                agent_name, target="agent", base=base
+            )
             # No requirement for this agent → nothing to enforce. Skip even
             # building the subject so the ungated path stays cheap and the
             # root coordinator (no requirement) is never blocked.
@@ -203,36 +199,35 @@ class AuthzPlugin(BasePlugin):
             )
         return None
 
+    def _agent_required(self, agent_name: str) -> frozenset[str]:
+        """Code-owned requirement for an agent (registry lookup).
+
+        Falls back to agent.py's AGENT_REQUIRED_PERMISSIONS when no explicit
+        map was injected. Lazy import avoids a plugins→agent cycle.
+        """
+        reg = self._agent_requirements
+        if reg is None:
+            try:
+                from ..agent import AGENT_REQUIRED_PERMISSIONS
+
+                reg = AGENT_REQUIRED_PERMISSIONS
+            except Exception:  # noqa: BLE001 — registry optional
+                reg = {}
+        return frozenset(reg.get(agent_name, ()))
+
+
+def _tool_required_permissions(tool: BaseTool) -> frozenset[str]:
+    """Pull required_permissions off a tool's ToolMeta, if any."""
+    meta = getattr(tool, "meta", None)
+    perms = getattr(meta, "required_permissions", None)
+    return frozenset(perms) if perms else frozenset()
+
 
 def _deny_content(message: str):
     """Build the ADK short-circuit Content for an agent-handoff denial."""
     from google.genai import types
 
     return types.Content(role="model", parts=[types.Part(text=message)])
-
-
-def _default_provider(
-    resolver: Optional[RequirementResolver],
-    agent_requirements: Optional[dict[str, frozenset[str]]],
-) -> RequirementProvider:
-    """Pick the default requirement provider from the environment.
-
-    `ADK_CC_GRANT_HEADER=1` selects the gateway presence scheme (the
-    gateway is authoritative; requirement = presence in the grant). Otherwise
-    the declared scheme (ToolMeta ∪ YAML `requirements:` + agent registry).
-    An explicitly injected provider/resolver always takes precedence over
-    this (handled by the caller)."""
-    if resolver is None:
-        try:
-            from ..service.grant_header_auth import grant_provider_from_env
-
-            grant = grant_provider_from_env()
-            if grant is not None:
-                return grant
-        except Exception as e:  # noqa: BLE001 — never block boot on the adapter
-            _log.error("authz: grant provider init failed: %s", e)
-    resolver = resolver if resolver is not None else _default_resolver()
-    return DeclaredRequirementProvider(resolver, agent_requirements)
 
 
 def _default_pdp() -> PolicyDecisionPoint:

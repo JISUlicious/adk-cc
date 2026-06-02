@@ -215,15 +215,7 @@ def make_app():
         raise RuntimeError("ADK_CC_AGENTS_DIR must be set for make_app()")
 
     extractor = None
-    # Gateway grant-header scheme takes precedence when enabled: the grant
-    # IS the authorization source, so its extractor supplies the principal's
-    # permissions. (The matching PresenceRequirementProvider is selected by
-    # AuthzPlugin via the same ADK_CC_GRANT_HEADER flag.)
-    if os.environ.get("ADK_CC_GRANT_HEADER") == "1":
-        from .grant_header_auth import grant_extractor_from_env
-
-        extractor = grant_extractor_from_env()
-    if extractor is None and os.environ.get("ADK_CC_JWT_JWKS_URL"):
+    if os.environ.get("ADK_CC_JWT_JWKS_URL"):
         from .auth import JwtAuthExtractor
 
         extractor = JwtAuthExtractor(
