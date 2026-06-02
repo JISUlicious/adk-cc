@@ -19,9 +19,26 @@ export function setToken(token: string, user?: string): void {
   if (user) localStorage.setItem(TOKEN_USER_KEY, user)
 }
 
+// Subscribers notified when the token is cleared (e.g. a 401 mid-session),
+// so the AuthGate can drop back to the login form. Module-level so apiFetch
+// and the gate share one channel without prop-drilling.
+const _authClearedSubs = new Set<() => void>()
+
+export function onAuthCleared(fn: () => void): () => void {
+  _authClearedSubs.add(fn)
+  return () => _authClearedSubs.delete(fn)
+}
+
 export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY)
   localStorage.removeItem(TOKEN_USER_KEY)
+  for (const fn of _authClearedSubs) {
+    try {
+      fn()
+    } catch {
+      // a bad subscriber must not break token clearing
+    }
+  }
 }
 
 export function getUser(): string {
