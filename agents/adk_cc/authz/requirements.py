@@ -18,7 +18,9 @@ the PDP enforces AND semantics (subject must hold ALL). Empty = ungated.
 from __future__ import annotations
 
 import fnmatch
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any, Optional
 
 
 @dataclass(frozen=True)
@@ -76,3 +78,78 @@ class RequirementResolver:
             else:  # augment
                 effective |= req.permissions
         return frozenset(effective)
+
+
+class RequirementProvider(ABC):
+    """The swappable seam for *what a tool/agent requires*.
+
+    Mirrors the `PolicyDecisionPoint` seam (which decides *whether* a subject
+    passes): this decides *which permissions the action demands*. Splitting
+    it out lets a deployment compute requirements that depend on runtime
+    context the static YAML can't express — e.g. a per-AGENT tool
+    requirement templated with the invoking agent's name
+    (`svc:{agent}:func:{tool}:level:{N}`).
+
+    The PEPs call `for_tool` / `for_agent`; the returned set is handed to the
+    PDP via `AuthzContext.required_permissions` (AND — subject must hold ALL;
+    empty = ungated).
+    """
+
+    @abstractmethod
+    def for_tool(
+        self,
+        tool_name: str,
+        *,
+        tool_meta: Any = None,
+        invoking_agent: Optional[str] = None,
+    ) -> frozenset[str]:
+        ...
+
+    @abstractmethod
+    def for_agent(self, agent_name: str) -> frozenset[str]:
+        ...
+
+
+class DeclaredRequirementProvider(RequirementProvider):
+    """Default provider — the declared-requirement behavior (unchanged).
+
+    Tool requirement = `ToolMeta.required_permissions` ∪ matching YAML
+    `requirements:` (target tool). Agent requirement = the code registry
+    (name→perms) ∪ matching YAML (target agent). `invoking_agent` is
+    accepted but ignored — the default scheme is agent-independent. Swap in a
+    different `RequirementProvider` to make tool requirements agent-scoped.
+    """
+
+    def __init__(
+        self,
+        resolver: Optional[RequirementResolver] = None,
+        agent_requirements: Optional[dict[str, frozenset[str]]] = None,
+    ) -> None:
+        self._resolver = resolver if resolver is not None else RequirementResolver([])
+        self._agent_requirements = agent_requirements
+
+    def for_tool(
+        self,
+        tool_name: str,
+        *,
+        tool_meta: Any = None,
+        invoking_agent: Optional[str] = None,
+    ) -> frozenset[str]:
+        perms = getattr(tool_meta, "required_permissions", None)
+        base = frozenset(perms) if perms else frozenset()
+        return self._resolver.resolve(tool_name, target="tool", base=base)
+
+    def for_agent(self, agent_name: str) -> frozenset[str]:
+        base = self._agent_base(agent_name)
+        return self._resolver.resolve(agent_name, target="agent", base=base)
+
+    def _agent_base(self, agent_name: str) -> frozenset[str]:
+        reg = self._agent_requirements
+        if reg is None:
+            try:
+                from ..agent import AGENT_REQUIRED_PERMISSIONS
+
+                reg = AGENT_REQUIRED_PERMISSIONS
+            except Exception:  # noqa: BLE001 — registry optional
+                reg = {}
+        return frozenset(reg.get(agent_name, ()))
