@@ -23,7 +23,12 @@ from typing import Any
 
 from google.adk.tools.tool_context import ToolContext
 
-from ..sandbox import SandboxViolation, get_backend, get_workspace
+from ..sandbox import (
+    SandboxViolation,
+    get_backend,
+    get_workspace,
+    is_noop_backend,
+)
 from ._fs import display_path, resolve
 from .base import AdkCcTool, ToolMeta
 from .schemas import LoadArtifactToSandboxArgs
@@ -50,6 +55,22 @@ class LoadArtifactToSandboxTool(AdkCcTool):
     ) -> dict[str, Any]:
         ws = get_workspace(ctx)
         backend = get_backend(ctx)
+
+        # Fail-safe: the agent doesn't list this tool under the noop backend,
+        # but a per-session/tenant override could still resolve to noop here.
+        # Loading an artifact into a no-isolation host-exec backend isn't
+        # meaningful (and binary bytes would fail the base UTF-8 decode), so
+        # refuse cleanly rather than write to the host filesystem.
+        if is_noop_backend(backend):
+            return {
+                "status": "error",
+                "error": (
+                    "load_artifact_to_sandbox is unavailable under the noop "
+                    "sandbox backend (no isolated sandbox to load into). "
+                    "Configure a real backend (ADK_CC_SANDBOX_BACKEND=docker|"
+                    "sandbox_service|daytona) to use artifact load/save."
+                ),
+            }
 
         scope = (args.scope or "session").lower()
         if scope not in ("session", "user"):

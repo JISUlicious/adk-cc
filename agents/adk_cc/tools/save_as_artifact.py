@@ -38,7 +38,12 @@ from typing import Any
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
-from ..sandbox import SandboxViolation, get_backend, get_workspace
+from ..sandbox import (
+    SandboxViolation,
+    get_backend,
+    get_workspace,
+    is_noop_backend,
+)
 from ._artifact import save_part_as_artifact
 from ._fs import resolve
 from .base import AdkCcTool, ToolMeta
@@ -68,6 +73,19 @@ class SaveAsArtifactTool(AdkCcTool):
     ) -> dict[str, Any]:
         ws = get_workspace(ctx)
         backend = get_backend(ctx)
+
+        # Fail-safe: not listed under the noop backend, but a per-session
+        # override could resolve to noop here. The artifact load/save pair is
+        # gated together, so refuse cleanly rather than capture host files.
+        if is_noop_backend(backend):
+            return {
+                "status": "error",
+                "error": (
+                    "save_as_artifact is unavailable under the noop sandbox "
+                    "backend. Configure a real backend (ADK_CC_SANDBOX_BACKEND="
+                    "docker|sandbox_service|daytona) to use artifact save/load."
+                ),
+            }
 
         # Resolve the path the same way read_file / write_file do, so a
         # workspace-relative path (`hello.py`) anchors at the workspace
