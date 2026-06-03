@@ -281,7 +281,11 @@ def mount_model_admin(
         try:
             registry.activate(name)
         except ValueError as e:
-            raise HTTPException(status_code=404, detail=str(e))
+            # Unknown endpoint → 404; a known endpoint that can't be activated
+            # (e.g. its api_key_env is unset) → 409 Conflict, an actionable
+            # config error rather than "not found".
+            status = 404 if str(e).startswith("unknown endpoint") else 409
+            raise HTTPException(status_code=status, detail=str(e))
         return {"status": "ok", "active": name}
 
     app.include_router(router)

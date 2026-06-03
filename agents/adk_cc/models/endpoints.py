@@ -31,7 +31,9 @@ class ModelEndpointConfig(BaseModel):
         default="ADK_CC_API_KEY",
         description=(
             "Name of the env var holding the api key for this endpoint. The "
-            "key itself is never stored in the registry or returned over HTTP."
+            "key itself is never stored in the registry or returned over HTTP. "
+            "Set to an empty string for an intentionally keyless endpoint "
+            "(e.g. a local model server that needs no auth)."
         ),
     )
 
@@ -39,11 +41,23 @@ class ModelEndpointConfig(BaseModel):
         """JSON-safe dict for API responses: includes whether the key env var
         is currently resolvable, but never the key value."""
         d = self.model_dump(mode="json")
-        d["api_key_present"] = bool(os.environ.get(self.api_key_env))
+        d["api_key_present"] = self.api_key_present()
         return d
 
+    def requires_key(self) -> bool:
+        """True when this endpoint declares an api_key_env (i.e. it expects a
+        key). An empty api_key_env means 'intentionally keyless'."""
+        return bool(self.api_key_env)
+
+    def api_key_present(self) -> bool:
+        """True when the declared key env var actually resolves in the
+        environment. Trivially True for an intentionally-keyless endpoint."""
+        if not self.requires_key():
+            return True
+        return bool(os.environ.get(self.api_key_env))
+
     def resolve_api_key(self) -> Optional[str]:
-        return os.environ.get(self.api_key_env)
+        return os.environ.get(self.api_key_env) if self.api_key_env else None
 
 
 class _RegistryFile(BaseModel):
@@ -136,11 +150,25 @@ class ModelEndpointRegistry:
             self._write(data)
 
     def activate(self, name: str) -> None:
-        """Make `name` the active endpoint. Raises ValueError if unknown."""
+        """Make `name` the active endpoint.
+
+        Raises ValueError if the endpoint is unknown, or if its api_key_env
+        is declared but unset in the server process — activating an endpoint
+        whose key is missing would only surface as an opaque provider auth
+        error on the next user message, so we reject it here at config time.
+        """
         with self._lock:
             data = self._read()
-            if not any(e.name == name for e in data.endpoints):
+            target = next((e for e in data.endpoints if e.name == name), None)
+            if target is None:
                 raise ValueError(f"unknown endpoint: {name!r}")
+            if target.requires_key() and not target.api_key_present():
+                raise ValueError(
+                    f"cannot activate {name!r}: its api_key_env "
+                    f"{target.api_key_env!r} is not set in the server "
+                    f"environment. Set it first (or clear api_key_env for a "
+                    f"keyless endpoint)."
+                )
             data.active = name
             self._write(data)
 
