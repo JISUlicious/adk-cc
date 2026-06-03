@@ -9,7 +9,17 @@ import tailwindcss from "@tailwindcss/vite"
 // running `adk api_server` on :8000 (set ADK_CC_DEV_API to override).
 // Prod: built assets are served by FastAPI directly (StaticFiles mount
 // in adk_cc/service/server.py); CORS not needed.
+//
+// envDir points at the REPO ROOT (one level up from web/) so the SAME
+// `.env` that configures the adk-cc backend also supplies the frontend's
+// VITE_* build-time vars — e.g. VITE_ADK_CC_HTML_PREVIEW_ALLOW_SCRIPTS.
+// Without this, Vite reads .env from web/ only, so a flag set in the root
+// .env is silently ignored (baked false) — exactly how the allow-scripts
+// toggle got dropped. Vite only exposes VITE_-prefixed vars to client
+// code, so the backend's ADK_CC_*/secret vars in the same file are NOT
+// leaked into the bundle.
 export default defineConfig({
+  envDir: path.resolve(__dirname, ".."),
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
