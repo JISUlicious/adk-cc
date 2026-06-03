@@ -109,10 +109,22 @@ class SelectableLlm(BaseLlm):
     def _build_litellm(self, cfg) -> BaseLlm:  # noqa: ANN001
         from google.adk.models.lite_llm import LiteLlm
 
-        api_key = cfg.resolve_api_key()
         kwargs: dict[str, Any] = {"model": cfg.model, "api_base": cfg.api_base}
-        if api_key:
+        if cfg.requires_key():
+            api_key = cfg.resolve_api_key()
+            if not api_key:
+                # FAIL LOUD. Previously a missing key was silently omitted,
+                # so LiteLlm was built with no key and failed downstream with
+                # an opaque "litellm authentication" error against the
+                # provider. Surface the actual config problem instead.
+                raise ValueError(
+                    f"model endpoint {cfg.name!r} references api_key_env "
+                    f"{cfg.api_key_env!r}, but that environment variable is "
+                    f"not set in the server process. Set it (or, for an "
+                    f"endpoint that needs no auth, clear api_key_env)."
+                )
             kwargs["api_key"] = api_key
+        # else: intentionally keyless endpoint (api_key_env == "") — no key.
         return LiteLlm(**kwargs)
 
     # -- BaseLlm interface (delegate everything) -----------------------

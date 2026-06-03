@@ -251,6 +251,113 @@ def test_routes_list_put_activate_delete():
     print("OK test_routes_list_put_activate_delete")
 
 
+# --- missing-api-key bug (the LiteLLM auth failure) -----------------------
+
+class _FakeLlmForKey:
+    """Captures the kwargs a real LiteLlm would be built with."""
+    last_kwargs = None
+
+    def __init__(self, **kwargs):
+        type(self).last_kwargs = kwargs
+
+
+def test_build_litellm_raises_on_missing_key_env():
+    # Regression for the silent-drop bug: an endpoint declaring an api_key_env
+    # that is NOT set must FAIL LOUD, not build a keyless LiteLlm that then
+    # errors with an opaque litellm auth failure downstream.
+    os.environ.pop("MISSING_KEY_VAR", None)
+    with tempfile.TemporaryDirectory() as tmp:
+        r = _reg(tmp)
+        r.upsert(ModelEndpointConfig(name="ep", model="openai/m",
+                 api_base="http://x/v1", api_key_env="MISSING_KEY_VAR"))
+        sel = SelectableLlm(registry=r)
+        try:
+            sel._resolve_delegate()
+            assert False, "expected ValueError for missing key env"
+        except ValueError as e:
+            assert "MISSING_KEY_VAR" in str(e) and "not set" in str(e), e
+    print("OK test_build_litellm_raises_on_missing_key_env")
+
+
+def test_build_litellm_passes_key_when_present():
+    os.environ["PRESENT_KEY_VAR"] = "sk-real"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            r = _reg(tmp)
+            r.upsert(ModelEndpointConfig(name="ep", model="openai/m",
+                     api_base="http://x/v1", api_key_env="PRESENT_KEY_VAR"))
+            sel = SelectableLlm(registry=r)
+            sel._build_litellm = lambda cfg: _FakeLlmForKey(  # type: ignore
+                model=cfg.model, api_base=cfg.api_base, api_key=cfg.resolve_api_key())
+            sel._resolve_delegate()
+            assert _FakeLlmForKey.last_kwargs["api_key"] == "sk-real"
+    finally:
+        os.environ.pop("PRESENT_KEY_VAR", None)
+    print("OK test_build_litellm_passes_key_when_present")
+
+
+def test_keyless_endpoint_allowed():
+    # api_key_env="" → intentionally keyless (e.g. local no-auth model). Must
+    # build WITHOUT a key and WITHOUT raising.
+    with tempfile.TemporaryDirectory() as tmp:
+        r = _reg(tmp)
+        r.upsert(ModelEndpointConfig(name="local", model="openai/m",
+                 api_base="http://localhost:8000/v1", api_key_env=""))
+        sel = SelectableLlm(registry=r)
+        d = sel._resolve_delegate()  # must not raise
+        assert d is not None
+    print("OK test_keyless_endpoint_allowed")
+
+
+def test_activate_rejects_missing_key():
+    os.environ.pop("ALSO_MISSING", None)
+    with tempfile.TemporaryDirectory() as tmp:
+        r = _reg(tmp)
+        r.upsert(_cfg("ok"))  # default api_key_env=ADK_CC_API_KEY (=stub, set)
+        r.upsert(ModelEndpointConfig(name="bad", model="openai/m",
+                 api_base="http://x/v1", api_key_env="ALSO_MISSING"))
+        try:
+            r.activate("bad")
+            assert False, "expected activate to reject missing-key endpoint"
+        except ValueError as e:
+            assert "ALSO_MISSING" in str(e), e
+        # the good one activates fine
+        r.activate("ok")
+        assert r.active_name() == "ok"
+    print("OK test_activate_rejects_missing_key")
+
+
+def test_route_activate_missing_key_409():
+    from fastapi import FastAPI, HTTPException
+    from starlette.testclient import TestClient
+    from adk_cc.service.auth import AuthPrincipal, BearerTokenExtractor, make_auth_middleware
+    from adk_cc.service.admin_routes import mount_model_admin
+
+    os.environ.pop("BOGUS_KEY", None)
+    with tempfile.TemporaryDirectory() as tmp:
+        r = _reg(tmp)
+        r.seed_default(_cfg("default"))  # valid (ADK_CC_API_KEY=stub)
+        r.upsert(ModelEndpointConfig(name="bad", model="openai/m",
+                 api_base="http://x/v1", api_key_env="BOGUS_KEY"))
+
+        def authorize(request, target):
+            auth = getattr(request.state, "adk_cc_auth", None)
+            if auth is None or "admin" not in (getattr(auth, "roles", frozenset()) or frozenset()):
+                raise HTTPException(403, "need admin")
+
+        app = FastAPI()
+        mount_model_admin(app, registry=r, authorize=authorize)
+        app.add_middleware(make_auth_middleware(BearerTokenExtractor(
+            {"admintok": AuthPrincipal("a", "local", frozenset({"admin"}))})))
+        c = TestClient(app)
+        h = {"Authorization": "Bearer admintok"}
+        # activating the bad endpoint → 409 (not 404, not 500)
+        assert c.post("/admin/model-endpoints/bad/activate", headers=h).status_code == 409
+        # unknown → still 404
+        assert c.post("/admin/model-endpoints/nope/activate", headers=h).status_code == 404
+    print("OK test_route_activate_missing_key_409")
+
+
 if __name__ == "__main__":
     test_first_endpoint_becomes_active()
     test_activate_and_persist()
@@ -264,4 +371,10 @@ if __name__ == "__main__":
     test_selectable_generate_delegates()
     test_routes_admin_gate()
     test_routes_list_put_activate_delete()
+    # missing-api-key regression (the LiteLLM auth bug)
+    test_build_litellm_raises_on_missing_key_env()
+    test_build_litellm_passes_key_when_present()
+    test_keyless_endpoint_allowed()
+    test_activate_rejects_missing_key()
+    test_route_activate_missing_key_409()
     print("\nall model-endpoint tests passed")
