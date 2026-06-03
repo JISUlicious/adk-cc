@@ -191,6 +191,72 @@ async def test_auth_context_isolates_between_concurrent_requests() -> None:
     print("OK auth_context_isolates_between_concurrent_requests")
 
 
+async def test_ensure_workspace_retries_after_failure() -> None:
+    """Regression: a failed ensure_workspace must NOT stick — the flag is set
+    only AFTER success, so the next tool call retries. Pre-fix, the flag flipped
+    True before the call, so one transient failure (e.g. the sandbox API briefly
+    unreachable) bricked the whole session with 'used before ensure_workspace()'.
+    """
+    from types import SimpleNamespace
+    from adk_cc.service import tenancy as T
+    from adk_cc.service.tenancy import TenancyPlugin, TenantContext
+    from adk_cc.sandbox.backends.base import SandboxBackend
+
+    # MUST subclass SandboxBackend — get_backend() ignores a state-stored
+    # backend that fails isinstance(SandboxBackend) and falls back to the
+    # module default, which would mask the behavior under test.
+    class _FlakyBackend(SandboxBackend):
+        name = "flaky"
+        def __init__(self):
+            self.calls = 0
+        async def ensure_workspace(self, ws):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("daytona briefly unreachable")
+            # 2nd call succeeds
+        # unused ABC methods
+        async def exec(self, *a, **k): raise NotImplementedError
+        async def read_text(self, *a, **k): raise NotImplementedError
+        async def write_text(self, *a, **k): raise NotImplementedError
+
+    backend = _FlakyBackend()
+    plugin = TenancyPlugin(default_workspace_root="/tmp/wks")
+
+    # Pre-seed state so _seed_state is a no-op (tenant key already set) and
+    # this test isolates ONLY the ensure-workspace retry logic — independent
+    # of the real workspace/backend machinery and any .env-configured backend.
+    state: dict = {
+        T._STATE_TENANT_KEY: TenantContext(
+            tenant_id="local", user_id="alice", workspace_root_path="/tmp/wks"
+        ),
+        "temp:sandbox_workspace": SimpleNamespace(
+            abs_path="/tmp/wks/local/alice", tenant_id="local", session_id="s1",
+            fs_read_config=lambda: None, fs_write_config=lambda: None,
+        ),
+        "temp:sandbox_backend": backend,
+    }
+    ctx = SimpleNamespace(
+        state=state,
+        user_id="alice",
+        session=SimpleNamespace(id="s1", state=state),
+    )
+
+    # 1st tool call: ensure fails → flag must remain UNSET so we retry.
+    await plugin.before_tool_callback(tool=None, tool_args={}, tool_context=ctx)
+    assert backend.calls == 1, backend.calls
+    assert not state.get(T._WS_ENSURED_KEY), "flag must NOT be set after a failed ensure"
+
+    # 2nd tool call: ensure retried and succeeds → flag set, no further calls.
+    await plugin.before_tool_callback(tool=None, tool_args={}, tool_context=ctx)
+    assert backend.calls == 2, "ensure_workspace should have been retried"
+    assert state.get(T._WS_ENSURED_KEY) is True, "flag must be set after success"
+
+    # 3rd tool call: already ensured → no more ensure_workspace calls.
+    await plugin.before_tool_callback(tool=None, tool_args={}, tool_context=ctx)
+    assert backend.calls == 2, "ensure_workspace must not run again once ensured"
+    print("OK ensure_workspace_retries_after_failure")
+
+
 def main() -> None:
     test_default_resolver_no_auth_context()
     test_default_resolver_uses_auth_context_tenant_id()
@@ -199,6 +265,7 @@ def main() -> None:
     test_custom_resolver_overrides_default()
     asyncio.run(test_auth_context_propagates_across_async_tasks())
     asyncio.run(test_auth_context_isolates_between_concurrent_requests())
+    asyncio.run(test_ensure_workspace_retries_after_failure())
     print("\nall tenancy-resolver tests passed")
 
 

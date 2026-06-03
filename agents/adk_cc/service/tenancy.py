@@ -278,16 +278,25 @@ class TenancyPlugin(BasePlugin):
             # hitting a "backend used before ensure_workspace()" guard
             # with no visible root cause — so we log before swallowing.
             if not state.get(_WS_ENSURED_KEY):
-                state[_WS_ENSURED_KEY] = True
                 from ..sandbox import get_backend, get_workspace
 
                 ws = get_workspace(tool_context)
                 backend = get_backend(tool_context)
                 try:
                     await backend.ensure_workspace(ws)
+                    # Mark ensured ONLY after success. Setting the flag before
+                    # the call (the old behavior) meant a transient failure
+                    # here — e.g. the sandbox API briefly unreachable — left
+                    # the flag stuck True, so ensure_workspace was never
+                    # retried and every later tool call hit the backend's
+                    # "used before ensure_workspace()" guard for the life of
+                    # the (in-memory) session. Setting it after success lets
+                    # the next tool call retry a failed bring-up.
+                    state[_WS_ENSURED_KEY] = True
                 except Exception as e:
                     _log.warning(
-                        "ensure_workspace failed (backend=%s tenant=%s session=%s): %s: %s",
+                        "ensure_workspace failed (backend=%s tenant=%s session=%s): %s: %s "
+                        "— will retry on next tool call",
                         type(backend).__name__,
                         getattr(ws, "tenant_id", "?"),
                         getattr(ws, "session_id", "?"),
