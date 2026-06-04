@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { RefreshCw, AlertTriangle } from "lucide-react"
+import { RefreshCw, AlertTriangle, Maximize2, X } from "lucide-react"
 import { fetchArtifactText } from "@/api/artifacts"
 
 /**
@@ -51,6 +51,7 @@ export function HtmlArtifactPreview({
 }) {
   const [html, setHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState(false)
   const cancelled = useRef(false)
 
   useEffect(() => {
@@ -68,6 +69,16 @@ export function HtmlArtifactPreview({
       cancelled.current = true
     }
   }, [appName, userId, sessionId, filename, version])
+
+  // Escape closes the expanded overlay.
+  useEffect(() => {
+    if (!expanded) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setExpanded(false)
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [expanded])
 
   if (error) {
     return (
@@ -87,23 +98,70 @@ export function HtmlArtifactPreview({
     )
   }
 
+  // The sandboxed frame, reused inline and in the expanded overlay.
+  // SANDBOX: "" (no scripts) by default, "allow-scripts" when the build-time
+  // flag is on. allow-same-origin is NEVER set — that combination would let
+  // the frame read the parent's token.
+  const frame = (heightClass: string) => (
+    <iframe
+      sandbox={SANDBOX}
+      srcDoc={html}
+      title={`${filename} (preview)`}
+      className={`w-full ${heightClass} rounded-md border border-border bg-white`}
+    />
+  )
+
+  const scriptNote = ALLOW_SCRIPTS ? (
+    <p className="text-[10px] text-muted-foreground">
+      interactive preview — scripts run in an isolated sandbox (no access to
+      your session)
+    </p>
+  ) : null
+
   return (
     <div className="space-y-1">
-      {ALLOW_SCRIPTS && (
-        <p className="text-[10px] text-muted-foreground">
-          interactive preview — scripts run in an isolated sandbox (no access
-          to your session)
-        </p>
+      <div className="flex items-center justify-between gap-2">
+        {scriptNote ?? <span />}
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground"
+          aria-label={`Expand ${filename} preview`}
+        >
+          <Maximize2 className="h-3 w-3" />
+          expand
+        </button>
+      </div>
+      {/* Inline: taller than before (70vh of the chat area, capped) so charts
+          have real room without dominating the page; the frame scrolls
+          internally and the expand button gives full height on demand. */}
+      {frame("h-[70vh] max-h-[640px] min-h-[320px]")}
+
+      {expanded && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setExpanded(false)}
+        >
+          <div
+            className="flex h-[92vh] w-full max-w-5xl flex-col rounded-lg border border-border bg-background shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b px-4 py-2">
+              <span className="truncate font-mono text-xs">{filename}</span>
+              <button
+                type="button"
+                onClick={() => setExpanded(false)}
+                className="text-muted-foreground hover:text-foreground"
+                aria-label="Close preview"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 p-2">{frame("h-full")}</div>
+            {scriptNote && <div className="px-4 pb-2">{scriptNote}</div>}
+          </div>
+        </div>
       )}
-      <iframe
-        // SANDBOX: "" (no scripts) by default, "allow-scripts" when the
-        // build-time flag is on. allow-same-origin is NEVER set — that
-        // combination would let the frame read the parent's token.
-        sandbox={SANDBOX}
-        srcDoc={html}
-        title={`${filename} (preview)`}
-        className="w-full h-96 rounded-md border border-border bg-white"
-      />
     </div>
   )
 }

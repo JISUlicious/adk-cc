@@ -73,13 +73,20 @@ export function ArtifactChip({
         )}
       </button>
       {isHtml && (
-        <HtmlArtifactPreview
-          appName={appName}
-          userId={userId}
-          sessionId={sessionId}
-          filename={filename}
-          version={version}
-        />
+        // Fill the chip's max-w-[80%] box so the preview renders at the same
+        // width as a chat bubble. Needed because this column is `items-start`
+        // (children don't stretch); without an explicit width the preview's
+        // inner wrapper shrink-wraps and the iframe collapses to its ~300px
+        // intrinsic width. `w-full` here = 80% of the row = the bubble width.
+        <div className="w-full">
+          <HtmlArtifactPreview
+            appName={appName}
+            userId={userId}
+            sessionId={sessionId}
+            filename={filename}
+            version={version}
+          />
+        </div>
       )}
     </div>
   )
