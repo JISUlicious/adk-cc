@@ -713,6 +713,71 @@ async def test_integration_smoke():
 # === Driver ===
 
 
+async def test_create_injects_sandbox_env():
+    """ensure_workspace bakes resolved env (static + host passthrough +
+    per-tenant credential) into the POST /api/sandbox `env` field."""
+    from adk_cc.sandbox.sandbox_env import SandboxEnvSpec
+    from adk_cc.credentials.impls import InMemoryCredentialProvider
+
+    os.environ["ADK_CC_DAYTONA_TEST_PT"] = "from-host"
+    try:
+        prov = InMemoryCredentialProvider(shared=False)
+        await prov.put(tenant_id="acme", key="gh_pat", value="ghp_secret")
+        spec = SandboxEnvSpec(
+            static={"TZ": "UTC"},
+            passthrough=("ADK_CC_DAYTONA_TEST_PT",),
+            credentials={"GITHUB_TOKEN": "gh_pat"},
+        )
+        captured: dict = {}
+
+        async def respond(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if request.method == "POST" and path == "/api/sandbox":
+                captured["body"] = json.loads(request.content.decode())
+                return httpx.Response(
+                    200, json={"id": "sbx-001", "state": "started"}
+                )
+            if request.method == "GET" and path == "/api/sandbox/sbx-001":
+                return httpx.Response(
+                    200, json={"id": "sbx-001", "state": "started"}
+                )
+            return httpx.Response(404, json={"message": f"unexpected {path}"})
+
+        rec = _Recorder(respond)
+        backend = _make_backend(rec, credentials=prov, env_spec=spec)
+        await backend.ensure_workspace(_make_workspace())
+        env = captured["body"].get("env")
+        assert env == {
+            "TZ": "UTC",
+            "ADK_CC_DAYTONA_TEST_PT": "from-host",
+            "GITHUB_TOKEN": "ghp_secret",
+        }, env
+        print("OK create_injects_sandbox_env")
+    finally:
+        os.environ.pop("ADK_CC_DAYTONA_TEST_PT", None)
+
+
+async def test_create_omits_env_when_no_spec():
+    """No env_spec (or an empty one) → the create payload carries NO `env`
+    field, so the v1 behavior is byte-for-byte unchanged."""
+    captured: dict = {}
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/api/sandbox":
+            captured["body"] = json.loads(request.content.decode())
+            return httpx.Response(200, json={"id": "sbx-001", "state": "started"})
+        if request.method == "GET" and path == "/api/sandbox/sbx-001":
+            return httpx.Response(200, json={"id": "sbx-001", "state": "started"})
+        return httpx.Response(404, json={"message": f"unexpected {path}"})
+
+    rec = _Recorder(respond)
+    backend = _make_backend(rec)  # no env_spec
+    await backend.ensure_workspace(_make_workspace())
+    assert "env" not in captured["body"], captured["body"]
+    print("OK create_omits_env_when_no_spec")
+
+
 def main():
     tests = [
         test_ensure_workspace_creates_and_polls,
@@ -732,6 +797,8 @@ def main():
         test_close_deletes_when_delete_on_close_true,
         test_close_swallows_exceptions,
         test_factory_from_env_dispatches,
+        test_create_injects_sandbox_env,
+        test_create_omits_env_when_no_spec,
         test_integration_smoke,
     ]
     for t in tests:

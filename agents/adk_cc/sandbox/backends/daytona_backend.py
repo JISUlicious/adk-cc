@@ -115,6 +115,7 @@ from .base import SandboxBackend
 
 if TYPE_CHECKING:
     from ...credentials import CredentialProvider
+    from ..sandbox_env import SandboxEnvSpec
     from ..workspace import WorkspaceRoot
 
 log = logging.getLogger(__name__)
@@ -165,6 +166,7 @@ class DaytonaBackend(SandboxBackend):
         api_key: Optional[str] = None,
         credentials: Optional["CredentialProvider"] = None,
         credential_key: str = "daytona_api_key",
+        env_spec: Optional["SandboxEnvSpec"] = None,
         snapshot: Optional[str] = None,
         workspace_path: str = "/home/daytona",
         autostop_minutes: int = 15,
@@ -186,6 +188,9 @@ class DaytonaBackend(SandboxBackend):
         self._static_token: Optional[str] = api_key
         self._credentials: Optional["CredentialProvider"] = credentials
         self._credential_key = credential_key
+        # Env vars / secrets to bake into the sandbox at create time. None or
+        # empty → no `env` field sent (unchanged create payload).
+        self._env_spec: Optional["SandboxEnvSpec"] = env_spec
         self._snapshot = snapshot
         self._workspace_path = workspace_path
         self._autostop_minutes = int(autostop_minutes)
@@ -396,6 +401,27 @@ class DaytonaBackend(SandboxBackend):
             }
             if self._snapshot:
                 payload["snapshot"] = self._snapshot
+            # Env vars / per-tenant secrets the agent's in-sandbox commands
+            # need (git tokens, vendor API keys, …). Daytona bakes `env` into
+            # the sandbox's container environment, so every later `exec`
+            # inherits it. Resolved per-tenant here (session start), so a
+            # rotated secret applies on the next session. Only the KEY NAMES
+            # are logged, never the values (see sandbox_env.resolve).
+            if self._env_spec is not None and not self._env_spec.is_empty():
+                resolved_env = await self._env_spec.resolve(
+                    tenant_id=self._tenant_id,
+                    credentials=self._credentials,
+                )
+                if resolved_env:
+                    payload["env"] = resolved_env
+                    log.info(
+                        "daytona: injecting %d env var(s) into sandbox for "
+                        "session %s (tenant=%s): %s",
+                        len(resolved_env),
+                        self._session_id,
+                        self._tenant_id,
+                        sorted(resolved_env),  # names only
+                    )
             async with self._client() as client:
                 resp = await client.post(
                     self._api_url("/api/sandbox"),
@@ -836,6 +862,15 @@ def make_daytona_backend_from_env(
       - ADK_CC_DAYTONA_START_TIMEOUT_S    — default 120.
       - ADK_CC_DAYTONA_REQUEST_TIMEOUT_S  — default 30.
 
+    Sandbox environment (backend-agnostic; see sandbox/sandbox_env.py).
+    These bake env vars / per-tenant secrets into the sandbox at create
+    time so in-sandbox commands (git, vendor CLIs) have what they need:
+      - ADK_CC_SANDBOX_ENV               — static KEY=VALUE,… (or JSON).
+      - ADK_CC_SANDBOX_ENV_PASSTHROUGH   — host env var names to copy.
+      - ADK_CC_SANDBOX_ENV_CREDENTIALS   — ENV_NAME=credential_key,… ;
+                                           values resolved per-tenant from
+                                           the CredentialProvider.
+
     Resource fields (cpu/memory/disk) are NOT exposed via env in v1:
     Daytona's API rejects them alongside a snapshot, and v1 always
     routes through snapshots. Custom resource sizing goes through a
@@ -880,14 +915,24 @@ def make_daytona_backend_from_env(
         except ValueError as e:
             raise RuntimeError(f"{key}={raw!r} is not a valid float: {e}") from e
 
+    # Env/secret injection is backend-agnostic: the same ADK_CC_SANDBOX_ENV*
+    # knobs feed every backend. Pass the credential provider through for
+    # per-tenant secret resolution EVEN in static-token mode (token
+    # resolution still prefers the static token; the provider is only used
+    # to look up sandbox-env secrets here).
+    from ..sandbox_env import sandbox_env_spec_from_env
+
+    env_spec = sandbox_env_spec_from_env()
+
     return DaytonaBackend(
         session_id=session_id,
         tenant_id=tenant_id,
         api_url=api_url,
         proxy_url=proxy_url,
         api_key=static_token,
-        credentials=credentials if not static_token else None,
+        credentials=credentials,
         credential_key=credential_key,
+        env_spec=env_spec,
         snapshot=os.environ.get("ADK_CC_DAYTONA_SNAPSHOT") or None,
         workspace_path=os.environ.get(
             "ADK_CC_DAYTONA_WORKSPACE_PATH", "/home/daytona"
