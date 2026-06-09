@@ -442,6 +442,49 @@ if _tenant_mcp is not None:
 if _tenant_skills is not None:
     _coordinator_tools.append(_tenant_skills)
 
+# Parallel exploration (opt-in spike): expose read-only explorers as
+# AgentTools so the coordinator can SPAWN SEVERAL IN ONE TURN — ADK then
+# dispatches the tool calls concurrently (asyncio.gather), giving dynamic,
+# parallel fan-out the model sizes at runtime. Each runs in its own isolated
+# session (own context budget) and returns an enriched, attributable envelope
+# (see tools/agent_tool_explore.py). Off by default; set
+# ADK_CC_AGENT_TOOL_EXPLORE=1 to enable. Distinct from the transfer-based
+# `Explore` sub-agent (sequential, shared event log) which stays as-is.
+if os.environ.get("ADK_CC_AGENT_TOOL_EXPLORE") == "1":
+    from .tools.agent_tool_explore import EnrichedAgentTool
+
+    _code_explorer = LlmAgent(
+        name="code_explore",
+        model=MODEL,
+        description=(
+            "Spawn a read-only sub-agent to explore the CODEBASE for ONE "
+            "focused question; it returns a written report. To investigate "
+            "several independent questions, call this tool ONCE PER QUESTION "
+            "IN A SINGLE TURN — the calls run in parallel. Pass the full "
+            "question as `request` (the explorer shares no chat history)."
+        ),
+        instruction=prompts.EXPLORE_INSTRUCTION,
+        tools=[_read_file, _glob_files, _grep],
+    )
+    _web_explorer = LlmAgent(
+        name="web_explore",
+        model=MODEL,
+        description=(
+            "Spawn a read-only sub-agent to research ONE question on the WEB; "
+            "it returns a written report. Call once per question in a single "
+            "turn to research several things in parallel. Pass the full "
+            "question as `request`."
+        ),
+        instruction=prompts.EXPLORE_INSTRUCTION,
+        tools=[_web_fetch, _grep],
+    )
+    _coordinator_tools.append(
+        EnrichedAgentTool(_code_explorer, skip_summarization=True)
+    )
+    _coordinator_tools.append(
+        EnrichedAgentTool(_web_explorer, skip_summarization=True)
+    )
+
 root_agent = LlmAgent(
     name="coordinator",
     model=MODEL,
