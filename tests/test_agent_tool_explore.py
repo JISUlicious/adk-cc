@@ -53,6 +53,7 @@ def test_enrich_result_envelope():
         "agent": "code_explore",
         "ok": True,
         "elapsed_s": 4.124,  # rounded to 3dp
+        "queued_s": 0.0,
         "tool_calls": 7,
         "tools_used": ["grep", "read_file"],
         "events": 15,
@@ -153,11 +154,45 @@ async def test_several_tools_fire_in_parallel():
     print("OK several_tools_fire_in_parallel")
 
 
+async def test_concurrency_cap_bounds_parallelism():
+    """With the cap at 2, firing 4 explorers runs them in 2 WAVES — the model
+    can spawn any number, but only `cap` run at once; the rest queue
+    (queued_s > 0). Proves the semaphore enforces the cap mechanically."""
+    from adk_cc.tools import agent_tool_explore as ate
+
+    ate._reset_gate_for_test(2)  # cap = 2
+    try:
+        tc = await _make_tool_context()
+        n, delay = 4, 0.4
+        tools = [
+            EnrichedAgentTool(_SleepyAgent(name=f"cap{i}", delay=delay),
+                              skip_summarization=True)
+            for i in range(n)
+        ]
+        t0 = time.perf_counter()
+        results = await asyncio.gather(*[
+            t.run_async(args={"request": f"t{i}"}, tool_context=tc)
+            for i, t in enumerate(tools)
+        ])
+        elapsed = time.perf_counter() - t0
+        # cap=2, 4 tasks => 2 waves x 0.4s ≈ 0.8s. Uncapped would be ~0.4s;
+        # fully serial ~1.6s. The window cleanly isolates "2 at a time".
+        print(f"  cap=2, {n} explorers x {delay}s -> elapsed={elapsed:.3f}s "
+              f"(queued_s={[r['queued_s'] for r in results]})")
+        assert 0.7 <= elapsed < 1.3, f"cap not enforced: {elapsed:.3f}s"
+        # The two that waited for a slot recorded queue time.
+        assert sum(1 for r in results if r["queued_s"] > 0.1) >= 2, results
+        print("OK concurrency_cap_bounds_parallelism")
+    finally:
+        ate._reset_gate_for_test(ate.explore_concurrency_limit())  # restore
+
+
 def main():
     test_enrich_result_envelope()
     test_enrich_result_error()
     asyncio.run(test_enriched_tool_returns_envelope())
     asyncio.run(test_several_tools_fire_in_parallel())
+    asyncio.run(test_concurrency_cap_bounds_parallelism())
     print("\nall agent-tool-explore tests passed")
 
 

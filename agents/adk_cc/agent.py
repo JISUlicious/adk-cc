@@ -451,17 +451,32 @@ if _tenant_skills is not None:
 # ADK_CC_AGENT_TOOL_EXPLORE=1 to enable. Distinct from the transfer-based
 # `Explore` sub-agent (sequential, shared event log) which stays as-is.
 if os.environ.get("ADK_CC_AGENT_TOOL_EXPLORE") == "1":
-    from .tools.agent_tool_explore import EnrichedAgentTool
+    from .tools.agent_tool_explore import (
+        EnrichedAgentTool,
+        explore_concurrency_limit,
+    )
 
+    _explore_max = explore_concurrency_limit()
+    # Batched, iterate-until-sufficient workflow (the "repeat as needed" half).
+    # The cap is enforced mechanically by a semaphore in the tool; this tells
+    # the model how to USE the fan-out: spawn a round, evaluate coverage, only
+    # re-spawn for the gaps. Sufficiency is the model's judgment.
+    _EXPLORE_WORKFLOW = (
+        f" WORKFLOW: in one turn, spawn a BATCH — one call per independent "
+        f"question, up to ~{_explore_max} (more than that just queue). They "
+        f"run in parallel and each returns {{task, report, ok, elapsed_s, "
+        f"tool_calls, ...}}. AFTER the reports return, ASSESS whether they "
+        f"cover what you need; if gaps remain, spawn ANOTHER round targeting "
+        f"only the missing pieces. Repeat until sufficient (typically ≤3 "
+        f"rounds), then synthesize. Pass the full question as `request` — the "
+        f"explorer shares no chat history."
+    )
     _code_explorer = LlmAgent(
         name="code_explore",
         model=MODEL,
         description=(
             "Spawn a read-only sub-agent to explore the CODEBASE for ONE "
-            "focused question; it returns a written report. To investigate "
-            "several independent questions, call this tool ONCE PER QUESTION "
-            "IN A SINGLE TURN — the calls run in parallel. Pass the full "
-            "question as `request` (the explorer shares no chat history)."
+            "focused question; returns a structured report." + _EXPLORE_WORKFLOW
         ),
         instruction=prompts.EXPLORE_INSTRUCTION,
         tools=[_read_file, _glob_files, _grep],
@@ -471,19 +486,18 @@ if os.environ.get("ADK_CC_AGENT_TOOL_EXPLORE") == "1":
         model=MODEL,
         description=(
             "Spawn a read-only sub-agent to research ONE question on the WEB; "
-            "it returns a written report. Call once per question in a single "
-            "turn to research several things in parallel. Pass the full "
-            "question as `request`."
+            "returns a structured report." + _EXPLORE_WORKFLOW
         ),
         instruction=prompts.EXPLORE_INSTRUCTION,
         tools=[_web_fetch, _grep],
     )
-    _coordinator_tools.append(
-        EnrichedAgentTool(_code_explorer, skip_summarization=True)
-    )
-    _coordinator_tools.append(
-        EnrichedAgentTool(_web_explorer, skip_summarization=True)
-    )
+    # skip_summarization MUST be False here: it sets actions.skip_summarization,
+    # which makes ADK skip the coordinator's post-tool turn — the very turn
+    # where it synthesizes the reports for the user AND evaluates coverage to
+    # decide whether to spawn another round. (Discovered via e2e: with it True
+    # the run ended at the tool responses — no answer, no iteration.)
+    _coordinator_tools.append(EnrichedAgentTool(_code_explorer))
+    _coordinator_tools.append(EnrichedAgentTool(_web_explorer))
 
 root_agent = LlmAgent(
     name="coordinator",

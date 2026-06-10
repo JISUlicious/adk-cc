@@ -48,6 +48,8 @@ Opt-in: wired into the coordinator only when `ADK_CC_AGENT_TOOL_EXPLORE=1`
 
 from __future__ import annotations
 
+import asyncio
+import os
 import time
 from typing import Any, Optional
 
@@ -59,6 +61,38 @@ from google.adk.utils.context_utils import Aclosing
 from google.genai import types
 
 
+# --- concurrency cap ------------------------------------------------------
+# At most N explorers run their nested execution AT ONCE — across all explore
+# tools, regardless of how many the model spawns in a single turn. Excess
+# calls queue on this semaphore (their `queued_s` reflects the wait) and run
+# as slots free up. Process-global: one resource guard for the model endpoint
+# / host. The model still picks the COUNT freely; this only bounds how many
+# run concurrently. Tune with ADK_CC_AGENT_TOOL_EXPLORE_MAX (default 8).
+_DEFAULT_MAX = 8
+_gate: Optional[asyncio.Semaphore] = None
+
+
+def explore_concurrency_limit() -> int:
+    try:
+        return max(1, int(os.environ.get("ADK_CC_AGENT_TOOL_EXPLORE_MAX", _DEFAULT_MAX)))
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX
+
+
+def _explore_gate() -> asyncio.Semaphore:
+    # Lazily created so the env var is read at first use, not import time.
+    global _gate
+    if _gate is None:
+        _gate = asyncio.Semaphore(explore_concurrency_limit())
+    return _gate
+
+
+def _reset_gate_for_test(n: int) -> None:
+    """Test hook: rebuild the gate with a specific concurrency limit."""
+    global _gate
+    _gate = asyncio.Semaphore(n)
+
+
 def enrich_result(
     report: str,
     *,
@@ -67,6 +101,7 @@ def enrich_result(
     ok: bool = True,
     error: Optional[str] = None,
     elapsed_s: float = 0.0,
+    queued_s: float = 0.0,
     tool_calls: int = 0,
     tools_used: Optional[list[str]] = None,
     events: int = 0,
@@ -76,12 +111,15 @@ def enrich_result(
     Pure + side-effect free so it can be unit-tested without spinning up a
     nested runner. `task` is echoed back so parallel results — which return
     unordered — are attributable to the question that produced them.
+    `queued_s` is how long this call waited for a concurrency slot (>0 when
+    the model spawned more than the cap allows to run at once).
     """
     env: dict[str, Any] = {
         "task": task,
         "agent": agent,
         "ok": ok,
         "elapsed_s": round(elapsed_s, 3),
+        "queued_s": round(queued_s, 3),
         "tool_calls": tool_calls,
         "tools_used": tools_used or [],
         "events": events,
@@ -145,59 +183,66 @@ class EnrichedAgentTool(AgentTool):
             if self.include_plugins
             else None
         )
-        runner = Runner(
-            app_name=child_app_name,
-            agent=self.agent,
-            artifact_service=ForwardingArtifactService(tool_context),
-            session_service=InMemorySessionService(),
-            memory_service=InMemoryMemoryService(),
-            credential_service=invocation_context.credential_service,
-            plugins=plugins,
-        )
-        state_dict = {
-            k: v
-            for k, v in tool_context.state.to_dict().items()
-            if not k.startswith("_adk")
-        }
-        session = await runner.session_service.create_session(
-            app_name=child_app_name,
-            user_id=invocation_context.user_id,
-            state=state_dict,
-        )
-
-        # --- instrumented run loop (the enrichment) ---
-        t0 = time.perf_counter()
         tool_calls = 0
         tools_used: list[str] = []
         n_events = 0
         last_content = None
         ok = True
         error: Optional[str] = None
-        try:
-            async with Aclosing(
-                runner.run_async(
-                    user_id=session.user_id,
-                    session_id=session.id,
-                    new_message=content,
-                )
-            ) as agen:
-                async for event in agen:
-                    n_events += 1
-                    if event.actions and event.actions.state_delta:
-                        tool_context.state.update(event.actions.state_delta)
-                    for fc in event.get_function_calls() or []:
-                        tool_calls += 1
-                        if fc.name and fc.name not in tools_used:
-                            tools_used.append(fc.name)
-                    if event.content:
-                        last_content = event.content
-        except Exception as e:  # one explorer failing must not poison the batch
-            ok = False
-            error = f"{type(e).__name__}: {e}"
-        finally:
-            await runner.close()
 
-        elapsed = time.perf_counter() - t0
+        # Concurrency cap: wait for a slot. Excess explorers (model spawned
+        # more than the cap) queue here; queued_s captures the wait. Only the
+        # nested run is gated — declaration/dispatch stay parallel, so ADK
+        # still fires the whole batch; the cap just bounds how many RUN at once.
+        t_start = time.perf_counter()
+        async with _explore_gate():
+            queued_s = time.perf_counter() - t_start
+            runner = Runner(
+                app_name=child_app_name,
+                agent=self.agent,
+                artifact_service=ForwardingArtifactService(tool_context),
+                session_service=InMemorySessionService(),
+                memory_service=InMemoryMemoryService(),
+                credential_service=invocation_context.credential_service,
+                plugins=plugins,
+            )
+            state_dict = {
+                k: v
+                for k, v in tool_context.state.to_dict().items()
+                if not k.startswith("_adk")
+            }
+            session = await runner.session_service.create_session(
+                app_name=child_app_name,
+                user_id=invocation_context.user_id,
+                state=state_dict,
+            )
+
+            # --- instrumented run loop (the enrichment) ---
+            t0 = time.perf_counter()
+            try:
+                async with Aclosing(
+                    runner.run_async(
+                        user_id=session.user_id,
+                        session_id=session.id,
+                        new_message=content,
+                    )
+                ) as agen:
+                    async for event in agen:
+                        n_events += 1
+                        if event.actions and event.actions.state_delta:
+                            tool_context.state.update(event.actions.state_delta)
+                        for fc in event.get_function_calls() or []:
+                            tool_calls += 1
+                            if fc.name and fc.name not in tools_used:
+                                tools_used.append(fc.name)
+                        if event.content:
+                            last_content = event.content
+            except Exception as e:  # one explorer failing must not poison the batch
+                ok = False
+                error = f"{type(e).__name__}: {e}"
+            finally:
+                await runner.close()
+            elapsed = time.perf_counter() - t0
         report = ""
         if last_content is not None and last_content.parts:
             report = "\n".join(
@@ -210,6 +255,7 @@ class EnrichedAgentTool(AgentTool):
             ok=ok,
             error=error,
             elapsed_s=elapsed,
+            queued_s=queued_s,
             tool_calls=tool_calls,
             tools_used=tools_used,
             events=n_events,
