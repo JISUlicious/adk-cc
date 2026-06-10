@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -74,8 +75,15 @@ from google.adk.skills import (
     list_skills_in_dir,
     load_skill_from_dir,
 )
-from google.adk.tools.skill_toolset import LoadSkillResourceTool, SkillToolset
+from google.adk.tools.base_tool import BaseTool
+from google.adk.tools.skill_toolset import (
+    LoadSkillResourceTool,
+    LoadSkillTool,
+    RunSkillScriptTool,
+    SkillToolset,
+)
 from google.adk.tools.tool_context import ToolContext
+from google.genai import types
 
 _log = logging.getLogger(__name__)
 
@@ -248,6 +256,152 @@ def _build_skill_dir_index(
     return out
 
 
+# --- bounded / paginated resource loading -------------------------------
+#
+# ADK's load_skill_resource / load_skill return whole files with no size cap
+# or pagination — a large reference dumps wholesale into the model's context.
+# adk-cc's own read_file tool already solved this (line offset/limit + a
+# per-line cap + a "paginate to continue" envelope); we mirror that exact
+# discipline here so skill resources read like every other file, and so the
+# model has ONE mental model. Mirrors patterns in mature frameworks (Claude
+# reads skill resources via bounded file tools; MCP caps + paginates resource
+# reads). Tunable; same per-line cap constant as read_file.py.
+
+_MAX_LINE_LENGTH = 2000  # mirrors read_file.py
+_LINE_TRUNCATION_SUFFIX = "… [truncated]"
+
+
+def _int_env(key: str, default: int) -> int:
+    raw = os.environ.get(key)
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return default
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _resource_default_limit() -> int:
+    return _int_env("ADK_CC_SKILL_RESOURCE_DEFAULT_LINES", 200)
+
+
+def _resource_max_lines() -> int:
+    return _int_env("ADK_CC_SKILL_RESOURCE_MAX_LINES", 400)
+
+
+def _instructions_max_chars() -> int:
+    return _int_env("ADK_CC_SKILL_INSTRUCTIONS_MAX_CHARS", 60000)
+
+
+def _file_max_bytes() -> int:
+    return _int_env("ADK_CC_SKILL_FILE_MAX_BYTES", 262144)
+
+
+def _guards_on() -> bool:
+    """Phase-2 guards (script-on-noop refusal + untrusted-content delimiters),
+    toggled together. Off by default — opt in with ADK_CC_SKILL_GUARDS=1."""
+    return os.environ.get("ADK_CC_SKILL_GUARDS") == "1"
+
+
+def _wrap_untrusted(content: str, source: str) -> str:
+    """Phase-2: mark model-bound skill content as untrusted DATA so an
+    injected instruction in a (possibly third-party) skill is less likely to
+    be obeyed. No-op unless guards are on."""
+    if not _guards_on():
+        return content
+    return (
+        f'<skill_content trust="untrusted" source="{source}">\n'
+        f"{content}\n</skill_content>"
+    )
+
+
+def _clip_lines(text: str, *, offset: int, limit: int) -> tuple[str, int, int, int, int, int]:
+    """Slice `text` to `limit` lines from 1-indexed `offset`, capping each line
+    at _MAX_LINE_LENGTH. Mirrors read_file.py. Returns (clipped, start_line,
+    end_line, total_lines, total_chars, lines_truncated)."""
+    lines = text.split("\n")
+    total_lines = len(lines)
+    total_chars = len(text)
+    start = max(1, offset)
+    start_idx = start - 1
+    end_idx = min(start_idx + max(1, limit), total_lines)
+    out: list[str] = []
+    lines_truncated = 0
+    for ln in lines[start_idx:end_idx]:
+        if len(ln) > _MAX_LINE_LENGTH:
+            out.append(ln[:_MAX_LINE_LENGTH] + _LINE_TRUNCATION_SUFFIX)
+            lines_truncated += 1
+        else:
+            out.append(ln)
+    clipped = "\n".join(out)
+    end_line = start_idx + len(out)  # 1-indexed inclusive; start-1 if empty
+    return clipped, start, end_line, total_lines, total_chars, lines_truncated
+
+
+def _bounded_resource_payload(
+    skill_name: str,
+    file_path: str,
+    content: str,
+    *,
+    offset: int,
+    limit: int,
+    extra: Optional[dict] = None,
+) -> dict[str, Any]:
+    """Build the bounded, paginated resource result (read_file-style envelope)."""
+    clipped, start, end, total_lines, total_chars, lt = _clip_lines(
+        content, offset=offset, limit=limit
+    )
+    payload: dict[str, Any] = {
+        "skill_name": skill_name,
+        "file_path": file_path,
+        "content": _wrap_untrusted(clipped, f"{skill_name}/{file_path}"),
+        "start_line": start,
+        "end_line": end,
+        "total_lines": total_lines,
+        "total_chars": total_chars,
+        "lines_truncated": lt,
+        "truncated": end < total_lines,
+    }
+    if end < total_lines:
+        payload["next_offset"] = end + 1
+        payload["hint"] = (
+            f"showing lines {start}-{end} of {total_lines}; read more with "
+            f"offset={end + 1}, or narrow with search_skill_resource."
+        )
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _prune_oversized_resources(skill: Skill, max_bytes: int) -> None:
+    """Lazy/memory guard: drop references & assets whose content exceeds
+    `max_bytes` from the in-memory dicts. They stay on disk and are served
+    on demand (bounded) by the lenient loader's disk fallback — so RAM is
+    bounded without losing access. Scripts are NOT pruned: run_skill_script
+    executes them from memory, and they never enter context anyway."""
+    for bucket in (skill.resources.references, skill.resources.assets):
+        for key in list(bucket.keys()):
+            val = bucket[key]
+            size = len(val) if isinstance(val, (str, bytes)) else len(str(val))
+            if size > max_bytes:
+                del bucket[key]
+                _log.info(
+                    "skills: pruned oversized in-memory resource %r (%d B > %d) "
+                    "from skill %r — served on demand from disk",
+                    key,
+                    size,
+                    max_bytes,
+                    skill.name,
+                )
+
+
 class _LenientLoadSkillResourceTool(LoadSkillResourceTool):
     """`load_skill_resource` with an on-disk fallback for non-canonical layouts.
 
@@ -270,31 +424,94 @@ class _LenientLoadSkillResourceTool(LoadSkillResourceTool):
     ) -> None:
         super().__init__(toolset)
         self.description = (
-            "Loads a resource file from within a skill. Canonical paths "
-            "start with 'references/', 'assets/', or 'scripts/'. As a "
-            "fallback, files at the skill root (e.g. 'README.md', "
-            "'pptxgenjs.md') can also be accessed — pass either the "
-            "bare filename or the full relative path."
+            "Loads a resource file from within a skill, in bounded slices. "
+            "Canonical paths start with 'references/', 'assets/', or "
+            "'scripts/'; files at the skill root or other subdirs also "
+            "resolve (pass the relative path or bare filename). Returns up to "
+            "`limit` lines starting at 1-indexed `offset`; for large files, "
+            "paginate with `offset = end_line + 1`, or use "
+            "search_skill_resource to jump to the relevant part."
         )
         self._skill_dirs = skill_dirs
+
+    def _get_declaration(self) -> types.FunctionDeclaration | None:
+        return types.FunctionDeclaration(
+            name=self.name,
+            description=self.description,
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "The name of the skill.",
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": (
+                            "Relative path to the resource (e.g."
+                            " 'references/api.md')."
+                        ),
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "1-indexed first line to return (default 1).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": (
+                            f"Max lines to return (default"
+                            f" {_resource_default_limit()}, capped at"
+                            f" {_resource_max_lines()})."
+                        ),
+                    },
+                },
+                "required": ["skill_name", "file_path"],
+            },
+        )
 
     async def run_async(
         self, *, args: dict[str, Any], tool_context: ToolContext
     ) -> Any:
+        offset = _coerce_int(args.get("offset"), 1)
+        limit = min(
+            _coerce_int(args.get("limit"), _resource_default_limit()),
+            _resource_max_lines(),
+        )
         result = await super().run_async(args=args, tool_context=tool_context)
-        if not isinstance(result, dict):
-            return result
-        if result.get("error_code") not in (
+
+        # In-memory hit (ADK's dict lookup) → re-wrap as a bounded slice.
+        if isinstance(result, dict) and isinstance(result.get("content"), str):
+            return _bounded_resource_payload(
+                result.get("skill_name", args.get("skill_name", "")),
+                result.get("file_path", args.get("file_path", "")),
+                result["content"],
+                offset=offset,
+                limit=limit,
+            )
+
+        # Miss (incl. pruned-from-memory large files) → disk fallback, bounded.
+        if isinstance(result, dict) and result.get("error_code") in (
             "RESOURCE_NOT_FOUND",
             "INVALID_RESOURCE_PATH",
         ):
+            fb = self._scan(args.get("skill_name") or "", args.get("file_path") or "")
+            if fb is not None:
+                content = fb.pop("content", "")
+                return _bounded_resource_payload(
+                    fb.get("skill_name", ""),
+                    fb.get("file_path", ""),
+                    content,
+                    offset=offset,
+                    limit=limit,
+                    extra={
+                        k: v
+                        for k, v in fb.items()
+                        if k not in ("skill_name", "file_path")
+                    },
+                )
             return result
 
-        skill_name = args.get("skill_name") or ""
-        file_path = args.get("file_path") or ""
-        fallback = self._scan(skill_name, file_path)
-        if fallback is not None:
-            return fallback
+        # Binary-detected status or other non-content dict → pass through.
         return result
 
     def _scan(self, skill_name: str, file_path: str) -> Optional[dict]:
@@ -372,21 +589,191 @@ class _LenientLoadSkillResourceTool(LoadSkillResourceTool):
             return None
 
 
-def _patch_load_skill_resource(
+class _BoundedLoadSkillTool(LoadSkillTool):
+    """`load_skill` that caps the injected SKILL.md instructions.
+
+    The body should be small by spec, but nothing enforces it — guard anyway
+    so a pathological SKILL.md can't dump unbounded text into context. Caps at
+    ADK_CC_SKILL_INSTRUCTIONS_MAX_CHARS with a pointer to load_skill_resource
+    for the rest. Wraps in untrusted-content delimiters when guards are on.
+    """
+
+    async def run_async(
+        self, *, args: dict[str, Any], tool_context: ToolContext
+    ) -> Any:
+        result = await super().run_async(args=args, tool_context=tool_context)
+        if isinstance(result, dict) and isinstance(result.get("instructions"), str):
+            instr = result["instructions"]
+            cap = _instructions_max_chars()
+            total = len(instr)
+            if total > cap:
+                instr = (
+                    instr[:cap]
+                    + f"\n\n… [SKILL.md truncated at {cap} of {total} chars; "
+                    "read the rest via load_skill_resource.]"
+                )
+                result["instructions_truncated"] = True
+                result["total_instruction_chars"] = total
+            result["instructions"] = _wrap_untrusted(
+                instr, f"{args.get('skill_name', '')}/SKILL.md"
+            )
+        return result
+
+
+class _SkillResourceSearchTool(BaseTool):
+    """`search_skill_resource`: grep within a skill's bundled files.
+
+    Relevance retrieval — the file_search/RAG idea in adk-cc's grep-native
+    form. Instead of paging linearly through a large reference, the model
+    searches for a regex and gets matching file/line locations + the line
+    text, then `load_skill_resource(offset=...)` the exact slice it needs.
+    """
+
+    def __init__(self, skill_dirs: dict[str, str]) -> None:
+        super().__init__(
+            name="search_skill_resource",
+            description=(
+                "Searches a skill's bundled files (references/assets/scripts "
+                "and root) for a regex; returns matching file paths + line "
+                "numbers + line text. Use to locate the relevant part of a "
+                "large resource, then load_skill_resource(offset=...) it."
+            ),
+        )
+        self._skill_dirs = skill_dirs
+
+    def _get_declaration(self) -> types.FunctionDeclaration | None:
+        return types.FunctionDeclaration(
+            name=self.name,
+            description=self.description,
+            parameters_json_schema={
+                "type": "object",
+                "properties": {
+                    "skill_name": {"type": "string", "description": "The skill to search."},
+                    "query": {"type": "string", "description": "Regular expression to search for."},
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Max matches to return (default 30).",
+                    },
+                },
+                "required": ["skill_name", "query"],
+            },
+        )
+
+    async def run_async(
+        self, *, args: dict[str, Any], tool_context: ToolContext
+    ) -> Any:
+        skill_name = args.get("skill_name") or ""
+        query = args.get("query") or ""
+        max_results = _coerce_int(args.get("max_results"), 30)
+        skill_dir = self._skill_dirs.get(skill_name)
+        if not skill_dir:
+            return {"error": f"Skill '{skill_name}' not found.", "error_code": "SKILL_NOT_FOUND"}
+        if not query:
+            return {"error": "Argument 'query' is required.", "error_code": "INVALID_ARGUMENTS"}
+        try:
+            pattern = re.compile(query)
+        except re.error as e:
+            return {"error": f"Invalid regex: {e}", "error_code": "INVALID_ARGUMENTS"}
+        base = Path(skill_dir).resolve()
+        matches: list[dict] = []
+        truncated = False
+        try:
+            for fp in sorted(base.rglob("*")):
+                if "__pycache__" in fp.parts or not fp.is_file():
+                    continue
+                try:
+                    text = fp.read_text(encoding="utf-8")
+                except (UnicodeDecodeError, OSError):
+                    continue  # binary / unreadable
+                rel = str(fp.relative_to(base))
+                for i, line in enumerate(text.split("\n"), start=1):
+                    if pattern.search(line):
+                        if len(matches) >= max_results:
+                            truncated = True
+                            break
+                        matches.append({
+                            "file_path": rel,
+                            "line": i,
+                            "text": line[:_MAX_LINE_LENGTH].strip(),
+                        })
+                if truncated:
+                    break
+        except OSError as e:
+            return {"error": f"search failed: {e}", "error_code": "SEARCH_ERROR"}
+        return {
+            "skill_name": skill_name,
+            "query": query,
+            "matches": matches,
+            "total_returned": len(matches),
+            "truncated": truncated,
+        }
+
+
+class _NoopGuardedRunSkillScriptTool(RunSkillScriptTool):
+    """`run_skill_script` that refuses under the noop backend (host exec).
+
+    Phase-2 guard (only installed when ADK_CC_SKILL_GUARDS=1): under noop a
+    skill's script runs on the HOST. Refuse unless explicitly acknowledged
+    with ADK_CC_SKILL_SCRIPTS_ACK_HOST_EXEC=1. Mirrors how the artifact tools
+    gate on the noop backend.
+    """
+
+    async def run_async(
+        self, *, args: dict[str, Any], tool_context: ToolContext
+    ) -> Any:
+        if os.environ.get("ADK_CC_SKILL_SCRIPTS_ACK_HOST_EXEC") != "1":
+            from ..sandbox import get_backend, is_noop_backend
+
+            try:
+                backend = get_backend(tool_context)
+            except Exception:
+                backend = None
+            if backend is not None and is_noop_backend(backend):
+                return {
+                    "error": (
+                        "run_skill_script is disabled under the noop backend — "
+                        "the script would execute on the host. Configure a real "
+                        "sandbox (ADK_CC_SANDBOX_BACKEND=docker|daytona|...) or "
+                        "set ADK_CC_SKILL_SCRIPTS_ACK_HOST_EXEC=1 to override."
+                    ),
+                    "error_code": "SANDBOX_REQUIRED",
+                }
+        return await super().run_async(args=args, tool_context=tool_context)
+
+
+def _patch_skill_tools(
     toolset: SkillToolset, skill_dirs: dict[str, str]
 ) -> None:
-    """Replace ADK's strict LoadSkillResourceTool with the lenient one.
+    """Swap ADK's skill tools for adk-cc's bounded/guarded variants in-place.
 
-    SkillToolset's `_tools` is a regular list constructed in `__init__`;
-    we swap the strict tool out for our subclass. No behavioral change
-    if `skill_dirs` is empty (the fallback finds nothing to scan).
+    `SkillToolset._tools` is a regular list built in `__init__`. We replace:
+      - LoadSkillResourceTool → _LenientLoadSkillResourceTool (bounded + disk
+        fallback)
+      - LoadSkillTool         → _BoundedLoadSkillTool (caps instructions)
+      - RunSkillScriptTool    → _NoopGuardedRunSkillScriptTool (only when
+        ADK_CC_SKILL_GUARDS=1)
+    Idempotent: already-swapped subclasses are skipped.
     """
+    guards = _guards_on()
     for i, tool in enumerate(toolset._tools):
         if isinstance(tool, LoadSkillResourceTool) and not isinstance(
             tool, _LenientLoadSkillResourceTool
         ):
             toolset._tools[i] = _LenientLoadSkillResourceTool(toolset, skill_dirs)
-            return
+        elif isinstance(tool, LoadSkillTool) and not isinstance(
+            tool, _BoundedLoadSkillTool
+        ):
+            toolset._tools[i] = _BoundedLoadSkillTool(toolset)
+        elif (
+            guards
+            and isinstance(tool, RunSkillScriptTool)
+            and not isinstance(tool, _NoopGuardedRunSkillScriptTool)
+        ):
+            toolset._tools[i] = _NoopGuardedRunSkillScriptTool(toolset)
+
+
+# Back-compat: skills_tenant.py imports the old name.
+_patch_load_skill_resource = _patch_skill_tools
 
 
 def make_skill_toolset(
@@ -412,6 +799,13 @@ def make_skill_toolset(
         pairs = discover_skills_with_sources()
     if not pairs:
         return None
+    # Lazy/memory guard: keep oversized references/assets OUT of RAM; the
+    # bounded disk-fallback serves them on demand (scripts are left intact —
+    # run_skill_script executes them from memory).
+    max_bytes = _file_max_bytes()
+    for skill, _ in pairs:
+        _prune_oversized_resources(skill, max_bytes)
+    skill_dirs = _build_skill_dir_index(pairs)
     if code_executor is None:
         # Lazy import keeps `tools/skills.py` importable in tests that
         # don't need the sandbox layer. The executor reads the active
@@ -424,5 +818,9 @@ def make_skill_toolset(
         code_executor=code_executor,
         script_timeout=script_timeout,
     )
-    _patch_load_skill_resource(toolset, _build_skill_dir_index(pairs))
+    # Phase 1.5: always-on grep-within-resource retrieval tool. Appended to
+    # `_tools` directly — `additional_tools=` would gate it behind a skill's
+    # adk_additional_tools metadata (it lands in _provided_tools_by_name).
+    toolset._tools.append(_SkillResourceSearchTool(skill_dirs))
+    _patch_skill_tools(toolset, skill_dirs)
     return toolset
