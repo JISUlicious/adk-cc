@@ -20,6 +20,7 @@ from .mcp import make_mcp_toolset
 from .read_current_plan import ReadCurrentPlanTool
 from .read_file import ReadFileTool
 from .save_as_artifact import SaveAsArtifactTool
+from .set_session_title import SetSessionTitleTool
 from .skills import make_skill_toolset
 from .task import (
     TaskCreateTool,
@@ -45,6 +46,7 @@ __all__ = [
     "ReadCurrentPlanTool",
     "ReadFileTool",
     "SaveAsArtifactTool",
+    "SetSessionTitleTool",
     "TaskCreateTool",
     "TaskGetTool",
     "TaskListTool",

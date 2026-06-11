@@ -43,6 +43,8 @@ APP = "adk_cc"
 BASH_TITLE = "Greeting the world"
 GREP_TITLE = "Hunting for needles"
 LIVE_TITLE = "Echo greeting from e2e"
+SEEDED_SESSION_TITLE = "Seeded rail title"
+LIVE_SESSION_TITLE = "Fizzbuzz e2e session"
 
 ok_all = True
 
@@ -119,7 +121,10 @@ def _seed_session() -> str:
               "response": {"status": "ok", "hits": []}}}]}},
     ]
     r = requests.post(f"{BASE}/apps/{APP}/users/{USER}/sessions",
-                      headers=_hdr(), json={"events": events}, timeout=10)
+                      headers=_hdr(),
+                      json={"events": events,
+                            "state": {"session_title": SEEDED_SESSION_TITLE}},
+                      timeout=10)
     r.raise_for_status()
     return r.json()["id"]
 
@@ -148,6 +153,9 @@ def part_a(browser) -> None:
           grep_title.count() >= 1, f"'{GREP_TITLE}'")
     # raw command still visible (secondary chip and/or terminal block)
     check("A: raw command still visible", pg.get_by_text("echo hi").count() >= 1)
+    check("A: session rail shows the seeded session title",
+          pg.get_by_text(SEEDED_SESSION_TITLE).count() >= 1,
+          f"'{SEEDED_SESSION_TITLE}'")
     pg.close()
 
 
@@ -161,7 +169,9 @@ def part_b(browser) -> None:
               "newMessage": {"role": "user", "parts": [{"text":
                   "Use run_bash to run exactly `echo hello`. On that run_bash "
                   f"call, set the optional `title` argument to exactly: "
-                  f"{LIVE_TITLE}. Then tell me the output."}]}},
+                  f"{LIVE_TITLE}. Also call set_session_title with the "
+                  f"label exactly: {LIVE_SESSION_TITLE}. Then tell me the "
+                  "output."}]}},
         timeout=420,
     )
     if r.status_code != 200:
@@ -185,7 +195,13 @@ def part_b(browser) -> None:
     ]
     check("B: run_bash still executed ok (title stripped before tool)",
           bool(executed))
-    # the title must also render in the real UI for this live session
+    sessions = requests.get(f"{BASE}/apps/{APP}/users/{USER}/sessions",
+                            headers=_hdr(), timeout=10).json()
+    mine = next((s for s in sessions if s["id"] == sid), {})
+    check("B: state.session_title set by the model",
+          (mine.get("state") or {}).get("session_title") == LIVE_SESSION_TITLE,
+          repr((mine.get("state") or {}).get("session_title")))
+    # the titles must also render in the real UI for this live session
     pg = browser.new_page(viewport={"width": 1280, "height": 900})
     _open_session(pg, sid)
     shown = pg.get_by_text(LIVE_TITLE).count() >= 1
@@ -193,6 +209,9 @@ def part_b(browser) -> None:
         print("  [SKIP] B: UI check (model set no title)")
     else:
         check("B: live title renders in the web UI", shown, f"'{LIVE_TITLE}'")
+    check("B: session title renders in the rail",
+          pg.get_by_text(LIVE_SESSION_TITLE).count() >= 1,
+          f"'{LIVE_SESSION_TITLE}'")
     pg.close()
 
 
