@@ -61,8 +61,10 @@ TITLE_GUIDANCE = """
 Every tool accepts an optional `title` argument: a short (3-6 word)
 present-progressive phrase describing THIS specific call, shown to the user
 in the UI while it runs (e.g. "Writing ML training script", "Searching for
-config files"). Set it on every call. It is display-only — pass real
-parameters in their own fields, never in the title."""
+config files"). Set it on EVERY call — especially write_file, edit_file and
+run_bash — and emit it FIRST, before large fields like file content. It is
+display-only — pass real parameters in their own fields, never in the
+title."""
 
 
 class ToolTitlePlugin(BasePlugin):
@@ -85,6 +87,11 @@ class ToolTitlePlugin(BasePlugin):
         name = getattr(decl, "name", None)
         if not name:
             return False
+        # `title` goes FIRST in property order: models tend to emit args in
+        # schema order, and a label written BEFORE a large content field
+        # (write_file/edit_file) is far less likely to be dropped than one
+        # trailing it. Dicts preserve insertion order through serialization.
+        injected_prop = {"type": "string", "description": _TITLE_DESCRIPTION}
         # Dict-schema form (AdkCcTool, ADK skill tools, most MCP tools).
         schema = getattr(decl, "parameters_json_schema", None)
         if isinstance(schema, dict):
@@ -93,21 +100,20 @@ class ToolTitlePlugin(BasePlugin):
                 # Either a native title arg (skip forever) or our own from a
                 # cached declaration (idempotent either way).
                 return name in self._injected
-            props[_TITLE_ARG] = {
-                "type": "string",
-                "description": _TITLE_DESCRIPTION,
-            }
+            schema["properties"] = {_TITLE_ARG: injected_prop, **props}
             return True
         # types.Schema form (FunctionTool-built declarations).
         params = getattr(decl, "parameters", None)
         if params is not None and getattr(params, "type", None) == types.Type.OBJECT:
-            if params.properties is None:
-                params.properties = {}
-            if _TITLE_ARG in params.properties:
+            existing = params.properties or {}
+            if _TITLE_ARG in existing:
                 return name in self._injected
-            params.properties[_TITLE_ARG] = types.Schema(
-                type=types.Type.STRING, description=_TITLE_DESCRIPTION
-            )
+            params.properties = {
+                _TITLE_ARG: types.Schema(
+                    type=types.Type.STRING, description=_TITLE_DESCRIPTION
+                ),
+                **existing,
+            }
             return True
         # No parameters at all (rare no-arg tool) — leave untouched.
         return False

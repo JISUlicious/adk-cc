@@ -76,6 +76,8 @@ def test_injects_into_json_schema_tool():
     d = _decl(req, "read_file")
     assert "title" in _props(d), _props(d).keys()
     assert "title" not in _required(d), _required(d)
+    # title is FIRST in property order (emitted before big content fields)
+    assert next(iter(_props(d))) == "title", list(_props(d))
     assert "read_file" in plugin._injected
     print("OK injects_into_json_schema_tool")
 
@@ -87,6 +89,7 @@ def test_injects_into_types_schema_tool():
     d = _decl(req, "_weather")
     assert "title" in _props(d), _props(d).keys()
     assert "title" not in _required(d), _required(d)
+    assert next(iter(_props(d))) == "title", list(_props(d))
     print("OK injects_into_types_schema_tool")
 
 
