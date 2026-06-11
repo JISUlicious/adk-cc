@@ -393,6 +393,50 @@ def test_oversized_disk_read_refused():
     print("OK")
 
 
+async def test_blocking_work_runs_off_event_loop():
+    """#2: the search walk and the load_skill_resource disk fallback run in a
+    WORKER thread (asyncio.to_thread), not on the event-loop thread. Spy on the
+    blocking callables and assert they execute on a different thread id."""
+    import threading
+    from adk_cc.tools import skills as sk
+
+    loop_thread = threading.get_ident()
+    seen: dict[str, int] = {}
+
+    real_search = sk._SkillResourceSearchTool._search_sync
+
+    def spy_search(base, query, max_results):
+        seen["search"] = threading.get_ident()
+        return real_search(base, query, max_results)
+
+    real_scan = sk._LenientLoadSkillResourceTool._scan
+
+    def spy_scan(self, skill_name, file_path):
+        seen["scan"] = threading.get_ident()
+        return real_scan(self, skill_name, file_path)
+
+    sk._SkillResourceSearchTool._search_sync = staticmethod(spy_search)
+    sk._LenientLoadSkillResourceTool._scan = spy_scan
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _write_skill(base, "demo", references={"a.md": "needle\nx"})
+            ts = sk.make_skill_toolset(skills_dir=base)
+            await _tool(ts, "search_skill_resource").run_async(
+                args={"skill_name": "demo", "query": "needle"}, tool_context=None)
+            # bare filename misses canonical lookup → disk fallback (_scan).
+            await _tool(ts, "load_skill_resource").run_async(
+                args={"skill_name": "demo", "file_path": "a.md"}, tool_context=None)
+        assert seen.get("search") and seen["search"] != loop_thread, \
+            f"search ran on the event-loop thread: {seen}"
+        assert seen.get("scan") and seen["scan"] != loop_thread, \
+            f"disk fallback ran on the event-loop thread: {seen}"
+        print("test_blocking_work_runs_off_event_loop: OK")
+    finally:
+        sk._SkillResourceSearchTool._search_sync = staticmethod(real_search)
+        sk._LenientLoadSkillResourceTool._scan = real_scan
+
+
 def main():
     test_resource_bounded_and_paginated()
     test_per_line_cap()
@@ -409,6 +453,7 @@ def main():
     test_search_is_literal_not_regex()
     test_search_skips_oversized_file()
     test_oversized_disk_read_refused()
+    asyncio.run(test_blocking_work_runs_off_event_loop())
     print()
     print("All skill-resource-limits tests passed")
 
