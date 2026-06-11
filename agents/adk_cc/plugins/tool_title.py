@@ -64,10 +64,7 @@ in the UI while it runs (e.g. "Writing ML training script", "Searching for
 config files"). Set it on EVERY call — especially write_file, edit_file and
 run_bash — and emit it FIRST, before large fields like file content. It is
 display-only — pass real parameters in their own fields, never in the
-title.
-Additionally, near the START of a new session call `set_session_title` once
-with a 2-6 word label for the whole session (e.g. "Fizzbuzz script demo");
-update it only if the session's topic changes substantially."""
+title."""
 
 
 class ToolTitlePlugin(BasePlugin):

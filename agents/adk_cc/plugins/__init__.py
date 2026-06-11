@@ -9,6 +9,7 @@ from .permissions import PermissionPlugin
 from .plan_mode import PlanModeReminderPlugin
 from .project_context import ProjectContextPlugin
 from .quotas import QuotaPlugin
+from .session_title import SessionTitlePlugin
 # session_retry has no exports; importing it triggers the optional
 # retry-on-stale patch on ADK's session services.
 from . import session_retry  # noqa: F401
@@ -32,6 +33,7 @@ __all__ = [
     "PlanModeReminderPlugin",
     "ProjectContextPlugin",
     "QuotaPlugin",
+    "SessionTitlePlugin",
     "TaskReminderPlugin",
     "ToolCallValidatorPlugin",
     "ToolTitlePlugin",
