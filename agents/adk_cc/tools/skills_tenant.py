@@ -90,16 +90,26 @@ class TenantSkillToolset(BaseToolset):
         skills = discover_skills(tenant_dir)
         if not skills:
             return []
+        # Same bounded/lazy/guarded treatment as the single-tenant factory.
+        # (skill dir == tenant_dir/<skill name>, enforced by ADK's loader.)
+        from .skills import (
+            _SkillResourceSearchTool,
+            _build_skill_dir_index,
+            _file_max_bytes,
+            _patch_skill_tools,
+            _prune_oversized_resources,
+        )
+
+        max_bytes = _file_max_bytes()
+        for skill in skills:
+            _prune_oversized_resources(skill, max_bytes)
+        pairs = [(skill, (tenant_dir / skill.name).resolve()) for skill in skills]
+        skill_dirs = _build_skill_dir_index(pairs)
         inner = SkillToolset(
             skills=skills,
             code_executor=self._code_executor,
             script_timeout=self._script_timeout,
         )
-        # Apply the lenient load_skill_resource patch so this tenant's
-        # skills get the on-disk fallback for non-canonical layouts.
-        from .skills import _build_skill_dir_index, _patch_load_skill_resource
-
-        _patch_load_skill_resource(
-            inner, _build_skill_dir_index(skills, tenant_dir)
-        )
+        inner._tools.append(_SkillResourceSearchTool(skill_dirs))
+        _patch_skill_tools(inner, skill_dirs)
         return await inner.get_tools_with_prefix(readonly_context)
