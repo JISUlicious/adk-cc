@@ -63,9 +63,9 @@ explicit `code_executor=` to override.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -304,6 +304,13 @@ def _file_max_bytes() -> int:
     return _int_env("ADK_CC_SKILL_FILE_MAX_BYTES", 262144)
 
 
+def _resource_read_max_bytes() -> int:
+    """Hard cap on bytes read from disk for ONE resource (search or the
+    load_skill_resource disk fallback). Bounds memory: a file larger than
+    this is skipped/not inlined rather than read whole into RAM. Default 4MB."""
+    return _int_env("ADK_CC_SKILL_RESOURCE_READ_MAX_BYTES", 4194304)
+
+
 def _guards_on() -> bool:
     """Phase-2 guards (script-on-noop refusal + untrusted-content delimiters),
     toggled together. Off by default — opt in with ADK_CC_SKILL_GUARDS=1."""
@@ -326,11 +333,14 @@ def _clip_lines(text: str, *, offset: int, limit: int) -> tuple[str, int, int, i
     """Slice `text` to `limit` lines from 1-indexed `offset`, capping each line
     at _MAX_LINE_LENGTH. Mirrors read_file.py. Returns (clipped, start_line,
     end_line, total_lines, total_chars, lines_truncated)."""
-    lines = text.split("\n")
+    lines = text.splitlines()  # mirrors read_file.py; no phantom trailing line
     total_lines = len(lines)
     total_chars = len(text)
     start = max(1, offset)
     start_idx = start - 1
+    if start_idx >= total_lines:
+        # offset past EOF → empty slice with a coherent (end < start) envelope.
+        return "", start, start - 1, total_lines, total_chars, 0
     end_idx = min(start_idx + max(1, limit), total_lines)
     out: list[str] = []
     lines_truncated = 0
@@ -381,15 +391,20 @@ def _bounded_resource_payload(
 
 
 def _prune_oversized_resources(skill: Skill, max_bytes: int) -> None:
-    """Lazy/memory guard: drop references & assets whose content exceeds
-    `max_bytes` from the in-memory dicts. They stay on disk and are served
-    on demand (bounded) by the lenient loader's disk fallback — so RAM is
-    bounded without losing access. Scripts are NOT pruned: run_skill_script
-    executes them from memory, and they never enter context anyway."""
+    """Lazy/memory guard: drop large TEXT references & assets from the
+    in-memory dicts. They stay on disk and are served on demand (bounded) by
+    the lenient loader's disk fallback — so RAM is bounded without losing
+    access. NOT pruned:
+      - binary (bytes) entries — the utf-8 disk fallback can't serve them and
+        ADK's binary-injection re-fetches them from this dict, so pruning
+        would make them unreachable. They stay in memory.
+      - scripts — run_skill_script executes them from memory; never context."""
     for bucket in (skill.resources.references, skill.resources.assets):
         for key in list(bucket.keys()):
             val = bucket[key]
-            size = len(val) if isinstance(val, (str, bytes)) else len(str(val))
+            if not isinstance(val, str):
+                continue  # keep binary/non-text in memory (see docstring)
+            size = len(val.encode("utf-8"))  # BYTES, not characters
             if size > max_bytes:
                 del bucket[key]
                 _log.info(
@@ -494,7 +509,9 @@ class _LenientLoadSkillResourceTool(LoadSkillResourceTool):
             "RESOURCE_NOT_FOUND",
             "INVALID_RESOURCE_PATH",
         ):
-            fb = self._scan(args.get("skill_name") or "", args.get("file_path") or "")
+            fb = await asyncio.to_thread(
+                self._scan, args.get("skill_name") or "", args.get("file_path") or ""
+            )
             if fb is not None:
                 content = fb.pop("content", "")
                 return _bounded_resource_payload(
@@ -584,6 +601,17 @@ class _LenientLoadSkillResourceTool(LoadSkillResourceTool):
     @staticmethod
     def _read_text(path: Path) -> Optional[str]:
         try:
+            size = path.stat().st_size
+        except OSError:
+            return None
+        if size > _resource_read_max_bytes():
+            _log.warning(
+                "load_skill_resource: %s exceeds the read cap (%d > %d B) — "
+                "not inlined; raise ADK_CC_SKILL_RESOURCE_READ_MAX_BYTES if needed",
+                path, size, _resource_read_max_bytes(),
+            )
+            return None
+        try:
             return path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             return None
@@ -621,12 +649,17 @@ class _BoundedLoadSkillTool(LoadSkillTool):
 
 
 class _SkillResourceSearchTool(BaseTool):
-    """`search_skill_resource`: grep within a skill's bundled files.
+    """`search_skill_resource`: substring search within a skill's bundled files.
 
     Relevance retrieval — the file_search/RAG idea in adk-cc's grep-native
     form. Instead of paging linearly through a large reference, the model
-    searches for a regex and gets matching file/line locations + the line
+    searches for a substring and gets matching file/line locations + the line
     text, then `load_skill_resource(offset=...)` the exact slice it needs.
+
+    LITERAL (case-insensitive) substring, NOT regex: an arbitrary model-
+    supplied regex over file contents is a ReDoS vector that could pin a CPU
+    indefinitely. The blocking walk + reads run in a worker thread (off the
+    event loop), skip files over the read cap, and skip binaries.
     """
 
     def __init__(self, skill_dirs: dict[str, str]) -> None:
@@ -634,9 +667,10 @@ class _SkillResourceSearchTool(BaseTool):
             name="search_skill_resource",
             description=(
                 "Searches a skill's bundled files (references/assets/scripts "
-                "and root) for a regex; returns matching file paths + line "
-                "numbers + line text. Use to locate the relevant part of a "
-                "large resource, then load_skill_resource(offset=...) it."
+                "and root) for a case-insensitive SUBSTRING; returns matching "
+                "file paths + line numbers + line text. Use to locate the "
+                "relevant part of a large resource, then "
+                "load_skill_resource(offset=...) it."
             ),
         )
         self._skill_dirs = skill_dirs
@@ -649,7 +683,10 @@ class _SkillResourceSearchTool(BaseTool):
                 "type": "object",
                 "properties": {
                     "skill_name": {"type": "string", "description": "The skill to search."},
-                    "query": {"type": "string", "description": "Regular expression to search for."},
+                    "query": {
+                        "type": "string",
+                        "description": "Case-insensitive substring to find (literal, not regex).",
+                    },
                     "max_results": {
                         "type": "integer",
                         "description": "Max matches to return (default 30).",
@@ -670,11 +707,27 @@ class _SkillResourceSearchTool(BaseTool):
             return {"error": f"Skill '{skill_name}' not found.", "error_code": "SKILL_NOT_FOUND"}
         if not query:
             return {"error": "Argument 'query' is required.", "error_code": "INVALID_ARGUMENTS"}
-        try:
-            pattern = re.compile(query)
-        except re.error as e:
-            return {"error": f"Invalid regex: {e}", "error_code": "INVALID_ARGUMENTS"}
         base = Path(skill_dir).resolve()
+        if not base.is_dir():
+            return {"error": f"Skill '{skill_name}' not found.", "error_code": "SKILL_NOT_FOUND"}
+        # Blocking filesystem walk + reads → run off the asyncio event loop.
+        matches, truncated = await asyncio.to_thread(
+            self._search_sync, base, query, max_results
+        )
+        return {
+            "skill_name": skill_name,
+            "query": query,
+            "matches": matches,
+            "total_returned": len(matches),
+            "truncated": truncated,
+        }
+
+    @staticmethod
+    def _search_sync(
+        base: Path, query: str, max_results: int
+    ) -> tuple[list[dict], bool]:
+        needle = query.lower()
+        read_cap = _resource_read_max_bytes()
         matches: list[dict] = []
         truncated = False
         try:
@@ -682,12 +735,14 @@ class _SkillResourceSearchTool(BaseTool):
                 if "__pycache__" in fp.parts or not fp.is_file():
                     continue
                 try:
+                    if fp.stat().st_size > read_cap:
+                        continue  # skip files over the read cap (memory bound)
                     text = fp.read_text(encoding="utf-8")
                 except (UnicodeDecodeError, OSError):
                     continue  # binary / unreadable
                 rel = str(fp.relative_to(base))
-                for i, line in enumerate(text.split("\n"), start=1):
-                    if pattern.search(line):
+                for i, line in enumerate(text.splitlines(), start=1):
+                    if needle in line.lower():
                         if len(matches) >= max_results:
                             truncated = True
                             break
@@ -698,15 +753,9 @@ class _SkillResourceSearchTool(BaseTool):
                         })
                 if truncated:
                     break
-        except OSError as e:
-            return {"error": f"search failed: {e}", "error_code": "SEARCH_ERROR"}
-        return {
-            "skill_name": skill_name,
-            "query": query,
-            "matches": matches,
-            "total_returned": len(matches),
-            "truncated": truncated,
-        }
+        except OSError:
+            pass
+        return matches, truncated
 
 
 class _NoopGuardedRunSkillScriptTool(RunSkillScriptTool):

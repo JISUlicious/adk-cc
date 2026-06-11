@@ -275,6 +275,100 @@ def test_load_skill_instructions_capped():
     print("OK")
 
 
+# === review fixes ===
+
+def test_clip_lines_no_phantom_trailing_line():
+    """#6: splitlines(), not split('\\n') — a newline-terminated file must not
+    report an extra phantom line or be flagged truncated at EOF."""
+    print("test_clip_lines_no_phantom_trailing_line: ", end="")
+    from adk_cc.tools.skills import _clip_lines
+    clipped, start, end, total, _chars, _lt = _clip_lines("a\nb\n", offset=1, limit=10)
+    assert total == 2, total          # not 3
+    assert clipped == "a\nb", clipped
+    assert end == 2 and start == 1, (start, end)
+    # offset past EOF → coherent empty envelope (end < start), not incoherent.
+    c2, s2, e2, t2, _, _ = _clip_lines("a\nb\nc", offset=99, limit=10)
+    assert c2 == "" and t2 == 3 and e2 == s2 - 1, (c2, s2, e2, t2)
+    print("OK")
+
+
+def test_prune_skips_binary_and_counts_bytes():
+    """#4 + #7: _prune drops large TEXT by BYTE size, keeps binary (bytes)."""
+    print("test_prune_skips_binary_and_counts_bytes: ", end="")
+    from adk_cc.tools.skills import _prune_oversized_resources
+    from google.adk.skills.models import Frontmatter, Resources, Skill
+    skill = Skill(
+        frontmatter=Frontmatter(name="demo", description="d"),
+        instructions="body",
+        resources=Resources(
+            references={"big.md": "x" * 200, "cjk.md": "あ" * 100},  # 200B / 300B utf-8
+            assets={"img.png": b"y" * 200},                          # binary, 200B
+        ),
+    )
+    _prune_oversized_resources(skill, max_bytes=150)
+    assert "big.md" not in skill.resources.references, "200B text not pruned"
+    # 100 CJK chars = 300 utf-8 bytes > 150 → pruned (char-count bug would keep it)
+    assert "cjk.md" not in skill.resources.references, "multibyte counted as chars"
+    assert "img.png" in skill.resources.assets, "binary must NOT be pruned"
+    print("OK")
+
+
+def test_search_is_literal_not_regex():
+    """#1: query is a literal substring, not a regex (no ReDoS surface)."""
+    print("test_search_is_literal_not_regex: ", end="")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        _write_skill(base, "demo", references={"a.md": "abc\nxyz"})
+        from adk_cc.tools.skills import make_skill_toolset
+        ts = make_skill_toolset(skills_dir=base)
+        search = _tool(ts, "search_skill_resource")
+        # 'a.c' matches 'abc' as REGEX but not as a literal substring.
+        r = _run(search.run_async(args={"skill_name": "demo", "query": "a.c"},
+                                  tool_context=None))
+        assert r["total_returned"] == 0, r
+        # case-insensitive literal does match.
+        r2 = _run(search.run_async(args={"skill_name": "demo", "query": "ABC"},
+                                   tool_context=None))
+        assert r2["total_returned"] == 1, r2
+    print("OK")
+
+
+def test_search_skips_oversized_file():
+    """#3: search skips files over the read cap instead of reading them whole."""
+    print("test_search_skips_oversized_file: ", end="")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        _write_skill(base, "demo", references={"big.md": "NEEDLE\n" + "x" * 500})
+        with _env(ADK_CC_SKILL_RESOURCE_READ_MAX_BYTES="50"):
+            from adk_cc.tools.skills import make_skill_toolset
+            ts = make_skill_toolset(skills_dir=base)
+            search = _tool(ts, "search_skill_resource")
+            r = _run(search.run_async(args={"skill_name": "demo", "query": "NEEDLE"},
+                                      tool_context=None))
+            assert r["total_returned"] == 0, r  # big.md skipped (over cap)
+    print("OK")
+
+
+def test_oversized_disk_read_refused():
+    """#3: the disk fallback refuses to read a file over the read cap (no OOM)."""
+    print("test_oversized_disk_read_refused: ", end="")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        _write_skill(base, "demo", references={"big.md": "x" * 500})
+        with _env(ADK_CC_SKILL_FILE_MAX_BYTES="50",
+                  ADK_CC_SKILL_RESOURCE_READ_MAX_BYTES="50"):
+            from adk_cc.tools.skills import make_skill_toolset
+            ts = make_skill_toolset(skills_dir=base)  # big.md pruned from memory
+            lr = _tool(ts, "load_skill_resource")
+            r = _run(lr.run_async(
+                args={"skill_name": "demo", "file_path": "references/big.md"},
+                tool_context=None,
+            ))
+            # pruned + too large to read from disk → not inlined.
+            assert r.get("error_code") == "RESOURCE_NOT_FOUND", r
+    print("OK")
+
+
 def main():
     test_resource_bounded_and_paginated()
     test_per_line_cap()
@@ -285,6 +379,11 @@ def main():
     test_guards_on_script_refused_on_noop()
     test_guards_off_script_not_guard_wrapped()
     test_load_skill_instructions_capped()
+    test_clip_lines_no_phantom_trailing_line()
+    test_prune_skips_binary_and_counts_bytes()
+    test_search_is_literal_not_regex()
+    test_search_skips_oversized_file()
+    test_oversized_disk_read_refused()
     print()
     print("All skill-resource-limits tests passed")
 
