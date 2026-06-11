@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { Terminal, ChevronDown, ChevronRight } from "lucide-react"
-import { cn } from "@/lib/utils"
+import { cn, toolCallTitle } from "@/lib/utils"
 
 /**
  * Terminal-style renderer for `run_bash` calls.
@@ -49,6 +49,9 @@ export function BashTerminalCard({
   const r = response ? ((response ?? {}) as BashResponse) : null
   const isPending = r === null
   const command = a.command ?? ""
+  // Model-written call label (ToolTitlePlugin). Title becomes the header;
+  // the raw command stays visible as a secondary chip + in the terminal block.
+  const callTitle = toolCallTitle(args)
   const exitCode = r?.exit_code
   const isTimeout = r?.status === "timeout"
   const isFailure = !isPending && (isTimeout || (typeof exitCode === "number" && exitCode !== 0))
@@ -67,9 +70,18 @@ export function BashTerminalCard({
             <ChevronRight className="h-4 w-4 text-muted-foreground" />
           )}
           <Terminal className="h-4 w-4 text-muted-foreground" />
-          <span className="font-mono text-xs truncate flex-1">
-            {command || "run_bash"}
-          </span>
+          {callTitle ? (
+            <span className="text-xs truncate flex-1">
+              {callTitle}{" "}
+              <span className="font-mono text-[10px] text-muted-foreground">
+                {command}
+              </span>
+            </span>
+          ) : (
+            <span className="font-mono text-xs truncate flex-1">
+              {command || "run_bash"}
+            </span>
+          )}
           {isPending && (
             <span className="rounded-sm bg-secondary text-secondary-foreground px-1.5 py-0.5 text-[10px] font-medium">
               running…

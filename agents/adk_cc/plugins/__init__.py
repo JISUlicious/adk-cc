@@ -18,6 +18,7 @@ from . import session_retry  # noqa: F401
 from . import tolerant_tool_json  # noqa: F401
 from .task_reminder import TaskReminderPlugin
 from .tool_call_validator import ToolCallValidatorPlugin
+from .tool_title import ToolTitlePlugin
 
 __all__ = [
     "AskUserQuestionUiHintPlugin",
@@ -33,4 +34,5 @@ __all__ = [
     "QuotaPlugin",
     "TaskReminderPlugin",
     "ToolCallValidatorPlugin",
+    "ToolTitlePlugin",
 ]
