@@ -66,6 +66,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -320,12 +321,25 @@ def _guards_on() -> bool:
 def _wrap_untrusted(content: str, source: str) -> str:
     """Phase-2: mark model-bound skill content as untrusted DATA so an
     injected instruction in a (possibly third-party) skill is less likely to
-    be obeyed. No-op unless guards are on."""
+    be obeyed. No-op unless guards are on.
+
+    The content is UNTRUSTED, so it can contain a forged <skill_content> /
+    </skill_content> tag to open or (more dangerously) close the wrapper early
+    and smuggle text out as trusted. Neutralize any such tag in the content
+    (case-insensitive) by escaping its '<', and escape the source attribute,
+    so the only real delimiters are the ones we emit."""
     if not _guards_on():
         return content
+    safe_content = re.sub(r"(?i)<(/?\s*skill_content)", r"&lt;\1", content)
+    safe_source = (
+        source.replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
     return (
-        f'<skill_content trust="untrusted" source="{source}">\n'
-        f"{content}\n</skill_content>"
+        f'<skill_content trust="untrusted" source="{safe_source}">\n'
+        f"{safe_content}\n</skill_content>"
     )
 
 
@@ -819,10 +833,6 @@ def _patch_skill_tools(
             and not isinstance(tool, _NoopGuardedRunSkillScriptTool)
         ):
             toolset._tools[i] = _NoopGuardedRunSkillScriptTool(toolset)
-
-
-# Back-compat: skills_tenant.py imports the old name.
-_patch_load_skill_resource = _patch_skill_tools
 
 
 def make_skill_toolset(
