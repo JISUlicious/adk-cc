@@ -1,14 +1,16 @@
 """Tests for SessionTitlePlugin (plugins/session_title.py).
 
-Out-of-band session titling: after_run_callback fires one small model call
-and persists state["session_title"] via a content-less state-delta event.
-Uses a fake BaseLlm — no live model. Hand-rolled (no pytest).
+Out-of-band session titling, spawn-early/persist-late: before_run spawns the
+titling model call CONCURRENTLY with the agent turn; after_run awaits it
+(already done) and persists state["session_title"] via a content-less
+state-delta event. Uses a fake BaseLlm — no live model. Hand-rolled.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import time
 from typing import AsyncGenerator
 
 os.environ.setdefault("ADK_CC_SKIP_DOTENV", "1")
@@ -26,9 +28,10 @@ from adk_cc.plugins.session_title import SessionTitlePlugin, _clean_title
 
 
 class _FakeLlm(BaseLlm):
-    """Returns a canned title; counts calls; can be told to explode."""
+    """Returns a canned title after `delay`s; counts calls; can explode."""
 
     reply: str = '  "Fizzbuzz Script Demo."  \nignored second line'
+    delay: float = 0.0
     explode: bool = False
     calls: int = 0
 
@@ -36,7 +39,8 @@ class _FakeLlm(BaseLlm):
         self, llm_request, stream: bool = False
     ) -> AsyncGenerator[LlmResponse, None]:
         type(self).calls += 1
-        self.calls = type(self).calls
+        if self.delay:
+            await asyncio.sleep(self.delay)
         if self.explode:
             raise RuntimeError("model down")
         yield LlmResponse(
@@ -53,37 +57,34 @@ def _user_event(text: str, n: int = 0) -> Event:
     )
 
 
-def _agent_event(text: str) -> Event:
-    return Event(
-        invocation_id="inv-a", author="coordinator",
-        content=types.Content(role="model", parts=[types.Part(text=text)]),
-    )
-
-
-async def _make_ictx(*events: Event, state=None, llm: _FakeLlm = None):
+async def _make_ictx(*events: Event, state=None, llm: _FakeLlm = None,
+                     user_text="make a fizzbuzz script"):
     svc = InMemorySessionService()
-    session = await svc.create_session(
-        app_name="t", user_id="u", state=state or {}
-    )
+    session = await svc.create_session(app_name="t", user_id="u", state=state or {})
     for e in events:
         await svc.append_event(session, e)
     agent = LlmAgent(name="t", model=llm or _FakeLlm(model="fake/model"))
+    user_content = (
+        types.Content(role="user", parts=[types.Part(text=user_text)])
+        if user_text is not None else None
+    )
     return InvocationContext(
         session_service=svc, invocation_id="inv-run",
-        agent=agent, session=session,
+        agent=agent, session=session, user_content=user_content,
     ), svc, session
+
+
+async def _full_run(plugin: SessionTitlePlugin, ictx):
+    await plugin.before_run_callback(invocation_context=ictx)
+    await plugin.after_run_callback(invocation_context=ictx)
 
 
 def test_titles_after_first_turn():
     async def run():
         _FakeLlm.calls = 0
-        ictx, svc, session = await _make_ictx(
-            _user_event("make a fizzbuzz script"),
-            _agent_event("Done — fizzbuzz.py created."),
-        )
-        await SessionTitlePlugin().after_run_callback(invocation_context=ictx)
-        fresh = await svc.get_session(
-            app_name="t", user_id="u", session_id=session.id)
+        ictx, svc, session = await _make_ictx(_user_event("make a fizzbuzz script"))
+        await _full_run(SessionTitlePlugin(), ictx)
+        fresh = await svc.get_session(app_name="t", user_id="u", session_id=session.id)
         # quotes/period/second-line stripped by _clean_title
         assert fresh.state.get("session_title") == "Fizzbuzz Script Demo", fresh.state
         assert _FakeLlm.calls == 1
@@ -94,29 +95,50 @@ def test_titles_after_first_turn():
     print("OK titles_after_first_turn")
 
 
+def test_generation_overlaps_the_turn():
+    """The titling call runs CONCURRENTLY with the (simulated) agent turn:
+    a 0.3s title call + a 0.3s turn complete in ~0.3s, not ~0.6s."""
+    async def run():
+        _FakeLlm.calls = 0
+        ictx, svc, session = await _make_ictx(
+            _user_event("hi"), llm=_FakeLlm(model="fake/model", delay=0.3))
+        plugin = SessionTitlePlugin()
+        t0 = time.perf_counter()
+        await plugin.before_run_callback(invocation_context=ictx)  # spawn
+        await asyncio.sleep(0.3)                                   # the "turn"
+        await plugin.after_run_callback(invocation_context=ictx)   # persist
+        elapsed = time.perf_counter() - t0
+        fresh = await svc.get_session(app_name="t", user_id="u", session_id=session.id)
+        assert fresh.state.get("session_title"), fresh.state
+        assert elapsed < 0.5, f"not overlapped: {elapsed:.3f}s (~0.6s = serial)"
+        print(f"  (0.3s call + 0.3s turn = {elapsed:.3f}s total — overlapped)")
+    asyncio.run(run())
+    print("OK generation_overlaps_the_turn")
+
+
 def test_skips_when_already_titled():
     async def run():
         _FakeLlm.calls = 0
         ictx, svc, session = await _make_ictx(
             _user_event("hello"), state={"session_title": "Existing"})
-        await SessionTitlePlugin().after_run_callback(invocation_context=ictx)
+        await _full_run(SessionTitlePlugin(), ictx)
         fresh = await svc.get_session(app_name="t", user_id="u", session_id=session.id)
         assert fresh.state["session_title"] == "Existing"
-        assert _FakeLlm.calls == 0, "must not burn a model call"
+        assert _FakeLlm.calls == 0, "must not even spawn the model call"
     asyncio.run(run())
     print("OK skips_when_already_titled")
 
 
-def test_skips_without_user_message():
+def test_skips_without_user_content():
     async def run():
         _FakeLlm.calls = 0
-        ictx, svc, session = await _make_ictx(_agent_event("system warmup"))
-        await SessionTitlePlugin().after_run_callback(invocation_context=ictx)
+        ictx, svc, session = await _make_ictx(user_text=None)
+        await _full_run(SessionTitlePlugin(), ictx)
         fresh = await svc.get_session(app_name="t", user_id="u", session_id=session.id)
         assert "session_title" not in fresh.state
         assert _FakeLlm.calls == 0
     asyncio.run(run())
-    print("OK skips_without_user_message")
+    print("OK skips_without_user_content")
 
 
 def test_skips_old_sessions():
@@ -124,7 +146,7 @@ def test_skips_old_sessions():
         _FakeLlm.calls = 0
         events = [_user_event(f"msg {i}", i) for i in range(6)]  # > _MAX_USER_TURNS
         ictx, svc, session = await _make_ictx(*events)
-        await SessionTitlePlugin().after_run_callback(invocation_context=ictx)
+        await _full_run(SessionTitlePlugin(), ictx)
         fresh = await svc.get_session(app_name="t", user_id="u", session_id=session.id)
         assert "session_title" not in fresh.state
         assert _FakeLlm.calls == 0
@@ -137,12 +159,22 @@ def test_model_failure_never_breaks_run():
         _FakeLlm.calls = 0
         ictx, svc, session = await _make_ictx(
             _user_event("hi"), llm=_FakeLlm(model="fake/model", explode=True))
-        # must not raise
-        await SessionTitlePlugin().after_run_callback(invocation_context=ictx)
+        await _full_run(SessionTitlePlugin(), ictx)  # must not raise
         fresh = await svc.get_session(app_name="t", user_id="u", session_id=session.id)
         assert "session_title" not in fresh.state
     asyncio.run(run())
     print("OK model_failure_never_breaks_run")
+
+
+def test_after_run_without_spawn_is_noop():
+    async def run():
+        ictx, svc, session = await _make_ictx(_user_event("hi"))
+        # after_run alone (e.g. plugin hot-swapped mid-run) — no pending task
+        await SessionTitlePlugin().after_run_callback(invocation_context=ictx)
+        fresh = await svc.get_session(app_name="t", user_id="u", session_id=session.id)
+        assert "session_title" not in fresh.state
+    asyncio.run(run())
+    print("OK after_run_without_spawn_is_noop")
 
 
 def test_clean_title():
@@ -157,10 +189,12 @@ def test_clean_title():
 
 def main():
     test_titles_after_first_turn()
+    test_generation_overlaps_the_turn()
     test_skips_when_already_titled()
-    test_skips_without_user_message()
+    test_skips_without_user_content()
     test_skips_old_sessions()
     test_model_failure_never_breaks_run()
+    test_after_run_without_spawn_is_noop()
     test_clean_title()
     print("\nall session-title-plugin tests passed")
 
