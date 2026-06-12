@@ -905,4 +905,18 @@ _app_kwargs = dict(
 if _compaction_config is not None:
     _app_kwargs["events_compaction_config"] = _compaction_config
 
+# Tool-call titles (opt-in, ADK_CC_TOOL_TITLES=1): the model labels each tool
+# call ("Writing ML training script") for the frontend UI. Plugin-layer — adds
+# an optional `title` arg to every tool declaration and strips it before
+# execution; the recorded functionCall event keeps it for the UI. Appended
+# last so injection runs after PlanModeReminderPlugin's tool filtering.
+# Same flag also enables SESSION titles for the rail — an out-of-band LLM
+# call after the first turn (SessionTitlePlugin), not a tool the agent must
+# remember to call.
+if os.environ.get("ADK_CC_TOOL_TITLES") == "1":
+    from .plugins import SessionTitlePlugin, ToolTitlePlugin
+
+    _app_kwargs["plugins"].append(ToolTitlePlugin())
+    _app_kwargs["plugins"].append(SessionTitlePlugin())
+
 app = App(**_app_kwargs)

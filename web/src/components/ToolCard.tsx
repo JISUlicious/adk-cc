@@ -7,6 +7,7 @@ import {
   X,
   Loader,
 } from "lucide-react"
+import { toolCallTitle } from "@/lib/utils"
 
 /**
  * Unified renderer for tool calls without a specialized paired card.
@@ -34,6 +35,8 @@ export function ToolCard({
   response: unknown
 }) {
   const [open, setOpen] = useState(false)
+  // Model-written call label (ToolTitlePlugin); tool name stays as a chip.
+  const callTitle = toolCallTitle(args)
   const status = deriveStatus(response)
   const error = status === "error" ? extractError(response) : null
   const hasArgs = Boolean(
@@ -55,7 +58,16 @@ export function ToolCard({
             <ChevronRight className="h-4 w-4 text-muted-foreground" />
           )}
           <Wrench className="h-4 w-4 text-muted-foreground" />
-          <span className="font-mono text-xs truncate flex-1">{name}</span>
+          {callTitle ? (
+            <span className="text-xs truncate flex-1">
+              {callTitle}{" "}
+              <span className="font-mono text-[10px] text-muted-foreground">
+                {name}
+              </span>
+            </span>
+          ) : (
+            <span className="font-mono text-xs truncate flex-1">{name}</span>
+          )}
           <StatusChip status={status} />
           {callId && (
             <span className="font-mono text-[10px] text-muted-foreground shrink-0">
@@ -116,7 +128,7 @@ function JsonBlock({ label, value }: { label: string; value: unknown }) {
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
         {label}
       </div>
-      <pre className="rounded bg-muted p-2 text-xs font-mono overflow-x-auto max-h-64">
+      <pre className="rounded bg-muted p-2 text-xs font-mono overflow-auto max-h-64">
         {safeJson(value)}
       </pre>
     </div>

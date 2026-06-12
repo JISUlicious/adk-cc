@@ -1,5 +1,6 @@
 import { useState } from "react"
 import { FileEdit, FilePlus, ChevronDown, ChevronRight } from "lucide-react"
+import { toolCallTitle } from "@/lib/utils"
 
 /**
  * Renders `edit_file` and `write_file` tool calls. Two shapes:
@@ -61,7 +62,8 @@ export function FileEditCard({
 
   const path = a.path ?? r?.path ?? "(unknown path)"
   const Icon = op === "edit" ? FileEdit : FilePlus
-  const title = op === "edit" ? "Edit file" : "Write file"
+  // Model-written call label (ToolTitlePlugin) wins over the generic verb.
+  const title = toolCallTitle(args) ?? (op === "edit" ? "Edit file" : "Write file")
 
   return (
     <div className="flex justify-start">
@@ -177,7 +179,7 @@ function CodeBlock({
         {label}
       </div>
       <pre
-        className="rounded p-2 text-xs leading-relaxed font-mono overflow-x-auto max-h-64 whitespace-pre-wrap break-all text-foreground"
+        className="rounded p-2 text-xs leading-relaxed font-mono overflow-auto max-h-64 whitespace-pre-wrap break-all text-foreground"
         style={blockStyle}
       >
         {content || <span className="opacity-50">(empty)</span>}

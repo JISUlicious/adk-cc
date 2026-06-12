@@ -210,12 +210,27 @@ export function SessionRail({
               onClick={() => onSelect(s)}
             >
               <div className="flex-1 min-w-0">
-                <div className="font-mono text-xs truncate">
-                  {s.id.slice(0, 18)}
-                </div>
-                <div className="text-[10px] text-muted-foreground">
-                  {s.events.length} event{s.events.length === 1 ? "" : "s"}
-                </div>
+                {/* Model-set session title (set_session_title →
+                    state.session_title) wins; bare id otherwise. The id
+                    stays on the secondary line so titled sessions remain
+                    findable/matchable. */}
+                {sessionTitle(s) ? (
+                  <>
+                    <div className="text-xs truncate">{sessionTitle(s)}</div>
+                    <div className="font-mono text-[10px] text-muted-foreground truncate">
+                      {s.id.slice(0, 18)}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="font-mono text-xs truncate">
+                      {s.id.slice(0, 18)}
+                    </div>
+                    <div className="text-[10px] text-muted-foreground">
+                      {s.events.length} event{s.events.length === 1 ? "" : "s"}
+                    </div>
+                  </>
+                )}
               </div>
               <button
                 type="button"
@@ -235,4 +250,10 @@ export function SessionRail({
       </aside>
     </>
   )
+}
+
+/** Model-set session title (set_session_title → state.session_title), if any. */
+function sessionTitle(s: Session): string | undefined {
+  const t = (s.state as Record<string, unknown> | undefined)?.["session_title"]
+  return typeof t === "string" && t.trim() ? t.trim() : undefined
 }
