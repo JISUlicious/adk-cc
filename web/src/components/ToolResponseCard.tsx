@@ -41,7 +41,7 @@ export function ToolResponseCard({
           )}
         </button>
         {open && (
-          <pre className="px-3 pb-3 text-xs overflow-x-auto text-muted-foreground">
+          <pre className="px-3 pb-3 text-xs overflow-auto max-h-64 text-muted-foreground">
             {safeJson(response)}
           </pre>
         )}

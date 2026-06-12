@@ -128,7 +128,7 @@ function JsonBlock({ label, value }: { label: string; value: unknown }) {
       <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
         {label}
       </div>
-      <pre className="rounded bg-muted p-2 text-xs font-mono overflow-x-auto max-h-64">
+      <pre className="rounded bg-muted p-2 text-xs font-mono overflow-auto max-h-64">
         {safeJson(value)}
       </pre>
     </div>

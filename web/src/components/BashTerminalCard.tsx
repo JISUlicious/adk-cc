@@ -43,8 +43,10 @@ export function BashTerminalCard({
   response: unknown
   callId: string
 }) {
-  // Default open if there's already a response; collapsed if pending.
-  const [open, setOpen] = useState(true)
+  // Collapsed by default: the header (command + exit-code chip) is the
+  // summary, so a thread full of run_bash calls stays scannable. Expand
+  // for the full terminal output (which is itself height-capped below).
+  const [open, setOpen] = useState(false)
   const a = (args ?? {}) as BashArgs
   const r = response ? ((response ?? {}) as BashResponse) : null
   const isPending = r === null
@@ -119,7 +121,7 @@ export function BashTerminalCard({
                 a cool zinc. Prompt and stderr keep functional color,
                 tuned warmer — stderr uses warm rust, prompt uses
                 muted parchment, not cool emerald. */}
-            <pre className="rounded p-3 text-xs leading-relaxed font-mono overflow-x-auto" style={{ background: "#141413", color: "#ece9df" }}>
+            <pre className="rounded p-3 text-xs leading-relaxed font-mono overflow-auto max-h-80" style={{ background: "#141413", color: "#ece9df" }}>
               <span style={{ color: "#a4a297" }} className="select-none">$ </span>
               {command}
               {r?.stdout && (

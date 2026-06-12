@@ -179,7 +179,7 @@ function CodeBlock({
         {label}
       </div>
       <pre
-        className="rounded p-2 text-xs leading-relaxed font-mono overflow-x-auto max-h-64 whitespace-pre-wrap break-all text-foreground"
+        className="rounded p-2 text-xs leading-relaxed font-mono overflow-auto max-h-64 whitespace-pre-wrap break-all text-foreground"
         style={blockStyle}
       >
         {content || <span className="opacity-50">(empty)</span>}
