@@ -309,6 +309,74 @@ class WikiStore:
         with open(self.changelog_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
+    # ----- sticky resolutions (idempotency + human adjudication) -----
+    def get_sticky(self, claim_hash: str) -> Optional[dict[str, Any]]:
+        """A prior resolution record for a claim-hash, or None. `by` is
+        'auto' (this layer recorded a hold) or 'human' (admin adjudicated)."""
+        path = os.path.join(self.resolutions_dir, _safe_id(claim_hash, "hash") + ".json")
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else None
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def set_sticky(
+        self, claim_hash: str, *, action: str, by: str = "auto", note: str = ""
+    ) -> None:
+        os.makedirs(self.resolutions_dir, exist_ok=True)
+        path = os.path.join(self.resolutions_dir, _safe_id(claim_hash, "hash") + ".json")
+        _atomic_write(
+            path,
+            json.dumps(
+                {"action": action, "by": by, "note": note, "ts": _now_iso()}, indent=2
+            ) + "\n",
+        )
+
+    def human_override(self, claim_hash: str) -> Optional[str]:
+        """'accept'/'reject' if a HUMAN adjudicated this claim, else None.
+        Auto-recorded holds do NOT count as overrides — only human ones do."""
+        rec = self.get_sticky(claim_hash)
+        if rec and rec.get("by") == "human":
+            action = rec.get("action")
+            if action in ("accept", "reject"):
+                return action
+        return None
+
+    # ----- quarantine (human review queue) -----
+    def add_quarantine(self, claim_hash: str, record: dict[str, Any]) -> str:
+        """Queue a conflicted/uncited claim for human review. Keyed by
+        claim-hash so re-running the merge doesn't pile up duplicate notes."""
+        os.makedirs(self.quarantine_dir, exist_ok=True)
+        qid = _safe_id(claim_hash, "hash")
+        path = os.path.join(self.quarantine_dir, qid + ".json")
+        rec = {"claim_hash": claim_hash, "status": "pending", "ts": _now_iso(), **record}
+        _atomic_write(path, json.dumps(rec, indent=2) + "\n")
+        return qid
+
+    def list_quarantine(self, *, pending_only: bool = True) -> list[dict[str, Any]]:
+        if not os.path.isdir(self.quarantine_dir):
+            return []
+        out: list[dict[str, Any]] = []
+        for f in sorted(os.listdir(self.quarantine_dir)):
+            if not f.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(self.quarantine_dir, f), encoding="utf-8") as fh:
+                    rec = json.load(fh)
+            except (json.JSONDecodeError, OSError):
+                continue
+            if pending_only and rec.get("status") != "pending":
+                continue
+            out.append(rec)
+        return out
+
+    def is_quarantined(self, claim_hash: str) -> bool:
+        path = os.path.join(self.quarantine_dir, _safe_id(claim_hash, "hash") + ".json")
+        return os.path.isfile(path)
+
     # ----- per-tenant settings (admin-tunable) -----
     def read_settings(self) -> dict[str, Any]:
         if not os.path.isfile(self.settings_path):

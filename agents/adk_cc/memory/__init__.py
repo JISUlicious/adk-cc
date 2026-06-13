@@ -21,6 +21,7 @@ auto-capture), and a cron-run librarian. All gated by `ADK_CC_WIKI=1`.
 
 from __future__ import annotations
 
+from .librarian import Librarian, LlmClassifier, MergeReport
 from .page import Page, parse, serialize, slugify
 from .store import InboxDoc, WikiStore, wiki_root_from_env
 
@@ -32,4 +33,7 @@ __all__ = [
     "InboxDoc",
     "WikiStore",
     "wiki_root_from_env",
+    "Librarian",
+    "LlmClassifier",
+    "MergeReport",
 ]
