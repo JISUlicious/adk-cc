@@ -262,3 +262,60 @@ class LoadArtifactToSandboxArgs(BaseModel):
             "true. Guards against silently clobbering sandbox edits."
         ),
     )
+
+
+# ---- Wiki memory tools (ADK_CC_WIKI=1) ----
+class WikiSearchArgs(BaseModel):
+    query: str = Field(
+        description=(
+            "What to look up in the wiki. Searches the shared domain wiki "
+            "AND your own private notes (inbox); results are tagged with "
+            "which scope they came from."
+        )
+    )
+    limit: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Max number of pages to return (1-20). Defaults to 5.",
+    )
+
+
+class WikiReadArgs(BaseModel):
+    slug: str = Field(
+        description=(
+            "The page slug to read (as returned by `wiki_search`, e.g. "
+            "'gpt-4-turbo'). Use `scope` to choose where to read from."
+        )
+    )
+    scope: str = Field(
+        default="auto",
+        description=(
+            "`auto` (default): prefer your private note on this topic, fall "
+            "back to the shared wiki. `domain`: only the shared wiki. "
+            "`inbox`: only your private notes."
+        ),
+    )
+
+
+class WikiAddArgs(BaseModel):
+    text: str = Field(
+        description=(
+            "The note/document to capture, as markdown. This is written to "
+            "YOUR private inbox only — it never edits the shared wiki "
+            "directly. The librarian later merges vetted notes into the "
+            "shared domain wiki."
+        )
+    )
+    title: Optional[str] = Field(
+        default=None,
+        description="Optional display title. Defaults to the first line of `text`.",
+    )
+    topic: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional entity/concept this note is about (drives the page "
+            "slug). Set this to the same topic as an existing wiki page to "
+            "have the librarian merge your note into it."
+        ),
+    )
