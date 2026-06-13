@@ -933,4 +933,15 @@ if os.environ.get("ADK_CC_TOOL_TITLES") == "1":
     _app_kwargs["plugins"].append(ToolTitlePlugin())
     _app_kwargs["plugins"].append(SessionTitlePlugin())
 
+# Knowledge-wiki recall (opt-in, ADK_CC_WIKI=1). Injects a token-budgeted
+# slice of the wiki relevant to each user message into the system
+# instruction (cheap, no model call), and — when ADK_CC_WIKI_AUTOCAPTURE=1
+# — auto-captures durable user-asserted facts into the caller's inbox via
+# an out-of-band extraction that overlaps the turn (spawn-early/persist-late,
+# like SessionTitlePlugin). Inert unless the flag is set.
+if os.environ.get("ADK_CC_WIKI") == "1":
+    from .plugins import WikiRecallPlugin
+
+    _app_kwargs["plugins"].append(WikiRecallPlugin())
+
 app = App(**_app_kwargs)
