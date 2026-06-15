@@ -40,6 +40,7 @@ programmatically if you need to read a value (e.g. for migration).
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import tempfile
 import zipfile
@@ -219,6 +220,41 @@ def mount_tenant_admin(
             if target.exists():
                 shutil.rmtree(target)
             return {"status": "ok"}
+
+    # --- Wiki memory settings (only mounted when ADK_CC_WIKI=1) -------
+    # Per-tenant, admin-tunable knobs for the knowledge wiki. Today: the
+    # corroboration threshold N (how many independent users must corroborate
+    # a claim to overturn a domain fact without human adjudication). Stored
+    # in the tenant's wiki settings.json; the librarian reads it each run.
+    if os.environ.get("ADK_CC_WIKI") == "1":
+        from ..memory import WikiStore
+
+        @router.get("/wiki-settings")
+        async def get_wiki_settings(tenant_id: str, request: Request):
+            await _maybe_await(authorize(request, tenant_id))
+            store = WikiStore.for_tenant(tenant_id)
+            return {
+                "settings": store.read_settings(),
+                "effective": {"corroboration_n": store.corroboration_n},
+            }
+
+        @router.put("/wiki-settings/corroboration_n")
+        async def put_corroboration_n(tenant_id: str, request: Request):
+            await _maybe_await(authorize(request, tenant_id))
+            _ensure_safe_id(tenant_id, "tenant_id")
+            body = await request.json()
+            value = body.get("value")
+            try:
+                n = int(value)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=400, detail="'value' must be an integer ≥ 1"
+                )
+            if n < 1:
+                raise HTTPException(status_code=400, detail="corroboration_n must be ≥ 1")
+            store = WikiStore.for_tenant(tenant_id).ensure()
+            store.set_setting("corroboration_n", n)
+            return {"status": "ok", "corroboration_n": store.corroboration_n}
 
     app.include_router(router)
 

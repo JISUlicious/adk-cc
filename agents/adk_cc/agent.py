@@ -442,6 +442,20 @@ if _tenant_mcp is not None:
 if _tenant_skills is not None:
     _coordinator_tools.append(_tenant_skills)
 
+# Knowledge-wiki memory tools (opt-in, ADK_CC_WIKI=1). User-scope writes
+# only: wiki_add captures to the caller's PRIVATE inbox; the offline
+# librarian (scripts/wiki_librarian.py) merges vetted notes into the
+# shared domain wiki. wiki_search / wiki_read overlay the caller's private
+# notes on the shared wiki. Inert unless the flag is set, so the
+# dev/default tool surface is unchanged. Explore (read-only) gets the
+# recall tools too; only the coordinator can capture.
+if os.environ.get("ADK_CC_WIKI") == "1":
+    from .tools import WikiAddTool, WikiReadTool, WikiSearchTool
+
+    _wiki_search, _wiki_read = WikiSearchTool(), WikiReadTool()
+    _coordinator_tools.extend([_wiki_search, _wiki_read, WikiAddTool()])
+    explore_agent.tools.extend([_wiki_search, _wiki_read])
+
 root_agent = LlmAgent(
     name="coordinator",
     model=MODEL,
@@ -918,5 +932,16 @@ if os.environ.get("ADK_CC_TOOL_TITLES") == "1":
 
     _app_kwargs["plugins"].append(ToolTitlePlugin())
     _app_kwargs["plugins"].append(SessionTitlePlugin())
+
+# Knowledge-wiki recall (opt-in, ADK_CC_WIKI=1). Injects a token-budgeted
+# slice of the wiki relevant to each user message into the system
+# instruction (cheap, no model call), and — when ADK_CC_WIKI_AUTOCAPTURE=1
+# — auto-captures durable user-asserted facts into the caller's inbox via
+# an out-of-band extraction that overlaps the turn (spawn-early/persist-late,
+# like SessionTitlePlugin). Inert unless the flag is set.
+if os.environ.get("ADK_CC_WIKI") == "1":
+    from .plugins import WikiRecallPlugin
+
+    _app_kwargs["plugins"].append(WikiRecallPlugin())
 
 app = App(**_app_kwargs)

@@ -11,42 +11,69 @@ import {
 import { apiFetch, ApiError } from "@/api/client"
 import { getToken, setToken, getUser, onAuthCleared } from "@/api/auth"
 
+// Auto-login identity used when the server is in no-auth dev mode
+// (ADK_CC_ALLOW_NO_AUTH=1). The token value is irrelevant to such a server —
+// any non-empty string is accepted — so we mint a placeholder and skip the
+// login form entirely. The user id defaults to whatever was last used.
+const DEV_TOKEN = "dev"
+
 /**
- * Wraps the app. Renders a login form when no token is stored, the stored
- * token fails verification, or any later API call returns 401 (the token
- * was revoked/expired mid-session). Renders children only once a stored
- * token has been VERIFIED against the server — presence alone is not
- * trusted, so a stale/invalid token can't render a broken, 401-ing page.
+ * Wraps the app. Renders a login form when auth is required and no valid
+ * token is stored, or when any later API call returns 401 (token revoked/
+ * expired mid-session). Children render only once a token has been VERIFIED
+ * against the server — presence alone is not trusted, so a stale/invalid
+ * token can't render a broken, 401-ing page.
+ *
+ * Dev convenience: on first load with no token, we probe `/list-apps`
+ * WITHOUT auth. If the server accepts it (ADK_CC_ALLOW_NO_AUTH=1), we
+ * auto-sign-in with a placeholder token and skip the login form. If it 401s
+ * (real auth configured), the login form shows exactly as before. This is
+ * behavior-detected, not build-flag'd — the bundle is built in prod mode
+ * even for local FastAPI-served dev, so import.meta.env.DEV is unreliable.
  *
  * Production OIDC redirect: future. v1 form-pastes a JWT (works with
  * either JwtAuthExtractor or BearerTokenExtractor — same Authorization
  * header on the wire).
  */
 export function AuthGate({ children }: { children: ReactNode }) {
-  const [token, setLocalToken] = useState<string | null>(getToken())
   const [user, setLocalUser] = useState<string>(getUser())
   const [verifying, setVerifying] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // null = not yet checked; true = verified good; false = needs login.
-  const [verified, setVerified] = useState<boolean | null>(
-    getToken() ? null : false,
-  )
+  // null = not yet checked (verifying a stored token OR probing no-auth);
+  // true = verified good; false = needs login.
+  const [verified, setVerified] = useState<boolean | null>(null)
 
-  // Verify a pre-existing stored token on mount. Until it succeeds we do
-  // NOT render children — otherwise a stale token shows the app, whose API
-  // calls then 401. On failure, clear + drop to the login form.
+  // Bootstrap on mount. Two paths, neither renders children until verified:
+  //   - stored token  → verify it against /list-apps; clear + show form on fail
+  //   - no token      → probe /list-apps WITHOUT auth; 200 ⇒ no-auth dev mode,
+  //                     auto-sign-in and skip the form; failure ⇒ show form
   useEffect(() => {
     let cancelled = false
-    if (getToken() && verified === null) {
-      apiFetch<string[]>("/list-apps")
-        .then(() => !cancelled && setVerified(true))
-        .catch(() => {
+    async function bootstrap() {
+      if (getToken()) {
+        try {
+          await apiFetch<string[]>("/list-apps")
+          if (!cancelled) setVerified(true)
+        } catch {
           if (cancelled) return
           setToken("", "")
-          setLocalToken(null)
           setVerified(false)
-        })
+        }
+        return
+      }
+      // No token — does the server accept unauthenticated requests?
+      try {
+        await apiFetch<string[]>("/list-apps", { noAuth: true })
+        if (cancelled) return
+        const u = getUser()
+        setToken(DEV_TOKEN, u)
+        setLocalUser(u)
+        setVerified(true)
+      } catch {
+        if (!cancelled) setVerified(false) // real auth required → login form
+      }
     }
+    if (verified === null) bootstrap()
     return () => {
       cancelled = true
     }
@@ -57,20 +84,19 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // broken page showing 401 errors.
   useEffect(() => {
     return onAuthCleared(() => {
-      setLocalToken(null)
       setVerified(false)
     })
   }, [])
 
-  if (token && verified === null) {
+  if (verified === null) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background">
-        <p className="text-sm text-muted-foreground">Verifying session…</p>
+        <p className="text-sm text-muted-foreground">Connecting…</p>
       </div>
     )
   }
 
-  if (token && verified) {
+  if (verified) {
     return <>{children}</>
   }
 
@@ -91,7 +117,6 @@ export function AuthGate({ children }: { children: ReactNode }) {
     try {
       setToken(t, u)
       await apiFetch<string[]>("/list-apps")
-      setLocalToken(t)
       setLocalUser(u)
       setVerified(true)
     } catch (err) {

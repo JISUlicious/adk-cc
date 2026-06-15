@@ -20,6 +20,7 @@ from . import tolerant_tool_json  # noqa: F401
 from .task_reminder import TaskReminderPlugin
 from .tool_call_validator import ToolCallValidatorPlugin
 from .tool_title import ToolTitlePlugin
+from .wiki_recall import WikiRecallPlugin
 
 __all__ = [
     "AskUserQuestionUiHintPlugin",
@@ -37,4 +38,5 @@ __all__ = [
     "TaskReminderPlugin",
     "ToolCallValidatorPlugin",
     "ToolTitlePlugin",
+    "WikiRecallPlugin",
 ]

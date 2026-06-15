@@ -28,6 +28,7 @@ from .task import (
     TaskUpdateTool,
 )
 from .web_fetch import WebFetchTool
+from .wiki import WikiAddTool, WikiReadTool, WikiSearchTool
 from .write_file import WriteFileTool
 from .write_plan import WritePlanTool
 
@@ -50,6 +51,9 @@ __all__ = [
     "TaskListTool",
     "TaskUpdateTool",
     "WebFetchTool",
+    "WikiAddTool",
+    "WikiReadTool",
+    "WikiSearchTool",
     "WriteFileTool",
     "WritePlanTool",
     "make_mcp_toolset",
