@@ -22,11 +22,11 @@ import tempfile
 os.environ.setdefault("ADK_CC_SKIP_DOTENV", "1")
 os.environ.setdefault("ADK_CC_API_KEY", "stub")
 
-from adk_cc.memory import conflict
-from adk_cc.memory.conflict import ClaimRecord, Verdict
-from adk_cc.memory.librarian import Librarian
-from adk_cc.memory.page import Page
-from adk_cc.memory.store import WikiStore
+from adk_cc.wiki import conflict
+from adk_cc.wiki.conflict import ClaimRecord, Verdict
+from adk_cc.wiki.librarian import Librarian
+from adk_cc.wiki.page import Page
+from adk_cc.wiki.store import WikiStore
 
 
 def _claim(slug="x", text="a fact", user="alice", sources=None):
@@ -104,7 +104,7 @@ def test_pipeline_novel_add_and_archive():
         assert page is not None and "api.acme.com" in page.body
         assert "acme-api" in st.read_index()
         assert st.list_inbox("alice") == []
-        assert os.path.isdir(st.merged_dir("alice"))
+        assert st.list_merged("alice"), "archived copy kept in merged"
         assert report.actions.get(conflict.ADD) == 1
         print("OK pipeline_novel_add_and_archive")
 

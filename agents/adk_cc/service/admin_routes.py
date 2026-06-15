@@ -227,7 +227,7 @@ def mount_tenant_admin(
     # a claim to overturn a domain fact without human adjudication). Stored
     # in the tenant's wiki settings.json; the librarian reads it each run.
     if os.environ.get("ADK_CC_WIKI") == "1":
-        from ..memory import WikiStore
+        from ..wiki import WikiStore
 
         @router.get("/wiki-settings")
         async def get_wiki_settings(tenant_id: str, request: Request):

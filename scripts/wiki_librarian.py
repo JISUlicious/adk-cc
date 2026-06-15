@@ -37,7 +37,7 @@ import logging
 import os
 import sys
 
-from adk_cc.memory import Librarian, LlmClassifier, WikiStore, wiki_root_from_env
+from adk_cc.wiki import Librarian, LlmClassifier, WikiStore, wiki_root_from_env
 
 _log = logging.getLogger("wiki_librarian")
 

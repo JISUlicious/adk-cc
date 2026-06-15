@@ -27,8 +27,8 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.genai import types
 
-from adk_cc.memory.page import Page
-from adk_cc.memory.store import WikiStore
+from adk_cc.wiki.page import Page
+from adk_cc.wiki.store import WikiStore
 from adk_cc.plugins.wiki_recall import WikiRecallPlugin, _parse_capture
 
 

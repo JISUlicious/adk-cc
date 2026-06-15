@@ -1,55 +1,22 @@
-"""Lexical search + budgeted recall over a tenant's wiki.
+"""Search + budgeted recall over a tenant's wiki.
 
-At the hundreds-of-pages scale Karpathy targets, embeddings are overkill:
-a token-overlap score over title + body, with the index page as the
-navigational hand, is enough and stays debuggable. Two entry points:
-
-  - `search(...)` — rank pages for a query. A user's own inbox captures
-    are searched alongside domain pages and tagged with their scope so the
-    caller can see "this came from your private notes, not the shared wiki".
-  - `recall_context(...)` — assemble a SMALL (token-budgeted) context block
-    for injection into the model: the index, then top pages, then any
-    read-time discrepancy between the user's inbox and the domain. This is
-    the Hermes "tiny always-injected memory" surface.
+Ranking now lives in the `DocumentStore` (so it travels with the storage
+backend — a service backend provides native FTS/vector and these functions
+don't change). This module keeps the wiki-specific shaping on top: scope
+tagging (shared domain vs. the caller's private inbox), read-time discrepancy
+surfacing, and the token-budgeted recall block (the Hermes "tiny always-
+injected memory" surface).
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Optional
 
-from .page import Page
 from .store import WikiStore
 
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
 # ~4 chars/token is the usual rough rule; we budget conservatively.
 _CHARS_PER_TOKEN = 4
-
-
-def _tokens(text: str) -> list[str]:
-    return _TOKEN_RE.findall(text.lower())
-
-
-def _score(query_tokens: set[str], page: Page) -> float:
-    """Overlap score: title matches weigh more than body matches, and we
-    reward distinct query-term coverage over raw term frequency so a page
-    that mentions every query word beats one that repeats a single word."""
-    if not query_tokens:
-        return 0.0
-    title_toks = set(_tokens(page.title))
-    body_toks = _tokens(page.body)
-    body_set = set(body_toks)
-    body_freq = {}
-    for t in body_toks:
-        body_freq[t] = body_freq.get(t, 0) + 1
-    covered = query_tokens & (title_toks | body_set)
-    if not covered:
-        return 0.0
-    coverage = len(covered) / len(query_tokens)
-    title_hits = len(query_tokens & title_toks)
-    body_hits = sum(min(body_freq.get(t, 0), 3) for t in query_tokens)
-    return coverage * 10 + title_hits * 3 + body_hits
 
 
 @dataclass
@@ -62,21 +29,6 @@ class Hit:
     contested: bool = False
 
 
-def _snippet(page: Page, query_tokens: set[str], width: int = 220) -> str:
-    """A short excerpt around the first query-term hit, else the head."""
-    body = page.body.strip()
-    low = body.lower()
-    pos = -1
-    for t in query_tokens:
-        i = low.find(t)
-        if i != -1 and (pos == -1 or i < pos):
-            pos = i
-    if pos == -1:
-        return body[:width].replace("\n", " ").strip()
-    start = max(0, pos - width // 3)
-    return body[start: start + width].replace("\n", " ").strip()
-
-
 def search(
     store: WikiStore,
     query: str,
@@ -85,30 +37,27 @@ def search(
     limit: int = 5,
 ) -> list[Hit]:
     """Rank domain pages (and the caller's inbox, if `user_id` given) for a
-    query. Inbox hits are tagged scope='inbox'. Sorted by score desc."""
-    q = set(_tokens(query))
-    hits: list[Hit] = []
-
-    for slug in store.list_domain_pages():
-        page = store.read_domain_page(slug)
-        if page is None:
-            continue
-        s = _score(q, page)
-        if s > 0:
-            hits.append(
-                Hit(slug, page.title, "domain", s, _snippet(page, q), page.contested)
-            )
-
+    query, delegating the scoring to the backend. Inbox hits are tagged
+    scope='inbox'. Sorted by score desc."""
+    collections = [WikiStore.DOMAIN_COLLECTION]
     if user_id:
-        for doc in store.list_inbox(user_id):
-            s = _score(q, doc.page)
-            if s > 0:
-                hits.append(
-                    Hit(doc.slug, doc.page.title, "inbox", s, _snippet(doc.page, q))
-                )
-
-    hits.sort(key=lambda h: h.score, reverse=True)
-    return hits[:limit]
+        collections.append(store.inbox_collection(user_id))
+    out: list[Hit] = []
+    for h in store.store.search(collections, query, limit=limit):
+        domain = h.collection == WikiStore.DOMAIN_COLLECTION
+        slug = h.doc_id if domain else str(h.frontmatter.get("slug") or h.doc_id)
+        title = str(h.frontmatter.get("title") or slug)
+        out.append(
+            Hit(
+                slug=slug,
+                title=title,
+                scope="domain" if domain else "inbox",
+                score=h.score,
+                snippet=h.snippet,
+                contested=bool(h.frontmatter.get("contested")),
+            )
+        )
+    return out
 
 
 @dataclass

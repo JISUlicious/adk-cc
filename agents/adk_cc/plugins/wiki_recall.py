@@ -38,8 +38,8 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.utils.context_utils import Aclosing
 from google.genai import types
 
-from ..memory import WikiStore
-from ..memory import search as searchlib
+from ..wiki import WikiStore
+from ..wiki import search as searchlib
 
 _log = logging.getLogger(__name__)
 
@@ -157,8 +157,9 @@ class WikiRecallPlugin(BasePlugin):
             if not query:
                 return None
             store = WikiStore.for_tenant(tenant_id)
-            if not os.path.isdir(store.wiki_dir):
-                return None  # nothing compiled yet — inject nothing
+            # recall_context returns "" when nothing is stored/relevant, so no
+            # need to pre-check the backend exists (and the store is now
+            # backend-agnostic — no filesystem path to stat).
             block = searchlib.recall_context(
                 store, query, user_id=user_id, budget_tokens=_budget_tokens()
             )

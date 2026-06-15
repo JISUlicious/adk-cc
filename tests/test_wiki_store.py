@@ -14,10 +14,10 @@ import tempfile
 os.environ.setdefault("ADK_CC_SKIP_DOTENV", "1")
 os.environ.setdefault("ADK_CC_API_KEY", "stub")
 
-from adk_cc.memory import page as pagelib
-from adk_cc.memory import search as searchlib
-from adk_cc.memory.page import Page
-from adk_cc.memory.store import WikiStore, corroboration_default_from_env
+from adk_cc.wiki import page as pagelib
+from adk_cc.wiki import search as searchlib
+from adk_cc.wiki.page import Page
+from adk_cc.wiki.store import WikiStore, corroboration_default_from_env
 
 
 def _store(root: str, tenant: str = "acme") -> WikiStore:
@@ -71,9 +71,10 @@ def test_slugify():
 def test_store_skeleton_and_domain_page():
     with tempfile.TemporaryDirectory() as root:
         st = _store(root)
-        assert os.path.isdir(st.wiki_dir)
-        assert os.path.isfile(st.schema_path)
-        assert os.path.isfile(st.index_path)
+        # ensure() seeds the conventions doc + an empty index (via the API,
+        # not raw paths — the store is backend-agnostic now).
+        assert "schema" in st.read_schema().lower()
+        assert "no pages yet" in st.read_index()
         # write + read a domain page
         st.write_domain_page(Page("openai", {"title": "OpenAI"}, "An AI lab.\n"))
         assert st.list_domain_pages() == ["openai"]
@@ -98,10 +99,9 @@ def test_inbox_capture_and_archive():
         assert len(listed) == 1 and listed[0].doc_id == doc.doc_id
         assert st.list_user_ids() == ["alice"]
         # archive moves inbox→merged (user keeps a copy), inbox now empty
-        new_path = st.archive_inbox("alice", doc.doc_id)
-        assert new_path and os.path.isfile(new_path)
+        assert st.archive_inbox("alice", doc.doc_id) == doc.doc_id
         assert st.list_inbox("alice") == []
-        assert os.path.isfile(os.path.join(st.merged_dir("alice"), doc.doc_id + ".md"))
+        assert doc.doc_id in st.list_merged("alice")
         # archiving a gone doc is a safe no-op
         assert st.archive_inbox("alice", doc.doc_id) is None
     print("OK inbox_capture_and_archive")
@@ -144,13 +144,11 @@ def test_sources_immutable_and_changelog():
         st = _store(root)
         st.write_source("src1", "original")
         st.write_source("src1", "OVERWRITE ATTEMPT")
-        with open(os.path.join(st.sources_dir, "src1.md"), encoding="utf-8") as fh:
-            assert fh.read() == "original", "sources must be immutable"
+        assert st.read_source("src1") == "original", "sources must be immutable"
         assert st.has_source("src1") and not st.has_source("src2")
         st.append_changelog({"op": "merge", "slug": "openai"})
-        with open(st.changelog_path, encoding="utf-8") as fh:
-            line = fh.readline()
-        assert '"op": "merge"' in line and '"ts"' in line
+        log = st.read_changelog()
+        assert '"op": "merge"' in log and '"ts"' in log
     print("OK sources_immutable_and_changelog")
 
 
