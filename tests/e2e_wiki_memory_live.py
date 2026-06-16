@@ -35,6 +35,12 @@ import requests
 
 import adk_cc  # noqa: F401 — importing bootstraps .env (model creds) into os.environ
 
+# Cap model calls under the endpoint's shared ~40/min limit. The SelectableLlm
+# throttle paces ALL calls — agent turns, capture, AND the librarian's
+# classifier + page synthesis — so the model-backed librarian runs safely.
+# Inherited by the server + cron subprocesses via dict(os.environ).
+os.environ.setdefault("ADK_CC_MODEL_MAX_RPM", "30")
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PORT = 8771
 BASE = f"http://127.0.0.1:{PORT}"
@@ -42,13 +48,12 @@ APP = "adk_cc"
 TENANT = "acme"
 USERS = {"alice": "alice_tok", "bob": "bob_tok", "carol": "carol_tok"}
 ROUNDS = 2
-RUN_TIMEOUT = 90  # per agent turn (a turn fans out into several LLM calls)
-# The endpoint allows ~40 req/min on a SHARED quota, and ONE agent turn is
-# several LLM requests (coordinator + tool round-trip + out-of-band memory
-# capture). So pace hard between turns and retry on rate-limit. With ~3
-# req/turn and 20s spacing that's ~9 req/min — well under the cap.
-PACE_S = 20
-RETRIES = 3          # on a 429/500 (rate-limit), back off and retry
+RUN_TIMEOUT = 120  # per agent turn (throttle spaces its internal calls)
+# Global pacing is enforced at the model layer (ADK_CC_MODEL_MAX_RPM, set
+# above) across every caller, so this between-turn delay is a small courtesy
+# margin. Retry on a 429/500 in case the cap is still grazed.
+PACE_S = 3
+RETRIES = 3
 RETRY_BACKOFF_S = 20
 
 # Scenario: CPU core design. Conflicts are SEQUENCED ACROSS ROUNDS — a
@@ -222,8 +227,8 @@ def main() -> int:
                         turns["err"] += 1
                         print(f"  {user}/{kind}: ERROR {type(e).__name__}: {e}")
                     time.sleep(PACE_S)  # respect the endpoint's rate limit
-            print(f"  -- running librarian + consolidator --")
-            _cron("wiki_librarian.py", wiki_root, "--no-model")
+            print(f"  -- running librarian (--model) + consolidator --")
+            _cron("wiki_librarian.py", wiki_root)            # real LLM classifier + synthesis
             _cron("memory_consolidator.py", mem_root)
 
         # ---- inspect the stores directly (model-independent invariants) ----

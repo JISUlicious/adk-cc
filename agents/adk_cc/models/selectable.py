@@ -18,8 +18,10 @@ Design choices:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
+import time
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional
 
 from google.adk.models.base_llm import BaseLlm
@@ -29,6 +31,55 @@ if TYPE_CHECKING:
     from google.adk.models.llm_response import LlmResponse
 
     from .endpoints import ModelEndpointRegistry
+
+
+# --------------------------------------------------------------------------
+# Process-global model rate-limit throttle (opt-in).
+#
+# Hosted endpoints often enforce a shared requests-per-minute cap, and a
+# single agent turn fans out into several model calls (coordinator + tool
+# round-trips + out-of-band session-title / memory-capture / librarian
+# classification + synthesis). Bursting that trips 429/500s and starves
+# follow-up calls. When ADK_CC_MODEL_MAX_RPM (or ADK_CC_MODEL_MIN_INTERVAL_S)
+# is set, every model call through SelectableLlm waits so call STARTS are
+# spaced by the configured minimum — paces all callers (agent, plugins,
+# crons) uniformly without limiting their concurrency. Default off (no cost).
+# --------------------------------------------------------------------------
+_pace_creation_lock = threading.Lock()
+_pace_lock: Optional["asyncio.Lock"] = None
+_pace_last_at: float = 0.0
+
+
+def _model_min_interval() -> float:
+    """Minimum seconds between model-call starts; 0 disables the throttle."""
+    rpm = os.environ.get("ADK_CC_MODEL_MAX_RPM")
+    if rpm:
+        try:
+            v = float(rpm)
+            return 60.0 / v if v > 0 else 0.0
+        except ValueError:
+            return 0.0
+    try:
+        return max(0.0, float(os.environ.get("ADK_CC_MODEL_MIN_INTERVAL_S", "")))
+    except ValueError:
+        return 0.0
+
+
+async def _pace_model_call() -> None:
+    interval = _model_min_interval()
+    if interval <= 0:
+        return
+    global _pace_lock, _pace_last_at
+    if _pace_lock is None:
+        with _pace_creation_lock:
+            if _pace_lock is None:
+                _pace_lock = asyncio.Lock()
+    async with _pace_lock:
+        now = time.monotonic()
+        wait = _pace_last_at + interval - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _pace_last_at = time.monotonic()
 
 
 class SelectableLlm(BaseLlm):
@@ -132,6 +183,7 @@ class SelectableLlm(BaseLlm):
     async def generate_content_async(
         self, llm_request: "LlmRequest", stream: bool = False
     ) -> "AsyncGenerator[LlmResponse, None]":
+        await _pace_model_call()  # opt-in global rate-limit throttle
         delegate = self._resolve_delegate()
         async for resp in delegate.generate_content_async(llm_request, stream=stream):
             yield resp
