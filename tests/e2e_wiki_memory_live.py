@@ -42,43 +42,51 @@ APP = "adk_cc"
 TENANT = "acme"
 USERS = {"alice": "alice_tok", "bob": "bob_tok", "carol": "carol_tok"}
 ROUNDS = 2
-RUN_TIMEOUT = 60  # per agent turn
-# Pace turns so we don't burst the rate-limited hosted endpoint (bursting was
-# observed to 500 follow-up turns + starve the after-run memory-capture call).
-# Each turn also fires out-of-band calls (session title, memory capture), so a
-# turn is several model requests — keep this generous.
-PACE_S = 8
+RUN_TIMEOUT = 90  # per agent turn (a turn fans out into several LLM calls)
+# The endpoint allows ~40 req/min on a SHARED quota, and ONE agent turn is
+# several LLM requests (coordinator + tool round-trip + out-of-band memory
+# capture). So pace hard between turns and retry on rate-limit. With ~3
+# req/turn and 20s spacing that's ~9 req/min — well under the cap.
+PACE_S = 20
+RETRIES = 3          # on a 429/500 (rate-limit), back off and retry
+RETRY_BACKOFF_S = 20
 
-# Scenario: CPU core design. Each entry = (topic, ingest_doc, query_with_context).
+# Scenario: CPU core design. Conflicts are SEQUENCED ACROSS ROUNDS — a
+# contradiction/supersession must arrive AFTER its page exists, else every
+# claim in the first run sees no page and is classified NOVEL (no conflict).
+# Each entry = (topic, ingest_doc, query_or_None).
 SCENARIO = {
+    # Round 1 — establish distinct baseline pages + capture per-user memory.
     1: {
         "alice": ("pipeline-depth",
-                  "Save this to the wiki under topic 'pipeline-depth': Modern "
+                  "Save to the wiki under topic 'pipeline-depth': Modern "
                   "high-performance CPU cores use roughly a 14-stage pipeline.",
-                  "What does the wiki say about pipeline depth? For context, I "
+                  "What does the wiki say about pipeline depth? Context: I "
                   "design embedded low-power cores."),
-        "bob": ("pipeline-depth",
-                "Add to the wiki under topic 'pipeline-depth': CPU pipelines "
-                "are typically about 20 stages deep.",
-                "Summarize branch prediction for me. FYI I work on server-class chips."),
-        "carol": ("cache-hierarchy",
-                  "Save to the wiki under topic 'cache-hierarchy': L2 cache is "
-                  "commonly 256KB per core.",
-                  "Explain the cache hierarchy. I focus on die-area efficiency."),
-    },
-    2: {
-        "alice": ("pipeline-depth",
-                  "Update the wiki topic 'pipeline-depth': Confirmed ~14-15 "
-                  "pipeline stages in modern cores (source: hennessy-patterson).",
-                  "Given my embedded low-power focus, what pipeline depth fits?"),
-        "carol": ("cache-hierarchy",
-                  "Update the wiki topic 'cache-hierarchy': L2 cache is now "
-                  "512KB per core in current designs.",
-                  "What's the latest on cache sizes?"),
         "bob": ("branch-prediction",
                 "Save to the wiki under topic 'branch-prediction': Modern cores "
                 "use TAGE branch predictors.",
-                "Remind me what we know about pipeline depth."),
+                "Summarize the cache hierarchy. FYI I work on server-class chips."),
+        "carol": ("cache-hierarchy",
+                  "Save to the wiki under topic 'cache-hierarchy': L2 cache is "
+                  "commonly 256KB per core.",
+                  "Explain branch prediction. I focus on die-area efficiency."),
+    },
+    # Round 2 — conflicts against now-existing pages (ingest-only; memory
+    # already captured in R1, so we save LLM requests).
+    2: {
+        # contradiction vs alice's 14-stage (uncited, lone → CONTEST)
+        "bob": ("pipeline-depth",
+                "Add to the wiki under topic 'pipeline-depth': Actually CPU "
+                "pipelines are typically about 20 stages deep.", None),
+        # supersession of carol's 256KB ("now" → SUPERSEDE + validity)
+        "carol": ("cache-hierarchy",
+                  "Update the wiki topic 'cache-hierarchy': L2 cache is now "
+                  "512KB per core in current designs.", None),
+        # a fresh page (no conflict)
+        "alice": ("out-of-order-execution",
+                  "Save to the wiki under topic 'out-of-order-execution': Modern "
+                  "cores use out-of-order execution with large reorder buffers.", None),
     },
 }
 
@@ -99,6 +107,12 @@ def _start_server(wiki_root, mem_root, data_dir):
         "ADK_CC_MEMORY_ROOT": mem_root,
         "ADK_CC_ARTIFACT_STORAGE_URI": f"file://{data_dir}",
         "ADK_CC_PERMISSION_MODE": "bypassPermissions",
+        # disable session titling (an extra out-of-band LLM call/turn) — not
+        # under test, and every saved request helps under the rate cap.
+        "ADK_CC_TOOL_TITLES": "0",
+        # give the after-run capture call more room (it's the 3rd-4th rapid
+        # LLM call within a query turn; the rate limit can make it slow).
+        "ADK_CC_MEMORY_CAPTURE_TIMEOUT_S": "60",
     })
     proc = subprocess.Popen(
         [os.path.join(REPO, ".venv/bin/uvicorn"),
@@ -124,20 +138,34 @@ def _create_session(user):
 
 
 def _run(user, sid, text):
-    """One agent turn; returns (events, tool_names_called)."""
-    r = requests.post(f"{BASE}/run", headers=_hdr(user), timeout=RUN_TIMEOUT, json={
-        "appName": APP, "userId": user, "sessionId": sid,
-        "newMessage": {"role": "user", "parts": [{"text": text}]},
-    })
-    r.raise_for_status()
-    events = r.json()
-    tools = []
-    for e in events:
-        for p in (e.get("content") or {}).get("parts") or []:
-            fc = p.get("functionCall")
-            if fc:
-                tools.append(fc.get("name"))
-    return events, tools
+    """One agent turn; returns (events, tool_names_called). Retries on a
+    rate-limit (429/500) with backoff, since the shared quota can still bite
+    even when paced."""
+    last = None
+    for attempt in range(RETRIES + 1):
+        try:
+            r = requests.post(f"{BASE}/run", headers=_hdr(user), timeout=RUN_TIMEOUT, json={
+                "appName": APP, "userId": user, "sessionId": sid,
+                "newMessage": {"role": "user", "parts": [{"text": text}]},
+            })
+            if r.status_code in (429, 500, 503) and attempt < RETRIES:
+                last = requests.HTTPError(f"{r.status_code}")
+                time.sleep(RETRY_BACKOFF_S)
+                continue
+            r.raise_for_status()
+            events = r.json()
+            tools = [
+                p["functionCall"].get("name")
+                for e in events
+                for p in (e.get("content") or {}).get("parts") or []
+                if p.get("functionCall")
+            ]
+            return events, tools
+        except requests.RequestException as e:
+            last = e
+            if attempt < RETRIES:
+                time.sleep(RETRY_BACKOFF_S)
+    raise last if last else RuntimeError("run failed")
 
 
 def _cron(script, root, *extra):
@@ -182,6 +210,8 @@ def main() -> int:
             print(f"\n=== round {rnd} ===")
             for user, (topic, ingest, query) in SCENARIO.get(rnd, {}).items():
                 for kind, msg in (("ingest", ingest), ("query", query)):
+                    if msg is None:
+                        continue
                     try:
                         _evts, tools = _run(user, sids[user], msg)
                         for t in tools:
@@ -212,36 +242,62 @@ def main() -> int:
                   "couldn't drive the live loop (turns hung/garbled). The harness "
                   "is verified; point ADK_CC_MODEL at a stronger model for content.")
 
-        # 1. provenance on every published domain claim (regardless of count)
-        prov_ok = all("_(by " in (p.body if p else "") for p in domain.values())
-        check("every domain page carries provenance", prov_ok or not domain,
-              f"{len(domain)} pages")
+        # 1. COMPLETE run: every agent turn succeeded (paced + retried)
+        check("all agent turns succeeded under the rate limit",
+              turns["err"] == 0, f"ok={turns['ok']} err={turns['err']}")
 
-        # 2. shared wiki — domain reflects contributions from >1 user (if any
-        #    ingestion happened); reported, asserted only when data exists.
+        # 2. provenance on every published domain claim
+        prov_ok = bool(domain) and all("_(by " in (p.body if p else "") for p in domain.values())
+        check("every domain page carries provenance", prov_ok, f"{len(domain)} pages")
+
+        # 3. shared wiki — pages contributed by ≥2 distinct users
         authors = set()
         for p in domain.values():
-            for tok in (p.body if p else "").split("_(by "):
-                authors.add(tok.split(";")[0].strip()) if tok and tok[0:1].isalpha() else None
-        print(f"[info] domain contributing authors (parsed): {sorted(a for a in authors if a in USERS)}")
+            for tok in (p.body if p else "").split("_(by ")[1:]:
+                authors.add(tok.split(";")[0].strip())
+        shared = {a for a in authors if a in USERS}
+        print(f"[info] domain contributing authors: {sorted(shared)}")
+        check("shared wiki reflects multiple users", len(shared) >= 2, f"{sorted(shared)}")
 
-        # 3. memory is per-user + isolated
+        # 4. conflict: bob's R2 contradiction of alice's pipeline depth is
+        #    surfaced (page contested, or queued, or both values recorded).
+        pd = domain.get("pipeline-depth")
+        pd_body = (pd.body if pd else "")
+        contested = bool(pd and pd.contested) or len(quarantine) >= 1 or (
+            "14" in pd_body and "20" in pd_body)
+        check("contradiction surfaced (contested / queued / both recorded)",
+              contested, f"contested={bool(pd and pd.contested)} q={len(quarantine)}")
+
+        # 5. supersession: carol's R2 '512KB' superseded '256KB' — validity
+        #    window recorded, or both values present on the page.
+        ch = domain.get("cache-hierarchy")
+        ch_body = (ch.body if ch else "")
+        superseded = bool(ch and ch.frontmatter.get("validity")) or "512" in ch_body
+        check("supersession recorded (validity window or new value present)",
+              superseded, f"validity={bool(ch and ch.frontmatter.get('validity'))}")
+
+        # 6. memory captured per user + isolated
         mem = MemoryStore.for_tenant(TENANT, root=mem_root)
         per_user = {u: (mem.list_episodic(u), mem.list_semantic(u)) for u in USERS}
         for u, (epi, sem) in per_user.items():
             print(f"[info] memory {u}: episodic={len(epi)} semantic={len(sem)} "
                   f"topics={[s.topic for s in sem]}")
+        captured = {u for u, (e, s) in per_user.items() if e or s}
+        # ≥1 proves the autonomous capture loop works end-to-end; per-turn
+        # capture is best-effort (an extra LLM call subject to the rate limit),
+        # so the full breakdown is reported, not required for all 3.
+        check("memory autonomously captured (≥1 user)", len(captured) >= 1,
+              f"captured={sorted(captured)} of {sorted(USERS)}")
         alice_blob = " ".join(s.text for s in per_user["alice"][1]).lower()
         bob_blob = " ".join(s.text for s in per_user["bob"][1]).lower()
-        # isolation: alice's distinctive 'embedded low-power' context, if captured,
-        # must not appear in bob's memory.
-        leaked = ("embedded" in bob_blob and "embedded" in alice_blob)
+        leaked = "embedded" in bob_blob and "embedded" in alice_blob
         check("memory is isolated per user (no cross-user leak)", not leaked,
               "alice's context not in bob's memory")
 
-        # 4. idempotency: re-running the crons changes nothing observable
+        # 7. idempotency: re-running the crons changes nothing (--no-model: no
+        #    model calls, so this is safe under the rate limit)
         before = (sorted(wiki.list_domain_pages()), len(wiki.list_quarantine(pending_only=False)))
-        _cron("wiki_librarian.py", wiki_root)
+        _cron("wiki_librarian.py", wiki_root, "--no-model")
         _cron("memory_consolidator.py", mem_root)
         after = (sorted(wiki.list_domain_pages()), len(wiki.list_quarantine(pending_only=False)))
         check("crons are idempotent (re-run is a no-op)", before == after,

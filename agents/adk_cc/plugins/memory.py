@@ -40,8 +40,18 @@ _log = logging.getLogger(__name__)
 
 _TENANT_KEY = "temp:tenant_context"
 _DEFAULT_RECALL_BUDGET = 600
-_CAPTURE_TIMEOUT_S = 30
+_DEFAULT_CAPTURE_TIMEOUT_S = 30
 _MAX_FACTS = 6
+
+
+def _capture_timeout() -> float:
+    """Seconds to wait for the out-of-band capture extraction before giving up
+    (swallowed). Configurable so a slow/rate-limited endpoint can be given more
+    room without changing the production default."""
+    try:
+        return max(1.0, float(os.environ.get("ADK_CC_MEMORY_CAPTURE_TIMEOUT_S", "")))
+    except ValueError:
+        return _DEFAULT_CAPTURE_TIMEOUT_S
 
 _CAPTURE_PROMPT = (
     "You maintain long-term memory for an AI assistant. From the turn below, "
@@ -173,7 +183,7 @@ class MemoryPlugin(BasePlugin):
             if not transcript.strip():
                 return None
             raw = await asyncio.wait_for(
-                self._extract(model, transcript), timeout=_CAPTURE_TIMEOUT_S
+                self._extract(model, transcript), timeout=_capture_timeout()
             )
             facts = _parse_facts(raw)
             if not facts:
@@ -186,7 +196,7 @@ class MemoryPlugin(BasePlugin):
                 store.add_episodic(user_id, fact, topic=topic, sources=[sid] if sid else None)
             _log.info("memory: captured %d fact(s) for user=%s", len(facts), user_id)
         except asyncio.TimeoutError:
-            _log.warning("memory: capture timed out (%ss)", _CAPTURE_TIMEOUT_S)
+            _log.warning("memory: capture timed out (%ss)", _capture_timeout())
         except Exception as e:  # noqa: BLE001
             _log.warning("memory: capture skipped (%s: %s)", type(e).__name__, e)
         return None
