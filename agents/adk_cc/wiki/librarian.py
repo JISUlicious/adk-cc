@@ -54,6 +54,31 @@ Classifier = Callable[
     [ClaimRecord, Optional[Page]], Union[Verdict, Awaitable[Verdict]]
 ]
 
+# Entity resolution (semantic dedup): (raw_slug, known_slugs) -> canonical slug.
+# Deterministic default merges hyphenation/spacing variants; an LLM resolver
+# can be injected for true aliases. Sync.
+EntityResolver = Callable[[str, set], str]
+
+# Page synthesis: (slug, deterministic_body) -> polished_body. Default keeps
+# the deterministic body; an LLM synthesizer rewrites it into coherent prose
+# while preserving facts + provenance (guarded — see _merge_slug). May be
+# sync or async.
+PageSynthesizer = Callable[[str, str], Union[str, Awaitable[str]]]
+
+
+def _canonicalize(slug: str, known: set) -> str:
+    """Deterministic entity resolution: map a slug to an existing one whose
+    de-hyphenated form is identical (so 'gpt4' ≡ 'gpt-4', 'open-ai' ≡
+    'openai'). Conservative — only exact de-hyphenated matches, never
+    substring (which would over-merge 'gpt-4' into 'gpt-4-turbo')."""
+    if slug in known:
+        return slug
+    norm = slug.replace("-", "")
+    for k in sorted(known):
+        if k.replace("-", "") == norm:
+            return k
+    return slug
+
 
 @dataclass
 class MergeReport:
@@ -76,11 +101,18 @@ class Librarian:
         store: WikiStore,
         *,
         classifier: Optional[Classifier] = None,
+        resolver: Optional[EntityResolver] = None,
+        synthesizer: Optional[PageSynthesizer] = None,
     ) -> None:
         self.store = store.ensure()
         # Default to the deterministic heuristic so the pipeline runs without
         # a model; production injects an LlmClassifier.
         self.classify: Classifier = classifier or conflict.heuristic_classify
+        # Entity resolution (semantic dedup) — deterministic default.
+        self.resolve_entity: EntityResolver = resolver or _canonicalize
+        # Page synthesis — None keeps the deterministic page; inject an LLM
+        # synthesizer for coherent prose.
+        self.synthesize: Optional[PageSynthesizer] = synthesizer
 
     # -------------------------------------------------------------- run ----
     async def run(self) -> MergeReport:
@@ -101,14 +133,20 @@ class Librarian:
 
     # ---------------------------------------------------------- collect ----
     def _collect(self, report: MergeReport) -> dict[str, list[tuple[InboxDoc, ClaimRecord]]]:
+        # Entity resolution (semantic dedup): canonicalize each inbox slug
+        # against existing domain pages AND slugs already seen this run, so
+        # variants of the same entity ('gpt4' / 'gpt-4') cluster together.
+        known: set = set(self.store.list_domain_pages())
         clusters: dict[str, list[tuple[InboxDoc, ClaimRecord]]] = {}
         for user_id in self.store.list_user_ids():
             for doc in self.store.list_inbox(user_id):
                 if doc.page.no_promote:
                     report.skipped_no_promote += 1
                     continue
+                canonical = self.resolve_entity(doc.slug, known)
+                known.add(canonical)
                 claim = ClaimRecord(
-                    slug=doc.slug,
+                    slug=canonical,
                     text=doc.page.body.strip(),
                     user_id=user_id,
                     doc_id=doc.doc_id,
@@ -124,7 +162,7 @@ class Librarian:
                 ):
                     report.skipped_queued += 1
                     continue
-                clusters.setdefault(doc.slug, []).append((doc, claim))
+                clusters.setdefault(canonical, []).append((doc, claim))
         return clusters
 
     # ----------------------------------------------------------- merge ----
@@ -179,11 +217,31 @@ class Librarian:
             )
 
         if touched:
+            # Optional LLM page synthesis: rewrite the deterministic body into
+            # coherent prose. Guarded — if the synthesis drops provenance
+            # markers (or errors), keep the deterministic body. The
+            # deterministic page stays the source of truth.
+            if self.synthesize is not None:
+                page.body = await self._maybe_synthesize(slug, page.body)
             self.store.write_domain_page(page)
             report.slugs_touched.append(slug)
             # archive only AFTER a successful page write (user keeps the copy)
             for user_id, doc_id in published_docs:
                 self.store.archive_inbox(user_id, doc_id)
+
+    async def _maybe_synthesize(self, slug: str, deterministic_body: str) -> str:
+        try:
+            out = self.synthesize(slug, deterministic_body)
+            if inspect.isawaitable(out):
+                out = await out
+            polished = (out or "").strip()
+            # provenance guard: never accept a synthesis that drops provenance
+            # markers (cite-or-quarantine must survive the prose rewrite).
+            if polished and polished.count("_(by ") >= deterministic_body.count("_(by "):
+                return polished + "\n"
+        except Exception as e:  # noqa: BLE001 — synthesis is polish, never fatal
+            _log.warning("librarian: synthesis skipped for %s (%s)", slug, type(e).__name__)
+        return deterministic_body
 
     def _enqueue_review(self, res: Resolution, verdict: Verdict, report: MergeReport) -> None:
         """Add a human-review-queue note for a claim (idempotent by hash)."""

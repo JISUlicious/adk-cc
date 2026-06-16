@@ -57,17 +57,51 @@ def _discover_tenants(root: str) -> list[str]:
     return out
 
 
+def _make_page_synthesizer(model):
+    """LLM page synthesizer: rewrite the deterministic page body into coherent
+    prose, PRESERVING every `_(by …)` provenance marker verbatim (the
+    librarian's guard rejects a synthesis that drops them). Falls back to the
+    deterministic body on any failure."""
+    from google.adk.models.llm_request import LlmRequest
+    from google.adk.utils.context_utils import Aclosing
+    from google.genai import types
+
+    _PROMPT = (
+        "Rewrite this wiki page into clear, well-organized prose about "
+        "'{slug}'. Keep ALL facts and copy EVERY `_(by …)` provenance marker "
+        "verbatim. Do not invent anything. Output only the page body.\n\n{body}"
+    )
+
+    async def _synth(slug: str, body: str) -> str:
+        prompt = _PROMPT.format(slug=slug, body=body)
+        req = LlmRequest(
+            contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
+            config=types.GenerateContentConfig(),
+        )
+        out = ""
+        async with Aclosing(model.generate_content_async(req, stream=False)) as agen:
+            async for resp in agen:
+                for p in (getattr(getattr(resp, "content", None), "parts", None) or []):
+                    if not getattr(p, "thought", None) and getattr(p, "text", None):
+                        out += p.text
+        return out
+
+    return _synth
+
+
 async def _run(root: str, tenants: list[str], use_model: bool) -> int:
     classifier = None
+    synthesizer = None
     if use_model:
         from adk_cc.agent import MODEL  # constructs the configured SelectableLlm
 
         classifier = LlmClassifier(MODEL).aclassify
+        synthesizer = _make_page_synthesizer(MODEL)
 
     overall = 0
     for tenant in tenants:
         store = WikiStore.for_tenant(tenant, root=root)
-        lib = Librarian(store, classifier=classifier)
+        lib = Librarian(store, classifier=classifier, synthesizer=synthesizer)
         report = await lib.run()
         _log.info(
             "tenant %s: seen=%d actions=%s slugs=%d quarantined=%d "
