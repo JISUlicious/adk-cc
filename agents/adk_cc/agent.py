@@ -951,4 +951,15 @@ if os.environ.get("ADK_CC_WIKI") == "1":
 
     _app_kwargs["plugins"].append(WikiRecallPlugin())
 
+# Autonomous per-user memory (opt-in, ADK_CC_MEMORY=1). Always-injected
+# budgeted recall (before_model, cheap) + full-turn capture of durable facts
+# into episodic memory (after_run, one model call — captures the agent's
+# output + tool results, not just the user message). Capture is on by default
+# with the flag; ADK_CC_MEMORY_AUTOCAPTURE=0 disables it. Consolidation
+# (episodic→semantic) is the separate scripts/memory_consolidator.py cron.
+if os.environ.get("ADK_CC_MEMORY") == "1":
+    from .plugins import MemoryPlugin
+
+    _app_kwargs["plugins"].append(MemoryPlugin())
+
 app = App(**_app_kwargs)

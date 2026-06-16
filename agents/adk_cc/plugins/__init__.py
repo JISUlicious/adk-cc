@@ -4,6 +4,7 @@ from .authz import AuthzPlugin
 from .confirmation_form_ui import ConfirmationFormUiPlugin
 from .context_guard import ContextGuardPlugin
 from .mcp_export_artifact import McpExportArtifactPlugin
+from .memory import MemoryPlugin
 from .model_io_trace import ModelIOTracePlugin
 from .permissions import PermissionPlugin
 from .plan_mode import PlanModeReminderPlugin
@@ -30,6 +31,7 @@ __all__ = [
     "ConfirmationFormUiPlugin",
     "ContextGuardPlugin",
     "McpExportArtifactPlugin",
+    "MemoryPlugin",
     "ModelIOTracePlugin",
     "PermissionPlugin",
     "PlanModeReminderPlugin",
