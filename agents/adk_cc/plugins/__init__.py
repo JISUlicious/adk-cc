@@ -21,6 +21,7 @@ from .task_reminder import TaskReminderPlugin
 from .tool_call_validator import ToolCallValidatorPlugin
 from .tool_title import ToolTitlePlugin
 from .wiki_recall import WikiRecallPlugin
+from .workspace_hint import WorkspaceHintPlugin
 
 __all__ = [
     "AskUserQuestionUiHintPlugin",
@@ -39,4 +40,5 @@ __all__ = [
     "ToolCallValidatorPlugin",
     "ToolTitlePlugin",
     "WikiRecallPlugin",
+    "WorkspaceHintPlugin",
 ]

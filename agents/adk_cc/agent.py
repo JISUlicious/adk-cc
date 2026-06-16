@@ -73,6 +73,7 @@ from .plugins import (
     QuotaPlugin,
     TaskReminderPlugin,
     ToolCallValidatorPlugin,
+    WorkspaceHintPlugin,
 )
 from .service.tenancy import TenancyPlugin
 from .tools import (
@@ -872,6 +873,12 @@ _app_kwargs = dict(
         ProjectContextPlugin(),
         PlanModeReminderPlugin(default_mode=PERMISSION_MODE.value),
         TaskReminderPlugin(default_mode=PERMISSION_MODE.value),
+        # Appends the resolved workspace directory to FS/exec tool
+        # descriptions each turn so the model knows its working directory
+        # and uses workspace-relative paths. Reads the per-session workspace
+        # from state (or ADK_CC_WORKSPACE_ROOT / CWD). Disable with
+        # ADK_CC_DISABLE_WORKSPACE_HINT=1.
+        WorkspaceHintPlugin(),
         # Catches "tool not found" errors from ADK's tool dispatch and
         # turns them into corrective tool responses so the model can
         # self-correct on the next iteration instead of aborting the run.
