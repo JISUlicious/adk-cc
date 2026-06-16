@@ -42,7 +42,12 @@ APP = "adk_cc"
 TENANT = "acme"
 USERS = {"alice": "alice_tok", "bob": "bob_tok", "carol": "carol_tok"}
 ROUNDS = 2
-RUN_TIMEOUT = 45  # per agent turn; a hanging turn fails fast so the run is bounded
+RUN_TIMEOUT = 60  # per agent turn
+# Pace turns so we don't burst the rate-limited hosted endpoint (bursting was
+# observed to 500 follow-up turns + starve the after-run memory-capture call).
+# Each turn also fires out-of-band calls (session title, memory capture), so a
+# turn is several model requests — keep this generous.
+PACE_S = 8
 
 # Scenario: CPU core design. Each entry = (topic, ingest_doc, query_with_context).
 SCENARIO = {
@@ -186,6 +191,7 @@ def main() -> int:
                     except Exception as e:
                         turns["err"] += 1
                         print(f"  {user}/{kind}: ERROR {type(e).__name__}: {e}")
+                    time.sleep(PACE_S)  # respect the endpoint's rate limit
             print(f"  -- running librarian + consolidator --")
             _cron("wiki_librarian.py", wiki_root, "--no-model")
             _cron("memory_consolidator.py", mem_root)
