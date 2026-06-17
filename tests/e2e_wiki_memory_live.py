@@ -41,6 +41,13 @@ import adk_cc  # noqa: F401 — importing bootstraps .env (model creds) into os.
 # Inherited by the server + cron subprocesses via dict(os.environ).
 os.environ.setdefault("ADK_CC_MODEL_MAX_RPM", "30")
 
+# ISOLATION: the test's per-run temp roots (set per subprocess below) must be
+# authoritative. A store URI from .env would override the root and point the
+# test at REAL data — clear them so existing data can't contaminate the test
+# (cleared in this process AND inherited-clear by the server/cron subprocesses).
+for _k in ("ADK_CC_WIKI_STORE_URI", "ADK_CC_MEMORY_STORE_URI"):
+    os.environ.pop(_k, None)
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PORT = 8771
 BASE = f"http://127.0.0.1:{PORT}"
