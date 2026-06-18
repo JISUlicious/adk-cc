@@ -21,7 +21,14 @@ Gated by `ADK_CC_MEMORY=1`.
 
 from __future__ import annotations
 
-from .consolidate import ConsolidationReport, consolidate_user
+from .consolidate import (
+    ConsolidationReport,
+    consolidate_all,
+    consolidate_user,
+    consolidation_lock,
+    discover_tenants,
+    pending_episodic_count,
+)
 from .recall import recall_context
 from .store import (
     ACTIVE,
@@ -42,6 +49,10 @@ __all__ = [
     "memory_root_from_env",
     "recall_context",
     "consolidate_user",
+    "consolidate_all",
+    "consolidation_lock",
+    "pending_episodic_count",
+    "discover_tenants",
     "ConsolidationReport",
     "EPISODIC",
     "SEMANTIC",

@@ -16,8 +16,15 @@ it both halves without the agent ever calling a tool:
      swallowed, so it never breaks or hangs a run. Default on with the flag;
      disable with ADK_CC_MEMORY_AUTOCAPTURE=0.
 
-Consolidation (episodic → semantic) is a separate cron (scripts/
-memory_consolidator.py), per the background-cron design choice.
+Consolidation (episodic → semantic) runs out of band. It has two triggers that
+form a HYBRID, both optional and both calling the same consolidate_user:
+  - THRESHOLD (responsive, here): ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD=N promotes
+    a user as soon as N unprocessed episodics stack up — checked right after a
+    capture (the only moment the backlog grows). Deterministic, no model call.
+  - PERIODIC (time-based): the scripts/memory_consolidator.py cron, or the
+    in-process service/memory_scheduler.py loop — the staleness sweep + a
+    safety net for users who never reach the threshold.
+A shared lock (memory.consolidation_lock) serializes the in-process pair.
 """
 
 from __future__ import annotations
@@ -34,14 +41,68 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.utils.context_utils import Aclosing
 from google.genai import types
 
-from ..memory import MemoryStore, recall_context
+from ..memory import (
+    MemoryStore,
+    consolidate_user,
+    consolidation_lock,
+    pending_episodic_count,
+    recall_context,
+)
 
 _log = logging.getLogger(__name__)
 
 _TENANT_KEY = "temp:tenant_context"
 _DEFAULT_RECALL_BUDGET = 600
 _DEFAULT_CAPTURE_TIMEOUT_S = 30
+_DEFAULT_STALE_DAYS = 90
 _MAX_FACTS = 6
+
+
+def _consolidate_threshold() -> int:
+    """Promote (episodic→semantic) once this many unprocessed episodics stack
+    up for a user. 0/unset → no threshold trigger (rely on the scheduler/cron).
+    This is the responsive half of the hybrid; the periodic scheduler
+    (service/memory_scheduler.py) is the time-based sweep + straggler net."""
+    try:
+        return max(0, int(os.environ.get("ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD", "")))
+    except ValueError:
+        return 0
+
+
+def _stale_days() -> int:
+    try:
+        return max(1, int(os.environ.get("ADK_CC_MEMORY_STALE_DAYS", "")))
+    except ValueError:
+        return _DEFAULT_STALE_DAYS
+
+
+async def maybe_threshold_consolidate(store: MemoryStore, user_id: str):
+    """If ≥ threshold unprocessed episodics have stacked for this user, run a
+    deterministic (no-model) consolidation now. Serialized against the periodic
+    scheduler via the shared lock; self-guarded so it never breaks a run."""
+    try:
+        threshold = _consolidate_threshold()
+        if threshold <= 0:
+            return None
+        pending = pending_episodic_count(store, user_id)
+        if pending < threshold:
+            return None
+
+        def _run():  # sync; runs in a worker thread, holds the cross-caller lock
+            with consolidation_lock:
+                return consolidate_user(store, user_id, stale_days=_stale_days())
+
+        rep = await asyncio.to_thread(_run)
+        _log.info(
+            "memory: threshold consolidation user=%s pending=%d topics_consolidated=%d",
+            user_id, pending, rep.topics_consolidated,
+        )
+        return rep
+    except Exception as e:  # noqa: BLE001 — promotion must never break a run
+        _log.warning(
+            "memory: threshold consolidation skipped (%s: %s)", type(e).__name__, e
+        )
+        return None
 
 
 def _capture_timeout() -> float:
@@ -195,6 +256,10 @@ class MemoryPlugin(BasePlugin):
             for topic, fact in facts:
                 store.add_episodic(user_id, fact, topic=topic, sources=[sid] if sid else None)
             _log.info("memory: captured %d fact(s) for user=%s", len(facts), user_id)
+            # Hybrid promotion: this turn just grew the unprocessed backlog, so
+            # this is the only moment it can cross the threshold — check here
+            # (no need to poll on no-capture turns; the count only rises here).
+            await maybe_threshold_consolidate(store, user_id)
         except asyncio.TimeoutError:
             _log.warning("memory: capture timed out (%ss)", _capture_timeout())
         except Exception as e:  # noqa: BLE001

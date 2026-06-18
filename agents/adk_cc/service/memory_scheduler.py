@@ -1,0 +1,135 @@
+"""Optional in-process memory-consolidation scheduler.
+
+Binds the periodic episodic→semantic consolidation pass (otherwise the
+scripts/memory_consolidator.py cron) to the API server's lifespan, so a
+deployment that doesn't run an external cron still grows semantic memory while
+the server is up. Capture stays inline (MemoryPlugin.after_run); this only adds
+the periodic *consolidation* half.
+
+This is the TIME-BASED half of the hybrid: the staleness sweep plus a safety
+net for users who never reach the capture-path threshold. The responsive half —
+promote as soon as N unprocessed episodics stack up — lives in MemoryPlugin
+(ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD). Set both for the full hybrid; they
+serialize via memory.consolidation_lock. With the threshold doing prompt
+promotion, this loop can run infrequently (e.g. daily) — mostly the sweep.
+
+OFF by default. Enable by setting a positive interval:
+
+    ADK_CC_MEMORY=1                             # memory subsystem on (required)
+    ADK_CC_MEMORY_CONSOLIDATE_INTERVAL_S=3600   # run every hour (enables this)
+
+Deterministic latest-wins synthesis only — NO model calls. This loop runs
+unattended against the shared, rate-limited model endpoint, so model-backed
+synthesis stays in the cron (`memory_consolidator.py --model`), never here.
+
+Other knobs:
+    ADK_CC_MEMORY_STALE_DAYS                    # archive threshold (default 90)
+    ADK_CC_MEMORY_CONSOLIDATE_DELAY_S           # delay before the first pass
+                                                # (default 60s; lets boot settle)
+
+Single-worker assumption: with `uvicorn --workers N>1` every worker would run
+its own loop and race on the memory files. For multi-worker production, leave
+this off and run the external cron once instead. (The dev server is single
+worker, so this is safe there.)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import os
+
+_log = logging.getLogger(__name__)
+
+_DEFAULT_DELAY_S = 60.0
+_DEFAULT_STALE_DAYS = 90
+
+
+def _interval_s() -> float:
+    """Consolidation period in seconds; <= 0 (or unset/invalid) → disabled."""
+    try:
+        return float(os.environ.get("ADK_CC_MEMORY_CONSOLIDATE_INTERVAL_S", ""))
+    except ValueError:
+        return 0.0
+
+
+def _delay_s() -> float:
+    try:
+        return max(0.0, float(os.environ.get("ADK_CC_MEMORY_CONSOLIDATE_DELAY_S", "")))
+    except ValueError:
+        return _DEFAULT_DELAY_S
+
+
+def _stale_days() -> int:
+    try:
+        return max(1, int(os.environ.get("ADK_CC_MEMORY_STALE_DAYS", "")))
+    except ValueError:
+        return _DEFAULT_STALE_DAYS
+
+
+def scheduler_enabled() -> bool:
+    return os.environ.get("ADK_CC_MEMORY") == "1" and _interval_s() > 0
+
+
+async def _run_once() -> None:
+    """One deterministic consolidation pass over all tenants/users. Sync
+    filesystem work, so it runs in a thread to keep the event loop responsive.
+    Holds the shared lock so it can't race the capture-path threshold trigger."""
+    from ..memory import consolidate_all, consolidation_lock, memory_root_from_env
+
+    root = memory_root_from_env()
+
+    def _run():
+        with consolidation_lock:
+            return consolidate_all(root, stale_days=_stale_days())
+
+    reports = await asyncio.to_thread(_run)
+    if reports:
+        topics = sum(r.topics_consolidated for _, r in reports)
+        archived = sum(r.archived_stale for _, r in reports)
+        _log.info(
+            "memory consolidation: %d user(s), %d topic(s) consolidated, %d archived",
+            len(reports), topics, archived,
+        )
+
+
+async def _loop(interval: float, delay: float) -> None:
+    if delay:
+        await asyncio.sleep(delay)
+    while True:
+        try:
+            await _run_once()
+        except Exception as e:  # noqa: BLE001 — a bad pass must not kill the loop
+            _log.warning("memory consolidation pass failed (%s: %s)", type(e).__name__, e)
+        await asyncio.sleep(interval)
+
+
+def make_consolidation_lifespan():
+    """Return an ASGI lifespan context manager that runs the consolidation loop
+    for the server's lifetime, or None when disabled (caller then passes
+    lifespan=None and ADK builds the app unchanged)."""
+    if not scheduler_enabled():
+        return None
+
+    interval = _interval_s()
+    delay = _delay_s()
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(app):
+        task = asyncio.create_task(
+            _loop(interval, delay), name="adk_cc_memory_consolidation"
+        )
+        _log.info(
+            "memory consolidation scheduler started (every %.0fs, first pass in %.0fs)",
+            interval, delay,
+        )
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            _log.info("memory consolidation scheduler stopped")
+
+    return _lifespan

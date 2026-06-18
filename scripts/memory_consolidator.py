@@ -36,18 +36,9 @@ import os
 import sys
 from typing import Optional
 
-from adk_cc.memory import MemoryStore, consolidate_user, memory_root_from_env
+from adk_cc.memory import consolidate_all, discover_tenants, memory_root_from_env
 
 _log = logging.getLogger("memory_consolidator")
-
-
-def _discover_tenants(root: str) -> list[str]:
-    if not os.path.isdir(root):
-        return []
-    return sorted(
-        name for name in os.listdir(root)
-        if os.path.isdir(os.path.join(root, name, "users"))
-    )
 
 
 def _make_llm_synthesizer():
@@ -113,7 +104,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         _log.error("memory root does not exist: %s", root)
         return 1
 
-    tenants = args.tenants or _discover_tenants(root)
+    tenants = args.tenants or discover_tenants(root)
     if not tenants:
         _log.info("no tenant memory found under %s — nothing to do", root)
         return 0
@@ -122,18 +113,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     _log.info("consolidating %d tenant(s) under %s (model=%s)",
               len(tenants), root, "on" if args.model else "off")
 
-    for tenant in tenants:
-        store = MemoryStore.for_tenant(tenant, root=root)
-        for user_id in store.list_user_ids():
-            rep = consolidate_user(
-                store, user_id, synthesizer=synthesizer, stale_days=args.stale_days
-            )
-            _log.info(
-                "tenant=%s user=%s: episodic_seen=%d consolidated=%d "
-                "(created=%d updated=%d) archived_stale=%d",
-                tenant, user_id, rep.episodic_seen, rep.topics_consolidated,
-                rep.created, rep.updated, rep.archived_stale,
-            )
+    for tenant, rep in consolidate_all(
+        root, tenants=tenants, synthesizer=synthesizer, stale_days=args.stale_days
+    ):
+        _log.info(
+            "tenant=%s user=%s: episodic_seen=%d consolidated=%d "
+            "(created=%d updated=%d) archived_stale=%d",
+            tenant, rep.user_id, rep.episodic_seen, rep.topics_consolidated,
+            rep.created, rep.updated, rep.archived_stale,
+        )
     return 0
 
 

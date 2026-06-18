@@ -15,6 +15,8 @@ without a model — the live model is exercised in the e2e.
 
 from __future__ import annotations
 
+import os
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -143,3 +145,55 @@ def consolidate_user(
 
 def _now_iso(epoch: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+# Process-global lock serializing the two IN-PROCESS consolidation callers (the
+# periodic scheduler and the capture-path threshold trigger) so they never
+# read-modify-write the same user's files concurrently. The cron / unit tests
+# call consolidate_user/all directly in their own process — uncontended there.
+consolidation_lock = threading.Lock()
+
+
+def pending_episodic_count(store: "MemoryStore", user_id: str) -> int:
+    """Episodic captures not yet folded into semantic memory (status ACTIVE or
+    DRAFT) — the same predicate consolidate_user promotes. This is the count a
+    threshold trigger checks ("≥N unprocessed stacked → consolidate now")."""
+    return sum(1 for i in store.list_episodic(user_id) if i.status in (ACTIVE, DRAFT))
+
+
+def discover_tenants(root: str) -> list[str]:
+    """Tenant ids with memory under `root` (dirs that contain a `users/`)."""
+    if not os.path.isdir(root):
+        return []
+    return sorted(
+        name for name in os.listdir(root)
+        if os.path.isdir(os.path.join(root, name, "users"))
+    )
+
+
+def consolidate_all(
+    root: str,
+    *,
+    tenants: Optional[list[str]] = None,
+    synthesizer: Optional[Synthesizer] = None,
+    stale_days: int = 90,
+) -> list[tuple[str, ConsolidationReport]]:
+    """Run `consolidate_user` for every (tenant, user) under `root`.
+
+    The single walk shared by the CLI cron (scripts/memory_consolidator.py) and
+    the optional in-process server scheduler, so both enumerate tenants/users
+    identically. `tenants=None` → discover from the filesystem. Returns
+    (tenant_id, report) pairs in iteration order; callers do their own logging.
+    """
+    selected = tenants if tenants is not None else discover_tenants(root)
+    out: list[tuple[str, ConsolidationReport]] = []
+    for tenant in selected:
+        store = MemoryStore.for_tenant(tenant, root=root)
+        for user_id in store.list_user_ids():
+            out.append((
+                tenant,
+                consolidate_user(
+                    store, user_id, synthesizer=synthesizer, stale_days=stale_days
+                ),
+            ))
+    return out

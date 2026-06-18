@@ -77,11 +77,19 @@ def build_fastapi_app(
 
         register_s3_artifact_scheme()
 
+    # Optional in-process memory-consolidation scheduler. None unless
+    # ADK_CC_MEMORY=1 and ADK_CC_MEMORY_CONSOLIDATE_INTERVAL_S>0, in which case
+    # this lifespan runs the periodic episodic→semantic pass for the server's
+    # lifetime. ADK wraps the passed lifespan in its own (async with lifespan),
+    # so startup/shutdown both fire. Passing None leaves the app unchanged.
+    from .memory_scheduler import make_consolidation_lifespan
+
     fastapi_app = get_fast_api_app(
         agents_dir=agents_dir,
         session_service_uri=session_service_uri,
         artifact_service_uri=artifact_uri,
         web=serve_web,
+        lifespan=make_consolidation_lifespan(),
     )
 
     if auth_extractor is not None:
@@ -216,6 +224,18 @@ def make_app():
       ADK_CC_ALLOW_NO_AUTH     (optional dev escape — see below)
       ADK_CC_SERVE_UI          (optional; "1" to mount the custom UI bundle)
       ADK_CC_UI_DIST           (optional; dir to serve; default: <repo>/web/dist)
+      ADK_CC_MEMORY_CONSOLIDATE_INTERVAL_S
+                               (optional; with ADK_CC_MEMORY=1, run the periodic
+                                episodic→semantic consolidation in-process every
+                                N seconds instead of via the external cron.
+                                Deterministic/no-model; single-worker only —
+                                see service/memory_scheduler.py)
+      ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD
+                               (optional; with ADK_CC_MEMORY=1, promote a user
+                                as soon as N unprocessed episodics stack up,
+                                from the capture path. The responsive half of
+                                the hybrid; pair with the interval above for the
+                                time-based sweep — see plugins/memory.py)
 
     Auth extractor selection (first match wins):
       1. ADK_CC_JWT_JWKS_URL set → JwtAuthExtractor (production).
