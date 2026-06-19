@@ -115,13 +115,16 @@ def _capture_timeout() -> float:
         return _DEFAULT_CAPTURE_TIMEOUT_S
 
 _CAPTURE_PROMPT = (
-    "You maintain long-term memory for an AI assistant. From the turn below, "
-    "list facts worth remembering for FUTURE conversations: the user's "
-    "identity and preferences, their project's stack / config / decisions, and "
-    "durable outcomes. Examples of durable facts: \"user's name is X\", "
-    "\"project deploys to Fly.io\", \"team chose Postgres\", \"user prefers "
-    "dark mode\". Do NOT record the user's questions, greetings, or one-off "
-    "task steps.\n\n"
+    "You maintain long-term memory for an AI assistant. Record ONLY durable "
+    "facts about the USER and THEIR work — their identity and preferences, and "
+    "their project's stack / config / decisions / outcomes. Good examples: "
+    "\"user's name is X\", \"project deploys to Fly.io\", \"team chose "
+    "Postgres\", \"user prefers dark mode\".\n"
+    "Do NOT record: (a) general or domain knowledge, or facts about the SUBJECT "
+    "MATTER being discussed — e.g. \"L2 caches are 256KB\", \"TAGE is a branch "
+    "predictor\", \"DDR5 has 8 channels\" — those belong in documents, not user "
+    "memory; (b) the user's questions, greetings, or one-off task steps. If a "
+    "statement would be equally true for any user, it is NOT a user fact.\n\n"
     "Output one fact per line, EXACTLY:\n"
     "TOPIC: <2-5 word topic> | <one concise sentence>\n"
     "Only if there is genuinely nothing worth remembering, output: NONE\n\n"
@@ -253,9 +256,15 @@ class MemoryPlugin(BasePlugin):
             tenant_id, user_id = _tenant_user(state)
             store = MemoryStore.for_tenant(tenant_id)
             sid = getattr(ictx.session, "id", None) or ""
-            for topic, fact in facts:
-                store.add_episodic(user_id, fact, topic=topic, sources=[sid] if sid else None)
-            _log.info("memory: captured %d fact(s) for user=%s", len(facts), user_id)
+            # Fix A+D: resolve each fact to an existing topic (corroborate/update)
+            # or NEW, so drifted slugs fold at write time. Falls back to the
+            # proposed slug on any model failure.
+            from ..memory import resolve_facts
+            resolutions = await resolve_facts(model, store, user_id, facts)
+            for res in resolutions:
+                store.add_episodic(user_id, res.fact, topic=res.topic,
+                                   sources=[sid] if sid else None)
+            _log.info("memory: captured %d fact(s) for user=%s", len(resolutions), user_id)
             # Hybrid promotion: this turn just grew the unprocessed backlog, so
             # this is the only moment it can cross the threshold — check here
             # (no need to poll on no-capture turns; the count only rises here).

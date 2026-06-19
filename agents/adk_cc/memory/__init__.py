@@ -30,6 +30,7 @@ from .consolidate import (
     pending_episodic_count,
 )
 from .recall import recall_context
+from .resolve import Resolution, resolve_facts
 from .store import (
     ACTIVE,
     ARCHIVED,
@@ -48,6 +49,8 @@ __all__ = [
     "MemoryItem",
     "memory_root_from_env",
     "recall_context",
+    "resolve_facts",
+    "Resolution",
     "consolidate_user",
     "consolidate_all",
     "consolidation_lock",

@@ -54,7 +54,11 @@ BASE = f"http://127.0.0.1:{PORT}"
 APP = "adk_cc"
 TENANT = "acme"
 USERS = {"alice": "alice_tok", "bob": "bob_tok", "carol": "carol_tok"}
-ROUNDS = 2
+# Longer sessions / more turns: bump via ADK_CC_E2E_ROUNDS (default 2 = the
+# canonical run). Each user keeps ONE session across all rounds, so a higher
+# count accumulates turns per session (context growth → compaction) and stacks
+# durable facts (exercising the hybrid threshold trigger + consolidation).
+ROUNDS = max(2, int(os.environ.get("ADK_CC_E2E_ROUNDS", "2")))
 RUN_TIMEOUT = 120  # per agent turn (throttle spaces its internal calls)
 # Global pacing is enforced at the model layer (ADK_CC_MODEL_MAX_RPM, set
 # above) across every caller, so this between-turn delay is a small courtesy
@@ -101,6 +105,80 @@ SCENARIO = {
                   "cores use out-of-order execution with large reorder buffers.", None),
     },
 }
+
+
+# Extra-round pools (used when ADK_CC_E2E_ROUNDS>2). Each entry mirrors the
+# SCENARIO shape: (topic, ingest_doc, query). Ingests corroborate existing
+# pages or add new ones; every query carries a NEW durable user fact so each
+# round grows the per-user episodic backlog (so the threshold trigger keeps
+# firing and consolidation keeps having work). Rounds cycle through the pool.
+_EXTRA = {
+    "alice": [
+        ("register-file",
+         "Save to the wiki under topic 'register-file': High-performance cores "
+         "use a physical register file with 100+ entries.",
+         "What does the wiki say about register files? My team standardized on "
+         "the RISC-V ISA."),
+        ("pipeline-depth",
+         "Add to the wiki under topic 'pipeline-depth': Embedded cores often use "
+         "shorter ~8-stage pipelines to save power.",
+         "Summarize out-of-order execution. We target a 1 GHz maximum clock."),
+        ("simd-width",
+         "Save to the wiki under topic 'simd-width': Cores include 128- to "
+         "512-bit SIMD vector units.",
+         "Give me a concise recap of the wiki. I prefer short bullet summaries."),
+        ("clock-gating",
+         "Save to the wiki under topic 'clock-gating': Fine-grained clock gating "
+         "cuts dynamic power in idle units.",
+         "What's recorded about the cache hierarchy? Our SoC tapes out in Q4."),
+    ],
+    "bob": [
+        ("smt",
+         "Save to the wiki under topic 'smt': Server cores use 2-way "
+         "simultaneous multithreading.",
+         "What does the wiki say about branch prediction? We use a 7nm node."),
+        ("cache-hierarchy",
+         "Add to the wiki under topic 'cache-hierarchy': Server parts add a large "
+         "shared L3 of 32MB or more.",
+         "Summarize pipeline depth. My chips run at a 3.5 GHz base clock."),
+        ("memory-bandwidth",
+         "Save to the wiki under topic 'memory-bandwidth': Server sockets use "
+         "8-channel DDR5 for bandwidth.",
+         "What's in the wiki about SIMD? We prioritize throughput over latency."),
+        ("ecc",
+         "Save to the wiki under topic 'ecc': Server memory uses ECC to correct "
+         "single-bit errors.",
+         "Recap register files. My validation team is based in Austin."),
+    ],
+    "carol": [
+        ("area-efficiency",
+         "Save to the wiki under topic 'area-efficiency': Die area is dominated "
+         "by caches and SIMD units.",
+         "What does the wiki say about L2 cache now? I optimize for die area."),
+        ("branch-prediction",
+         "Add to the wiki under topic 'branch-prediction': Smaller predictors "
+         "trade accuracy for area on embedded cores.",
+         "Summarize register files. My target library is a 22nm process."),
+        ("power-budget",
+         "Save to the wiki under topic 'power-budget': Mobile cores target a 2W "
+         "thermal design power.",
+         "What's recorded about SMT? I care most about perf-per-watt."),
+        ("decode-width",
+         "Save to the wiki under topic 'decode-width': Embedded cores commonly "
+         "decode 2-4 instructions per cycle.",
+         "Recap memory bandwidth. We tape out next spring."),
+    ],
+}
+
+
+def _round_content(rnd: int) -> dict:
+    """Round 1-2 = the canonical sequenced-conflict SCENARIO; rounds >2 draw
+    from the _EXTRA pools (cycling) to lengthen sessions and stack memory."""
+    if rnd in SCENARIO:
+        return SCENARIO[rnd]
+    pool_len = len(next(iter(_EXTRA.values())))
+    idx = (rnd - 3) % pool_len
+    return {u: _EXTRA[u][idx] for u in _EXTRA}
 
 
 def _hdr(user):
@@ -218,9 +296,12 @@ def main() -> int:
             print(f"SKIP: model turn failed ({type(e).__name__}: {e}).")
             return 0
 
+        print(f"[config] rounds={ROUNDS} users={list(USERS)} pace={PACE_S}s "
+              f"rpm_cap={os.environ.get('ADK_CC_MODEL_MAX_RPM')} "
+              f"threshold={os.environ.get('ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD', 'off')}")
         for rnd in range(1, ROUNDS + 1):
             print(f"\n=== round {rnd} ===")
-            for user, (topic, ingest, query) in SCENARIO.get(rnd, {}).items():
+            for user, (topic, ingest, query) in _round_content(rnd).items():
                 for kind, msg in (("ingest", ingest), ("query", query)):
                     if msg is None:
                         continue
@@ -254,9 +335,17 @@ def main() -> int:
                   "couldn't drive the live loop (turns hung/garbled). The harness "
                   "is verified; point ADK_CC_MODEL at a stronger model for content.")
 
-        # 1. COMPLETE run: every agent turn succeeded (paced + retried)
-        check("all agent turns succeeded under the rate limit",
-              turns["err"] == 0, f"ok={turns['ok']} err={turns['err']}")
+        # 1. COMPLETE run: turns succeed under the rate limit (paced + retried).
+        #    Canonical 2-round run is strict (err==0); a longer endurance run
+        #    tolerates the occasional rate-limit casualty (report + require ≥90%).
+        if ROUNDS <= 2:
+            check("all agent turns succeeded under the rate limit",
+                  turns["err"] == 0, f"ok={turns['ok']} err={turns['err']}")
+        else:
+            _total = turns["ok"] + turns["err"]
+            _ratio = (turns["ok"] / _total) if _total else 0.0
+            check("agent turns mostly succeeded over a long run (≥90%)",
+                  _ratio >= 0.9, f"ok={turns['ok']} err={turns['err']} ratio={_ratio:.0%}")
 
         # 2. provenance on every published domain claim
         prov_ok = bool(domain) and all("_(by " in (p.body if p else "") for p in domain.values())

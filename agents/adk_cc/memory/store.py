@@ -19,6 +19,7 @@ Collections: `users/<uid>/episodic`, `users/<uid>/semantic`.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -173,6 +174,8 @@ class MemoryStore:
             sources=list(sources or []),
         )
         self._store.put_doc(_episodic(user_id), item.to_document())
+        self._log(user_id, {"op": "capture", "tier": EPISODIC, "topic": slug,
+                            "id": item.id, "after": item.text})
         return item
 
     def list_episodic(
@@ -190,7 +193,20 @@ class MemoryStore:
         item.memory_type = SEMANTIC
         if not item.updated:
             item.updated = _now_iso()
+        prev = self._store.get_doc(_semantic(user_id), item.id)
         self._store.put_doc(_semantic(user_id), item.to_document())
+        prev_text = prev.body.strip() if prev else None
+        new_text = item.text.strip()
+        if prev is None:
+            op = "semantic_create"
+        elif prev_text != new_text:
+            op = "semantic_supersede"
+        else:
+            op = "semantic_corroborate"
+        self._log(user_id, {"op": op, "tier": SEMANTIC, "topic": item.topic,
+                            "id": item.id, "before": prev_text, "after": new_text,
+                            "confidence": item.confidence})
+        self._index_upsert(user_id, item)
 
     def list_semantic(
         self, user_id: str, *, status: Optional[str] = None
@@ -206,6 +222,14 @@ class MemoryStore:
         doc.frontmatter["status"] = status
         doc.frontmatter["updated"] = _now_iso()
         self._store.put_doc(collection, doc)
+        topic = str(doc.frontmatter.get("topic") or doc_id)
+        self._log(user_id, {"op": f"status:{status}", "tier": tier,
+                            "id": doc_id, "topic": topic})
+        if tier != EPISODIC:
+            if status == ARCHIVED:
+                self._index_drop(user_id, topic)
+            else:
+                self._index_upsert(user_id, MemoryItem.from_document(doc))
         return True
 
     def record_access(self, user_id: str, topic: str) -> None:
@@ -233,6 +257,89 @@ class MemoryStore:
         for t in tiers:
             cols.append(_semantic(user_id) if t == SEMANTIC else _episodic(user_id))
         return self._store.search(cols, query, limit=limit)
+
+    # ----- changelog (Fix G): every mutation is logged, per user -----
+    def _log(self, user_id: str, entry: dict[str, Any]) -> None:
+        """Append one audit record. Never raises — logging must not break a
+        memory write."""
+        try:
+            uid = _safe_id(user_id, "user_id")
+            rec = {"ts": _now_iso(), "user": uid, **entry}
+            self._store.append(f"changelog/{uid}", json.dumps(rec, ensure_ascii=False))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def read_changelog(self, user_id: str, *, limit: Optional[int] = None) -> list[dict]:
+        raw = self._store.kv_get(f"changelog/{_safe_id(user_id, 'user_id')}") or ""
+        out: list[dict] = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+        return out[-limit:] if limit else out
+
+    # ----- topic index (Fix G): maintained compact view for the resolver -----
+    def _index_key(self, user_id: str) -> str:
+        return f"topic-index/{_safe_id(user_id, 'user_id')}"
+
+    def get_topic_index(self, user_id: str) -> dict[str, dict]:
+        raw = self._store.kv_get(self._index_key(user_id))
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return {}
+
+    def _index_write(self, user_id: str, idx: dict[str, dict]) -> None:
+        try:
+            self._store.kv_put(self._index_key(user_id), json.dumps(idx, ensure_ascii=False))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _index_upsert(self, user_id: str, item: MemoryItem) -> None:
+        idx = self.get_topic_index(user_id)
+        idx[item.topic] = {
+            "id": item.id,
+            "summary": item.text.strip()[:160],
+            "confidence": item.confidence,
+            "status": item.status,
+            "updated": item.updated,
+        }
+        self._index_write(user_id, idx)
+
+    def _index_drop(self, user_id: str, topic: str) -> None:
+        idx = self.get_topic_index(user_id)
+        if idx.pop(topic, None) is not None:
+            self._index_write(user_id, idx)
+
+    # ----- reversibility (Fix G): undo a wrong merge/supersession -----
+    def revert_semantic(self, user_id: str, topic: str) -> bool:
+        """Restore a semantic topic's previous value from its supersession
+        history — the rollback for a bad merge. False if there's nothing to
+        revert."""
+        slug = _slugify(topic) or topic
+        item = self.get_semantic(user_id, slug)
+        if item is None or not item.supersedes:
+            return False
+        prior = item.supersedes[-1]
+        restored = MemoryItem(
+            id=item.id, topic=item.topic, text=prior, memory_type=SEMANTIC,
+            status=item.status, confidence=item.confidence,
+            created=item.created, updated=_now_iso(),
+            sources=item.sources, access_count=item.access_count,
+            supersedes=item.supersedes[:-1],
+        )
+        # direct put + explicit log (bypasses put_semantic's op auto-detection)
+        self._store.put_doc(_semantic(user_id), restored.to_document())
+        self._log(user_id, {"op": "revert", "tier": SEMANTIC, "topic": item.topic,
+                            "id": item.id, "before": item.text, "after": prior})
+        self._index_upsert(user_id, restored)
+        return True
 
 
 # --------------------------------------------------------------------------

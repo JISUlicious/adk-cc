@@ -43,7 +43,18 @@ class ConsolidationReport:
     created: int = 0
     updated: int = 0
     archived_stale: int = 0
+    pruned_episodic: int = 0
     topics: list[str] = field(default_factory=list)
+
+
+def _episodic_cap() -> int:
+    """Max CONSOLIDATED episodics to retain per user; 0/unset = keep all.
+    Prevents the episodic tier (#5) from growing unbounded — older ones are
+    reversibly archived (provenance survives in the semantic item's sources)."""
+    try:
+        return max(0, int(os.environ.get("ADK_CC_MEMORY_EPISODIC_CAP", "")))
+    except ValueError:
+        return 0
 
 
 def _default_synth(existing: Optional[str], episodic_newest_first: list[str]) -> str:
@@ -139,6 +150,18 @@ def consolidate_user(
         if _age_days(ref, now) > stale_days and sem.access_count == 0:
             store.set_status(user_id, SEMANTIC, sem.id, ARCHIVED)
             report.archived_stale += 1
+
+    # 4. prune (#5): keep only the most recent CONSOLIDATED episodics per user;
+    # archive the rest (reversible — provenance lives on in semantic.sources).
+    cap = _episodic_cap()
+    if cap:
+        done = sorted(
+            store.list_episodic(user_id, status=CONSOLIDATED),
+            key=lambda i: i.updated or i.created,
+        )
+        for old in done[: max(0, len(done) - cap)]:
+            store.set_status(user_id, "episodic", old.id, ARCHIVED)
+            report.pruned_episodic += 1
 
     return report
 
