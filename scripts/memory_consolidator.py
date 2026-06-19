@@ -22,6 +22,9 @@ Usage:
   --stale-days  archive semantic facts older + unaccessed than this (default 90).
   --model       use the agent model to synthesize merged facts (nicer prose);
                 default is deterministic latest-wins (no model call).
+  --compact     after consolidating, run LLM compaction (Fix F) to merge
+                residual duplicate topics — parity with the in-process
+                scheduler. Use this in the k8s CronJob.
   --verbose     DEBUG logging.
 
 Exit codes: 0 ok, 1 bad --root, 2 invalid args.
@@ -30,7 +33,6 @@ Exit codes: 0 ok, 1 bad --root, 2 invalid args.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import logging
 import os
 import sys
@@ -42,47 +44,11 @@ _log = logging.getLogger("memory_consolidator")
 
 
 def _make_llm_synthesizer():
-    """Optional model-backed synthesizer: merge existing + new captures into a
-    single coherent fact. Falls back to latest-wins on any failure."""
+    """Model-backed synthesizer (shared impl in adk_cc.memory.synth)."""
     from adk_cc.agent import MODEL
-    from google.adk.models.llm_request import LlmRequest
-    from google.adk.utils.context_utils import Aclosing
-    from google.genai import types
+    from adk_cc.memory.synth import make_llm_synthesizer
 
-    _PROMPT = (
-        "Merge these statements about one topic into ONE concise, current "
-        "fact (1-2 sentences). Prefer the newest when they conflict; keep "
-        "specifics. Output only the merged fact.\n\n"
-        "Existing: {existing}\nNew (newest first):\n{new}"
-    )
-
-    def _synth(existing: Optional[str], new_texts: list[str]) -> str:
-        prompt = _PROMPT.format(
-            existing=existing or "(none)",
-            new="\n".join(f"- {t}" for t in new_texts),
-        )
-
-        async def _call() -> str:
-            req = LlmRequest(
-                contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-                config=types.GenerateContentConfig(),
-            )
-            out = ""
-            async with Aclosing(MODEL.generate_content_async(req, stream=False)) as agen:
-                async for resp in agen:
-                    for p in (getattr(getattr(resp, "content", None), "parts", None) or []):
-                        if not getattr(p, "thought", None) and getattr(p, "text", None):
-                            out += p.text
-            return out.strip()
-
-        try:
-            text = asyncio.run(asyncio.wait_for(_call(), timeout=45))
-            return text or (new_texts[0] if new_texts else (existing or ""))
-        except Exception as e:  # noqa: BLE001
-            _log.warning("synth failed (%s) — latest-wins", type(e).__name__)
-            return new_texts[0] if new_texts else (existing or "")
-
-    return _synth
+    return make_llm_synthesizer(MODEL)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -91,6 +57,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--tenant", action="append", dest="tenants", default=None)
     ap.add_argument("--stale-days", type=int, default=90)
     ap.add_argument("--model", action="store_true")
+    ap.add_argument("--compact", action="store_true",
+                    help="after consolidating, run LLM compaction (Fix F): "
+                         "merge residual duplicate topics across each user's "
+                         "semantic tier. Implies model use.")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -118,10 +88,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     ):
         _log.info(
             "tenant=%s user=%s: episodic_seen=%d consolidated=%d "
-            "(created=%d updated=%d) archived_stale=%d",
+            "(created=%d updated=%d) archived_stale=%d pruned=%d",
             tenant, rep.user_id, rep.episodic_seen, rep.topics_consolidated,
-            rep.created, rep.updated, rep.archived_stale,
+            rep.created, rep.updated, rep.archived_stale, rep.pruned_episodic,
         )
+
+    # Fix F parity: optional LLM compaction pass (matches the in-process
+    # scheduler). Separate from --model so a deployment can synth without it.
+    if args.compact:
+        from adk_cc.agent import MODEL
+        from adk_cc.memory import compact_all
+
+        for tenant, user_id, comp in compact_all(MODEL, root, tenants=tenants):
+            if comp["merged"]:
+                _log.info("tenant=%s user=%s: compacted %d duplicate topic(s) in %d group(s)",
+                          tenant, user_id, comp["merged"], comp["groups"])
     return 0
 
 

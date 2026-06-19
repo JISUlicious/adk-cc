@@ -72,26 +72,61 @@ def scheduler_enabled() -> bool:
     return os.environ.get("ADK_CC_MEMORY") == "1" and _interval_s() > 0
 
 
+def _synthesizer():
+    """LLM synthesizer for periodic consolidation (off the hot path, so it's the
+    default here). Disable with ADK_CC_MEMORY_SYNTH=deterministic."""
+    if os.environ.get("ADK_CC_MEMORY_SYNTH") == "deterministic":
+        return None
+    try:
+        from ..agent import MODEL
+        from ..memory.synth import make_llm_synthesizer
+        return make_llm_synthesizer(MODEL)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _compact_enabled() -> bool:
+    return os.environ.get("ADK_CC_MEMORY_COMPACT") != "0"
+
+
 async def _run_once() -> None:
-    """One deterministic consolidation pass over all tenants/users. Sync
-    filesystem work, so it runs in a thread to keep the event loop responsive.
-    Holds the shared lock so it can't race the capture-path threshold trigger."""
+    """One consolidation pass over all tenants/users, then (Fix F) an LLM
+    compaction pass that re-merges residual topic fragmentation. Sync filesystem
+    + model work runs in a thread; the shared lock keeps it off the capture-path
+    threshold trigger."""
     from ..memory import consolidate_all, consolidation_lock, memory_root_from_env
+    from ..memory.resolve import compact_all
 
     root = memory_root_from_env()
+    synth = _synthesizer()
 
     def _run():
         with consolidation_lock:
-            return consolidate_all(root, stale_days=_stale_days())
+            return consolidate_all(root, synthesizer=synth, stale_days=_stale_days())
 
     reports = await asyncio.to_thread(_run)
     if reports:
         topics = sum(r.topics_consolidated for _, r in reports)
         archived = sum(r.archived_stale for _, r in reports)
+        pruned = sum(r.pruned_episodic for _, r in reports)
         _log.info(
-            "memory consolidation: %d user(s), %d topic(s) consolidated, %d archived",
-            len(reports), topics, archived,
+            "memory consolidation: %d user(s), %d topic(s) consolidated, %d archived, %d pruned",
+            len(reports), topics, archived, pruned,
         )
+
+    if _compact_enabled():
+        def _compact():
+            from ..agent import MODEL
+            with consolidation_lock:
+                return compact_all(MODEL, root)
+        try:
+            comp = await asyncio.to_thread(_compact)
+            merged = sum(c["merged"] for *_, c in comp)
+            if merged:
+                _log.info("memory compaction: merged %d duplicate topic(s) across %d user(s)",
+                          merged, len(comp))
+        except Exception as e:  # noqa: BLE001
+            _log.warning("memory compaction skipped (%s: %s)", type(e).__name__, e)
 
 
 async def _loop(interval: float, delay: float) -> None:

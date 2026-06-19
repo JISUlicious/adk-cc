@@ -96,3 +96,24 @@ it for index/changelog; memory does not.
 Live G+A+D result: 3 restatements of one fact folded at write → episodic 5 / semantic 3
 (was 4/4), corroboration revived (n_support=3 → conf 0.7), distinct facts stayed NEW
 (no false merge), full changelog audit present.
+
+- [x] **F** — `compact_user`/`compact_all` (`memory/resolve.py`), wired into the
+  in-process scheduler AND the cron (`--compact`). Tests: `test_memory_compact.py` (2).
+- [x] consolidation **LLM-synth default** in the scheduler (`memory/synth.py`
+  shared by cron + scheduler; `ADK_CC_MEMORY_SYNTH=deterministic` to disable).
+
+## Deployment matrix (consolidation = mutation; needs exactly ONE writer)
+- **Single process (dev / 1 replica, 1 worker):** in-process scheduler
+  (`ADK_CC_MEMORY_CONSOLIDATE_INTERVAL_S`) + threshold trigger. The
+  `threading.Lock` serializes them. Cron optional.
+- **Multi-worker (uvicorn --workers N) / k8s (replicas > 1):** the threading
+  lock does NOT cross processes/pods, so run consolidation in ONE place:
+  - serving pods = **capture-only** (scheduler OFF, `THRESHOLD` unset) — capture
+    is append-only / unique-id, safe across pods;
+  - a **k8s CronJob** runs `scripts/memory_consolidator.py --model --compact` as
+    the sole consolidator.
+  - Requires shared memory via `ADK_CC_MEMORY_STORE_URI` (a storage-service
+    backend), not pod-local disk. NB: that backend must implement docstore
+    `append`/`kv_*` for Fix G's changelog/index (filesystem does; S3/db TBD).
+  - Alternatives to a CronJob: leader election (k8s Lease) or a distributed lock
+    (Redis/DB) — heavier; CronJob is the idiomatic default.

@@ -30,7 +30,8 @@ from .consolidate import (
     pending_episodic_count,
 )
 from .recall import recall_context
-from .resolve import Resolution, resolve_facts
+from .resolve import Resolution, compact_all, compact_user, resolve_facts
+from .synth import make_llm_synthesizer
 from .store import (
     ACTIVE,
     ARCHIVED,
@@ -51,6 +52,9 @@ __all__ = [
     "recall_context",
     "resolve_facts",
     "Resolution",
+    "compact_user",
+    "compact_all",
+    "make_llm_synthesizer",
     "consolidate_user",
     "consolidate_all",
     "consolidation_lock",

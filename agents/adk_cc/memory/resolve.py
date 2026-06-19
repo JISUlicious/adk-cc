@@ -181,3 +181,78 @@ async def resolve_facts(
     if _verify_enabled():
         res = [await _verify(model, r, existing) for r in res]
     return res
+
+
+# --------------------------------------------------------------------------
+# Fix F: periodic LLM compaction — re-merge residual fragmentation across a
+# user's whole SEMANTIC tier (drift that slipped past the per-write resolver).
+# --------------------------------------------------------------------------
+def _verify_same_sync(model, topic: str, summary: str, fact: str) -> bool:
+    import asyncio
+    try:
+        ans = asyncio.run(_generate(model, _VERIFY_PROMPT.format(
+            topic=topic, summary=summary, fact=fact)))
+        return "YES" in ans.strip().upper().split()
+    except Exception:  # noqa: BLE001 — conservative: don't merge if unsure
+        return False
+
+
+def compact_user(model, store: MemoryStore, user_id: str, *, verify: bool = True) -> dict:
+    """Merge semantically-equivalent semantic topics for one user. The survivor
+    keeps the latest value; merged-away items' values go to `supersedes` and
+    they're archived (reversible). Verified per merge (Fix D). No-op without a
+    model or with <2 topics."""
+    from .canonicalize import make_llm_canonical
+    from .store import ACTIVE, ARCHIVED, SEMANTIC
+
+    sems = store.list_semantic(user_id, status=ACTIVE)
+    if model is None or len(sems) < 2:
+        return {"merged": 0, "groups": 0}
+    by_topic = {s.topic: s for s in sems}
+    try:
+        mapping = make_llm_canonical(model)(list(by_topic))
+    except Exception:  # noqa: BLE001
+        return {"merged": 0, "groups": 0}
+
+    groups: dict[str, list[str]] = {}
+    for t, canon in mapping.items():
+        if t in by_topic:
+            groups.setdefault(canon, []).append(t)
+
+    merged = ngroups = 0
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda t: (by_topic[t].confidence, by_topic[t].updated), reverse=True)
+        survivor = by_topic[members[0]]
+        to_merge = [
+            by_topic[m] for m in members[1:]
+            if not verify or _verify_same_sync(model, survivor.topic, survivor.text, by_topic[m].text)
+        ]
+        if not to_merge:
+            continue
+        ngroups += 1
+        sup, srcs = list(survivor.supersedes), list(survivor.sources)
+        for other in to_merge:
+            if other.text and other.text != survivor.text and other.text not in sup:
+                sup.append(other.text)
+            for s in other.sources:
+                if s not in srcs:
+                    srcs.append(s)
+            store.set_status(user_id, SEMANTIC, other.id, ARCHIVED)  # logged (Fix G)
+            merged += 1
+        survivor.supersedes, survivor.sources = sup, srcs
+        survivor.confidence = min(0.95, survivor.confidence + 0.05 * len(to_merge))
+        store.put_semantic(user_id, survivor)  # logged
+    return {"merged": merged, "groups": ngroups}
+
+
+def compact_all(model, root: str, *, tenants=None, verify: bool = True) -> list[tuple]:
+    """Run compact_user for every (tenant, user) under `root`."""
+    from .consolidate import discover_tenants
+    out: list[tuple] = []
+    for tenant in (tenants if tenants is not None else discover_tenants(root)):
+        store = MemoryStore.for_tenant(tenant, root=root)
+        for user_id in store.list_user_ids():
+            out.append((tenant, user_id, compact_user(model, store, user_id, verify=verify)))
+    return out
