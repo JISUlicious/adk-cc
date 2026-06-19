@@ -279,6 +279,29 @@ Per-session scratch dirs at `<user_home>/.sessions/<session>/` accumulate. `scri
 
 User home dirs are never reaped — they're the user's persistent state.
 
+### Knowledge consolidation (memory + wiki)
+
+Both the autonomous memory (episodic→semantic) and the shared wiki (inbox→domain) consolidate out of band. Consolidation **mutates** shared per-tenant/per-user files, and its mutual exclusion is a `threading.Lock` — which only coordinates *within one process*. So the rule is: **exactly one consolidator at a time.**
+
+**Single process (1 replica, 1 worker — dev, small deployments):** run it in-process. Memory: set `ADK_CC_MEMORY_CONSOLIDATE_INTERVAL_S` (the scheduler runs consolidation + compaction in the API server's lifespan) and optionally `ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD` (promote promptly on the capture path). The wiki still needs its librarian cron. No external memory cron required.
+
+**Multi-worker (`uvicorn --workers N`) or k8s (`replicas > 1`):** the lock does **not** cross processes/pods, so N in-process schedulers would duplicate work and race on the same files. Instead, make the serving pods **capture-only** and run a single external consolidator:
+
+- Serving: leave `ADK_CC_MEMORY_CONSOLIDATE_INTERVAL_S` **unset** and `ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD` **unset** (capture is append-only / unique-id, safe across pods). Keep `ADK_CC_MEMORY=1` / `ADK_CC_WIKI=1`.
+- One consolidator (cron / systemd timer / k8s **CronJob**) runs both passes:
+
+```bash
+# hourly — the sole writer of consolidated memory + the domain wiki
+0 * * * * cd /opt/adk-cc && .venv/bin/python scripts/memory_consolidator.py \
+            --root /var/lib/adk-cc/.memory --model --compact
+5 * * * * cd /opt/adk-cc && .venv/bin/python scripts/wiki_librarian.py \
+            --root /var/lib/adk-cc/.wiki --compact
+```
+
+On k8s these are two `CronJob`s using the same image with those commands. **Prerequisites:** every replica *and* the CronJob must share storage via `ADK_CC_MEMORY_STORE_URI` / `ADK_CC_WIKI_STORE_URI` (a storage service — pod-local disk gives each pod its own knowledge), and that backend must implement the docstore `append` / `kv_*` ops the changelog and index use (the filesystem backend does; an S3/db backend must add them). Alternatives to a CronJob — leader election (k8s `Lease`) or a distributed lock (Redis/DB) — are heavier; the CronJob is the default.
+
+`--model` enables LLM synthesis/resolution/verification; omit it for a deterministic, model-free pass. `--compact` adds the duplicate re-merge (memory Fix F / wiki domain compaction).
+
 ### Migration from pre-per-user layouts
 
 Existing tenant-shared deployments (`<root>/<tenant>/...` with files at the tenant root, no `<user>/` nesting) need a one-time migration per tenant. Two cases:

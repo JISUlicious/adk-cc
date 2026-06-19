@@ -279,6 +279,29 @@ Sandbox VM의 로컬 NVMe. `<root>`는 VM의 디렉터리 (예: `/var/lib/adk-cc
 
 User home dir은 절대 reap되지 않음 — user의 persistent 상태.
 
+### 지식 consolidation (memory + wiki)
+
+자율 memory(episodic→semantic)와 공유 wiki(inbox→domain) 모두 out-of-band로 consolidate합니다. consolidation은 공유 per-tenant/per-user 파일을 **mutate**하며, 상호 배제는 `threading.Lock` — *한 프로세스 내에서만* 동작합니다. 따라서 규칙은: **동시에 consolidator는 정확히 하나.**
+
+**단일 프로세스 (replica 1, worker 1 — 개발/소규모):** in-process로 실행. Memory: `ADK_CC_MEMORY_CONSOLIDATE_INTERVAL_S` 설정(스케줄러가 API 서버 lifespan에서 consolidation + compaction 실행) + 선택적으로 `ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD`(capture-path에서 즉시 promote). wiki는 여전히 librarian cron 필요. 외부 memory cron은 불필요.
+
+**Multi-worker (`uvicorn --workers N`) 또는 k8s (`replicas > 1`):** lock이 프로세스/pod를 넘지 못하므로, N개의 in-process 스케줄러가 작업을 중복하고 같은 파일에서 race. 대신 serving pod를 **capture-only**로 두고 단일 외부 consolidator를 실행:
+
+- Serving: `ADK_CC_MEMORY_CONSOLIDATE_INTERVAL_S`와 `ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD`를 **unset**(capture는 append-only / unique-id라 pod 간 안전). `ADK_CC_MEMORY=1` / `ADK_CC_WIKI=1`은 유지.
+- consolidator 하나(cron / systemd 타이머 / k8s **CronJob**)가 두 pass 실행:
+
+```bash
+# 매시간 — consolidate된 memory + domain wiki의 유일한 writer
+0 * * * * cd /opt/adk-cc && .venv/bin/python scripts/memory_consolidator.py \
+            --root /var/lib/adk-cc/.memory --model --compact
+5 * * * * cd /opt/adk-cc && .venv/bin/python scripts/wiki_librarian.py \
+            --root /var/lib/adk-cc/.wiki --compact
+```
+
+k8s에서는 같은 이미지로 위 명령을 실행하는 두 개의 `CronJob`. **전제조건:** 모든 replica *와* CronJob이 `ADK_CC_MEMORY_STORE_URI` / `ADK_CC_WIKI_STORE_URI`(스토리지 서비스 — pod-local 디스크는 pod마다 별도 지식을 가짐)로 저장소를 공유해야 하고, 해당 backend가 changelog/인덱스가 쓰는 docstore `append` / `kv_*` 연산을 구현해야 함(filesystem backend는 구현됨; S3/db backend는 추가 필요). CronJob의 대안 — leader election(k8s `Lease`)이나 distributed lock(Redis/DB) — 은 더 무거움; CronJob이 기본.
+
+`--model`은 LLM synthesis/resolution/verification을 켬; deterministic·모델 없는 pass는 생략. `--compact`은 중복 재병합(memory Fix F / wiki domain compaction)을 추가.
+
 ### Pre-per-user 레이아웃에서 migration
 
 기존 tenant-shared 배포 (`<root>/<tenant>/...`이며 파일이 테넌트 root에, `<user>/` 중첩 없음)는 테넌트당 일회성 migration이 필요합니다. 두 경우:
