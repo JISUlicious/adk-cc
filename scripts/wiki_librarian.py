@@ -89,14 +89,23 @@ def _make_page_synthesizer(model):
     return _synth
 
 
-async def _run(root: str, tenants: list[str], use_model: bool) -> int:
+async def _run(root: str, tenants: list[str], use_model: bool, compact: bool) -> int:
     classifier = None
     synthesizer = None
+    verifier = None
+    compact_resolver = None
     if use_model:
         from adk_cc.agent import MODEL  # constructs the configured SelectableLlm
+        from adk_cc.wiki import make_llm_entity_resolver, make_llm_merge_verifier
 
         classifier = LlmClassifier(MODEL).aclassify
         synthesizer = _make_page_synthesizer(MODEL)
+        if compact:
+            # compaction merges across the published domain → guard it with a
+            # verifier, and use the LLM resolver so it catches true aliases (not
+            # just hyphenation variants).
+            verifier = make_llm_merge_verifier(MODEL)
+            compact_resolver = make_llm_entity_resolver(MODEL)
 
     overall = 0
     for tenant in tenants:
@@ -113,6 +122,15 @@ async def _run(root: str, tenants: list[str], use_model: bool) -> int:
         for err in report.errors:
             _log.warning("tenant %s slug error: %s", tenant, err)
             overall = max(overall, 0)  # per-slug errors don't fail the job
+        if compact:
+            # A separate librarian for the compaction pass: LLM resolver +
+            # verifier (when --model), deterministic hyphenation dedup otherwise.
+            comp_lib = Librarian(store, resolver=compact_resolver, verifier=verifier)
+            crep = await comp_lib.compact()
+            _log.info(
+                "tenant %s: compaction merged=%d group(s)=%d pages %d→%d",
+                tenant, crep.merged, crep.groups, crep.pages_before, crep.pages_after,
+            )
     return overall
 
 
@@ -121,6 +139,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--root", default=None)
     ap.add_argument("--tenant", action="append", dest="tenants", default=None)
     ap.add_argument("--no-model", action="store_true")
+    ap.add_argument("--compact", action="store_true",
+                    help="after merging, re-dedup the published domain pages "
+                         "(verified). With a model, catches true aliases; "
+                         "without, hyphenation variants.")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -141,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
 
     _log.info("merging %d tenant(s) under %s (model=%s)",
               len(tenants), root, "off" if args.no_model else "on")
-    return asyncio.run(_run(root, tenants, use_model=not args.no_model))
+    return asyncio.run(_run(root, tenants, use_model=not args.no_model, compact=args.compact))
 
 
 if __name__ == "__main__":

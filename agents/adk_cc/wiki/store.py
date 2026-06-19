@@ -159,6 +159,15 @@ class WikiStore:
             _DOMAIN, Document(page.slug, dict(page.frontmatter), page.body)
         )
 
+    def delete_domain_page(self, slug: str) -> Optional[Page]:
+        """Remove a domain page (used by compaction). Returns the removed page
+        (so the caller can log it for rollback) or None if it didn't exist."""
+        page = self.read_domain_page(slug)
+        if page is None:
+            return None
+        self._store.delete_doc(_DOMAIN, slug)
+        return page
+
     def read_index(self) -> str:
         return self._store.kv_get("index") or ""
 

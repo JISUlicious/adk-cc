@@ -25,7 +25,14 @@ only), a recall plugin, and a cron-run librarian. Gated by `ADK_CC_WIKI=1`.
 
 from __future__ import annotations
 
-from .librarian import Librarian, LlmClassifier, MergeReport
+from .librarian import (
+    CompactReport,
+    Librarian,
+    LlmClassifier,
+    MergeReport,
+    make_llm_entity_resolver,
+    make_llm_merge_verifier,
+)
 from .page import Page, parse, serialize, slugify
 from .store import InboxDoc, WikiStore, wiki_root_from_env
 
@@ -40,4 +47,7 @@ __all__ = [
     "Librarian",
     "LlmClassifier",
     "MergeReport",
+    "CompactReport",
+    "make_llm_entity_resolver",
+    "make_llm_merge_verifier",
 ]
