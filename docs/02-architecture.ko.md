@@ -436,6 +436,30 @@ ADK의 tool-dispatch flow(`google/adk/flows/llm_flows/functions.py:489-504`)는 
 
 **동시성**: same-user parallel 세션은 user home을 공유 — 파일 경쟁 가능. 각 세션은 자체 scratch 보유. v1 입장: 경쟁은 user의 문제 (공유 working tree의 `git`과 같은 모델). COW overlay 또는 세션 lock은 v2로 연기.
 
+## 7.7. 지식: 공유 wiki + 자율 memory
+
+워크스페이스 옆에 두 개의 지식 subsystem이 있으며, 역할이 의도적으로 다릅니다. 둘 다 backend-agnostic한 `adk_cc/docstore`(기본 filesystem; `ADK_CC_WIKI_STORE_URI` / `ADK_CC_MEMORY_STORE_URI`로 서비스 backend)로 저장하므로, 저장소를 이전해도 검색이 유지됩니다.
+
+**Wiki (`adk_cc/wiki`, `ADK_CC_WIKI=1`) — 명시적(explicit), 공유, multi-writer.** 팀의 영속 지식 베이스. agent는 오직 도구(`wiki_search` / `wiki_read` / `wiki_add`)로만 접근하며, `wiki_add`는 호출한 user의 **inbox**에 쓰고 공유 domain에는 절대 쓰지 않습니다. 오프라인 **librarian**(`scripts/wiki_librarian.py`, cron으로 실행) 하나가 `domain/`의 *유일한* writer입니다:
+
+```
+users/<uid>/inbox   → librarian → domain/wiki   (모두가 읽음)
+```
+
+librarian은 slug별로: inbox claim을 기존 page로 entity-resolve(`_canonicalize`, 또는 주입된 LLM resolver)하고, 현재 page와 분류(`ConflictClassifier`: novel / corroborate / contradict)한 뒤, **cite-or-quarantine** — provenance와 함께 publish하거나 검토를 위해 `quarantine`에 보류. `sticky` 해소는 재실행을 idempotent하게 만들고 사람의 override가 유지되게 합니다. memory에서 이식한 두 안전장치: **merge-verify gate**(entity 병합을 신뢰하기 전에 독립적으로 확인 — 잘못된 병합은 공유 데이터를 오염시킴)와 **`compact()`**(merge 실행은 inbox→domain만 정규화하므로, drift된 *기존* domain page를 재-중복제거). wiki는 **explicit-only**: 상시 recall 없음.
+
+**Memory (`adk_cc/memory`, `ADK_CC_MEMORY=1`) — 자율(autonomous), per-user, single-writer.** 도구 호출 없이 *이 user*에 관한 영속 사실을 나중에 재사용하려고 기억합니다:
+
+```
+turn → capture (scoped 추출) → identity resolve → episodic → consolidate → semantic → recall
+```
+
+- **Recall** (`before_model`, 모델 호출 없음): 매 turn마다 user의 관련 memory를 budget 한도 내에서 system prompt에 주입.
+- **Capture** (`after_run`, 모델 호출 1회): turn 전체에서 영속 *user/project* 사실을 추출(domain/주제 내용은 제외하도록 scoped)한 뒤, user의 기존 topic에 대해 **identity resolve** — corroborate / update / new — 하여 slug가 흔들려도 같은 사실이 쓰기 시점에 하나의 topic으로 합쳐짐. **verify gate**가 각 병합 제안을 보호.
+- **Consolidation** (episodic→semantic, latest-wins + corroboration 신뢰도 + supersession 이력): out-of-band로, **hybrid** trigger로 실행 — capture-path **threshold**(미처리 N개가 쌓이면 즉시 promote)와 **주기적** pass(in-process 스케줄러 `service/memory_scheduler.py`, 또는 `scripts/memory_consolidator.py` cron). 주기 실행은 **staleness sweep**, **prune**(보유 episodic 상한), **compaction**(잔여 중복의 LLM 재병합)도 수행.
+
+두 store 모두 append-only **changelog**와 유지되는 **topic/page 인덱스**를 가지며, memory는 `revert_semantic`을, wiki는 `compact_merge` 로깅을 더해 잘못된 LLM 병합을 감사·롤백 가능하게 합니다. identity resolution·verification·synthesis는 LLM 기반이되 deterministic fallback이 있어, 모델 없이도(성능은 저하되지만) 파이프라인이 동작합니다. consolidation은 single-writer를 가정한 *mutation*입니다 — multi-worker / k8s 토폴로지는 배포 문서(§ "지식 consolidation")를 참조.
+
 ## 8. ADK가 우리를 위해 하는 것
 
 ADK 1.31.1에 의존:

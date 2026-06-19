@@ -54,6 +54,125 @@ Classifier = Callable[
     [ClaimRecord, Optional[Page]], Union[Verdict, Awaitable[Verdict]]
 ]
 
+# Entity resolution (semantic dedup): (raw_slug, known_slugs) -> canonical slug.
+# Deterministic default merges hyphenation/spacing variants; an LLM resolver
+# can be injected for true aliases. May be sync (the default) or async (the LLM
+# resolver) — call sites await via _maybe_await.
+EntityResolver = Callable[[str, set], Union[str, Awaitable[str]]]
+
+# Page synthesis: (slug, deterministic_body) -> polished_body. Default keeps
+# the deterministic body; an LLM synthesizer rewrites it into coherent prose
+# while preserving facts + provenance (guarded — see _merge_slug). May be
+# sync or async.
+PageSynthesizer = Callable[[str, str], Union[str, Awaitable[str]]]
+
+# Merge verification (ported from memory Fix D): (text_a, text_b) -> are these
+# the SAME underlying entity, so merging is correct? Guards the entity
+# resolver's decision before two pages/claims are combined. None = trust the
+# resolver (model-free; current behavior). A false verdict (or any error) keeps
+# the items SEPARATE — a missed merge is harmless; a false merge corrupts shared
+# data everyone reads.
+MergeVerifier = Callable[[str, str], Union[bool, Awaitable[bool]]]
+
+
+async def _maybe_await(v):
+    return await v if inspect.isawaitable(v) else v
+
+
+def _merge_pages(survivor: Page, loser: Page) -> Page:
+    """Fold `loser` into `survivor` for compaction: append the loser's body (with
+    a provenance breadcrumb) if not already present, and union `sources`."""
+    body = survivor.body.rstrip()
+    add = loser.body.strip()
+    if add and add not in body:
+        body = f"{body}\n\n{add} _(merged from [[{loser.slug}]])_"
+    fm = dict(survivor.frontmatter)
+    srcs = list(fm.get("sources") or [])
+    for s in (loser.frontmatter.get("sources") or []):
+        if s not in srcs:
+            srcs.append(s)
+    if srcs:
+        fm["sources"] = srcs
+    return Page(slug=survivor.slug, frontmatter=fm, body=body + "\n")
+
+
+def make_llm_merge_verifier(model, *, timeout_s: float = 30.0) -> MergeVerifier:
+    """A MergeVerifier backed by `model`: asks whether two entries describe the
+    same entity. Used to guard the entity resolver's merges (Fix D)."""
+    _PROMPT = (
+        "Do these two wiki entries describe the SAME underlying entity or topic, "
+        "so they should be a single page? Answer EXACTLY 'YES' or 'NO'.\n\n"
+        "A:\n{a}\n\nB:\n{b}"
+    )
+
+    async def _verify(a: str, b: str) -> bool:
+        req = LlmRequest(
+            contents=[types.Content(role="user", parts=[types.Part(
+                text=_PROMPT.format(a=a[:600], b=b[:600]))])],
+            config=types.GenerateContentConfig(),
+        )
+        out = ""
+        async with Aclosing(model.generate_content_async(req, stream=False)) as agen:
+            async for resp in agen:
+                for p in (getattr(getattr(resp, "content", None), "parts", None) or []):
+                    if not getattr(p, "thought", None) and getattr(p, "text", None):
+                        out += p.text
+        return "YES" in out.strip().upper().split()
+
+    return _verify
+
+
+def make_llm_entity_resolver(model, *, timeout_s: float = 30.0) -> EntityResolver:
+    """An async EntityResolver backed by `model`: map a raw slug onto an
+    existing entity when they're true aliases (semantic dedup beyond the
+    deterministic hyphenation match), else return the raw slug. Pair with a
+    verifier so the resolver's choice is double-checked before merging."""
+    _PROMPT = (
+        "Which existing entity, if any, names the SAME thing as the new slug? "
+        "Reply with EXACTLY one slug from the existing list, or NONE.\n\n"
+        "New slug: {slug}\nExisting: {known}"
+    )
+
+    async def _resolve(slug: str, known: set) -> str:
+        if slug in known or not known:
+            return slug
+        req = LlmRequest(
+            contents=[types.Content(role="user", parts=[types.Part(
+                text=_PROMPT.format(slug=slug, known=", ".join(sorted(known))))])],
+            config=types.GenerateContentConfig(),
+        )
+        out = ""
+        try:
+            async with Aclosing(model.generate_content_async(req, stream=False)) as agen:
+                async for resp in agen:
+                    for p in (getattr(getattr(resp, "content", None), "parts", None) or []):
+                        if not getattr(p, "thought", None) and getattr(p, "text", None):
+                            out += p.text
+        except Exception:  # noqa: BLE001 — resolver failure ⇒ no merge
+            return slug
+        # lenient: pick any known slug the model named (handles prose answers)
+        toks = set(out.lower().replace(",", " ").replace(".", " ").split())
+        for k in known:
+            if k.lower() in toks:
+                return k
+        return slug
+
+    return _resolve
+
+
+def _canonicalize(slug: str, known: set) -> str:
+    """Deterministic entity resolution: map a slug to an existing one whose
+    de-hyphenated form is identical (so 'gpt4' ≡ 'gpt-4', 'open-ai' ≡
+    'openai'). Conservative — only exact de-hyphenated matches, never
+    substring (which would over-merge 'gpt-4' into 'gpt-4-turbo')."""
+    if slug in known:
+        return slug
+    norm = slug.replace("-", "")
+    for k in sorted(known):
+        if k.replace("-", "") == norm:
+            return k
+    return slug
+
 
 @dataclass
 class MergeReport:
@@ -70,22 +189,45 @@ class MergeReport:
         self.actions[action] = self.actions.get(action, 0) + 1
 
 
+@dataclass
+class CompactReport:
+    tenant_id: str
+    groups: int = 0           # alias-groups that had ≥1 merge
+    merged: int = 0           # domain pages folded away
+    pages_before: int = 0
+    pages_after: int = 0
+    actions: dict[str, int] = field(default_factory=dict)
+
+    def bump(self, action: str) -> None:
+        self.actions[action] = self.actions.get(action, 0) + 1
+
+
 class Librarian:
     def __init__(
         self,
         store: WikiStore,
         *,
         classifier: Optional[Classifier] = None,
+        resolver: Optional[EntityResolver] = None,
+        synthesizer: Optional[PageSynthesizer] = None,
+        verifier: Optional[MergeVerifier] = None,
     ) -> None:
         self.store = store.ensure()
         # Default to the deterministic heuristic so the pipeline runs without
         # a model; production injects an LlmClassifier.
         self.classify: Classifier = classifier or conflict.heuristic_classify
+        # Entity resolution (semantic dedup) — deterministic default.
+        self.resolve_entity: EntityResolver = resolver or _canonicalize
+        # Page synthesis — None keeps the deterministic page; inject an LLM
+        # synthesizer for coherent prose.
+        self.synthesize: Optional[PageSynthesizer] = synthesizer
+        # Merge verification — None trusts the resolver (model-free default).
+        self.verify_merge: Optional[MergeVerifier] = verifier
 
     # -------------------------------------------------------------- run ----
     async def run(self) -> MergeReport:
         report = MergeReport(tenant_id=self.store.tenant_id)
-        clusters = self._collect(report)
+        clusters = await self._collect(report)
         for slug, claims in sorted(clusters.items()):
             try:
                 await self._merge_slug(slug, claims, report)
@@ -100,15 +242,29 @@ class Librarian:
         return report
 
     # ---------------------------------------------------------- collect ----
-    def _collect(self, report: MergeReport) -> dict[str, list[tuple[InboxDoc, ClaimRecord]]]:
+    async def _collect(self, report: MergeReport) -> dict[str, list[tuple[InboxDoc, ClaimRecord]]]:
+        # Entity resolution (semantic dedup): canonicalize each inbox slug
+        # against existing domain pages AND slugs already seen this run, so
+        # variants of the same entity ('gpt4' / 'gpt-4') cluster together.
+        known: set = set(self.store.list_domain_pages())
         clusters: dict[str, list[tuple[InboxDoc, ClaimRecord]]] = {}
         for user_id in self.store.list_user_ids():
             for doc in self.store.list_inbox(user_id):
                 if doc.page.no_promote:
                     report.skipped_no_promote += 1
                     continue
+                canonical = await _maybe_await(self.resolve_entity(doc.slug, known))
+                # Verify a non-trivial entity merge before trusting it (Fix D):
+                # reject → keep the claim under its own slug rather than fold it
+                # onto a different entity.
+                if canonical != doc.slug:
+                    ref = self._reference_text(canonical, clusters)
+                    if ref is not None and not await self._verified(doc.page.body.strip(), ref):
+                        canonical = doc.slug
+                        report.bump("merge_rejected")
+                known.add(canonical)
                 claim = ClaimRecord(
-                    slug=doc.slug,
+                    slug=canonical,
                     text=doc.page.body.strip(),
                     user_id=user_id,
                     doc_id=doc.doc_id,
@@ -124,8 +280,29 @@ class Librarian:
                 ):
                     report.skipped_queued += 1
                     continue
-                clusters.setdefault(doc.slug, []).append((doc, claim))
+                clusters.setdefault(canonical, []).append((doc, claim))
         return clusters
+
+    def _reference_text(self, canonical: str, clusters: dict) -> Optional[str]:
+        """Representative text for the entity `canonical` resolves to: the
+        existing domain page if there is one, else the first claim already
+        clustered under it this run."""
+        page = self.store.read_domain_page(canonical)
+        if page is not None:
+            return page.body.strip()
+        if clusters.get(canonical):
+            return clusters[canonical][0][1].text
+        return None
+
+    async def _verified(self, text_a: str, text_b: str) -> bool:
+        """True if no verifier (trust the resolver) or the verifier confirms the
+        two texts are the same entity. Any error ⇒ False (don't merge)."""
+        if self.verify_merge is None:
+            return True
+        try:
+            return bool(await _maybe_await(self.verify_merge(text_a, text_b)))
+        except Exception:  # noqa: BLE001 — conservative: never merge on uncertainty
+            return False
 
     # ----------------------------------------------------------- merge ----
     async def _merge_slug(
@@ -179,11 +356,31 @@ class Librarian:
             )
 
         if touched:
+            # Optional LLM page synthesis: rewrite the deterministic body into
+            # coherent prose. Guarded — if the synthesis drops provenance
+            # markers (or errors), keep the deterministic body. The
+            # deterministic page stays the source of truth.
+            if self.synthesize is not None:
+                page.body = await self._maybe_synthesize(slug, page.body)
             self.store.write_domain_page(page)
             report.slugs_touched.append(slug)
             # archive only AFTER a successful page write (user keeps the copy)
             for user_id, doc_id in published_docs:
                 self.store.archive_inbox(user_id, doc_id)
+
+    async def _maybe_synthesize(self, slug: str, deterministic_body: str) -> str:
+        try:
+            out = self.synthesize(slug, deterministic_body)
+            if inspect.isawaitable(out):
+                out = await out
+            polished = (out or "").strip()
+            # provenance guard: never accept a synthesis that drops provenance
+            # markers (cite-or-quarantine must survive the prose rewrite).
+            if polished and polished.count("_(by ") >= deterministic_body.count("_(by "):
+                return polished + "\n"
+        except Exception as e:  # noqa: BLE001 — synthesis is polish, never fatal
+            _log.warning("librarian: synthesis skipped for %s (%s)", slug, type(e).__name__)
+        return deterministic_body
 
     def _enqueue_review(self, res: Resolution, verdict: Verdict, report: MergeReport) -> None:
         """Add a human-review-queue note for a claim (idempotent by hash)."""
@@ -222,6 +419,60 @@ class Librarian:
         if not slugs:
             lines.append("_(empty — no pages yet)_")
         self.store.write_index("\n".join(lines) + "\n")
+
+    # ------------------------------------------------------- compaction ----
+    async def compact(self) -> "CompactReport":
+        """Re-dedup EXISTING domain pages (ported from memory Fix F). The merge
+        run only canonicalizes inbox→domain; this re-resolves the published
+        pages against each other and folds duplicates that drifted (or that an
+        improved resolver now recognizes), verified (Fix D) and logged for
+        rollback. Single-writer (librarian) → safe to mutate the domain here."""
+        slugs = self.store.list_domain_pages()
+        report = CompactReport(tenant_id=self.store.tenant_id, pages_before=len(slugs))
+        if len(slugs) < 2:
+            report.pages_after = len(slugs)
+            return report
+
+        # cluster aliases via the same entity resolver the merge run uses
+        seen: set = set()
+        groups: dict[str, list[str]] = {}
+        for slug in sorted(slugs):
+            canonical = await _maybe_await(self.resolve_entity(slug, seen))
+            seen.add(canonical)
+            groups.setdefault(canonical, []).append(slug)
+
+        for canonical, members in groups.items():
+            if len(members) < 2:
+                continue
+            survivor_slug = canonical if canonical in members else members[0]
+            survivor = self.store.read_domain_page(survivor_slug)
+            if survivor is None:
+                continue
+            merged_any = False
+            for loser_slug in members:
+                if loser_slug == survivor_slug:
+                    continue
+                loser = self.store.read_domain_page(loser_slug)
+                if loser is None:
+                    continue
+                if not await self._verified(survivor.body, loser.body):
+                    report.bump("merge_rejected")
+                    continue
+                survivor = _merge_pages(survivor, loser)
+                removed = self.store.delete_domain_page(loser_slug)
+                self.store.append_changelog({
+                    "op": "compact_merge", "survivor": survivor_slug,
+                    "merged": loser_slug,
+                    "before": (removed.body.strip() if removed else ""),
+                })
+                report.merged += 1
+                merged_any = True
+            if merged_any:
+                self.store.write_domain_page(survivor)
+                report.groups += 1
+        self._lint()
+        report.pages_after = len(self.store.list_domain_pages())
+        return report
 
 
 # --------------------------------------------------------------------------

@@ -4,6 +4,7 @@ from .authz import AuthzPlugin
 from .confirmation_form_ui import ConfirmationFormUiPlugin
 from .context_guard import ContextGuardPlugin
 from .mcp_export_artifact import McpExportArtifactPlugin
+from .memory import MemoryPlugin
 from .model_io_trace import ModelIOTracePlugin
 from .permissions import PermissionPlugin
 from .plan_mode import PlanModeReminderPlugin
@@ -20,7 +21,7 @@ from . import tolerant_tool_json  # noqa: F401
 from .task_reminder import TaskReminderPlugin
 from .tool_call_validator import ToolCallValidatorPlugin
 from .tool_title import ToolTitlePlugin
-from .wiki_recall import WikiRecallPlugin
+from .workspace_hint import WorkspaceHintPlugin
 
 __all__ = [
     "AskUserQuestionUiHintPlugin",
@@ -29,6 +30,7 @@ __all__ = [
     "ConfirmationFormUiPlugin",
     "ContextGuardPlugin",
     "McpExportArtifactPlugin",
+    "MemoryPlugin",
     "ModelIOTracePlugin",
     "PermissionPlugin",
     "PlanModeReminderPlugin",
@@ -38,5 +40,5 @@ __all__ = [
     "TaskReminderPlugin",
     "ToolCallValidatorPlugin",
     "ToolTitlePlugin",
-    "WikiRecallPlugin",
+    "WorkspaceHintPlugin",
 ]

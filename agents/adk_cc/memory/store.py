@@ -1,28 +1,20 @@
-"""Tenant-scoped filesystem store for the LLM-wiki memory system.
+"""Per-user memory store — a facade over a `DocumentStore`.
 
-Layout (one tree per tenant; `domain == tenant`, per the requirement that
-same-domain users share a wiki and separate domains separate by tenant):
+Memory is the AUTONOMOUS, per-user counterpart to the (explicit, shared)
+wiki: it remembers user/session facts and useful info to reuse later. Single
+user per store-scope, so consolidation is simple (no cross-user conflicts) —
+the hard multi-writer machinery lives in the wiki, not here.
 
-    <ADK_CC_WIKI_ROOT>/<tenant_id>/
-      domain/                    # SHARED — the librarian is the ONLY writer
-        wiki/  <slug>.md, index.md
-        sources/                 # immutable ingested originals (provenance)
-        schema.md                # the wiki's own conventions doc
-        .changelog/log.jsonl     # append-only merge log
-      users/<user_id>/
-        inbox/                   # user-scope captures awaiting merge
-        merged/                  # archived post-merge (user keeps a copy)
-      .quarantine/               # conflicted claims awaiting adjudication
-      .resolutions/              # sticky resolutions keyed by claim-hash
-      settings.json             # per-tenant admin-tunable knobs
+Two tiers, per user:
+  - episodic — per-interaction fact captures (raw-ish, high volume, decays)
+  - semantic — consolidated durable facts (the "useful later" knowledge)
 
-This store is a HOST-side service store (like credentials / skills /
-mcp-server registries), NOT the user's sandboxed workspace — it is read
-and written directly via Python IO, never through the sandbox backend.
+Lifecycle (from the memory skill): draft → active → consolidated → archived,
+with confidence grading and access/staleness tracking. Storage is
+backend-agnostic via `adk_cc.docstore` (filesystem today; service backends by
+`ADK_CC_MEMORY_STORE_URI`), so search survives a migration.
 
-The store is deliberately dumb: paths, atomic IO, and the inbox→merged
-lifecycle. All semantics (search, recall, conflict classification, merge)
-live in sibling modules so this file stays easy to reason about and test.
+Collections: `users/<uid>/episodic`, `users/<uid>/semantic`.
 """
 
 from __future__ import annotations
@@ -30,401 +22,327 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from . import page as pagelib
-from .page import Page
+from ..docstore import Document, DocumentStore, make_document_store
 
-# --- defaults the admin panel can override per-tenant (settings.json) ---
-_DEFAULT_CORROBORATION_N = 2
+# memory tiers
+EPISODIC = "episodic"
+SEMANTIC = "semantic"
+PROCEDURAL = "procedural"
 
-
-def _safe_id(value: str, label: str) -> str:
-    """Reject path-traversal before an id reaches os.path.join. Mirrors
-    `service/tenancy._safe_id` — duplicated (4 lines) so the memory package
-    imports nothing from the service layer."""
-    safe = "".join(c for c in value if c.isalnum() or c in "-_")
-    if safe != value or not safe:
-        raise ValueError(f"unsafe {label} for filesystem path: {value!r}")
-    return safe
+# lifecycle status
+DRAFT = "draft"
+ACTIVE = "active"
+CONSOLIDATED = "consolidated"
+ARCHIVED = "archived"
 
 
-def wiki_root_from_env() -> str:
-    """Resolve the wiki storage root. Explicit `ADK_CC_WIKI_ROOT` wins;
-    otherwise a `.wiki` sibling of the workspace root (or CWD in dev)."""
-    raw = os.environ.get("ADK_CC_WIKI_ROOT")
+def memory_root_from_env() -> str:
+    raw = os.environ.get("ADK_CC_MEMORY_ROOT")
     if raw:
         return os.path.abspath(os.path.expanduser(raw))
     base = os.environ.get("ADK_CC_WORKSPACE_ROOT") or os.getcwd()
-    return os.path.join(os.path.abspath(os.path.expanduser(base)), ".wiki")
+    return os.path.join(os.path.abspath(os.path.expanduser(base)), ".memory")
 
 
-def corroboration_default_from_env() -> int:
-    """Env fallback for the corroboration threshold; admin settings.json
-    overrides this per tenant (see `WikiStore.corroboration_n`)."""
-    try:
-        return max(1, int(os.environ.get("ADK_CC_WIKI_CORROBORATION_N", "")))
-    except ValueError:
-        return _DEFAULT_CORROBORATION_N
+def _safe_id(value: str, label: str) -> str:
+    safe = "".join(c for c in value if c.isalnum() or c in "-_")
+    if safe != value or not safe:
+        raise ValueError(f"unsafe {label}: {value!r}")
+    return safe
 
 
-_DEFAULT_SCHEMA = """\
-# Wiki schema & conventions
+def _slugify(name: str) -> str:
+    import re
 
-This wiki is COMPILED, not retrieved: each page is a living summary of one
-entity or concept, maintained by the librarian — not an append-only log.
-
-## Page shape
-- One markdown file per entity/concept; filename is the slug.
-- Optional YAML frontmatter: `title`, `sources` (doc ids backing claims),
-  `no_promote`/`sensitive` (never merged to domain), `contested` (records a
-  true contradiction), `validity` (supersession windows), `captured_by`,
-  `created`.
-- Body is prose with `[[wikilink]]` cross-references. `index.md` is the
-  hand of the wiki: a short map of the top-level pages.
-
-## Claims
-- Prefer specific, dated, sourced statements over vague ones.
-- Every promoted claim cites a source (cite-or-quarantine).
-- When two sources disagree and neither supersedes the other, record BOTH
-  and mark the page `contested` — do not silently pick a winner.
-"""
+    return re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
 
 
 @dataclass
-class InboxDoc:
-    """A user-scope capture awaiting merge. `doc_id` is the filename stem
-    (unique); `slug` is the topic it concerns (may collide across docs)."""
+class MemoryItem:
+    """One memory (episodic or semantic). Round-trips to a docstore Document
+    (everything but `text` lives in frontmatter)."""
 
-    doc_id: str
-    slug: str
-    page: Page
+    id: str
+    topic: str
+    text: str
+    memory_type: str = EPISODIC
+    status: str = ACTIVE
+    confidence: float = 0.5
+    created: str = ""
+    updated: str = ""
+    sources: list[str] = field(default_factory=list)
+    access_count: int = 0
+    supersedes: list[str] = field(default_factory=list)
 
-
-@dataclass
-class WikiStore:
-    """All paths + IO for one tenant's wiki tree. Construct via
-    `for_tenant`; call `ensure()` once before first use."""
-
-    tenant_id: str
-    root: str  # <ADK_CC_WIKI_ROOT>/<tenant_id>
+    def to_document(self) -> Document:
+        fm: dict[str, Any] = {
+            "topic": self.topic,
+            "memory_type": self.memory_type,
+            "status": self.status,
+            "confidence": self.confidence,
+            "created": self.created,
+            "updated": self.updated,
+            "access_count": self.access_count,
+        }
+        if self.sources:
+            fm["sources"] = list(self.sources)
+        if self.supersedes:
+            fm["supersedes"] = list(self.supersedes)
+        return Document(self.id, fm, self.text.strip() + "\n")
 
     @classmethod
-    def for_tenant(cls, tenant_id: str, root: Optional[str] = None) -> "WikiStore":
-        tid = _safe_id(tenant_id or "local", "tenant_id")
-        base = root or wiki_root_from_env()
-        return cls(tenant_id=tid, root=os.path.join(base, tid))
-
-    # ----- path accessors -----
-    @property
-    def domain_dir(self) -> str:
-        return os.path.join(self.root, "domain")
-
-    @property
-    def wiki_dir(self) -> str:
-        return os.path.join(self.domain_dir, "wiki")
-
-    @property
-    def sources_dir(self) -> str:
-        return os.path.join(self.domain_dir, "sources")
-
-    @property
-    def schema_path(self) -> str:
-        return os.path.join(self.domain_dir, "schema.md")
-
-    @property
-    def index_path(self) -> str:
-        return os.path.join(self.wiki_dir, "index.md")
-
-    @property
-    def changelog_path(self) -> str:
-        return os.path.join(self.domain_dir, ".changelog", "log.jsonl")
-
-    @property
-    def quarantine_dir(self) -> str:
-        return os.path.join(self.root, ".quarantine")
-
-    @property
-    def resolutions_dir(self) -> str:
-        return os.path.join(self.root, ".resolutions")
-
-    @property
-    def settings_path(self) -> str:
-        return os.path.join(self.root, "settings.json")
-
-    def user_dir(self, user_id: str) -> str:
-        return os.path.join(self.root, "users", _safe_id(user_id, "user_id"))
-
-    def inbox_dir(self, user_id: str) -> str:
-        return os.path.join(self.user_dir(user_id), "inbox")
-
-    def merged_dir(self, user_id: str) -> str:
-        return os.path.join(self.user_dir(user_id), "merged")
-
-    # ----- bring-up -----
-    def ensure(self) -> "WikiStore":
-        """Create the tenant skeleton (idempotent) + seed schema/index."""
-        for d in (
-            self.wiki_dir,
-            self.sources_dir,
-            os.path.dirname(self.changelog_path),
-            self.quarantine_dir,
-            self.resolutions_dir,
-        ):
-            os.makedirs(d, exist_ok=True)
-        if not os.path.exists(self.schema_path):
-            _atomic_write(self.schema_path, _DEFAULT_SCHEMA)
-        if not os.path.exists(self.index_path):
-            _atomic_write(self.index_path, "# Index\n\n_(empty — no pages yet)_\n")
-        return self
-
-    # ----- domain pages (read by everyone; written only by librarian) -----
-    def list_domain_pages(self) -> list[str]:
-        if not os.path.isdir(self.wiki_dir):
-            return []
-        return sorted(
-            f[:-3]
-            for f in os.listdir(self.wiki_dir)
-            if f.endswith(".md") and f != "index.md"
+    def from_document(cls, doc: Document) -> "MemoryItem":
+        fm = doc.frontmatter or {}
+        return cls(
+            id=doc.doc_id,
+            topic=str(fm.get("topic") or doc.doc_id),
+            text=doc.body.strip(),
+            memory_type=str(fm.get("memory_type") or EPISODIC),
+            status=str(fm.get("status") or ACTIVE),
+            confidence=float(fm.get("confidence") or 0.5),
+            created=str(fm.get("created") or ""),
+            updated=str(fm.get("updated") or ""),
+            sources=[str(s) for s in (fm.get("sources") or [])],
+            access_count=int(fm.get("access_count") or 0),
+            supersedes=[str(s) for s in (fm.get("supersedes") or [])],
         )
 
-    def read_domain_page(self, slug: str) -> Optional[Page]:
-        path = os.path.join(self.wiki_dir, _safe_id(slug, "slug") + ".md")
-        if not os.path.isfile(path):
-            return None
-        with open(path, "r", encoding="utf-8") as fh:
-            return pagelib.parse(fh.read(), slug)
 
-    def write_domain_page(self, page: Page) -> str:
-        """Atomically write/replace a domain page (librarian only)."""
-        os.makedirs(self.wiki_dir, exist_ok=True)
-        path = os.path.join(self.wiki_dir, _safe_id(page.slug, "slug") + ".md")
-        _atomic_write(path, pagelib.serialize(page))
-        return path
+def _episodic(user_id: str) -> str:
+    return f"users/{_safe_id(user_id, 'user_id')}/episodic"
 
-    def read_index(self) -> str:
-        if not os.path.isfile(self.index_path):
-            return ""
-        with open(self.index_path, "r", encoding="utf-8") as fh:
-            return fh.read()
 
-    def write_index(self, text: str) -> None:
-        os.makedirs(self.wiki_dir, exist_ok=True)
-        _atomic_write(self.index_path, text)
+def _semantic(user_id: str) -> str:
+    return f"users/{_safe_id(user_id, 'user_id')}/semantic"
 
-    def read_schema(self) -> str:
-        if not os.path.isfile(self.schema_path):
-            return ""
-        with open(self.schema_path, "r", encoding="utf-8") as fh:
-            return fh.read()
 
-    # ----- user inbox (user-scope captures) -----
-    def add_inbox(
+class MemoryStore:
+    """Per-tenant memory store; methods are per-user. Construct via
+    `for_tenant`."""
+
+    EPISODIC_OF = staticmethod(_episodic)
+    SEMANTIC_OF = staticmethod(_semantic)
+
+    def __init__(self, tenant_id: str, store: DocumentStore) -> None:
+        self.tenant_id = tenant_id
+        self._store = store
+
+    @classmethod
+    def for_tenant(cls, tenant_id: str, root: Optional[str] = None) -> "MemoryStore":
+        tid = _safe_id(tenant_id or "local", "tenant_id")
+        store = make_document_store(
+            uri=os.environ.get("ADK_CC_MEMORY_STORE_URI"),
+            tenant_id=tid,
+            default_root=root or memory_root_from_env(),
+        )
+        return cls(tenant_id=tid, store=store)
+
+    @property
+    def store(self) -> DocumentStore:
+        return self._store
+
+    def list_user_ids(self) -> list[str]:
+        return self._store.list_collections("users")
+
+    # ----- episodic -----
+    def add_episodic(
         self,
         user_id: str,
         text: str,
         *,
-        title: Optional[str] = None,
         topic: Optional[str] = None,
         sources: Optional[list[str]] = None,
-        extra_frontmatter: Optional[dict[str, Any]] = None,
+        confidence: float = 0.5,
         doc_id: Optional[str] = None,
-    ) -> InboxDoc:
-        """Capture a doc/claim into the user's inbox. The slug comes from
-        `topic` else `title` else the first body line. `doc_id` is unique
-        (`<slug>__<hash8>`) so repeated captures of one topic don't clobber.
-        Idempotent when an explicit `doc_id` is reused."""
-        slug = pagelib.slugify(topic or title or _first_line(text)) or "note"
+    ) -> MemoryItem:
+        slug = _slugify(topic or _first_line(text)) or "note"
         if doc_id is None:
             doc_id = f"{slug}__{_short_hash(text)}"
-        doc_id = _safe_id(doc_id, "doc_id")
-        fm: dict[str, Any] = {
-            "title": title or _first_line(text) or slug,
-            "slug": slug,
-            "captured_by": user_id,
-            "created": _now_iso(),
-        }
-        if sources:
-            fm["sources"] = list(sources)
-        if extra_frontmatter:
-            fm.update(extra_frontmatter)
-        page = Page(slug=slug, frontmatter=fm, body=text.strip() + "\n")
-        os.makedirs(self.inbox_dir(user_id), exist_ok=True)
-        path = os.path.join(self.inbox_dir(user_id), doc_id + ".md")
-        _atomic_write(path, pagelib.serialize(page))
-        return InboxDoc(doc_id=doc_id, slug=slug, page=page)
-
-    def list_inbox(self, user_id: str) -> list[InboxDoc]:
-        d = self.inbox_dir(user_id)
-        if not os.path.isdir(d):
-            return []
-        out: list[InboxDoc] = []
-        for f in sorted(os.listdir(d)):
-            if not f.endswith(".md"):
-                continue
-            with open(os.path.join(d, f), "r", encoding="utf-8") as fh:
-                page = pagelib.parse(fh.read(), f[:-3])
-            slug = str(page.frontmatter.get("slug") or page.slug)
-            out.append(InboxDoc(doc_id=f[:-3], slug=slug, page=page))
-        return out
-
-    def list_user_ids(self) -> list[str]:
-        users = os.path.join(self.root, "users")
-        if not os.path.isdir(users):
-            return []
-        return sorted(
-            u for u in os.listdir(users) if os.path.isdir(os.path.join(users, u))
+        now = _now_iso()
+        item = MemoryItem(
+            id=_safe_id(doc_id, "doc_id"),
+            topic=slug,
+            text=text.strip(),
+            memory_type=EPISODIC,
+            status=ACTIVE,
+            confidence=confidence,
+            created=now,
+            updated=now,
+            sources=list(sources or []),
         )
+        self._store.put_doc(_episodic(user_id), item.to_document())
+        self._log(user_id, {"op": "capture", "tier": EPISODIC, "topic": slug,
+                            "id": item.id, "after": item.text})
+        return item
 
-    def archive_inbox(self, user_id: str, doc_id: str) -> Optional[str]:
-        """Move a processed inbox doc → merged/ (the user keeps the copy).
-        Returns the new path, or None if the source was already gone."""
-        doc_id = _safe_id(doc_id, "doc_id")
-        src = os.path.join(self.inbox_dir(user_id), doc_id + ".md")
-        if not os.path.isfile(src):
-            return None
-        os.makedirs(self.merged_dir(user_id), exist_ok=True)
-        dst = os.path.join(self.merged_dir(user_id), doc_id + ".md")
-        os.replace(src, dst)
-        return dst
+    def list_episodic(
+        self, user_id: str, *, status: Optional[str] = None
+    ) -> list[MemoryItem]:
+        items = [MemoryItem.from_document(d) for d in self._store.iter_docs(_episodic(user_id))]
+        return [i for i in items if status is None or i.status == status]
 
-    # ----- sources (immutable provenance) -----
-    def write_source(self, source_id: str, text: str) -> str:
-        os.makedirs(self.sources_dir, exist_ok=True)
-        path = os.path.join(self.sources_dir, _safe_id(source_id, "source_id") + ".md")
-        if not os.path.exists(path):  # immutable: first write wins
-            _atomic_write(path, text)
-        return path
+    # ----- semantic -----
+    def get_semantic(self, user_id: str, topic: str) -> Optional[MemoryItem]:
+        doc = self._store.get_doc(_semantic(user_id), _slugify(topic) or topic)
+        return MemoryItem.from_document(doc) if doc else None
 
-    def has_source(self, source_id: str) -> bool:
-        return os.path.isfile(
-            os.path.join(self.sources_dir, _safe_id(source_id, "source_id") + ".md")
-        )
+    def put_semantic(self, user_id: str, item: MemoryItem) -> None:
+        item.memory_type = SEMANTIC
+        if not item.updated:
+            item.updated = _now_iso()
+        prev = self._store.get_doc(_semantic(user_id), item.id)
+        self._store.put_doc(_semantic(user_id), item.to_document())
+        prev_text = prev.body.strip() if prev else None
+        new_text = item.text.strip()
+        if prev is None:
+            op = "semantic_create"
+        elif prev_text != new_text:
+            op = "semantic_supersede"
+        else:
+            op = "semantic_corroborate"
+        self._log(user_id, {"op": op, "tier": SEMANTIC, "topic": item.topic,
+                            "id": item.id, "before": prev_text, "after": new_text,
+                            "confidence": item.confidence})
+        self._index_upsert(user_id, item)
 
-    # ----- changelog -----
-    def append_changelog(self, entry: dict[str, Any]) -> None:
-        os.makedirs(os.path.dirname(self.changelog_path), exist_ok=True)
-        rec = {"ts": _now_iso(), **entry}
-        with open(self.changelog_path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    def list_semantic(
+        self, user_id: str, *, status: Optional[str] = None
+    ) -> list[MemoryItem]:
+        items = [MemoryItem.from_document(d) for d in self._store.iter_docs(_semantic(user_id))]
+        return [i for i in items if status is None or i.status == status]
 
-    # ----- sticky resolutions (idempotency + human adjudication) -----
-    def get_sticky(self, claim_hash: str) -> Optional[dict[str, Any]]:
-        """A prior resolution record for a claim-hash, or None. `by` is
-        'auto' (this layer recorded a hold) or 'human' (admin adjudicated)."""
-        path = os.path.join(self.resolutions_dir, _safe_id(claim_hash, "hash") + ".json")
-        if not os.path.isfile(path):
-            return None
+    def set_status(self, user_id: str, tier: str, doc_id: str, status: str) -> bool:
+        collection = _episodic(user_id) if tier == EPISODIC else _semantic(user_id)
+        doc = self._store.get_doc(collection, doc_id)
+        if doc is None:
+            return False
+        doc.frontmatter["status"] = status
+        doc.frontmatter["updated"] = _now_iso()
+        self._store.put_doc(collection, doc)
+        topic = str(doc.frontmatter.get("topic") or doc_id)
+        self._log(user_id, {"op": f"status:{status}", "tier": tier,
+                            "id": doc_id, "topic": topic})
+        if tier != EPISODIC:
+            if status == ARCHIVED:
+                self._index_drop(user_id, topic)
+            else:
+                self._index_upsert(user_id, MemoryItem.from_document(doc))
+        return True
+
+    def record_access(self, user_id: str, topic: str) -> None:
+        """Bump a semantic item's access_count (recency/usefulness signal).
+        Called on explicit recall, not passive injection (avoids read-path
+        writes every turn)."""
+        slug = _slugify(topic) or topic
+        doc = self._store.get_doc(_semantic(user_id), slug)
+        if doc is None:
+            return
+        doc.frontmatter["access_count"] = int(doc.frontmatter.get("access_count") or 0) + 1
+        doc.frontmatter["last_access"] = _now_iso()
+        self._store.put_doc(_semantic(user_id), doc)
+
+    # ----- search (both tiers; semantic first) -----
+    def search(
+        self,
+        user_id: str,
+        query: str,
+        *,
+        tiers: tuple[str, ...] = (SEMANTIC, EPISODIC),
+        limit: int = 5,
+    ):
+        cols = []
+        for t in tiers:
+            cols.append(_semantic(user_id) if t == SEMANTIC else _episodic(user_id))
+        return self._store.search(cols, query, limit=limit)
+
+    # ----- changelog (Fix G): every mutation is logged, per user -----
+    def _log(self, user_id: str, entry: dict[str, Any]) -> None:
+        """Append one audit record. Never raises — logging must not break a
+        memory write."""
         try:
-            with open(path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            return data if isinstance(data, dict) else None
-        except (json.JSONDecodeError, OSError):
-            return None
+            uid = _safe_id(user_id, "user_id")
+            rec = {"ts": _now_iso(), "user": uid, **entry}
+            self._store.append(f"changelog/{uid}", json.dumps(rec, ensure_ascii=False))
+        except Exception:  # noqa: BLE001
+            pass
 
-    def set_sticky(
-        self, claim_hash: str, *, action: str, by: str = "auto", note: str = ""
-    ) -> None:
-        os.makedirs(self.resolutions_dir, exist_ok=True)
-        path = os.path.join(self.resolutions_dir, _safe_id(claim_hash, "hash") + ".json")
-        _atomic_write(
-            path,
-            json.dumps(
-                {"action": action, "by": by, "note": note, "ts": _now_iso()}, indent=2
-            ) + "\n",
-        )
-
-    def human_override(self, claim_hash: str) -> Optional[str]:
-        """'accept'/'reject' if a HUMAN adjudicated this claim, else None.
-        Auto-recorded holds do NOT count as overrides — only human ones do."""
-        rec = self.get_sticky(claim_hash)
-        if rec and rec.get("by") == "human":
-            action = rec.get("action")
-            if action in ("accept", "reject"):
-                return action
-        return None
-
-    # ----- quarantine (human review queue) -----
-    def add_quarantine(self, claim_hash: str, record: dict[str, Any]) -> str:
-        """Queue a conflicted/uncited claim for human review. Keyed by
-        claim-hash so re-running the merge doesn't pile up duplicate notes."""
-        os.makedirs(self.quarantine_dir, exist_ok=True)
-        qid = _safe_id(claim_hash, "hash")
-        path = os.path.join(self.quarantine_dir, qid + ".json")
-        rec = {"claim_hash": claim_hash, "status": "pending", "ts": _now_iso(), **record}
-        _atomic_write(path, json.dumps(rec, indent=2) + "\n")
-        return qid
-
-    def list_quarantine(self, *, pending_only: bool = True) -> list[dict[str, Any]]:
-        if not os.path.isdir(self.quarantine_dir):
-            return []
-        out: list[dict[str, Any]] = []
-        for f in sorted(os.listdir(self.quarantine_dir)):
-            if not f.endswith(".json"):
+    def read_changelog(self, user_id: str, *, limit: Optional[int] = None) -> list[dict]:
+        raw = self._store.kv_get(f"changelog/{_safe_id(user_id, 'user_id')}") or ""
+        out: list[dict] = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
                 continue
             try:
-                with open(os.path.join(self.quarantine_dir, f), encoding="utf-8") as fh:
-                    rec = json.load(fh)
-            except (json.JSONDecodeError, OSError):
+                out.append(json.loads(line))
+            except ValueError:
                 continue
-            if pending_only and rec.get("status") != "pending":
-                continue
-            out.append(rec)
-        return out
+        return out[-limit:] if limit else out
 
-    def is_quarantined(self, claim_hash: str) -> bool:
-        path = os.path.join(self.quarantine_dir, _safe_id(claim_hash, "hash") + ".json")
-        return os.path.isfile(path)
+    # ----- topic index (Fix G): maintained compact view for the resolver -----
+    def _index_key(self, user_id: str) -> str:
+        return f"topic-index/{_safe_id(user_id, 'user_id')}"
 
-    # ----- per-tenant settings (admin-tunable) -----
-    def read_settings(self) -> dict[str, Any]:
-        if not os.path.isfile(self.settings_path):
+    def get_topic_index(self, user_id: str) -> dict[str, dict]:
+        raw = self._store.kv_get(self._index_key(user_id))
+        if not raw:
             return {}
         try:
-            with open(self.settings_path, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError):
+            return json.loads(raw)
+        except ValueError:
             return {}
 
-    def write_settings(self, settings: dict[str, Any]) -> None:
-        _atomic_write(self.settings_path, json.dumps(settings, indent=2) + "\n")
-
-    def set_setting(self, key: str, value: Any) -> dict[str, Any]:
-        s = self.read_settings()
-        s[key] = value
-        self.write_settings(s)
-        return s
-
-    @property
-    def corroboration_n(self) -> int:
-        """How many independent users must corroborate a claim to overturn a
-        domain fact without human adjudication. Admin settings.json wins;
-        else the env default (`ADK_CC_WIKI_CORROBORATION_N`, then 2)."""
-        raw = self.read_settings().get("corroboration_n")
+    def _index_write(self, user_id: str, idx: dict[str, dict]) -> None:
         try:
-            if raw is not None:
-                return max(1, int(raw))
-        except (TypeError, ValueError):
+            self._store.kv_put(self._index_key(user_id), json.dumps(idx, ensure_ascii=False))
+        except Exception:  # noqa: BLE001
             pass
-        return corroboration_default_from_env()
+
+    def _index_upsert(self, user_id: str, item: MemoryItem) -> None:
+        idx = self.get_topic_index(user_id)
+        idx[item.topic] = {
+            "id": item.id,
+            "summary": item.text.strip()[:160],
+            "confidence": item.confidence,
+            "status": item.status,
+            "updated": item.updated,
+        }
+        self._index_write(user_id, idx)
+
+    def _index_drop(self, user_id: str, topic: str) -> None:
+        idx = self.get_topic_index(user_id)
+        if idx.pop(topic, None) is not None:
+            self._index_write(user_id, idx)
+
+    # ----- reversibility (Fix G): undo a wrong merge/supersession -----
+    def revert_semantic(self, user_id: str, topic: str) -> bool:
+        """Restore a semantic topic's previous value from its supersession
+        history — the rollback for a bad merge. False if there's nothing to
+        revert."""
+        slug = _slugify(topic) or topic
+        item = self.get_semantic(user_id, slug)
+        if item is None or not item.supersedes:
+            return False
+        prior = item.supersedes[-1]
+        restored = MemoryItem(
+            id=item.id, topic=item.topic, text=prior, memory_type=SEMANTIC,
+            status=item.status, confidence=item.confidence,
+            created=item.created, updated=_now_iso(),
+            sources=item.sources, access_count=item.access_count,
+            supersedes=item.supersedes[:-1],
+        )
+        # direct put + explicit log (bypasses put_semantic's op auto-detection)
+        self._store.put_doc(_semantic(user_id), restored.to_document())
+        self._log(user_id, {"op": "revert", "tier": SEMANTIC, "topic": item.topic,
+                            "id": item.id, "before": item.text, "after": prior})
+        self._index_upsert(user_id, restored)
+        return True
 
 
 # --------------------------------------------------------------------------
-# small free helpers
-# --------------------------------------------------------------------------
-def _atomic_write(path: str, text: str) -> None:
-    """Write via a temp file + os.replace so a reader never sees a partial
-    page. Per-file atomic; the single-writer librarian makes cross-page
-    races a non-issue."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp, path)
-
-
 def _first_line(text: str) -> str:
     for line in text.splitlines():
         s = line.strip().lstrip("# ").strip()

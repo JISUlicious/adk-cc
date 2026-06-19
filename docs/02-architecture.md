@@ -446,6 +446,30 @@ Two shapes exist:
 
 **Concurrency**: same-user parallel sessions share the user home — file races are possible. Each session has its own scratch. v1's stance: races are the user's problem (same model as `git` on a shared working tree). COW overlay or session locks deferred to v2.
 
+## 7.7. Knowledge: shared wiki + autonomous memory
+
+Two knowledge subsystems sit beside the workspace, with deliberately different roles. Both persist through the backend-agnostic `adk_cc/docstore` (filesystem by default; a service backend via `ADK_CC_WIKI_STORE_URI` / `ADK_CC_MEMORY_STORE_URI`), so search survives a storage migration.
+
+**Wiki (`adk_cc/wiki`, `ADK_CC_WIKI=1`) — explicit, shared, multi-writer.** The team's durable knowledge base. Agents touch it only through tools (`wiki_search` / `wiki_read` / `wiki_add`); `wiki_add` writes to the calling user's **inbox**, never the shared domain. A single offline **librarian** (`scripts/wiki_librarian.py`, run as a cron) is the *only* writer of `domain/`:
+
+```
+users/<uid>/inbox   → librarian → domain/wiki   (read by everyone)
+```
+
+The librarian, per slug: entity-resolves inbox claims onto existing pages (`_canonicalize`, or an injected LLM resolver), classifies each against the current page (`ConflictClassifier`: novel / corroborate / contradict), then **cite-or-quarantine** — publish with provenance, or hold in `quarantine` for review. `sticky` resolutions make re-runs idempotent and let a human override stick. Two safeguards ported from memory: a **merge-verify gate** (an entity merge is independently confirmed before it's trusted — a false merge corrupts shared data) and **`compact()`** (re-dedups *existing* domain pages that drifted, since the merge run only canonicalizes inbox→domain). The wiki is **explicit-only**: no always-on recall.
+
+**Memory (`adk_cc/memory`, `ADK_CC_MEMORY=1`) — autonomous, per-user, single-writer.** Remembers durable facts about *this user* to reuse later, with no tool calls:
+
+```
+turn → capture (scoped extract) → resolve identity → episodic → consolidate → semantic → recall
+```
+
+- **Recall** (`before_model`, no model call): injects a budgeted block of the user's relevant memories into the system prompt every turn.
+- **Capture** (`after_run`, one model call): extracts durable *user/project* facts from the whole turn (scoped to exclude domain/subject-matter content), then **resolves identity** against the user's existing topics — corroborate / update / new — so the same fact under drifting slugs folds onto one topic at write time. A **verify gate** guards each proposed merge.
+- **Consolidation** (episodic→semantic, latest-wins + corroboration confidence + supersession history): runs out of band via a **hybrid** of triggers — a capture-path **threshold** (promote once N unprocessed stack up), and a **periodic** pass (the in-process scheduler `service/memory_scheduler.py`, or the `scripts/memory_consolidator.py` cron). Periodic runs also do a **staleness sweep**, **prune** (cap retained episodics), and **compaction** (LLM re-merge of residual duplicates).
+
+Both stores keep an append-only **changelog** and a maintained **topic/page index**; memory adds `revert_semantic` and the wiki `compact_merge` logging so a bad LLM merge is auditable and reversible. Identity resolution, verification, and synthesis are LLM-backed with deterministic fallbacks, so the pipelines run (degraded) without a model. Consolidation is a *mutation* with a single-writer assumption — see the deployment doc (§ "Knowledge consolidation") for the multi-worker / k8s topology.
+
 ## 8. What ADK does for us
 
 We rely on ADK 1.31.1 for:

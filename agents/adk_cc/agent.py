@@ -73,6 +73,7 @@ from .plugins import (
     QuotaPlugin,
     TaskReminderPlugin,
     ToolCallValidatorPlugin,
+    WorkspaceHintPlugin,
 )
 from .service.tenancy import TenancyPlugin
 from .tools import (
@@ -872,6 +873,12 @@ _app_kwargs = dict(
         ProjectContextPlugin(),
         PlanModeReminderPlugin(default_mode=PERMISSION_MODE.value),
         TaskReminderPlugin(default_mode=PERMISSION_MODE.value),
+        # Appends the resolved workspace directory to FS/exec tool
+        # descriptions each turn so the model knows its working directory
+        # and uses workspace-relative paths. Reads the per-session workspace
+        # from state (or ADK_CC_WORKSPACE_ROOT / CWD). Disable with
+        # ADK_CC_DISABLE_WORKSPACE_HINT=1.
+        WorkspaceHintPlugin(),
         # Catches "tool not found" errors from ADK's tool dispatch and
         # turns them into corrective tool responses so the model can
         # self-correct on the next iteration instead of aborting the run.
@@ -933,15 +940,21 @@ if os.environ.get("ADK_CC_TOOL_TITLES") == "1":
     _app_kwargs["plugins"].append(ToolTitlePlugin())
     _app_kwargs["plugins"].append(SessionTitlePlugin())
 
-# Knowledge-wiki recall (opt-in, ADK_CC_WIKI=1). Injects a token-budgeted
-# slice of the wiki relevant to each user message into the system
-# instruction (cheap, no model call), and — when ADK_CC_WIKI_AUTOCAPTURE=1
-# — auto-captures durable user-asserted facts into the caller's inbox via
-# an out-of-band extraction that overlaps the turn (spawn-early/persist-late,
-# like SessionTitlePlugin). Inert unless the flag is set.
-if os.environ.get("ADK_CC_WIKI") == "1":
-    from .plugins import WikiRecallPlugin
+# The wiki (ADK_CC_WIKI=1) is EXPLICIT — accessed via the wiki_search /
+# wiki_read / wiki_add tools (wired onto the coordinator above). It has NO
+# always-on recall plugin: autonomous recall/capture is the MEMORY system's
+# job (below). Shared-domain merging is the offline librarian
+# (scripts/wiki_librarian.py).
 
-    _app_kwargs["plugins"].append(WikiRecallPlugin())
+# Autonomous per-user memory (opt-in, ADK_CC_MEMORY=1). Always-injected
+# budgeted recall (before_model, cheap) + full-turn capture of durable facts
+# into episodic memory (after_run, one model call — captures the agent's
+# output + tool results, not just the user message). Capture is on by default
+# with the flag; ADK_CC_MEMORY_AUTOCAPTURE=0 disables it. Consolidation
+# (episodic→semantic) is the separate scripts/memory_consolidator.py cron.
+if os.environ.get("ADK_CC_MEMORY") == "1":
+    from .plugins import MemoryPlugin
+
+    _app_kwargs["plugins"].append(MemoryPlugin())
 
 app = App(**_app_kwargs)

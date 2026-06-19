@@ -20,9 +20,9 @@ from typing import Any
 
 from google.adk.tools.tool_context import ToolContext
 
-from ..memory import WikiStore
-from ..memory import page as pagelib
-from ..memory import search as searchlib
+from ..wiki import WikiStore
+from ..wiki import page as pagelib
+from ..wiki import search as searchlib
 from .base import AdkCcTool, ToolMeta
 from .schemas import WikiAddArgs, WikiReadArgs, WikiSearchArgs
 

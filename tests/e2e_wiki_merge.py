@@ -45,10 +45,10 @@ os.environ["ADK_CC_WIKI"] = "1"
 _TMP = tempfile.mkdtemp(prefix="wiki-e2e-")
 os.environ["ADK_CC_WIKI_ROOT"] = _TMP
 
-from adk_cc.memory import search as searchlib
-from adk_cc.memory.librarian import Librarian, LlmClassifier
-from adk_cc.memory.page import Page
-from adk_cc.memory.store import WikiStore
+from adk_cc.wiki import search as searchlib
+from adk_cc.wiki.librarian import Librarian, LlmClassifier
+from adk_cc.wiki.page import Page
+from adk_cc.wiki.store import WikiStore
 
 
 _PROBE_TIMEOUT_S = 30

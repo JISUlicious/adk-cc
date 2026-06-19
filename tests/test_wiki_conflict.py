@@ -22,11 +22,11 @@ import tempfile
 os.environ.setdefault("ADK_CC_SKIP_DOTENV", "1")
 os.environ.setdefault("ADK_CC_API_KEY", "stub")
 
-from adk_cc.memory import conflict
-from adk_cc.memory.conflict import ClaimRecord, Verdict
-from adk_cc.memory.librarian import Librarian
-from adk_cc.memory.page import Page
-from adk_cc.memory.store import WikiStore
+from adk_cc.wiki import conflict
+from adk_cc.wiki.conflict import ClaimRecord, Verdict
+from adk_cc.wiki.librarian import Librarian
+from adk_cc.wiki.page import Page
+from adk_cc.wiki.store import WikiStore
 
 
 def _claim(slug="x", text="a fact", user="alice", sources=None):
@@ -104,7 +104,7 @@ def test_pipeline_novel_add_and_archive():
         assert page is not None and "api.acme.com" in page.body
         assert "acme-api" in st.read_index()
         assert st.list_inbox("alice") == []
-        assert os.path.isdir(st.merged_dir("alice"))
+        assert st.list_merged("alice"), "archived copy kept in merged"
         assert report.actions.get(conflict.ADD) == 1
         print("OK pipeline_novel_add_and_archive")
 
@@ -219,6 +219,51 @@ def test_pipeline_human_override_promotes_held_claim():
         print("OK pipeline_human_override_promotes_held_claim")
 
 
+# ----------------------- C2: entity resolution (semantic dedup) -----------------------
+def test_entity_resolution_merges_slug_variants():
+    with tempfile.TemporaryDirectory() as root:
+        st = WikiStore.for_tenant("acme", root=root).ensure()
+        st.write_domain_page(Page("gpt-4", {"title": "GPT-4"}, "A model.\n"))
+        # inbox slugs are hyphenation variants of the existing 'gpt-4' page
+        st.add_inbox("alice", "GPT-4 has a 128k window.", topic="gpt4")
+        st.add_inbox("bob", "GPT-4 is multimodal.", topic="gpt-4")
+        report = asyncio.run(Librarian(st, classifier=_fixed(conflict.AGREES)).run())
+        # both variants resolved onto the one canonical page — no 'gpt4' page
+        assert st.list_domain_pages() == ["gpt-4"], st.list_domain_pages()
+        assert report.slugs_touched == ["gpt-4"]
+        print("OK entity_resolution_merges_slug_variants")
+
+
+# ----------------------- C3: injectable LLM page synthesis -----------------------
+def test_synthesis_polishes_page_preserving_provenance():
+    with tempfile.TemporaryDirectory() as root:
+        st = WikiStore.for_tenant("acme", root=root).ensure()
+        st.add_inbox("alice", "Acme uses Postgres.", topic="acme-db")
+
+        def _synth(slug, body):
+            # a "model" rewrite that keeps the provenance markers from `body`
+            prov = body[body.index("_(by "):] if "_(by " in body else ""
+            return f"# {slug}\n\nAcme's database is PostgreSQL. {prov}"
+
+        asyncio.run(Librarian(st, classifier=_fixed(conflict.NOVEL), synthesizer=_synth).run())
+        page = st.read_domain_page("acme-db")
+        assert "PostgreSQL" in page.body, page.body          # synthesis applied
+        assert "_(by alice" in page.body                     # provenance preserved
+        print("OK synthesis_polishes_page_preserving_provenance")
+
+
+def test_synthesis_dropping_provenance_is_rejected():
+    with tempfile.TemporaryDirectory() as root:
+        st = WikiStore.for_tenant("acme", root=root).ensure()
+        st.add_inbox("alice", "Acme uses Postgres.", topic="acme-db")
+        # a "model" that drops provenance entirely → guard must reject it
+        asyncio.run(Librarian(st, classifier=_fixed(conflict.NOVEL),
+                              synthesizer=lambda slug, body: "Acme uses Postgres.").run())
+        page = st.read_domain_page("acme-db")
+        assert "_(by alice" in page.body, "deterministic body kept when synthesis drops provenance"
+        print("OK synthesis_dropping_provenance_is_rejected")
+
+
 def main():
     test_resolve_auto_tier()
     test_resolve_contradiction_threshold()
@@ -231,6 +276,9 @@ def main():
     test_pipeline_no_promote_is_skipped()
     test_pipeline_idempotent_on_quarantine()
     test_pipeline_human_override_promotes_held_claim()
+    test_entity_resolution_merges_slug_variants()
+    test_synthesis_polishes_page_preserving_provenance()
+    test_synthesis_dropping_provenance_is_rejected()
     print("\nall wiki-conflict tests passed")
 
 
