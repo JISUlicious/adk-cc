@@ -150,8 +150,12 @@ def make_llm_entity_resolver(model, *, timeout_s: float = 30.0) -> EntityResolve
                             out += p.text
         except Exception:  # noqa: BLE001 — resolver failure ⇒ no merge
             return slug
-        answer = out.strip().split()[0] if out.strip() else "NONE"
-        return answer if answer in known else slug
+        # lenient: pick any known slug the model named (handles prose answers)
+        toks = set(out.lower().replace(",", " ").replace(".", " ").split())
+        for k in known:
+            if k.lower() in toks:
+                return k
+        return slug
 
     return _resolve
 
