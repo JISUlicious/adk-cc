@@ -32,6 +32,12 @@ audit.jsonl
 .e2e-test-workspace/
 .e2e-test-driver.py
 
+# Runtime storage roots (dev defaults: workspace / wiki / memory / admin data)
+.workspace/
+.wiki/
+.memory/
+.adk-cc/
+
 # Editor / OS
 .idea/
 .vscode/
