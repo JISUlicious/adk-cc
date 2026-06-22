@@ -120,7 +120,7 @@ def build_fastapi_app(
         # gate. (The tenant admin API at `/tenants/*` is likewise gated.)
         if ui_dist_dir:
             admin_pages = ("/admin", "/admin/mcp", "/admin/skills", "/admin/models")
-            exempt_exact = ("/", "/favicon.svg", "/favicon.ico") + admin_pages
+            exempt_exact = ("/", "/favicon.svg", "/favicon.ico", "/knowledge") + admin_pages
             exempt_prefixes = ("/assets/",)
         else:
             exempt_exact = ()
@@ -202,7 +202,7 @@ def _mount_ui(app, dist_dir: str) -> None:
     # `/admin/{path}` catch-all, which would shadow the admin API routes
     # (e.g. /admin/model-endpoints) that get registered later. Add new SPA
     # page tabs here as they're created.
-    for _spa_path in ("/admin", "/admin/mcp", "/admin/skills", "/admin/models"):
+    for _spa_path in ("/admin", "/admin/mcp", "/admin/skills", "/admin/models", "/knowledge"):
         app.add_api_route(
             _spa_path,
             lambda: FileResponse(index_html),
