@@ -68,6 +68,9 @@ def main() -> int:
         "ADK_CC_COMPACTION_OVERLAP": "1",
         "ADK_CC_MAX_CONTEXT_TOKENS": "200000",
         "ADK_CC_TOOL_TITLES": "0",
+        # all summary-shaping tiers on, so the rendered divider reflects them
+        "ADK_CC_MEMORY": "1",
+        "ADK_CC_COMPACTION_SEED_MEMORY": "1",
     })
     proc = subprocess.Popen(
         [os.path.join(REPO, ".venv/bin/uvicorn"), "adk_cc.service.server:make_app",
@@ -135,18 +138,29 @@ def main() -> int:
                 found = page.locator("text=Context compacted").count() > 0
                 print(f"  after nudge turn: divider {'YES' if found else 'no'}")
 
+            checks = {}
             if found:
-                # expand it and check the summary panel renders
+                # expand it and check the panel + P5 footer render
                 page.locator("text=Context compacted").first.click()
                 time.sleep(1)
-                expanded = page.locator("text=Summary kept in place").count() > 0
-                print(f"  [{'PASS' if expanded else 'WARN'}] divider expands to summary panel")
-                ok = True
+                checks["divider expands to summary panel"] = (
+                    page.locator("text=Summary kept in place").count() > 0)
+                # P5 footer (static, always present once expanded)
+                checks["P5 footer renders"] = (
+                    page.locator("text=stands in for the older messages").count() > 0)
+                # P5 framing line should appear in the rendered summary text
+                body = page.content().lower()
+                checks["P5 framing line in summary"] = (
+                    "continue the conversation directly" in body)
+                for name, cond in checks.items():
+                    print(f"  [{'PASS' if cond else 'WARN'}] {name}")
+                ok = checks.get("divider expands to summary panel", False) \
+                    and checks.get("P5 footer renders", False)
             page.screenshot(path=SHOT, full_page=True)
             print(f"  screenshot: {SHOT}")
             browser.close()
 
-        print(f"\n  [{'PASS' if ok else 'FAIL'}] CompactionDivider renders in the thread")
+        print(f"\n  [{'PASS' if ok else 'FAIL'}] CompactionDivider renders (+ P5 footer)")
         print("compaction UI e2e " + ("PASSED" if ok else "FAILED"))
         return 0 if ok else 1
     finally:
