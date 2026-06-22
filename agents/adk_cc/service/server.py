@@ -92,6 +92,14 @@ def build_fastapi_app(
         lifespan=make_consolidation_lifespan(),
     )
 
+    # Context-fullness limits for the UI gauge (compaction-indicator P2). Returns
+    # the resolved ladder (max/reserve/effective/warn/reject + compaction
+    # threshold), or {} when the guard is disabled. Read-only; behind auth.
+    @fastapi_app.get("/api/context/limits", include_in_schema=False)
+    def _context_limits():  # noqa: ANN202
+        from ..plugins.context_guard import resolved_limits
+        return resolved_limits() or {}
+
     if auth_extractor is not None:
         from .auth import make_auth_middleware
 

@@ -108,6 +108,40 @@ def _normalize_ladder(
     return reserve, effective, warn, reject, corrections
 
 
+def resolved_limits() -> Optional[dict]:
+    """The resolved context ladder (same env + normalization ContextGuardPlugin
+    uses), for the UI fullness gauge (P2). Returns None when MAX is unset (guard
+    disabled). Pure read — no logging, no side effects."""
+    max_str = os.environ.get("ADK_CC_MAX_CONTEXT_TOKENS")
+    if not max_str:
+        return None
+    try:
+        max_tokens = int(max_str)
+    except ValueError:
+        return None
+
+    def _int_or_none(name):
+        v = os.environ.get(name)
+        try:
+            return int(v) if v else None
+        except ValueError:
+            return None
+
+    reserve = _int_or_none("ADK_CC_CONTEXT_RESERVE_TOKENS") or 0
+    reserve, effective, warn, reject, _ = _normalize_ladder(
+        max_tokens, reserve, _int_or_none("ADK_CC_CONTEXT_WARN_TOKENS"),
+        _int_or_none("ADK_CC_CONTEXT_REJECT_TOKENS"),
+    )
+    return {
+        "max_tokens": max_tokens,
+        "reserve": reserve,
+        "effective": effective,
+        "warn": warn,
+        "reject": reject,
+        "compaction_threshold": _int_or_none("ADK_CC_COMPACTION_TOKEN_THRESHOLD"),
+    }
+
+
 class ContextGuardPlugin(BasePlugin):
     """WARN at threshold, REJECT at hard limit. ADK compaction does the rest."""
 

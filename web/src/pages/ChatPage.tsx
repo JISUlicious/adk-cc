@@ -18,6 +18,8 @@ import { Thread } from "@/components/Thread"
 import { Composer } from "@/components/Composer"
 import { TaskSidebar, deriveTasks } from "@/components/TaskSidebar"
 import { ArtifactsPanel } from "@/components/ArtifactsPanel"
+import { ContextGauge } from "@/components/ContextGauge"
+import { fetchContextLimits, type ContextLimits } from "@/api/context"
 import { SettingsDialog } from "@/components/SettingsDialog"
 import { type SlashAction } from "@/components/SlashCommandMenu"
 import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/lib/theme"
@@ -58,6 +60,21 @@ export function ChatPage() {
   // Whether there are any tasks — drives the header's mobile tasks
   // toggle (the right rail itself renders nothing when empty).
   const taskCount = useMemo(() => deriveTasks(events).length, [events])
+
+  // Context-fullness gauge (P2): server ladder fetched once; current usage =
+  // the latest reported prompt_token_count across the loaded events.
+  const [ctxLimits, setCtxLimits] = useState<ContextLimits | null>(null)
+  useEffect(() => {
+    fetchContextLimits().then(setCtxLimits).catch(() => setCtxLimits(null))
+  }, [])
+  const ctxTokens = useMemo(() => {
+    let n = 0
+    for (const e of events) {
+      const um = (e as { usageMetadata?: { promptTokenCount?: number } }).usageMetadata
+      if (typeof um?.promptTokenCount === "number") n = um.promptTokenCount
+    }
+    return n
+  }, [events])
 
   // When the selected session changes, fetch its full event log + state.
   useEffect(() => {
@@ -308,6 +325,7 @@ export function ChatPage() {
             )}
           </div>
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+            {session && <ContextGauge current={ctxTokens} limits={ctxLimits} />}
             <span className="hidden md:inline text-sm text-muted-foreground">
               Signed in as <span className="font-mono">{userId}</span>
             </span>
