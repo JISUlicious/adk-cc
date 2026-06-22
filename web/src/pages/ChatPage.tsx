@@ -19,6 +19,7 @@ import { Composer } from "@/components/Composer"
 import { TaskSidebar, deriveTasks } from "@/components/TaskSidebar"
 import { ArtifactsPanel } from "@/components/ArtifactsPanel"
 import { ContextGauge } from "@/components/ContextGauge"
+import { CompactionBadge } from "@/components/CompactionBadge"
 import { fetchContextLimits, type ContextLimits } from "@/api/context"
 import { SettingsDialog } from "@/components/SettingsDialog"
 import { type SlashAction } from "@/components/SlashCommandMenu"
@@ -74,6 +75,20 @@ export function ChatPage() {
       if (typeof um?.promptTokenCount === "number") n = um.promptTokenCount
     }
     return n
+  }, [events])
+  // Compaction history (P3): count + last end-timestamp, live from the stream.
+  const compactions = useMemo(() => {
+    let count = 0
+    let lastEndTs: number | undefined
+    for (const e of events) {
+      const c = (e as { actions?: { compaction?: { endTimestamp?: number } } })
+        .actions?.compaction
+      if (c) {
+        count++
+        if (typeof c.endTimestamp === "number") lastEndTs = c.endTimestamp
+      }
+    }
+    return { count, lastEndTs }
   }, [events])
 
   // When the selected session changes, fetch its full event log + state.
@@ -325,6 +340,12 @@ export function ChatPage() {
             )}
           </div>
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+            {session && (
+              <CompactionBadge
+                count={compactions.count}
+                lastEndTs={compactions.lastEndTs}
+              />
+            )}
             {session && <ContextGauge current={ctxTokens} limits={ctxLimits} />}
             <span className="hidden md:inline text-sm text-muted-foreground">
               Signed in as <span className="font-mono">{userId}</span>

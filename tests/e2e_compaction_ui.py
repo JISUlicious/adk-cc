@@ -152,6 +152,10 @@ def main() -> int:
                 body = page.content().lower()
                 checks["P5 framing line in summary"] = (
                     "continue the conversation directly" in body)
+                # P3 compaction badge ("N×") in the header
+                import re as _re
+                checks["P3 compaction badge renders"] = bool(
+                    _re.search(r"\d+×", page.content()))
                 for name, cond in checks.items():
                     print(f"  [{'PASS' if cond else 'WARN'}] {name}")
                 ok = checks.get("divider expands to summary panel", False) \
