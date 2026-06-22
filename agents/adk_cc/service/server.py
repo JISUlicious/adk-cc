@@ -100,6 +100,10 @@ def build_fastapi_app(
         from ..plugins.context_guard import resolved_limits
         return resolved_limits() or {}
 
+    # Knowledge-graph endpoints (opt-in, ADK_CC_KNOWLEDGE_UI=1). No-op otherwise.
+    from .graph_routes import mount_knowledge_routes
+    mount_knowledge_routes(fastapi_app)
+
     if auth_extractor is not None:
         from .auth import make_auth_middleware
 
