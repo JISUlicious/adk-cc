@@ -114,3 +114,48 @@ def _count_text_chars_in_content(content: Any) -> int:
         if text:
             total += len(text)
     return total
+
+
+def estimate_prompt_tokens_full(
+    llm_request: Any,
+    session_events: Optional[Iterable[Any]] = None,
+) -> int:
+    """Payload-INCLUSIVE token estimate (chars/4) that ALSO counts
+    function_call args and function_response payloads — the bytes ADK's
+    text-only counter (and `estimate_prompt_tokens`) deliberately ignore.
+
+    For a tool-heavy agent those payloads dominate, so the ADK-consistent
+    estimate under-counts the real prompt. Use this for a safety REJECT decision
+    or observability — NOT as the compaction trigger (that must stay aligned with
+    ADK's own counter). Prefers the model's `usage_metadata.prompt_token_count`
+    when available (the ground truth), same as `estimate_prompt_tokens`.
+    """
+    if session_events is not None:
+        for event in reversed(list(session_events)):
+            usage = getattr(event, "usage_metadata", None)
+            count = getattr(usage, "prompt_token_count", None) if usage else None
+            if count is not None:
+                return int(count)
+    if llm_request is None:
+        return 0
+    import json as _json
+
+    total = 0
+    for content in getattr(llm_request, "contents", None) or []:
+        for part in getattr(content, "parts", None) or []:
+            text = getattr(part, "text", None)
+            if text:
+                total += len(text)
+            fc = getattr(part, "function_call", None)
+            if fc is not None:
+                try:
+                    total += len(_json.dumps(getattr(fc, "args", None) or {}, default=str))
+                except Exception:
+                    pass
+            fr = getattr(part, "function_response", None)
+            if fr is not None:
+                try:
+                    total += len(_json.dumps(getattr(fr, "response", None) or {}, default=str))
+                except Exception:
+                    pass
+    return total // 4 if total > 0 else 0

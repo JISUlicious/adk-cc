@@ -49,7 +49,10 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
-from ..permissions.token_counter import estimate_prompt_tokens
+from ..permissions.token_counter import (
+    estimate_prompt_tokens,
+    estimate_prompt_tokens_full,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -73,17 +76,60 @@ class ContextGuardPlugin(BasePlugin):
             self._reject = None
             return
 
+        # Reserve output headroom for the response (and any compaction summary)
+        # so WARN/REJECT trigger BEFORE the window is truly full — CC reserves
+        # min(model_max_output, 20k). Opt-in (default 0 preserves prior
+        # behavior); derived WARN/REJECT are computed off the EFFECTIVE window.
+        reserve_str = os.environ.get("ADK_CC_CONTEXT_RESERVE_TOKENS")
+        self._reserve = int(reserve_str) if reserve_str else 0
+        self._effective = max(1, self._max - self._reserve)
+
         warn_str = os.environ.get("ADK_CC_CONTEXT_WARN_TOKENS")
         reject_str = os.environ.get("ADK_CC_CONTEXT_REJECT_TOKENS")
-        self._warn = int(warn_str) if warn_str else int(self._max * 0.75)
-        self._reject = int(reject_str) if reject_str else int(self._max * 0.95)
+        self._warn = int(warn_str) if warn_str else int(self._effective * 0.75)
+        self._reject = int(reject_str) if reject_str else int(self._effective * 0.95)
 
-        # Logged at startup so operators see resolved values and can
-        # catch typos in MAX immediately.
-        _log.info(
-            "ContextGuardPlugin: MAX=%d WARN=%d REJECT=%d",
-            self._max, self._warn, self._reject,
+        # Opt-in: count function_call/function_response payloads in the REJECT
+        # decision (the ADK-consistent estimator ignores them, under-counting
+        # tool-heavy turns — a real REJECT-safety gap). Default off to preserve
+        # ADK-aligned behavior; the fuller number is always shown in the logs.
+        self._count_tool_payloads = (
+            os.environ.get("ADK_CC_CONTEXT_COUNT_TOOL_PAYLOADS") == "1"
         )
+
+        # Logged at startup so operators see the resolved ladder and can catch
+        # typos / misordering immediately.
+        _log.info(
+            "ContextGuardPlugin: MAX=%d RESERVE=%d EFFECTIVE=%d WARN=%d REJECT=%d "
+            "count_tool_payloads=%s",
+            self._max, self._reserve, self._effective, self._warn, self._reject,
+            self._count_tool_payloads,
+        )
+        self._validate_ladder()
+
+    def _validate_ladder(self) -> None:
+        """Sanity-check the warn→compact→reject→effective ordering and log a
+        WARN on misconfiguration (the compaction trigger should fire before our
+        WARN so summarization is the backstop ahead of REJECT)."""
+        if not (self._warn < self._reject <= self._effective):
+            _log.warning(
+                "ContextGuardPlugin ladder looks misordered: expected "
+                "WARN(%d) < REJECT(%d) <= EFFECTIVE(%d)",
+                self._warn, self._reject, self._effective,
+            )
+        thr = os.environ.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD")
+        if thr:
+            try:
+                thr_i = int(thr)
+            except ValueError:
+                return
+            if thr_i >= self._warn:
+                _log.warning(
+                    "ContextGuardPlugin: ADK_CC_COMPACTION_TOKEN_THRESHOLD=%d is "
+                    ">= WARN=%d — compaction may not fire before the WARN/REJECT "
+                    "ladder. Set the threshold below WARN so summarization is the "
+                    "backstop.", thr_i, self._warn,
+                )
 
     async def before_model_callback(
         self,
@@ -95,8 +141,12 @@ class ContextGuardPlugin(BasePlugin):
             return None  # disabled
 
         session_events = self._session_events(callback_context)
-        tokens = estimate_prompt_tokens(llm_request, session_events=session_events)
-        ratio = tokens / self._max if self._max else 0.0
+        base = estimate_prompt_tokens(llm_request, session_events=session_events)
+        # Payload-inclusive estimate (counts tool args/results the ADK-consistent
+        # count ignores). Used for the decision only when opted in; always shown.
+        full = estimate_prompt_tokens_full(llm_request, session_events=session_events)
+        tokens = full if self._count_tool_payloads else base
+        ratio = tokens / self._effective if self._effective else 0.0
 
         # Diagnostic-only: when DEBUG is on, also compute the
         # litellm-based count so operators investigating an
@@ -120,8 +170,9 @@ class ContextGuardPlugin(BasePlugin):
         if tokens >= self._reject:
             session_id = self._session_id(callback_context)
             _log.warning(
-                "ContextGuardPlugin REJECT: tokens=%d max=%d ratio=%.2f session_id=%s",
-                tokens, self._max, ratio, session_id,
+                "ContextGuardPlugin REJECT: tokens=%d (base=%d full=%d) "
+                "effective=%d ratio=%.2f session_id=%s",
+                tokens, base, full, self._effective, ratio, session_id,
             )
             return LlmResponse(
                 content=types.Content(
@@ -133,8 +184,9 @@ class ContextGuardPlugin(BasePlugin):
         if tokens >= self._warn:
             session_id = self._session_id(callback_context)
             _log.warning(
-                "ContextGuardPlugin WARN: tokens=%d max=%d ratio=%.2f session_id=%s",
-                tokens, self._max, ratio, session_id,
+                "ContextGuardPlugin WARN: tokens=%d (base=%d full=%d) "
+                "effective=%d ratio=%.2f session_id=%s",
+                tokens, base, full, self._effective, ratio, session_id,
             )
 
         return None
