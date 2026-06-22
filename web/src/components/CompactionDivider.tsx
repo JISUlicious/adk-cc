@@ -56,6 +56,10 @@ export function CompactionDivider({
             ) : (
               <p className="italic opacity-70">(no summary text)</p>
             )}
+            <p className="mt-2 border-t border-border pt-2 text-[11px] opacity-70">
+              This summary stands in for the older messages in the model's
+              working context.
+            </p>
           </div>
         )}
       </div>

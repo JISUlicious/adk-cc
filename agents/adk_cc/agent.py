@@ -618,6 +618,35 @@ def _seed_memory_into_summary(event, events):
     return event
 
 
+_COMPACTION_FRAME_DEFAULT = (
+    "[The following condenses earlier messages in this session to save context. "
+    "Continue the conversation directly — do not acknowledge or recap this "
+    "summary.]"
+)
+
+
+def _frame_summary(event):
+    """P5: prepend a continuation instruction to the compaction summary so the
+    model resumes silently instead of narrating the compaction (CC's
+    getCompactUserSummaryMessage intent, adapted for ADK's in-window summary).
+    Default on; ADK_CC_COMPACTION_FRAME=0 disables, or set it to a custom line."""
+    raw = os.environ.get("ADK_CC_COMPACTION_FRAME")
+    if raw == "0":
+        return event
+    frame = raw if raw else _COMPACTION_FRAME_DEFAULT
+    try:
+        content = event.actions.compaction.compacted_content
+        parts = getattr(content, "parts", None) or []
+        if parts and getattr(parts[0], "text", None) is not None:
+            parts[0].text = frame + "\n\n" + parts[0].text
+        else:
+            from google.genai import types as _types
+            content.parts = [_types.Part(text=frame)] + list(parts)
+    except Exception:  # noqa: BLE001 — framing must never break a compaction
+        return event
+    return event
+
+
 def _make_lazy_summarizer_class():
     """Build the lazy summarizer class with deferred BaseEventsSummarizer import.
 
@@ -826,6 +855,7 @@ def _make_lazy_summarizer_class():
             # counting bytes, so the audit reflects what actually enters context.
             result = _strip_analysis(result)
             result = _seed_memory_into_summary(result, events)
+            result = _frame_summary(result)  # continuation instruction, on top
             summary_bytes = _summary_bytes(result)
             if _compaction_log.isEnabledFor(logging.DEBUG):
                 _compaction_log.debug(
