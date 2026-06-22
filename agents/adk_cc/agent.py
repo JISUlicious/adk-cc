@@ -68,6 +68,7 @@ from .plugins import (
     ConfirmationFormUiPlugin,
     ContextGuardPlugin,
     McpExportArtifactPlugin,
+    MicrocompactPlugin,
     PermissionPlugin,
     PlanModeReminderPlugin,
     QuotaPlugin,
@@ -993,6 +994,11 @@ _app_kwargs = dict(
         # request_confirmation resume processor handles them unchanged.
         # Disable to fall back to the binary widget.
         ConfirmationFormUiPlugin(),
+        # Microcompaction (opt-in, ADK_CC_MICROCOMPACT=1): stub old, large
+        # tool-result content in the outgoing request — the cheap, no-model
+        # tier. Runs BEFORE ContextGuard so the shrink is reflected in its
+        # token count (can defer WARN/REJECT and ADK's summarizer entirely).
+        MicrocompactPlugin(),
         # Pre-flight context-length guardrail: WARN at 75% of MAX,
         # REJECT at 95%. ADK's EventsCompactionConfig (set above) is
         # the primary defense; this is the fail-soft safety net.
