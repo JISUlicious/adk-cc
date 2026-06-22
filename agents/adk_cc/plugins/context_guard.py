@@ -62,6 +62,52 @@ _REJECT_TEXT = (
 )
 
 
+def _normalize_ladder(
+    max_tokens: int,
+    reserve: int,
+    warn_opt: Optional[int],
+    reject_opt: Optional[int],
+) -> tuple[int, int, int, int, list[str]]:
+    """Enforce the context-guard ladder invariant in code:
+        0 <= RESERVE < MAX   and   1 <= WARN < REJECT <= EFFECTIVE
+    where EFFECTIVE = MAX - RESERVE. Out-of-range / misordered inputs are
+    clamped to the nearest valid value (self-heal: keep serving with a sane
+    ladder rather than refuse to boot). Returns
+    (reserve, effective, warn, reject, corrections) — corrections is a list of
+    human-readable strings for the caller to log. Pure / side-effect-free.
+    """
+    corrections: list[str] = []
+
+    if reserve < 0:
+        corrections.append(f"RESERVE {reserve} < 0 → 0")
+        reserve = 0
+    if reserve >= max_tokens:
+        new = max(0, max_tokens - 1)
+        corrections.append(f"RESERVE {reserve} >= MAX {max_tokens} → {new}")
+        reserve = new
+    effective = max(1, max_tokens - reserve)
+
+    warn = warn_opt if warn_opt is not None else int(effective * 0.75)
+    reject = reject_opt if reject_opt is not None else int(effective * 0.95)
+
+    # REJECT into [1, EFFECTIVE].
+    c_reject = min(max(reject, 1), effective)
+    if c_reject != reject:
+        corrections.append(
+            f"REJECT {reject} → {c_reject} (must be 1..EFFECTIVE {effective})")
+        reject = c_reject
+
+    # WARN into [1, REJECT], strictly below REJECT when the window allows.
+    c_warn = min(max(warn, 1), reject)
+    if c_warn == reject and reject > 1:
+        c_warn = reject - 1
+    if c_warn != warn:
+        corrections.append(f"WARN {warn} → {c_warn} (must be < REJECT {reject})")
+        warn = c_warn
+
+    return reserve, effective, warn, reject, corrections
+
+
 class ContextGuardPlugin(BasePlugin):
     """WARN at threshold, REJECT at hard limit. ADK compaction does the rest."""
 
@@ -81,13 +127,18 @@ class ContextGuardPlugin(BasePlugin):
         # min(model_max_output, 20k). Opt-in (default 0 preserves prior
         # behavior); derived WARN/REJECT are computed off the EFFECTIVE window.
         reserve_str = os.environ.get("ADK_CC_CONTEXT_RESERVE_TOKENS")
-        self._reserve = int(reserve_str) if reserve_str else 0
-        self._effective = max(1, self._max - self._reserve)
-
+        reserve = int(reserve_str) if reserve_str else 0
         warn_str = os.environ.get("ADK_CC_CONTEXT_WARN_TOKENS")
         reject_str = os.environ.get("ADK_CC_CONTEXT_REJECT_TOKENS")
-        self._warn = int(warn_str) if warn_str else int(self._effective * 0.75)
-        self._reject = int(reject_str) if reject_str else int(self._effective * 0.95)
+        warn_opt = int(warn_str) if warn_str else None
+        reject_opt = int(reject_str) if reject_str else None
+
+        # ENFORCE the ladder invariant in code (clamp/normalize, not just warn):
+        # 0 <= RESERVE < MAX, and 1 <= WARN < REJECT <= EFFECTIVE. Bad config is
+        # corrected to a sane ladder (loudly logged) rather than left to misfire.
+        self._reserve, self._effective, self._warn, self._reject, corrections = (
+            _normalize_ladder(self._max, reserve, warn_opt, reject_opt)
+        )
 
         # Opt-in: count function_call/function_response payloads in the REJECT
         # decision (the ADK-consistent estimator ignores them, under-counting
@@ -105,31 +156,28 @@ class ContextGuardPlugin(BasePlugin):
             self._max, self._reserve, self._effective, self._warn, self._reject,
             self._count_tool_payloads,
         )
-        self._validate_ladder()
+        for c in corrections:
+            _log.warning("ContextGuardPlugin ladder corrected: %s", c)
+        self._check_compaction_threshold()
 
-    def _validate_ladder(self) -> None:
-        """Sanity-check the warn→compact→reject→effective ordering and log a
-        WARN on misconfiguration (the compaction trigger should fire before our
-        WARN so summarization is the backstop ahead of REJECT)."""
-        if not (self._warn < self._reject <= self._effective):
-            _log.warning(
-                "ContextGuardPlugin ladder looks misordered: expected "
-                "WARN(%d) < REJECT(%d) <= EFFECTIVE(%d)",
-                self._warn, self._reject, self._effective,
-            )
+    def _check_compaction_threshold(self) -> None:
+        """The compaction trigger (ADK's, a separate subsystem) should fire
+        before our WARN so summarization backstops ahead of REJECT. We can't
+        clamp another subsystem's knob, so this stays a loud WARN."""
         thr = os.environ.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD")
-        if thr:
-            try:
-                thr_i = int(thr)
-            except ValueError:
-                return
-            if thr_i >= self._warn:
-                _log.warning(
-                    "ContextGuardPlugin: ADK_CC_COMPACTION_TOKEN_THRESHOLD=%d is "
-                    ">= WARN=%d — compaction may not fire before the WARN/REJECT "
-                    "ladder. Set the threshold below WARN so summarization is the "
-                    "backstop.", thr_i, self._warn,
-                )
+        if not thr:
+            return
+        try:
+            thr_i = int(thr)
+        except ValueError:
+            return
+        if thr_i >= self._warn:
+            _log.warning(
+                "ContextGuardPlugin: ADK_CC_COMPACTION_TOKEN_THRESHOLD=%d is "
+                ">= WARN=%d — compaction may not fire before the WARN/REJECT "
+                "ladder. Set the threshold below WARN so summarization is the "
+                "backstop.", thr_i, self._warn,
+            )
 
     async def before_model_callback(
         self,

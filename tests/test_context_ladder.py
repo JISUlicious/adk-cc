@@ -15,6 +15,7 @@ from adk_cc.permissions.token_counter import (
     estimate_prompt_tokens,
     estimate_prompt_tokens_full,
 )
+from adk_cc.plugins.context_guard import _normalize_ladder
 
 
 def _guard(**env):
@@ -66,6 +67,52 @@ def test_count_tool_payloads_flag():
     assert _guard(ADK_CC_MAX_CONTEXT_TOKENS=1000)._count_tool_payloads is False
     assert _guard(ADK_CC_MAX_CONTEXT_TOKENS=1000,
                   ADK_CC_CONTEXT_COUNT_TOOL_PAYLOADS=1)._count_tool_payloads is True
+
+
+# ---- enforced self-heal (_normalize_ladder) ----
+def _inv(reserve, eff, warn, reject, max_tokens):
+    assert 0 <= reserve < max_tokens, (reserve, max_tokens)
+    assert eff == max_tokens - reserve
+    assert 1 <= warn < reject <= eff, (warn, reject, eff)
+
+
+def test_normalize_valid_passthrough():
+    r, e, w, j, corr = _normalize_ladder(200000, 20000, None, None)
+    assert (r, e, w, j) == (20000, 180000, 135000, 171000) and corr == []
+    _inv(r, e, w, j, 200000)
+
+
+def test_normalize_reserve_exceeding_max_is_clamped():
+    r, e, w, j, corr = _normalize_ladder(1000, 5000, None, None)
+    assert r == 999 and e == 1 and any("RESERVE" in c for c in corr)
+    # degenerate tiny window still yields a valid (clamped) ladder
+    assert 1 <= w <= j <= e
+
+
+def test_normalize_inverted_warn_reject_is_fixed():
+    # operator set WARN above REJECT → must be corrected to WARN < REJECT
+    r, e, w, j, corr = _normalize_ladder(100000, 0, 90000, 50000)
+    assert w < j, (w, j)
+    assert any("WARN" in c for c in corr)
+    _inv(r, e, w, j, 100000)
+
+
+def test_normalize_reject_above_effective_is_clamped():
+    r, e, w, j, corr = _normalize_ladder(100000, 10000, 50000, 999999)
+    assert j <= e and any("REJECT" in c for c in corr)
+    _inv(r, e, w, j, 100000)
+
+
+def test_normalize_negative_reserve_clamped():
+    r, e, w, j, corr = _normalize_ladder(100000, -5, None, None)
+    assert r == 0 and any("RESERVE" in c for c in corr)
+
+
+def test_guard_self_heals_inverted_env():
+    # full integration through the plugin: inverted WARN/REJECT env → fixed
+    g = _guard(ADK_CC_MAX_CONTEXT_TOKENS=100000,
+               ADK_CC_CONTEXT_WARN_TOKENS=90000, ADK_CC_CONTEXT_REJECT_TOKENS=50000)
+    assert g._warn < g._reject <= g._effective, (g._warn, g._reject, g._effective)
 
 
 # ---- payload-inclusive estimator ----
