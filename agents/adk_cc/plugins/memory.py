@@ -223,6 +223,12 @@ class MemoryPlugin(BasePlugin):
             if state is None:
                 return None
             tenant_id, user_id = _tenant_user(state)
+            # Stamp the principal so the (shared, events-only) compaction
+            # summarizer can reach this user's memory store when seeding the
+            # summary (P3). Set before the empty-query return so it's available
+            # even on turns with no user text.
+            from ..memory import set_principal
+            set_principal(tenant_id, user_id)
             query = _latest_user_text(getattr(llm_request, "contents", None))
             if not query:
                 return None

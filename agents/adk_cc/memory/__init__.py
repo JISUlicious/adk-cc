@@ -29,6 +29,7 @@ from .consolidate import (
     discover_tenants,
     pending_episodic_count,
 )
+from .principal import get_principal, set_principal
 from .recall import recall_context
 from .resolve import Resolution, compact_all, compact_user, resolve_facts
 from .synth import make_llm_synthesizer
@@ -50,6 +51,8 @@ __all__ = [
     "MemoryItem",
     "memory_root_from_env",
     "recall_context",
+    "get_principal",
+    "set_principal",
     "resolve_facts",
     "Resolution",
     "compact_user",

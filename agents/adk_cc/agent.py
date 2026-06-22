@@ -569,6 +569,55 @@ def _strip_analysis(event):
     return event
 
 
+def _seed_memory_into_summary(event, events):
+    """P3 bridge: prepend the user's recalled durable memory to the compaction
+    summary, so durable facts are carried INSIDE the boundary (not only
+    re-injected each turn by MemoryPlugin recall). Opt-in
+    (ADK_CC_COMPACTION_SEED_MEMORY=1); best-effort — any failure / missing
+    principal / empty recall leaves the summary untouched."""
+    if os.environ.get("ADK_CC_COMPACTION_SEED_MEMORY") != "1":
+        return event
+    try:
+        from .memory import MemoryStore, get_principal, recall_context
+
+        principal = get_principal()
+        if not principal:
+            return event
+        tenant_id, user_id = principal
+        # Rank recall by the most recent user text in the compacted events.
+        query = ""
+        for e in reversed(list(events or [])):
+            content = getattr(e, "content", None)
+            if getattr(content, "role", None) == "user":
+                query = " ".join(
+                    p.text for p in (getattr(content, "parts", None) or [])
+                    if getattr(p, "text", None)
+                )
+                if query:
+                    break
+        try:
+            budget = max(0, int(os.environ.get("ADK_CC_COMPACTION_SEED_BUDGET", "")))
+        except ValueError:
+            budget = 300
+        block = recall_context(
+            MemoryStore.for_tenant(tenant_id), user_id, query or "user project context",
+            budget_tokens=budget or 300,
+        )
+        if not block:
+            return event
+        preamble = "Durable facts about this user (from memory):\n" + block + "\n\n"
+        content = event.actions.compaction.compacted_content
+        parts = getattr(content, "parts", None) or []
+        if parts and getattr(parts[0], "text", None) is not None:
+            parts[0].text = preamble + parts[0].text
+        else:
+            from google.genai import types as _types
+            content.parts = [_types.Part(text=preamble)] + list(parts)
+    except Exception:  # noqa: BLE001 — seeding must never break a compaction
+        return event
+    return event
+
+
 def _make_lazy_summarizer_class():
     """Build the lazy summarizer class with deferred BaseEventsSummarizer import.
 
@@ -772,9 +821,11 @@ def _make_lazy_summarizer_class():
                 )
                 return None
 
-            # Strip the <analysis> scratchpad / unwrap <summary> BEFORE counting
-            # bytes, so the audit reflects what actually enters the context.
+            # Strip the <analysis> scratchpad / unwrap <summary>, then optionally
+            # seed the user's durable memory into the summary (P3) — BEFORE
+            # counting bytes, so the audit reflects what actually enters context.
             result = _strip_analysis(result)
+            result = _seed_memory_into_summary(result, events)
             summary_bytes = _summary_bytes(result)
             if _compaction_log.isEnabledFor(logging.DEBUG):
                 _compaction_log.debug(
