@@ -475,6 +475,99 @@ root_agent = LlmAgent(
 # ADK can react. See plan-mode plan + docs/05-production-deployment.md.
 
 
+# Structured compaction summary prompt (adapted from Claude Code's
+# src/services/compact/prompt.ts — analysis/compaction-prompt-plan.md). ADK's
+# LlmEventSummarizer interpolates via `template.format(conversation_history=...)`,
+# so this MUST contain exactly one `{conversation_history}` and NO other literal
+# braces (str.format would choke). The `<analysis>` scratchpad improves quality
+# and is stripped post-hoc by `_strip_analysis` before the summary enters context.
+_ADKCC_COMPACTION_PROMPT = (
+    "You are summarizing a conversation between a user and an AI agent so the "
+    "agent can continue working after older messages are dropped from its "
+    "context. Capture technical detail, decisions, and the user's intent "
+    "faithfully.\n\n"
+    "First, think in an <analysis> block: go through the conversation "
+    "chronologically and note the user's explicit requests, your approach, key "
+    "technical decisions, specific file names / code / commands, errors and "
+    "their fixes, and especially any user feedback or corrections. Then write "
+    "the summary.\n\n"
+    "Wrap the final summary in a <summary> block with these sections:\n"
+    "1. Primary Request and Intent: all explicit user requests and intent.\n"
+    "2. Key Technical Concepts: technologies, frameworks, patterns discussed.\n"
+    "3. Files and Code Sections: files/commands examined or changed, with the "
+    "important snippets and why they matter.\n"
+    "4. Errors and Fixes: errors hit and how they were resolved, plus user "
+    "feedback received.\n"
+    "5. Problem Solving: what was solved and any ongoing troubleshooting.\n"
+    "6. User Messages: the non-tool user messages, to preserve intent and "
+    "feedback.\n"
+    "7. Pending Tasks: work explicitly still requested.\n"
+    "8. Current Work: precisely what was being done just before this summary.\n"
+    "9. Next Step: the immediate next step, if it directly continues the most "
+    "recent work; otherwise omit.\n\n"
+    "Output ONLY the <analysis> block followed by the <summary> block.\n\n"
+    "Conversation:\n{conversation_history}"
+)
+
+_COMPACTION_PLACEHOLDER = "{conversation_history}"
+
+
+def _resolve_compaction_prompt() -> str:
+    """Pick the compaction summary template: inline env override, then file
+    override, then the structured default. Guarantees the
+    `{conversation_history}` placeholder is present (appends it if a custom
+    template omits it, so ADK's .format() still receives the history)."""
+    template = os.environ.get("ADK_CC_COMPACTION_PROMPT")
+    if not template:
+        path = os.environ.get("ADK_CC_COMPACTION_PROMPT_FILE")
+        if path:
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    template = fh.read()
+            except OSError:
+                template = None
+    if not template:
+        template = _ADKCC_COMPACTION_PROMPT
+    if _COMPACTION_PLACEHOLDER not in template:
+        template = template.rstrip() + "\n\n" + _COMPACTION_PLACEHOLDER
+    return template
+
+
+def _strip_analysis(event):
+    """Strip the <analysis> scratchpad and unwrap <summary> from a compaction
+    Event's text, in place — mirrors CC's formatCompactSummary. The scratchpad
+    improves the summary but must not enter the context compaction is shrinking.
+    Tolerates the various shapes (Content with parts, mocks); degrades to the raw
+    text (minus analysis) when the model didn't follow the structure. Never
+    empties the summary."""
+    import re as _re
+
+    def _clean(text: str) -> str:
+        if not isinstance(text, str) or not text:
+            return text
+        cleaned = _re.sub(r"<analysis>.*?</analysis>", "", text,
+                          flags=_re.DOTALL | _re.IGNORECASE).strip()
+        m = _re.search(r"<summary>(.*?)</summary>", cleaned,
+                       flags=_re.DOTALL | _re.IGNORECASE)
+        if m:
+            cleaned = m.group(1).strip()
+        else:
+            # no <summary> tag (weak model) — just drop any stray tags
+            cleaned = _re.sub(r"</?summary>", "", cleaned,
+                              flags=_re.IGNORECASE).strip()
+        return cleaned or text.strip()  # never return empty
+
+    try:
+        content = event.actions.compaction.compacted_content
+    except AttributeError:
+        return event
+    parts = getattr(content, "parts", None) or []
+    for part in parts:
+        if getattr(part, "text", None):
+            part.text = _clean(part.text)
+    return event
+
+
 def _make_lazy_summarizer_class():
     """Build the lazy summarizer class with deferred BaseEventsSummarizer import.
 
@@ -678,6 +771,9 @@ def _make_lazy_summarizer_class():
                 )
                 return None
 
+            # Strip the <analysis> scratchpad / unwrap <summary> BEFORE counting
+            # bytes, so the audit reflects what actually enters the context.
+            result = _strip_analysis(result)
             summary_bytes = _summary_bytes(result)
             if _compaction_log.isEnabledFor(logging.DEBUG):
                 _compaction_log.debug(
@@ -772,6 +868,7 @@ def _make_compaction_summarizer():
         model_id=model_id,
         api_base=api_base,
         api_key=api_key,
+        prompt_template=_resolve_compaction_prompt(),
         timeout_seconds=timeout_seconds,
     )
 

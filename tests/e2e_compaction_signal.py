@@ -136,10 +136,21 @@ def main() -> int:
             summary = _summary_text(comp)
             print(f"\n  [PASS] actions.compaction present after {sent} turn(s)")
             print(f"  [{'PASS' if summary else 'WARN'}] compactedContent summary "
-                  f"({len(summary)} chars): {summary[:160]!r}")
+                  f"({len(summary)} chars): {summary[:200]!r}")
             print(f"  [info] startTimestamp={comp.get('startTimestamp')} "
                   f"endTimestamp={comp.get('endTimestamp')}")
             ok = ok and bool(summary)
+            # Phase 1: the structured prompt should produce section headers, and
+            # the <analysis> scratchpad must be stripped before it enters context.
+            low = summary.lower()
+            structured = any(h in low for h in (
+                "primary request", "key technical", "files and code",
+                "pending tasks", "current work"))
+            no_analysis = "<analysis>" not in low and "</analysis>" not in low
+            print(f"  [{'PASS' if structured else 'WARN'}] summary is structured "
+                  "(section headers present)")
+            print(f"  [{'PASS' if no_analysis else 'FAIL'}] <analysis> scratchpad stripped")
+            ok = ok and no_analysis  # strip is a hard requirement; structure is model-dependent
         else:
             print(f"\n  [FAIL] no actions.compaction after {sent} turn(s) — "
                   "threshold not crossed or compaction didn't fire.")
