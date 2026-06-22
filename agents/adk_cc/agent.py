@@ -647,6 +647,60 @@ def _frame_summary(event):
     return event
 
 
+class _CompactionBreaker:
+    """Process-global circuit breaker for the compaction summarizer (P6).
+
+    After N consecutive failures (timeout / exception / empty), open the breaker
+    for a cooldown so we stop hammering a failing — often rate-limited — model
+    endpoint with summarizer calls. Closes on the first success. Mirrors CC's
+    MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES. Thread-safe; `now` injectable for tests.
+
+    Config: ADK_CC_COMPACTION_BREAKER_THRESHOLD (default 3; 0 disables),
+            ADK_CC_COMPACTION_BREAKER_COOLDOWN_S (default 60).
+    """
+
+    def __init__(self) -> None:
+        import threading
+        self._lock = threading.Lock()
+        self._fails = 0
+        self._open_until = 0.0
+
+    @staticmethod
+    def _threshold() -> int:
+        try:
+            return max(0, int(os.environ.get("ADK_CC_COMPACTION_BREAKER_THRESHOLD", "")))
+        except ValueError:
+            return 3
+
+    @staticmethod
+    def _cooldown() -> float:
+        try:
+            return max(0.0, float(os.environ.get("ADK_CC_COMPACTION_BREAKER_COOLDOWN_S", "")))
+        except ValueError:
+            return 60.0
+
+    def should_skip(self, now: float) -> bool:
+        if self._threshold() <= 0:
+            return False
+        with self._lock:
+            return now < self._open_until
+
+    def record_failure(self, now: float) -> None:
+        thr = self._threshold()
+        with self._lock:
+            self._fails += 1
+            if thr > 0 and self._fails >= thr:
+                self._open_until = now + self._cooldown()
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._fails = 0
+            self._open_until = 0.0
+
+
+_COMPACTION_BREAKER = _CompactionBreaker()
+
+
 def _make_lazy_summarizer_class():
     """Build the lazy summarizer class with deferred BaseEventsSummarizer import.
 
@@ -756,6 +810,16 @@ def _make_lazy_summarizer_class():
             )
 
             started = time.monotonic()
+            # Circuit breaker (P6): if recent summarizer calls keep failing, skip
+            # the model call during the cooldown — the turn proceeds uncompacted
+            # rather than hammering a failing/rate-limited endpoint.
+            if _COMPACTION_BREAKER.should_skip(started):
+                _compaction_log.warning(
+                    "compaction_skipped model=%s reason=breaker_open", self.model_id)
+                emit_compaction_event(
+                    "compaction_failure", model_id=self.model_id,
+                    reason="breaker_open", event_count=event_count)
+                return None
             try:
                 llm = LiteLlm(
                     model=self.model_id,
@@ -800,6 +864,7 @@ def _make_lazy_summarizer_class():
                 # Graceful degrade: return None so ADK skips this
                 # compaction. The turn proceeds with uncompacted
                 # history rather than hanging on a stuck summarizer.
+                _COMPACTION_BREAKER.record_failure(time.monotonic())
                 return None
             except Exception as e:
                 elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -828,6 +893,7 @@ def _make_lazy_summarizer_class():
                 # Graceful degrade — same reasoning as the timeout
                 # branch. A broken summarizer can only cost an
                 # uncompacted turn, never a stuck session.
+                _COMPACTION_BREAKER.record_failure(time.monotonic())
                 return None
 
             elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -848,6 +914,7 @@ def _make_lazy_summarizer_class():
                     reason="empty_summary",
                     elapsed_ms=elapsed_ms,
                 )
+                _COMPACTION_BREAKER.record_failure(time.monotonic())
                 return None
 
             # Strip the <analysis> scratchpad / unwrap <summary>, then optionally
@@ -876,6 +943,7 @@ def _make_lazy_summarizer_class():
                 summary_bytes=summary_bytes,
                 elapsed_ms=elapsed_ms,
             )
+            _COMPACTION_BREAKER.record_success()
             return result
 
     return _LazyAdkCcSummarizer
