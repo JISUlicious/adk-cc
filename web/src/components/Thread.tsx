@@ -11,6 +11,7 @@ import {
   type AskUserQuestionArgsDef,
 } from "./AskUserQuestionCard"
 import { ArtifactChip } from "./ArtifactChip"
+import { CompactionDivider } from "./CompactionDivider"
 import { BashTerminalCard } from "./BashTerminalCard"
 import { FileEditCard } from "./FileEditCard"
 import { PlanCard } from "./PlanCard"
@@ -212,6 +213,14 @@ function Row({
           sessionId={sessionId}
           filename={row.filename}
           version={row.version}
+        />
+      )
+    case "compaction":
+      return (
+        <CompactionDivider
+          summary={row.summary}
+          startTs={row.startTs}
+          endTs={row.endTs}
         />
       )
     case "function_response":
@@ -435,6 +444,33 @@ type ChatRow =
       filename: string
       version: number
     }
+  | {
+      kind: "compaction"
+      eventId: string
+      /** Summary text ADK kept in place of the compacted older events. */
+      summary: string
+      /** Epoch seconds of the compacted event range (ADK EventCompaction). */
+      startTs?: number
+      endTs?: number
+    }
+
+function numOrUndef(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined
+}
+
+/** Pull the summary text out of an ADK EventCompaction. `compactedContent` is
+ * a Content object ({role, parts:[{text}]}); join its text parts. */
+function extractCompactionSummary(compaction: Record<string, unknown>): string {
+  const content = (compaction.compactedContent ?? compaction.compacted_content) as
+    | { parts?: Array<{ text?: unknown }> }
+    | undefined
+  if (!content || typeof content !== "object") return ""
+  return (content.parts ?? [])
+    .map((p) => (typeof p?.text === "string" ? p.text : ""))
+    .filter(Boolean)
+    .join("\n")
+    .trim()
+}
 
 function dedupePartials(events: RunEvent[]): RunEvent[] {
   // ADK streaming protocol (google/adk/models/base_llm.py:96-101):
@@ -587,6 +623,23 @@ function flattenEvents(
         if (!Number.isFinite(version)) continue
         rows.push({ kind: "artifact", eventId, filename, version })
       }
+    }
+
+    // Context compaction marker. ADK records a compaction as
+    // event.actions.compaction = {startTimestamp, endTimestamp,
+    // compactedContent} (camelCase on the wire; accept snake_case too). We
+    // surface it as a divider so the otherwise-silent summarization is visible.
+    const compaction = actions.compaction as Record<string, unknown> | undefined
+    if (compaction && typeof compaction === "object") {
+      rows.push({
+        kind: "compaction",
+        eventId,
+        summary: extractCompactionSummary(compaction),
+        startTs: numOrUndef(
+          compaction.startTimestamp ?? compaction.start_timestamp,
+        ),
+        endTs: numOrUndef(compaction.endTimestamp ?? compaction.end_timestamp),
+      })
     }
 
     for (const part of parts) {
