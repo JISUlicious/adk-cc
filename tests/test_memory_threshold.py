@@ -56,6 +56,47 @@ def test_at_threshold_promotes_and_resets():
     assert pending_episodic_count(s, "alice") == 0
 
 
+def test_llm_synth_processes_semantic_text():
+    # with a model + SYNTH != deterministic, the threshold consolidation should
+    # REWRITE the semantic text (not copy the episodic verbatim).
+    from types import SimpleNamespace
+
+    class _Model:
+        async def generate_content_async(self, req, stream=False):
+            yield SimpleNamespace(content=SimpleNamespace(
+                parts=[SimpleNamespace(text="DISTILLED: user deploys to Fly.io", thought=False)]))
+
+    os.environ["ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD"] = "2"
+    os.environ.pop("ADK_CC_MEMORY_SYNTH", None)  # default → LLM when model given
+    try:
+        s = _store()
+        s.add_episodic("alice", "I deploy to fly", topic="deploy")
+        s.add_episodic("alice", "deploying on fly.io", topic="deploy")
+        rep = asyncio.run(maybe_threshold_consolidate(s, "alice", model=_Model()))
+        assert rep is not None and rep.topics_consolidated == 1, rep
+        sem = s.list_semantic("alice")[0]
+        assert sem.text.startswith("DISTILLED:"), sem.text  # rewritten, not verbatim
+    finally:
+        os.environ.pop("ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD", None)
+
+
+def test_deterministic_when_synth_env_set():
+    os.environ["ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD"] = "2"
+    os.environ["ADK_CC_MEMORY_SYNTH"] = "deterministic"
+    try:
+        s = _store()
+        s.add_episodic("alice", "first", topic="t")
+        s.add_episodic("alice", "second latest", topic="t")
+        asyncio.run(maybe_threshold_consolidate(s, "alice", model=object()))
+        sem = s.list_semantic("alice")[0]
+        # deterministic = a VERBATIM episodic (not LLM-rewritten); which of the
+        # two wins is timestamp-order dependent, so accept either.
+        assert sem.text in ("first", "second latest"), sem.text
+    finally:
+        os.environ.pop("ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD", None)
+        os.environ.pop("ADK_CC_MEMORY_SYNTH", None)
+
+
 def test_disabled_when_threshold_zero():
     os.environ["ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD"] = "0"
     s = _store()

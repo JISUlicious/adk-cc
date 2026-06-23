@@ -76,10 +76,28 @@ def _stale_days() -> int:
         return _DEFAULT_STALE_DAYS
 
 
-async def maybe_threshold_consolidate(store: MemoryStore, user_id: str):
-    """If ≥ threshold unprocessed episodics have stacked for this user, run a
-    deterministic (no-model) consolidation now. Serialized against the periodic
-    scheduler via the shared lock; self-guarded so it never breaks a run."""
+def _threshold_synthesizer(model):
+    """Synthesizer for the threshold trigger. LLM (genuinely rewrites the
+    captures into a distilled fact) when a model is available and
+    ADK_CC_MEMORY_SYNTH != 'deterministic' — same convention as the periodic
+    scheduler. Else None → deterministic latest-wins (semantic text == newest
+    episodic verbatim). Set ADK_CC_MEMORY_SYNTH=deterministic to keep the hot
+    path model-free."""
+    if model is None or os.environ.get("ADK_CC_MEMORY_SYNTH") == "deterministic":
+        return None
+    try:
+        from ..memory.synth import make_llm_synthesizer
+        return make_llm_synthesizer(model)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def maybe_threshold_consolidate(store: MemoryStore, user_id: str, model=None):
+    """If ≥ threshold unprocessed episodics have stacked for this user,
+    consolidate now (episodic→semantic). Uses the LLM synthesizer to distill the
+    facts unless ADK_CC_MEMORY_SYNTH=deterministic (then latest-wins, no model
+    call). Serialized against the periodic scheduler via the shared lock;
+    self-guarded so it never breaks a run."""
     try:
         threshold = _consolidate_threshold()
         if threshold <= 0:
@@ -88,14 +106,18 @@ async def maybe_threshold_consolidate(store: MemoryStore, user_id: str):
         if pending < threshold:
             return None
 
+        synth = _threshold_synthesizer(model)
+
         def _run():  # sync; runs in a worker thread, holds the cross-caller lock
             with consolidation_lock:
-                return consolidate_user(store, user_id, stale_days=_stale_days())
+                return consolidate_user(
+                    store, user_id, synthesizer=synth, stale_days=_stale_days())
 
         rep = await asyncio.to_thread(_run)
         _log.info(
-            "memory: threshold consolidation user=%s pending=%d topics_consolidated=%d",
+            "memory: threshold consolidation user=%s pending=%d topics=%d synth=%s",
             user_id, pending, rep.topics_consolidated,
+            "llm" if synth else "deterministic",
         )
         return rep
     except Exception as e:  # noqa: BLE001 — promotion must never break a run
@@ -274,7 +296,9 @@ class MemoryPlugin(BasePlugin):
             # Hybrid promotion: this turn just grew the unprocessed backlog, so
             # this is the only moment it can cross the threshold — check here
             # (no need to poll on no-capture turns; the count only rises here).
-            await maybe_threshold_consolidate(store, user_id)
+            # Pass the model so consolidation can LLM-synthesize the semantic
+            # fact (unless ADK_CC_MEMORY_SYNTH=deterministic).
+            await maybe_threshold_consolidate(store, user_id, model=model)
         except asyncio.TimeoutError:
             _log.warning("memory: capture timed out (%ss)", _capture_timeout())
         except Exception as e:  # noqa: BLE001
