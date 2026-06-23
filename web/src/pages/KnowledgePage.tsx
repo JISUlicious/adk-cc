@@ -122,20 +122,23 @@ export function KnowledgePage() {
         <span className="ml-auto text-xs text-muted-foreground">
           {graph.nodes.length} nodes · {graph.links.length} links
         </span>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={recenter}
-          title="Re-center / fit the graph to view"
-          className="ml-2"
-        >
-          <Maximize2 className="h-3.5 w-3.5" />
-          Re-center
-        </Button>
       </header>
 
       <div className="flex min-h-0 flex-1">
         <div ref={wrapRef} className="relative min-w-0 flex-1 bg-muted/20">
+          {/* Floating graph control, overlaid bottom-right of the canvas. */}
+          {graph.nodes.length > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={recenter}
+              title="Re-center / fit the graph to view"
+              className="absolute bottom-3 right-3 z-10 shadow-sm bg-background/90 backdrop-blur"
+            >
+              <Maximize2 className="h-3.5 w-3.5" />
+              Re-center
+            </Button>
+          )}
           {loading && (
             <p className="absolute left-3 top-3 text-sm text-muted-foreground">Loading…</p>
           )}
