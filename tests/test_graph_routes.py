@@ -71,6 +71,21 @@ def test_wiki_graph_nodes_and_links():
     assert ("gpu", "missing-page") in by and by[("gpu", "missing-page")]["missing"] is True
 
 
+def test_wiki_inbox_nodes_deduped_by_slug():
+    # a user with TWO inbox notes under the same slug → ONE inbox node (no
+    # duplicate node ids, which break the force-graph). notes count == 2.
+    w = WikiStore.for_tenant("acme", root=_ROOT).ensure()
+    w.add_inbox("someuser", "first note on topic X", topic="topic-x")
+    w.add_inbox("someuser", "second note on topic X", topic="topic-x")
+    _PRINCIPAL["v"] = ("someuser", "acme")
+    g = _client().get("/api/knowledge/wiki/graph").json()
+    inbox = [n for n in g["nodes"] if n["kind"] == "inbox" and n["label"] == "topic-x"]
+    assert len(inbox) == 1, inbox
+    assert inbox[0]["notes"] == 2, inbox[0]
+    ids = [n["id"] for n in g["nodes"]]
+    assert len(ids) == len(set(ids)), f"duplicate node ids: {ids}"
+
+
 def test_wiki_page_content():
     _seed()
     _PRINCIPAL["v"] = ("someuser", "acme")

@@ -66,12 +66,21 @@ def mount_knowledge_routes(app) -> None:
                     "target": target,
                     "missing": target not in known,
                 })
-        # caller's inbox overlay (distinct kind), if any
+        # caller's inbox overlay (distinct kind). One node PER SLUG — a user can
+        # have several notes under the same topic; the overlay means "you have a
+        # private note on this topic", so collapse them (avoids duplicate node
+        # ids, which break the force-graph). `notes` records how many.
+        inbox_seen: dict[str, dict] = {}
         for doc in wiki.list_inbox(user_id):
-            nid = f"inbox:{doc.slug}"
-            nodes.append({"id": nid, "label": doc.slug, "kind": "inbox"})
-            if doc.slug in known:
-                links.append({"source": nid, "target": doc.slug, "overlay": True})
+            n = inbox_seen.get(doc.slug)
+            if n is None:
+                n = {"id": f"inbox:{doc.slug}", "label": doc.slug,
+                     "kind": "inbox", "notes": 0}
+                inbox_seen[doc.slug] = n
+                nodes.append(n)
+                if doc.slug in known:
+                    links.append({"source": n["id"], "target": doc.slug, "overlay": True})
+            n["notes"] += 1
         return {"nodes": nodes, "links": links}
 
     @app.get("/api/knowledge/wiki/page/{slug}", include_in_schema=False)
