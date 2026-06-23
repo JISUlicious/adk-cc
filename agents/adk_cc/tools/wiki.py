@@ -16,7 +16,8 @@ Scope comes from the tenant context TenancyPlugin seeds into session state
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, Optional
 
 from google.adk.tools.tool_context import ToolContext
 
@@ -27,6 +28,30 @@ from .base import AdkCcTool, ToolMeta
 from .schemas import WikiAddArgs, WikiReadArgs, WikiSearchArgs
 
 _TENANT_KEY = "temp:tenant_context"
+
+# The shared wiki is for durable DOMAIN knowledge, not personal user facts
+# (name/role/preferences/identity) — those belong in the per-user memory system.
+# Conservative, high-precision signals so genuine domain docs aren't blocked.
+# A topic slug naming a person/profile:
+_PERSONAL_TOPIC_RE = re.compile(
+    r"^(user(-|$)|about-me|my-|profile$|bio$|user-profile)", re.IGNORECASE)
+# First-person identity / preference / memory-directive phrasing:
+_PERSONAL_TEXT_RE = re.compile(
+    r"\b(my name is|remember (about )?me|i am (a|an|the)\b.*\b(engineer|developer|"
+    r"manager|designer|lead|architect|scientist)|i (prefer|like|use|work)\b|"
+    r"the user'?s? (name|role|identity|preference|profile))", re.IGNORECASE)
+
+
+def _personal_info_reason(text: str, topic: Optional[str], title: Optional[str]) -> Optional[str]:
+    """Return a short reason string when a wiki_add looks like personal user
+    info (so it should go to memory, not the shared wiki), else None."""
+    slug = pagelib.slugify(topic or title or "")
+    if slug and _PERSONAL_TOPIC_RE.search(slug):
+        return f"topic:{slug}"
+    m = _PERSONAL_TEXT_RE.search(text or "")
+    if m:
+        return f"text:{m.group(0)[:40]}"
+    return None
 
 
 def _store_and_user(ctx: ToolContext) -> tuple[WikiStore, str]:
@@ -147,13 +172,33 @@ class WikiAddTool(AdkCcTool):
     )
     input_model = WikiAddArgs
     description = (
-        "Capture a note/document into YOUR private wiki inbox. It is NOT "
-        "added to the shared wiki directly — the librarian merges vetted "
-        "notes into the shared domain wiki periodically. Set `topic` to an "
-        "existing page's subject to have your note merged into it."
+        "Capture a SHARED-KNOWLEDGE note/document into YOUR private wiki inbox; "
+        "the librarian later merges vetted notes into the team's shared domain "
+        "wiki. Use it ONLY for durable, reusable domain/project knowledge that "
+        "would help anyone (facts, designs, decisions, how-tos). Do NOT use it "
+        "for personal facts about the user (their name, role, preferences, "
+        "identity) — those are remembered automatically by the memory system and "
+        "must not go into the shared wiki. Set `topic` to an existing page's "
+        "subject to merge into it."
     )
 
     async def _execute(self, args: WikiAddArgs, ctx: ToolContext) -> dict[str, Any]:
+        # Enforce the shared-vs-personal boundary: the shared wiki is not the
+        # place for user identity/preferences (memory handles those). Decline
+        # such captures rather than polluting the domain wiki.
+        reason = _personal_info_reason(args.text or "", args.topic, args.title)
+        if reason is not None:
+            return {
+                "status": "skipped",
+                "reason": "personal_info",
+                "note": (
+                    "Not added to the shared wiki: this looks like personal "
+                    "info about the user, which the memory system remembers "
+                    "automatically. The shared wiki is for durable domain "
+                    "knowledge that helps everyone."
+                ),
+                "matched": reason,
+            }
         store, user_id = _store_and_user(ctx)
         doc = store.add_inbox(
             user_id,
