@@ -133,7 +133,7 @@ export function KnowledgePage() {
               size="sm"
               onClick={recenter}
               title="Re-center / fit the graph to view"
-              className="absolute bottom-3 right-3 z-10 shadow-sm bg-background/90 backdrop-blur"
+              className="absolute top-3 right-3 z-10 shadow-sm bg-background/90 backdrop-blur"
             >
               <Maximize2 className="h-3.5 w-3.5" />
               Re-center
