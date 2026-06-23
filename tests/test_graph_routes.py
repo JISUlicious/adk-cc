@@ -99,6 +99,32 @@ def test_memory_isolation_other_user_sees_nothing():
     assert g["nodes"] == [], f"bob must not see alice's memory: {g}"
 
 
+def test_memory_item_detail():
+    _seed()
+    _PRINCIPAL["v"] = ("alice", "acme")
+    c = _client()
+    g = c.get("/api/knowledge/memory/graph").json()
+    sem = next(n for n in g["nodes"] if n["kind"] == "semantic")
+    raw_id = sem["id"].split(":", 1)[1]  # strip the "sem:" prefix (UI does this)
+    item = c.get(f"/api/knowledge/memory/item/{raw_id}").json()
+    assert item["status"] == "ok", item
+    assert item["topic"] == "deploy" and "Fly.io" in item["text"]
+    assert "confidence" in item and "supersedes" in item
+    # unknown id → not_found
+    assert c.get("/api/knowledge/memory/item/nope").json()["status"] == "not_found"
+
+
+def test_memory_item_isolation():
+    _seed()
+    # discover alice's semantic id as alice, then try to read it as bob
+    _PRINCIPAL["v"] = ("alice", "acme")
+    g = _client().get("/api/knowledge/memory/graph").json()
+    raw_id = next(n for n in g["nodes"] if n["kind"] == "semantic")["id"].split(":", 1)[1]
+    _PRINCIPAL["v"] = ("bob", "acme")
+    item = _client().get(f"/api/knowledge/memory/item/{raw_id}").json()
+    assert item["status"] == "not_found", f"bob must not read alice's item: {item}"
+
+
 def test_disabled_when_flag_off():
     os.environ["ADK_CC_KNOWLEDGE_UI"] = "0"
     try:

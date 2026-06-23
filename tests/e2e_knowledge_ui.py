@@ -86,14 +86,45 @@ def main() -> int:
             header = page.content()
             wiki_nodes = int((re.search(r"(\d+) nodes", header) or [0, "0"])[1])
             print(f"  [{'PASS' if wiki_nodes > 0 else 'FAIL'}] wiki tab shows {wiki_nodes} nodes")
+            # re-center button present + clickable
+            recenter = page.locator("button:has-text('Re-center')")
+            recenter_ok = recenter.count() > 0
+            if recenter_ok:
+                recenter.first.click()
+                time.sleep(0.5)
+            print(f"  [{'PASS' if recenter_ok else 'FAIL'}] re-center button present")
             # switch to Memory tab
             page.click("text=memory")
             time.sleep(1.5)
             mem_nodes = int((re.search(r"(\d+) nodes", page.content()) or [0, "0"])[1])
             print(f"  [{'PASS' if mem_nodes > 0 else 'FAIL'}] memory tab shows {mem_nodes} nodes")
+
+            # click a MEMORY node (grid scan) → detail pane shows the item
+            canvas = page.locator("canvas").first
+            b = canvas.bounding_box()
+            mx, my = b["x"] + b["width"] / 2, b["y"] + b["height"] / 2
+            mem_detail = False
+            for r in range(0, 200, 24):
+                if mem_detail:
+                    break
+                for dx in range(-r, r + 1, 24):
+                    for dy in range(-r, r + 1, 24):
+                        if r != 0 and max(abs(dx), abs(dy)) != r:
+                            continue
+                        page.mouse.click(mx + dx, my + dy)
+                        time.sleep(0.15)
+                        if page.locator("text=Click a node to view").count() == 0:
+                            mem_detail = True
+                            break
+                    if mem_detail:
+                        break
+            time.sleep(0.3)
+            # the memory detail pane shows the topic ("deploy-target") + text
+            shows_item = mem_detail and page.locator("aside:has-text('deploy')").count() > 0
+            print(f"  [{'PASS' if shows_item else 'FAIL'}] memory node click → detail pane shows the item")
             page.screenshot(path=SHOT, full_page=False)
             print(f"  screenshot: {SHOT}")
-            ok = wiki_nodes > 0 and mem_nodes > 0
+            ok = wiki_nodes > 0 and mem_nodes > 0 and recenter_ok and shows_item
             browser.close()
         print("\nknowledge UI e2e " + ("PASSED" if ok else "FAILED"))
         return 0 if ok else 1

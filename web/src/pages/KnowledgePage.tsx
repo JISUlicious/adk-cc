@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Link } from "react-router-dom"
-import { ArrowLeft } from "lucide-react"
+import { ArrowLeft, Maximize2 } from "lucide-react"
 import ForceGraph2D from "react-force-graph-2d"
 import { Button } from "@/components/ui/button"
 import {
@@ -34,7 +34,11 @@ export function KnowledgePage() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [detail, setDetail] = useState<WikiPage | MemoryItemDetail | null>(null)
-  const fgRef = useRef<{ centerAt: (x: number, y: number, ms: number) => void } | null>(null)
+  const fgRef = useRef<{
+    centerAt: (x: number, y: number, ms: number) => void
+    zoomToFit: (ms?: number, px?: number) => void
+  } | null>(null)
+  const recenter = useCallback(() => fgRef.current?.zoomToFit(400, 50), [])
   const wrapRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ w: 800, h: 600 })
 
@@ -118,6 +122,16 @@ export function KnowledgePage() {
         <span className="ml-auto text-xs text-muted-foreground">
           {graph.nodes.length} nodes · {graph.links.length} links
         </span>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={recenter}
+          title="Re-center / fit the graph to view"
+          className="ml-2"
+        >
+          <Maximize2 className="h-3.5 w-3.5" />
+          Re-center
+        </Button>
       </header>
 
       <div className="flex min-h-0 flex-1">
@@ -143,6 +157,7 @@ export function KnowledgePage() {
               l.missing ? "#f59e0b" : "rgba(120,120,120,0.4)") as never}
             linkDirectionalArrowLength={3}
             onNodeClick={openNode as never}
+            onEngineStop={recenter as never}
           />
         </div>
 
