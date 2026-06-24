@@ -31,6 +31,7 @@ def build_fastapi_app(
     agents_dir: str,
     session_service_uri: Optional[str] = None,
     auth_extractor=None,
+    identity=None,
     serve_web: bool = False,
     ui_dist_dir: Optional[str] = None,
 ):
@@ -125,6 +126,13 @@ def build_fastapi_app(
         else:
             exempt_exact = ()
             exempt_prefixes = ()
+        # The in-house identity endpoints that MUST be reachable without a
+        # token (login/signup/config + the JWKS the SPA & external verifiers
+        # read). /auth/me and /auth/logout stay gated.
+        if identity is not None:
+            from .identity_routes import PUBLIC_PATHS
+
+            exempt_exact = exempt_exact + PUBLIC_PATHS
         # REST authZ gate (closes trust-the-path). Added BEFORE the auth
         # middleware so it ends up INNER: Starlette runs the last-added
         # middleware outermost, so auth (added next) runs first and sets
@@ -142,6 +150,14 @@ def build_fastapi_app(
                 exempt_exact_paths=exempt_exact,
             )
         )
+
+    # In-house email+password identity routes (/auth/*, JWKS). Mounted only
+    # when an IdentityService is configured (ADK_CC_AUTH_PASSWORD=1), before
+    # the UI catch-all so the routes win on path match.
+    if identity is not None:
+        from .identity_routes import mount_identity_routes
+
+        mount_identity_routes(fastapi_app, identity)
 
     # Admin panel routes (default-OFF). Mounted BEFORE the UI StaticFiles
     # mount — the SPA is mounted at `/` (a catch-all) and would otherwise
@@ -276,6 +292,7 @@ def make_app():
     _prepare_admin_env()
 
     extractor = None
+    identity = None
     if os.environ.get("ADK_CC_JWT_JWKS_URL"):
         from .auth import JwtAuthExtractor
 
@@ -288,6 +305,14 @@ def make_app():
             roles_claim=os.environ.get("ADK_CC_JWT_ROLES_CLAIM", "roles"),
             scopes_claim=os.environ.get("ADK_CC_JWT_SCOPES_CLAIM", "scope"),
         )
+    elif os.environ.get("ADK_CC_AUTH_PASSWORD") == "1":
+        # In-house email+password identity: adk-cc mints its own RS256 tokens
+        # and validates them in-process via the same JwtAuthExtractor (no
+        # network). The /auth/* routes are mounted by build_fastapi_app.
+        from ..identity import IdentityService
+
+        identity = IdentityService.build_from_env()
+        extractor = identity.make_extractor()
     elif os.environ.get("ADK_CC_AUTH_TOKENS"):
         from .auth import BearerTokenExtractor
 
@@ -297,7 +322,9 @@ def make_app():
         raise RuntimeError(
             "make_app(): no auth extractor configured. Pick one:\n"
             "  - Set ADK_CC_JWT_JWKS_URL (and optionally ISSUER/AUDIENCE) "
-            "for the production JwtAuthExtractor.\n"
+            "for the production JwtAuthExtractor (external IdP / Keycloak).\n"
+            "  - Set ADK_CC_AUTH_PASSWORD=1 for the built-in email+password "
+            "identity provider (local accounts; mints + validates its own JWTs).\n"
             "  - Set ADK_CC_AUTH_TOKENS=token=user:tenant,... for the "
             "built-in dev BearerTokenExtractor.\n"
             "  - Implement an AuthExtractor and call "
@@ -322,6 +349,7 @@ def make_app():
         agents_dir=agents_dir,
         session_service_uri=os.environ.get("ADK_CC_SESSION_DSN"),
         auth_extractor=extractor,
+        identity=identity,
         ui_dist_dir=ui_dist_dir,
     )
 

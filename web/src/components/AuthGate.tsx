@@ -10,6 +10,12 @@ import {
 } from "@/components/ui/card"
 import { apiFetch, ApiError } from "@/api/client"
 import { getToken, setToken, getUser, onAuthCleared } from "@/api/auth"
+import {
+  fetchAuthConfig,
+  login as pwLogin,
+  signup as pwSignup,
+  type AuthConfig,
+} from "@/api/identity"
 
 // Auto-login identity used when the server is in no-auth dev mode
 // (ADK_CC_ALLOW_NO_AUTH=1). The token value is irrelevant to such a server —
@@ -19,36 +25,38 @@ const DEV_TOKEN = "dev"
 
 /**
  * Wraps the app. Renders a login form when auth is required and no valid
- * token is stored, or when any later API call returns 401 (token revoked/
- * expired mid-session). Children render only once a token has been VERIFIED
- * against the server — presence alone is not trusted, so a stale/invalid
- * token can't render a broken, 401-ing page.
+ * token is stored, or when any later API call returns 401. Children render
+ * only once a token has been VERIFIED against the server.
  *
- * Dev convenience: on first load with no token, we probe `/list-apps`
- * WITHOUT auth. If the server accepts it (ADK_CC_ALLOW_NO_AUTH=1), we
- * auto-sign-in with a placeholder token and skip the login form. If it 401s
- * (real auth configured), the login form shows exactly as before. This is
- * behavior-detected, not build-flag'd — the bundle is built in prod mode
- * even for local FastAPI-served dev, so import.meta.env.DEV is unreliable.
+ * The login form adapts to the server's auth provider, learned from
+ * `GET /auth/config`:
+ *   - password provider (ADK_CC_AUTH_PASSWORD=1) → email+password form, with a
+ *     sign-up toggle when self-registration is enabled (multi-tenant mode).
+ *   - no identity provider (external JWT / dev Bearer) → token-paste form.
  *
- * Production OIDC redirect: future. v1 form-pastes a JWT (works with
- * either JwtAuthExtractor or BearerTokenExtractor — same Authorization
- * header on the wire).
+ * Dev convenience: on first load with no token we probe `/list-apps` WITHOUT
+ * auth; a 200 means ADK_CC_ALLOW_NO_AUTH and we auto-sign-in.
  */
 export function AuthGate({ children }: { children: ReactNode }) {
   const [user, setLocalUser] = useState<string>(getUser())
   const [verifying, setVerifying] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // null = not yet checked (verifying a stored token OR probing no-auth);
-  // true = verified good; false = needs login.
+  // null = not yet checked; true = verified good; false = needs login.
   const [verified, setVerified] = useState<boolean | null>(null)
+  const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null)
+  const [mode, setMode] = useState<"login" | "signup">("login")
 
-  // Bootstrap on mount. Two paths, neither renders children until verified:
-  //   - stored token  → verify it against /list-apps; clear + show form on fail
-  //   - no token      → probe /list-apps WITHOUT auth; 200 ⇒ no-auth dev mode,
-  //                     auto-sign-in and skip the form; failure ⇒ show form
   useEffect(() => {
     let cancelled = false
+    async function loadConfig() {
+      try {
+        const cfg = await fetchAuthConfig()
+        if (!cancelled) setAuthConfig(cfg)
+      } catch {
+        // No in-house identity provider (external JWT / Bearer deployment) —
+        // leave authConfig null so the token-paste form renders.
+      }
+    }
     async function bootstrap() {
       if (getToken()) {
         try {
@@ -57,7 +65,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
         } catch {
           if (cancelled) return
           setToken("", "")
-          setVerified(false)
+          await loadConfig()
+          if (!cancelled) setVerified(false)
         }
         return
       }
@@ -70,6 +79,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
         setLocalUser(u)
         setVerified(true)
       } catch {
+        if (cancelled) return
+        await loadConfig()
         if (!cancelled) setVerified(false) // real auth required → login form
       }
     }
@@ -79,13 +90,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
     }
   }, [verified])
 
-  // A 401 from ANY later API call clears the token (apiFetch) and fires
-  // this callback — bounce back to the login form instead of leaving a
-  // broken page showing 401 errors.
+  // A 401 from any later API call clears the token and bounces to login.
   useEffect(() => {
-    return onAuthCleared(() => {
-      setVerified(false)
-    })
+    return onAuthCleared(() => setVerified(false))
   }, [])
 
   if (verified === null) {
@@ -100,7 +107,40 @@ export function AuthGate({ children }: { children: ReactNode }) {
     return <>{children}</>
   }
 
-  async function handleLogin(e: React.FormEvent) {
+  const passwordMode = !!authConfig?.password
+  const canSignup = !!authConfig?.registration
+
+  // --- email + password (in-house identity provider) ---
+  async function handlePassword(e: React.FormEvent) {
+    e.preventDefault()
+    const data = new FormData(e.currentTarget as HTMLFormElement)
+    const email = String(data.get("email") || "").trim()
+    const password = String(data.get("password") || "")
+    const name = String(data.get("name") || "").trim()
+    const org = String(data.get("org") || "").trim()
+    if (!email || !password) {
+      setError("Email and password are required")
+      return
+    }
+    setVerifying(true)
+    setError(null)
+    try {
+      const res =
+        mode === "signup"
+          ? await pwSignup({ email, password, name, org })
+          : await pwLogin(email, password)
+      setToken(res.access_token, res.user.id)
+      setLocalUser(res.user.id)
+      setVerified(true)
+    } catch (err) {
+      setError(authErrMsg(err))
+    } finally {
+      setVerifying(false)
+    }
+  }
+
+  // --- token paste (external JWT / dev Bearer) ---
+  async function handleToken(e: React.FormEvent) {
     e.preventDefault()
     const data = new FormData(e.currentTarget as HTMLFormElement)
     const t = String(data.get("token") || "").trim()
@@ -111,16 +151,13 @@ export function AuthGate({ children }: { children: ReactNode }) {
     }
     setVerifying(true)
     setError(null)
-    // Pre-flight against /list-apps, which every ADK FastAPI exposes
-    // and which the auth middleware gates. If this returns 200 we
-    // know the token works against the wire-level auth extractor.
     try {
       setToken(t, u)
       await apiFetch<string[]>("/list-apps")
       setLocalUser(u)
       setVerified(true)
     } catch (err) {
-      setToken("", "") // clear cleanly
+      setToken("", "")
       if (err instanceof ApiError && err.status === 401) {
         setError("Token rejected by the server (401). Check the value.")
       } else if (err instanceof ApiError) {
@@ -136,64 +173,161 @@ export function AuthGate({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-6">
       <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle>Sign in to adk-cc</CardTitle>
-          <CardDescription>
-            Paste a Bearer token. JWT (production) or static dev token
-            both work — same Authorization header on the wire.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div className="space-y-2">
-              <label
-                htmlFor="user"
-                className="text-sm font-medium text-foreground"
-              >
-                User id
-              </label>
-              <Input
-                id="user"
-                name="user"
-                defaultValue={user}
-                placeholder="alice"
-                autoComplete="username"
-              />
-              <p className="text-xs text-muted-foreground">
-                Used as the URL segment under{" "}
-                <code className="font-mono">/apps/&lt;app&gt;/users/&lt;user&gt;/sessions</code>
-                . Defaults to <code className="font-mono">alice</code>.
-              </p>
-            </div>
-            <div className="space-y-2">
-              <label
-                htmlFor="token"
-                className="text-sm font-medium text-foreground"
-              >
-                Bearer token
-              </label>
-              <Input
-                id="token"
-                name="token"
-                type="password"
-                placeholder="eyJhbGciOiJIUzI1NiI…"
-                autoComplete="current-password"
-              />
-            </div>
-            {error && (
-              <p className="text-sm text-destructive">{error}</p>
-            )}
-            <Button type="submit" disabled={verifying} className="w-full">
-              {verifying ? "Verifying…" : "Sign in"}
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              Dev: set{" "}
-              <code className="font-mono">ADK_CC_ALLOW_NO_AUTH=1</code>{" "}
-              on the server and any non-empty token works.
-            </p>
-          </form>
-        </CardContent>
+        {passwordMode ? (
+          <>
+            <CardHeader>
+              <CardTitle>
+                {mode === "signup" ? "Create your adk-cc account" : "Sign in to adk-cc"}
+              </CardTitle>
+              <CardDescription>
+                {mode === "signup"
+                  ? "Sign up with your email and a password."
+                  : "Sign in with your email and password."}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handlePassword} className="space-y-4">
+                <Field label="Email" id="email">
+                  <Input
+                    id="email"
+                    name="email"
+                    type="email"
+                    placeholder="you@example.com"
+                    autoComplete="email"
+                    autoFocus
+                  />
+                </Field>
+                <Field label="Password" id="password">
+                  <Input
+                    id="password"
+                    name="password"
+                    type="password"
+                    placeholder={mode === "signup" ? "at least 8 characters" : "••••••••"}
+                    autoComplete={mode === "signup" ? "new-password" : "current-password"}
+                  />
+                </Field>
+                {mode === "signup" && (
+                  <>
+                    <Field label="Name (optional)" id="name">
+                      <Input id="name" name="name" placeholder="Your name" autoComplete="name" />
+                    </Field>
+                    <Field
+                      label="Organization (optional)"
+                      id="org"
+                      hint="Creates your workspace. Defaults to a private one."
+                    >
+                      <Input id="org" name="org" placeholder="Acme Inc" autoComplete="organization" />
+                    </Field>
+                  </>
+                )}
+                {error && <p className="text-sm text-destructive">{error}</p>}
+                <Button type="submit" disabled={verifying} className="w-full">
+                  {verifying
+                    ? mode === "signup"
+                      ? "Creating…"
+                      : "Signing in…"
+                    : mode === "signup"
+                      ? "Create account"
+                      : "Sign in"}
+                </Button>
+                {canSignup && (
+                  <p className="text-center text-xs text-muted-foreground">
+                    {mode === "signup" ? "Already have an account?" : "No account yet?"}{" "}
+                    <button
+                      type="button"
+                      className="text-primary underline underline-offset-2 hover:opacity-80"
+                      onClick={() => {
+                        setError(null)
+                        setMode(mode === "signup" ? "login" : "signup")
+                      }}
+                    >
+                      {mode === "signup" ? "Sign in" : "Create one"}
+                    </button>
+                  </p>
+                )}
+              </form>
+            </CardContent>
+          </>
+        ) : (
+          <>
+            <CardHeader>
+              <CardTitle>Sign in to adk-cc</CardTitle>
+              <CardDescription>
+                Paste a Bearer token. JWT (production) or static dev token both
+                work — same Authorization header on the wire.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleToken} className="space-y-4">
+                <Field
+                  label="User id"
+                  id="user"
+                  hint="Used as the URL segment under /apps/<app>/users/<user>/sessions."
+                >
+                  <Input
+                    id="user"
+                    name="user"
+                    defaultValue={user}
+                    placeholder="alice"
+                    autoComplete="username"
+                  />
+                </Field>
+                <Field label="Bearer token" id="token">
+                  <Input
+                    id="token"
+                    name="token"
+                    type="password"
+                    placeholder="eyJhbGciOiJSUzI1NiI…"
+                    autoComplete="current-password"
+                  />
+                </Field>
+                {error && <p className="text-sm text-destructive">{error}</p>}
+                <Button type="submit" disabled={verifying} className="w-full">
+                  {verifying ? "Verifying…" : "Sign in"}
+                </Button>
+                <p className="text-xs text-muted-foreground">
+                  Dev: set <code className="font-mono">ADK_CC_ALLOW_NO_AUTH=1</code> on the
+                  server and any non-empty token works.
+                </p>
+              </form>
+            </CardContent>
+          </>
+        )}
       </Card>
     </div>
   )
+}
+
+/** Labeled form field with an optional hint line. */
+function Field({
+  label,
+  id,
+  hint,
+  children,
+}: {
+  label: string
+  id: string
+  hint?: string
+  children: ReactNode
+}) {
+  return (
+    <div className="space-y-2">
+      <label htmlFor={id} className="text-sm font-medium text-foreground">
+        {label}
+      </label>
+      {children}
+      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
+    </div>
+  )
+}
+
+function authErrMsg(err: unknown): string {
+  if (err instanceof ApiError) {
+    const detail = (err.body as { detail?: unknown } | undefined)?.detail
+    if (typeof detail === "string" && detail) return detail
+    if (err.status === 401) return "Invalid email or password."
+    if (err.status === 403) return "Sign-up is disabled. Contact your admin."
+    return `Server returned ${err.status}.`
+  }
+  return "Could not reach the server. Is the adk-cc server running?"
 }
