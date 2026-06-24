@@ -59,6 +59,7 @@ def mount_identity_routes(app, identity) -> None:
         ident = await identity.provider.login_password(email, password)
         if ident is None:
             raise HTTPException(status_code=401, detail="invalid email or password")
+        identity.record(ident.tenant_id, ident.user_id, "login", actor_email=ident.email)
         return {
             "access_token": identity.token_for(ident),
             "token_type": "Bearer",
@@ -79,6 +80,7 @@ def mount_identity_routes(app, identity) -> None:
             )
         except (ValueError, PermissionError) as e:
             raise HTTPException(status_code=400, detail=str(e))
+        identity.record(ident.tenant_id, ident.user_id, "signup", actor_email=ident.email)
         return {
             "access_token": identity.token_for(ident),
             "token_type": "Bearer",
@@ -105,9 +107,11 @@ def mount_identity_routes(app, identity) -> None:
         auth = _require_auth(request)
         body = await _json(request)
         try:
-            return identity.update_profile(auth.user_id, name=body.get("name") or "")
+            prof = identity.update_profile(auth.user_id, name=body.get("name") or "")
         except KeyError:
             raise HTTPException(status_code=404, detail="user not found")
+        identity.record(auth.tenant_id, auth.user_id, "profile.updated")
+        return prof
 
     @router.post("/auth/password")
     async def change_password(request: Request):
@@ -123,6 +127,7 @@ def mount_identity_routes(app, identity) -> None:
             raise HTTPException(status_code=404, detail="user not found")
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        identity.record(auth.tenant_id, auth.user_id, "password.changed")
         return {"status": "ok"}
 
     @router.get("/auth/api-keys")
@@ -140,6 +145,7 @@ def mount_identity_routes(app, identity) -> None:
             raise HTTPException(status_code=404, detail="user not found")
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        identity.record(auth.tenant_id, auth.user_id, "apikey.created", target=rec.name)
         # The token is returned ONCE here and never again.
         return {"id": rec.id, "name": rec.name, "created": rec.created, "token": token}
 
@@ -150,6 +156,7 @@ def mount_identity_routes(app, identity) -> None:
             identity.revoke_api_key(auth.user_id, key_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="api key not found")
+        identity.record(auth.tenant_id, auth.user_id, "apikey.revoked", target=key_id)
         return {"status": "revoked"}
 
     @router.post("/auth/logout")

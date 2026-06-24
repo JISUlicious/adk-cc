@@ -6,9 +6,13 @@ import { McpAdminTab } from "@/components/admin/McpAdminTab"
 import { SkillsAdminTab } from "@/components/admin/SkillsAdminTab"
 import { ModelAdminTab } from "@/components/admin/ModelAdminTab"
 import { UsersAdminTab } from "@/components/admin/UsersAdminTab"
+import { UsageAdminTab } from "@/components/admin/UsageAdminTab"
+import { AuditAdminTab } from "@/components/admin/AuditAdminTab"
 
 const TABS = [
   { id: "users", label: "Users" },
+  { id: "usage", label: "Usage" },
+  { id: "audit", label: "Audit" },
   { id: "mcp", label: "MCP Servers" },
   { id: "skills", label: "Skills" },
   { id: "models", label: "Model Endpoints" },
@@ -51,6 +55,8 @@ export function AdminPage() {
 
       <main>
         {active === "users" && <UsersAdminTab />}
+        {active === "usage" && <UsageAdminTab />}
+        {active === "audit" && <AuditAdminTab />}
         {active === "mcp" && <McpAdminTab />}
         {active === "skills" && <SkillsAdminTab />}
         {active === "models" && <ModelAdminTab />}

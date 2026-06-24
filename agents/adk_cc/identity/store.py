@@ -15,7 +15,7 @@ from pathlib import Path
 
 from filelock import FileLock
 
-from .models import ApiKeyRecord, InviteRecord, UserRecord
+from .models import ApiKeyRecord, AuditEvent, InviteRecord, UserRecord
 
 
 def normalize_email(email: str) -> str:
@@ -227,3 +227,49 @@ class JsonFileApiKeyStore(ApiKeyStore):
                 for d in self._read().values()
                 if d.get("user_id") == user_id
             ]
+
+
+class AuditStore(ABC):
+    @abstractmethod
+    def append(self, event: AuditEvent) -> None: ...
+
+    @abstractmethod
+    def list_by_tenant(self, tenant_id: str, limit: int = 200) -> list[AuditEvent]:
+        """Most-recent-first audit events for a tenant."""
+
+
+class JsonFileAuditStore(AuditStore):
+    """Append-only audit log as a JSON array, filelock-protected. Capped to the
+    last `cap` events so the file can't grow unbounded in a dev deployment."""
+
+    def __init__(self, path: str, *, cap: int = 5000) -> None:
+        self._path = Path(path)
+        self._cap = cap
+        self._lock = FileLock(str(self._path) + ".lock")
+
+    def _read(self) -> list[dict]:
+        if not self._path.exists():
+            return []
+        with self._path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _write(self, data: list[dict]) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        tmp.replace(self._path)
+
+    def append(self, event: AuditEvent) -> None:
+        with self._lock:
+            data = self._read()
+            data.append(event.to_dict())
+            if len(data) > self._cap:
+                data = data[-self._cap:]
+            self._write(data)
+
+    def list_by_tenant(self, tenant_id: str, limit: int = 200) -> list[AuditEvent]:
+        with self._lock:
+            rows = [d for d in self._read() if d.get("tenant_id") == tenant_id]
+        rows.reverse()  # most-recent first
+        return [AuditEvent.from_dict(d) for d in rows[:limit]]

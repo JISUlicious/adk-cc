@@ -50,6 +50,28 @@ class ApiKeyRecord:
 
 
 @dataclass
+class AuditEvent:
+    """One identity/org/account action — who did what, when, in which org.
+    Powers the audit log + the usage summary (aggregated per actor)."""
+
+    id: str
+    ts: str  # ISO-8601 UTC
+    tenant_id: str
+    actor_id: str
+    actor_email: str = ""
+    action: str = ""  # e.g. login, user.created, member.role, apikey.created
+    target: str = ""  # what it acted on (an email, a key name, …)
+    detail: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "AuditEvent":
+        return cls(**{k: d[k] for k in cls.__dataclass_fields__ if k in d})
+
+
+@dataclass
 class InviteRecord:
     """A pending invitation to join a tenant/org with a given role. The token
     is the share secret (the invite link carries it); accepting it creates a

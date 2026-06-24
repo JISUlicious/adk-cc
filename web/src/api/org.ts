@@ -74,6 +74,32 @@ export function revokeInvite(token: string): Promise<unknown> {
   return apiFetch(`/orgs/invites/${encodeURIComponent(token)}`, { method: "DELETE" })
 }
 
+// --- usage & audit (admin dashboards) ---
+export interface UsageRow {
+  id: string
+  email: string
+  roles: string[]
+  status: string
+  events: number
+  last_active: string
+}
+
+export interface AuditEvent {
+  ts: string
+  actor: string
+  action: string
+  target: string
+  detail: string
+}
+
+export function fetchUsage(): Promise<{ users: UsageRow[] }> {
+  return apiFetch("/orgs/usage")
+}
+
+export function fetchAudit(): Promise<{ events: AuditEvent[] }> {
+  return apiFetch("/orgs/audit")
+}
+
 export function setMemberRole(userId: string, role: string): Promise<Member> {
   return apiFetch(`/orgs/members/${encodeURIComponent(userId)}/role`, {
     method: "POST",

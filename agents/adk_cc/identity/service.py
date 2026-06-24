@@ -12,11 +12,14 @@ import os
 import secrets
 import time
 
-from .models import ApiKeyRecord, InviteRecord
+import uuid
+
+from .models import ApiKeyRecord, AuditEvent, InviteRecord
 from .passwords import hash_password, verify_password
 from .provider import EmailPasswordProvider, Identity
 from .store import (
     JsonFileApiKeyStore,
+    JsonFileAuditStore,
     JsonFileInviteStore,
     JsonFileUserStore,
     normalize_email,
@@ -30,12 +33,14 @@ _PAT_TTL_S = 365 * 24 * 3600  # personal access tokens: 1 year
 
 
 class IdentityService:
-    def __init__(self, *, provider, issuer: TokenIssuer, mode: str, invites=None, api_keys=None) -> None:
+    def __init__(self, *, provider, issuer: TokenIssuer, mode: str, invites=None,
+                 api_keys=None, audit=None) -> None:
         self.provider = provider
         self.issuer = issuer
         self.mode = mode
         self.invites = invites
         self.api_keys = api_keys
+        self.audit = audit
 
     @property
     def store(self):
@@ -73,7 +78,9 @@ class IdentityService:
         )
         invites = JsonFileInviteStore(os.path.join(base, "invites.json"))
         api_keys = JsonFileApiKeyStore(os.path.join(base, "api_keys.json"))
-        svc = cls(provider=provider, issuer=issuer, mode=mode, invites=invites, api_keys=api_keys)
+        audit = JsonFileAuditStore(os.path.join(base, "audit.json"))
+        svc = cls(provider=provider, issuer=issuer, mode=mode, invites=invites,
+                  api_keys=api_keys, audit=audit)
         svc._maybe_bootstrap_admin(global_tenant, admin_role)
         return svc
 
@@ -319,3 +326,51 @@ class IdentityService:
             raise KeyError("api key not found")
         rec.revoked = True
         self.api_keys.update(rec)
+
+    # ------------------------------------------------------------------
+    # Audit + usage (Phase 6). record() is called from the routes after each
+    # action; the audit log and usage summary are read by admins for their org.
+    # ------------------------------------------------------------------
+    def record(self, tenant_id: str, actor_id: str, action: str,
+               *, target: str = "", detail: str = "", actor_email: str = "") -> None:
+        if self.audit is None:
+            return
+        if not actor_email:
+            u = self.store.get(actor_id)
+            actor_email = u.email if u else ""
+        self.audit.append(AuditEvent(
+            id=uuid.uuid4().hex,
+            ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            tenant_id=tenant_id, actor_id=actor_id, actor_email=actor_email,
+            action=action, target=target, detail=detail,
+        ))
+
+    def recent_audit(self, tenant_id: str, limit: int = 200) -> list[dict]:
+        if self.audit is None:
+            return []
+        return [
+            {"ts": e.ts, "actor": e.actor_email or e.actor_id, "action": e.action,
+             "target": e.target, "detail": e.detail}
+            for e in self.audit.list_by_tenant(tenant_id, limit)
+        ]
+
+    def usage_summary(self, tenant_id: str) -> list[dict]:
+        """Per-actor activity derived from the audit log: event count + last
+        active, joined with the current member list (so inactive members show 0)."""
+        events = self.audit.list_by_tenant(tenant_id, limit=10000) if self.audit else []
+        agg: dict[str, dict] = {}
+        for e in events:
+            a = agg.setdefault(e.actor_id, {"events": 0, "last_active": "", "email": e.actor_email})
+            a["events"] += 1
+            if e.ts > a["last_active"]:
+                a["last_active"] = e.ts
+            if e.actor_email:
+                a["email"] = e.actor_email
+        out = []
+        for m in self.store.list_by_tenant(tenant_id):
+            a = agg.get(m.user_id, {"events": 0, "last_active": "", "email": m.email})
+            out.append({"id": m.user_id, "email": m.email or a["email"],
+                        "roles": list(m.roles), "status": m.status,
+                        "events": a["events"], "last_active": a["last_active"]})
+        out.sort(key=lambda r: r["events"], reverse=True)
+        return out
