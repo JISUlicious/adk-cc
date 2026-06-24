@@ -9,7 +9,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { apiFetch, ApiError } from "@/api/client"
-import { getToken, setToken, getUser, onAuthCleared } from "@/api/auth"
+import { getToken, setToken, getUser, onAuthCleared, isSignedOut, clearSignedOut } from "@/api/auth"
 import {
   fetchAuthConfig,
   login as pwLogin,
@@ -68,6 +68,13 @@ export function AuthGate({ children }: { children: ReactNode }) {
           await loadConfig()
           if (!cancelled) setVerified(false)
         }
+        return
+      }
+      // Explicit sign-out: do NOT silently auto-login via no-auth dev mode —
+      // show the login form and stay there until the user signs in again.
+      if (isSignedOut()) {
+        await loadConfig()
+        if (!cancelled) setVerified(false)
         return
       }
       // No token — does the server accept unauthenticated requests?
@@ -131,6 +138,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
           : await pwLogin(email, password)
       setToken(res.access_token, res.user.id)
       setLocalUser(res.user.id)
+      clearSignedOut()
       setVerified(true)
     } catch (err) {
       setError(authErrMsg(err))
@@ -155,6 +163,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       setToken(t, u)
       await apiFetch<string[]>("/list-apps")
       setLocalUser(u)
+      clearSignedOut()
       setVerified(true)
     } catch (err) {
       setToken("", "")

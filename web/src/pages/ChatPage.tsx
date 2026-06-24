@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Settings as SettingsIcon, Menu, ListChecks } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { clearToken, getUser } from "@/api/auth"
+import { clearToken, getUser, markSignedOut } from "@/api/auth"
 import {
   createSession,
   getSession,
@@ -264,6 +264,7 @@ export function ChatPage() {
         return
       }
       case "signout":
+        markSignedOut()
         clearToken()
         location.reload()
         return

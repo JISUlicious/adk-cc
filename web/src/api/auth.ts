@@ -45,6 +45,38 @@ export function getUser(): string {
   return localStorage.getItem(TOKEN_USER_KEY) ?? "alice"
 }
 
+// An EXPLICIT sign-out marker (per-tab). Without it, signing out on a no-auth
+// dev server bounces straight back to the app: the AuthGate finds no token,
+// probes /list-apps anonymously, gets 200, and auto-signs-in again. The marker
+// tells the AuthGate to skip that auto-login and show the login form. It's
+// cleared on the next successful sign-in. Not set by the 401 auto-clear, so an
+// expired token still re-prompts normally.
+const SIGNED_OUT_KEY = "adk_cc.signed_out"
+
+export function markSignedOut(): void {
+  try {
+    sessionStorage.setItem(SIGNED_OUT_KEY, "1")
+  } catch {
+    /* sessionStorage unavailable — ignore */
+  }
+}
+
+export function isSignedOut(): boolean {
+  try {
+    return sessionStorage.getItem(SIGNED_OUT_KEY) === "1"
+  } catch {
+    return false
+  }
+}
+
+export function clearSignedOut(): void {
+  try {
+    sessionStorage.removeItem(SIGNED_OUT_KEY)
+  } catch {
+    /* ignore */
+  }
+}
+
 /** Decode the JWT payload for display purposes only. Does NOT verify
  * signatures — the FastAPI side does that via JwtAuthExtractor. */
 export function decodeJwtPayload(token: string): Record<string, unknown> | null {

@@ -2,7 +2,7 @@ import { useEffect } from "react"
 import { X, Moon, Sun, Monitor, LogOut, Shield, Network, Users } from "lucide-react"
 import { Button } from "./ui/button"
 import { useTheme, type ThemeMode } from "@/lib/theme"
-import { clearToken, getToken, getUser, maybeAdmin } from "@/api/auth"
+import { clearToken, getToken, getUser, maybeAdmin, markSignedOut } from "@/api/auth"
 import { cn } from "@/lib/utils"
 
 /**
@@ -133,6 +133,7 @@ export function SettingsDialog({
               variant="outline"
               size="sm"
               onClick={() => {
+                markSignedOut()
                 clearToken()
                 location.reload()
               }}
