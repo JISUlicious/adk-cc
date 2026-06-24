@@ -147,23 +147,26 @@ export function SessionRail({
       >
         <X className="h-4 w-4" />
       </button>
-      <div className="px-4 py-3">
-        <label className="text-xs font-medium text-muted-foreground">
-          Agent
-        </label>
-        <select
-          value={appName ?? ""}
-          onChange={(e) => onAppChange(e.target.value)}
-          disabled={apps.length === 0}
-          className="mt-1 block w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
-        >
-          {apps.length === 0 && <option value="">— none —</option>}
-          {apps.map((a) => (
-            <option key={a} value={a}>
-              {a}
-            </option>
-          ))}
-        </select>
+      {/* Branding. adk-cc registers a single coordinator agent (auto-selected),
+          so this space is the brand rather than an agent picker. A compact
+          picker only appears if a deployment registers more than one agent. */}
+      <div className="flex items-center gap-2 px-4 py-3.5">
+        <img src="/favicon.svg" alt="" className="h-6 w-6 shrink-0" />
+        <span className="text-base font-semibold tracking-tight">adk-cc</span>
+        {apps.length > 1 && (
+          <select
+            value={appName ?? ""}
+            onChange={(e) => onAppChange(e.target.value)}
+            title="Agent"
+            className="ml-auto rounded-md border border-input bg-background px-1.5 py-1 text-xs"
+          >
+            {apps.map((a) => (
+              <option key={a} value={a}>
+                {a}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
       <div className="flex items-center justify-between px-4 py-3">
         <span className="text-xs font-medium text-muted-foreground">
