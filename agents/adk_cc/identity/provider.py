@@ -91,11 +91,13 @@ class EmailPasswordProvider(IdentityProvider):
         mode: str = "single",
         global_tenant_id: str = "local",
         admin_role: str = "admin",
+        owner_role: str = "owner",
     ) -> None:
         self.store = store
         self.mode = mode
         self.global_tenant_id = global_tenant_id
         self.admin_role = admin_role
+        self.owner_role = owner_role
 
     @property
     def supports_registration(self) -> bool:  # type: ignore[override]
@@ -137,7 +139,8 @@ class EmailPasswordProvider(IdentityProvider):
         if tenant_id is None:
             if self.mode == "multi":
                 tenant_id = _slug(org) or uid  # each signup owns a fresh tenant
-                roles = roles if roles is not None else [self.admin_role]
+                # The org creator OWNS it (owner ⊇ admin powers).
+                roles = roles if roles is not None else [self.owner_role, self.admin_role]
             else:
                 tenant_id = self.global_tenant_id
                 roles = roles if roles is not None else []

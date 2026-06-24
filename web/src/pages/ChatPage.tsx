@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Settings as SettingsIcon, Menu, ListChecks } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { clearToken, getUser, markSignedOut } from "@/api/auth"
+import { clearToken, getUser, getToken, decodeJwtPayload, markSignedOut } from "@/api/auth"
 import {
   createSession,
   getSession,
@@ -45,6 +45,12 @@ import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/lib/theme"
  */
 export function ChatPage() {
   const userId = getUser()
+  // Friendly display label — email/name from the token, NOT the opaque user_id
+  // (which is what `userId` holds and is used for the API session path).
+  const userLabel = (() => {
+    const p = decodeJwtPayload(getToken() ?? "")
+    return (p?.email as string) || (p?.name as string) || userId
+  })()
   const [appName, setAppName] = useState<string | null>(null)
   const [session, setSession] = useState<Session | null>(null)
   const [events, setEvents] = useState<RunEvent[]>([])
@@ -266,7 +272,7 @@ export function ChatPage() {
       case "signout":
         markSignedOut()
         clearToken()
-        location.reload()
+        location.assign("/")
         return
       case "plan":
       case "exit-plan": {
@@ -349,7 +355,7 @@ export function ChatPage() {
             )}
             {session && <ContextGauge current={ctxTokens} limits={ctxLimits} />}
             <span className="hidden md:inline text-sm text-muted-foreground">
-              Signed in as <span className="font-mono">{userId}</span>
+              Signed in as <span className="font-medium text-foreground">{userLabel}</span>
             </span>
             {appName && session && (
               <ArtifactsPanel

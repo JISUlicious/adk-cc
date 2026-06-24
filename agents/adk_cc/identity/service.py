@@ -18,6 +18,7 @@ from .store import JsonFileInviteStore, JsonFileUserStore, normalize_email
 from .tokens import TokenIssuer
 
 MEMBER_ROLE = "member"
+OWNER_ROLE = "owner"
 _INVITE_TTL_S = 7 * 24 * 3600
 
 
@@ -191,6 +192,8 @@ class IdentityService:
         if role not in self.allowed_roles():
             raise ValueError(f"invalid role: {role}")
         u = self._member_in_tenant(tenant_id, user_id)
+        if OWNER_ROLE in u.roles:
+            raise ValueError("the team owner's role can't be changed")
         if self.admin_role in u.roles and role != self.admin_role:
             self._guard_last_admin(tenant_id, user_id)
         u.roles = [role]
@@ -201,6 +204,8 @@ class IdentityService:
         if status not in ("active", "disabled"):
             raise ValueError("status must be 'active' or 'disabled'")
         u = self._member_in_tenant(tenant_id, user_id)
+        if status == "disabled" and OWNER_ROLE in u.roles:
+            raise ValueError("the team owner can't be disabled")
         if status == "disabled" and self.admin_role in u.roles:
             self._guard_last_admin(tenant_id, user_id)
         u.status = status

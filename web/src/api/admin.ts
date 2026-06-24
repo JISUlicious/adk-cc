@@ -1,23 +1,26 @@
 /**
  * Typed wrappers over the admin-panel backend routes.
  *
- * MCP servers + skills + credentials are tenant-scoped routes pinned to the
- * GLOBAL tenant (the backend manages one deployment-wide config set; it
- * rejects any other tenant). Model endpoints are global (/admin/...).
+ * MCP servers + skills + credentials are tenant-scoped to the CALLER'S OWN org
+ * (the backend rejects any other tenant). Model endpoints are global (/admin/...).
  *
  * The real authorization gate is server-side (admin role → 403); these
  * helpers just shape the requests/responses.
  */
 
 import { apiFetch } from "./client"
+import { decodeJwtPayload, getToken } from "./auth"
 
-// The global tenant the admin panel manages. Matches the server's
-// ADK_CC_GLOBAL_TENANT_ID default ("local"); override at build via
-// VITE_ADK_CC_GLOBAL_TENANT if a deployment changes it.
-export const GLOBAL_TENANT: string =
-  (import.meta.env.VITE_ADK_CC_GLOBAL_TENANT as string | undefined) || "local"
+/** The admin panel manages the CALLER'S OWN tenant (org_id == tenant_id), read
+ * from the signed-in token. Falls back to "local" when the tenant is unknown
+ * (dev no-auth / opaque token). The server independently enforces that the
+ * caller may only touch their own tenant. */
+export function callerTenant(): string {
+  const p = decodeJwtPayload(getToken() ?? "")
+  return (p?.tenant as string) || "local"
+}
 
-const T = `/tenants/${GLOBAL_TENANT}`
+const T = (): string => `/tenants/${callerTenant()}`
 
 // --- MCP servers ----------------------------------------------------------
 
@@ -33,32 +36,32 @@ export interface McpServer {
 }
 
 export async function listMcpServers(): Promise<McpServer[]> {
-  const r = await apiFetch<{ servers: McpServer[] }>(`${T}/mcp-servers`)
+  const r = await apiFetch<{ servers: McpServer[] }>(`${T()}/mcp-servers`)
   return r.servers
 }
 
 export async function putMcpServer(s: McpServer): Promise<void> {
   const { server_name, ...rest } = s
-  await apiFetch(`${T}/mcp-servers/${encodeURIComponent(server_name)}`, {
+  await apiFetch(`${T()}/mcp-servers/${encodeURIComponent(server_name)}`, {
     method: "PUT",
     body: JSON.stringify(rest),
   })
 }
 
 export async function deleteMcpServer(name: string): Promise<void> {
-  await apiFetch(`${T}/mcp-servers/${encodeURIComponent(name)}`, { method: "DELETE" })
+  await apiFetch(`${T()}/mcp-servers/${encodeURIComponent(name)}`, { method: "DELETE" })
 }
 
 // --- Skills ---------------------------------------------------------------
 
 export async function listSkills(): Promise<string[]> {
-  const r = await apiFetch<{ skills: string[] }>(`${T}/skills`)
+  const r = await apiFetch<{ skills: string[] }>(`${T()}/skills`)
   return r.skills
 }
 
 export async function uploadSkill(name: string, zip: Blob): Promise<void> {
   // Raw zip body (the route reads request.body() directly, not multipart).
-  await apiFetch(`${T}/skills/${encodeURIComponent(name)}`, {
+  await apiFetch(`${T()}/skills/${encodeURIComponent(name)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/zip" },
     body: zip,
@@ -66,25 +69,25 @@ export async function uploadSkill(name: string, zip: Blob): Promise<void> {
 }
 
 export async function deleteSkill(name: string): Promise<void> {
-  await apiFetch(`${T}/skills/${encodeURIComponent(name)}`, { method: "DELETE" })
+  await apiFetch(`${T()}/skills/${encodeURIComponent(name)}`, { method: "DELETE" })
 }
 
 // --- Credentials (names only; values write-only) --------------------------
 
 export async function listCredentialKeys(): Promise<string[]> {
-  const r = await apiFetch<{ keys: string[] }>(`${T}/credentials`)
+  const r = await apiFetch<{ keys: string[] }>(`${T()}/credentials`)
   return r.keys
 }
 
 export async function putCredential(key: string, value: string): Promise<void> {
-  await apiFetch(`${T}/credentials/${encodeURIComponent(key)}`, {
+  await apiFetch(`${T()}/credentials/${encodeURIComponent(key)}`, {
     method: "PUT",
     body: JSON.stringify({ value }),
   })
 }
 
 export async function deleteCredential(key: string): Promise<void> {
-  await apiFetch(`${T}/credentials/${encodeURIComponent(key)}`, { method: "DELETE" })
+  await apiFetch(`${T()}/credentials/${encodeURIComponent(key)}`, { method: "DELETE" })
 }
 
 // --- Model endpoints (global) ---------------------------------------------

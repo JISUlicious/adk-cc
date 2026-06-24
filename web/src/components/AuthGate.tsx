@@ -49,6 +49,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // Used so the signed-out screen offers a one-click "Continue" instead of a
   // dead-end token-paste form (you have no token to type on a no-auth server).
   const [noAuthMode, setNoAuthMode] = useState(false)
+  // True once we've determined the server's auth shape (password? no-auth?).
+  // Until then we never render a login form — prevents the token-paste fallback
+  // from flashing before we know an email/password provider is configured.
+  const [probed, setProbed] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -87,6 +91,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       const anon = await isAnonOk()
       if (cancelled) return
       setNoAuthMode(anon)
+      setProbed(true)
       // No-auth dev mode AND not an explicit sign-out → auto-sign-in (frictionless
       // dev). After an explicit sign-out we deliberately DON'T, so it sticks; the
       // signed-out screen then offers a one-click Continue.
@@ -120,6 +125,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   if (verified) {
     return <>{children}</>
+  }
+
+  // verified === false → a login screen is due, but don't render one until the
+  // auth shape is known (else the token-paste fallback flashes for a frame).
+  if (!probed) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <p className="text-sm text-muted-foreground">Connecting…</p>
+      </div>
+    )
   }
 
   const passwordMode = !!authConfig?.password

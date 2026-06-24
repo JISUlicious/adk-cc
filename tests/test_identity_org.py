@@ -6,6 +6,7 @@ Run: .venv/bin/python tests/test_identity_org.py
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -132,6 +133,32 @@ def test_cross_tenant_member_ops_rejected():
         assert False, "cross-tenant role change must be refused"
     except KeyError:
         pass
+
+
+def test_owner_is_protected():
+    svc = _svc()
+    owner = svc.provider.provision(email="o@acme.io", password="password123",
+                                   tenant_id="acme", roles=["owner", "admin"])
+    # also add a second admin so the last-admin guard isn't what trips
+    svc.provider.provision(email="a2@acme.io", password="password123",
+                           tenant_id="acme", roles=["admin"])
+    try:
+        svc.set_member_role("acme", owner.user_id, "member")
+        assert False, "owner role must not be changeable"
+    except ValueError:
+        pass
+    try:
+        svc.set_member_status("acme", owner.user_id, "disabled")
+        assert False, "owner must not be disable-able"
+    except ValueError:
+        pass
+
+
+def test_multi_signup_creator_is_owner():
+    svc = _svc(mode="multi")
+    ident = asyncio.run(svc.provider.register(email="founder@acme.io",
+                                              password="password123", org="Acme"))
+    assert "owner" in ident.roles and "admin" in ident.roles
 
 
 def _run_all() -> int:

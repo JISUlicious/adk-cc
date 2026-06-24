@@ -135,7 +135,10 @@ export function SettingsDialog({
               onClick={() => {
                 markSignedOut()
                 clearToken()
-                location.reload()
+                // Go to the root, not reload-in-place — otherwise signing out
+                // from /admin or /org re-prompts there and lands you back on
+                // that page after sign-in instead of the chat home.
+                location.assign("/")
               }}
               className="w-full"
             >

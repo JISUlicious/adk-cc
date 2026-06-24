@@ -469,7 +469,6 @@ def _make_admin_role_extractor():
     from fastapi import HTTPException
 
     required_role = os.environ.get("ADK_CC_ADMIN_ROLE", "admin")
-    global_tenant = _global_tenant_id()
 
     def authorize(request, target: str) -> None:
         auth = getattr(request.state, "adk_cc_auth", None)
@@ -480,14 +479,15 @@ def _make_admin_role_extractor():
             raise HTTPException(
                 status_code=403, detail=f"admin role {required_role!r} required"
             )
-        # Tenant-scoped routes pass a tenant id as `target` and must match the
-        # one global tenant. Global routes (e.g. model endpoints) pass a
-        # non-tenant scope string in `_GLOBAL_SCOPES`, which is exempt from
-        # the tenant check (the role check above already gated them).
-        if target not in _GLOBAL_SCOPES and target != global_tenant:
+        # Tenant-scoped routes pass a tenant id as `target`: an admin may only
+        # manage their OWN tenant's resources (org_id == tenant_id). Global
+        # routes (e.g. model endpoints) pass a non-tenant scope string in
+        # `_GLOBAL_SCOPES`, exempt from the tenant check (role-gated above).
+        caller_tenant = getattr(auth, "tenant_id", None)
+        if target not in _GLOBAL_SCOPES and target != caller_tenant:
             raise HTTPException(
                 status_code=403,
-                detail=f"admin panel manages the global tenant {global_tenant!r} only",
+                detail="you can only manage your own org's resources",
             )
 
     return authorize

@@ -173,6 +173,7 @@ export function OrgPage() {
             <ul className="divide-y divide-border">
               {members.map((m) => {
                 const isMe = m.id === me
+                const isOwner = m.roles.includes("owner")
                 const disabled = m.status === "disabled"
                 return (
                   <li key={m.id} className="flex items-center gap-3 px-4 py-2.5">
@@ -184,23 +185,40 @@ export function OrgPage() {
                       </p>
                       {m.name && <p className="truncate text-xs text-muted-foreground">{m.name}</p>}
                     </div>
-                    <select
-                      value={m.roles[0] || "member"}
-                      onChange={(e) => changeRole(m, e.target.value)}
-                      disabled={isMe}
-                      className="h-8 rounded-md border border-input bg-background px-2 text-xs disabled:opacity-50"
-                      title={isMe ? "You can't change your own role" : "Change role"}
-                    >
-                      {ROLES.map((r) => (
-                        <option key={r} value={r}>{r}</option>
-                      ))}
-                    </select>
+                    {isOwner ? (
+                      <span
+                        className="rounded-md bg-amber-100 px-2 py-1 text-xs font-medium text-amber-800"
+                        title="The team owner — can't be reassigned or disabled"
+                      >
+                        owner
+                      </span>
+                    ) : (
+                      <select
+                        value={m.roles[0] || "member"}
+                        onChange={(e) => changeRole(m, e.target.value)}
+                        disabled={isMe}
+                        className="h-8 rounded-md border border-input bg-background px-2 text-xs disabled:opacity-50"
+                        title={isMe ? "You can't change your own role" : "Change role"}
+                      >
+                        {ROLES.map((r) => (
+                          <option key={r} value={r}>{r}</option>
+                        ))}
+                      </select>
+                    )}
                     <Button
                       variant="outline"
                       size="sm"
                       onClick={() => toggleStatus(m)}
-                      disabled={isMe}
-                      title={isMe ? "You can't disable yourself" : disabled ? "Re-enable" : "Disable"}
+                      disabled={isMe || isOwner}
+                      title={
+                        isOwner
+                          ? "The owner can't be disabled"
+                          : isMe
+                            ? "You can't disable yourself"
+                            : disabled
+                              ? "Re-enable"
+                              : "Disable"
+                      }
                     >
                       {disabled ? <RotateCcw className="h-3.5 w-3.5" /> : <Ban className="h-3.5 w-3.5" />}
                       {disabled ? "Enable" : "Disable"}
