@@ -120,8 +120,13 @@ def build_fastapi_app(
         # `/admin/model-endpoints` and must stay behind auth + the admin-role
         # gate. (The tenant admin API at `/tenants/*` is likewise gated.)
         if ui_dist_dir:
-            admin_pages = ("/admin", "/admin/mcp", "/admin/skills", "/admin/models")
-            exempt_exact = ("/", "/favicon.svg", "/favicon.ico", "/knowledge") + admin_pages
+            # SPA PAGE shells must load anonymously (the React app boots, then
+            # makes authenticated API calls). API routes stay gated.
+            spa_pages = (
+                "/admin", "/admin/mcp", "/admin/skills", "/admin/models",
+                "/knowledge", "/org",
+            )
+            exempt_exact = ("/", "/favicon.svg", "/favicon.ico") + spa_pages
             exempt_prefixes = ("/assets/",)
         else:
             exempt_exact = ()
@@ -131,8 +136,12 @@ def build_fastapi_app(
         # read). /auth/me and /auth/logout stay gated.
         if identity is not None:
             from .identity_routes import PUBLIC_PATHS
+            from .org_routes import PUBLIC_PREFIXES as INVITE_PREFIXES
 
             exempt_exact = exempt_exact + PUBLIC_PATHS
+            # /auth/invite/* (the public invite API) + the /invite/<token>
+            # SPA page shell, so an invitee can land + accept before signing in.
+            exempt_prefixes = exempt_prefixes + INVITE_PREFIXES + ("/invite/",)
         # REST authZ gate (closes trust-the-path). Added BEFORE the auth
         # middleware so it ends up INNER: Starlette runs the last-added
         # middleware outermost, so auth (added next) runs first and sets
@@ -156,8 +165,10 @@ def build_fastapi_app(
     # the UI catch-all so the routes win on path match.
     if identity is not None:
         from .identity_routes import mount_identity_routes
+        from .org_routes import mount_org_routes
 
         mount_identity_routes(fastapi_app, identity)
+        mount_org_routes(fastapi_app, identity)
 
     # Admin panel routes (default-OFF). Mounted BEFORE the UI StaticFiles
     # mount — the SPA is mounted at `/` (a catch-all) and would otherwise
@@ -217,14 +228,21 @@ def _mount_ui(app, dist_dir: str) -> None:
     # Client-side routes (react-router). Enumerated EXACTLY — NOT a
     # `/admin/{path}` catch-all, which would shadow the admin API routes
     # (e.g. /admin/model-endpoints) that get registered later. Add new SPA
-    # page tabs here as they're created.
-    for _spa_path in ("/admin", "/admin/mcp", "/admin/skills", "/admin/models", "/knowledge"):
+    # page tabs here as they're created (and to the auth-exempt list above).
+    for _spa_path in (
+        "/admin", "/admin/mcp", "/admin/skills", "/admin/models", "/knowledge", "/org",
+    ):
         app.add_api_route(
             _spa_path,
             lambda: FileResponse(index_html),
             methods=["GET"],
             include_in_schema=False,
         )
+
+    # Parameterized SPA route: the public accept-invite page /invite/<token>.
+    @app.get("/invite/{token}", include_in_schema=False)
+    def _spa_invite(token: str) -> FileResponse:
+        return FileResponse(index_html)
 
     app.mount("/", StaticFiles(directory=str(dist), html=False), name="ui")
 

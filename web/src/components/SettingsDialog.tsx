@@ -1,5 +1,5 @@
 import { useEffect } from "react"
-import { X, Moon, Sun, Monitor, LogOut, Shield, Network } from "lucide-react"
+import { X, Moon, Sun, Monitor, LogOut, Shield, Network, Users } from "lucide-react"
 import { Button } from "./ui/button"
 import { useTheme, type ThemeMode } from "@/lib/theme"
 import { clearToken, getToken, getUser, maybeAdmin } from "@/api/auth"
@@ -112,7 +112,13 @@ export function SettingsDialog({
           </section>
 
           {maybeAdmin() && (
-            <section className="pt-2 border-t">
+            <section className="pt-2 border-t space-y-2">
+              <a href="/org">
+                <Button variant="outline" size="sm" className="w-full">
+                  <Users className="h-3.5 w-3.5" />
+                  Team
+                </Button>
+              </a>
               <a href="/admin">
                 <Button variant="outline" size="sm" className="w-full">
                   <Shield className="h-3.5 w-3.5" />
