@@ -45,6 +45,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [verified, setVerified] = useState<boolean | null>(null)
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null)
   const [mode, setMode] = useState<"login" | "signup">("login")
+  // True when the server accepts unauthenticated calls (ADK_CC_ALLOW_NO_AUTH).
+  // Used so the signed-out screen offers a one-click "Continue" instead of a
+  // dead-end token-paste form (you have no token to type on a no-auth server).
+  const [noAuthMode, setNoAuthMode] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -57,39 +61,43 @@ export function AuthGate({ children }: { children: ReactNode }) {
         // leave authConfig null so the token-paste form renders.
       }
     }
+    async function isAnonOk(): Promise<boolean> {
+      // Does the server accept unauthenticated requests (no-auth dev mode)?
+      try {
+        await apiFetch<string[]>("/list-apps", { noAuth: true })
+        return true
+      } catch {
+        return false
+      }
+    }
     async function bootstrap() {
       if (getToken()) {
         try {
           await apiFetch<string[]>("/list-apps")
           if (!cancelled) setVerified(true)
+          return
         } catch {
           if (cancelled) return
-          setToken("", "")
-          await loadConfig()
-          if (!cancelled) setVerified(false)
+          setToken("", "") // stale/expired → fall through to the login flow
         }
-        return
       }
-      // Explicit sign-out: do NOT silently auto-login via no-auth dev mode —
-      // show the login form and stay there until the user signs in again.
-      if (isSignedOut()) {
-        await loadConfig()
-        if (!cancelled) setVerified(false)
-        return
-      }
-      // No token — does the server accept unauthenticated requests?
-      try {
-        await apiFetch<string[]>("/list-apps", { noAuth: true })
-        if (cancelled) return
+      // No (valid) token. Learn the server's auth shape: password provider?
+      // anonymous-OK (no-auth dev)?
+      await loadConfig()
+      const anon = await isAnonOk()
+      if (cancelled) return
+      setNoAuthMode(anon)
+      // No-auth dev mode AND not an explicit sign-out → auto-sign-in (frictionless
+      // dev). After an explicit sign-out we deliberately DON'T, so it sticks; the
+      // signed-out screen then offers a one-click Continue.
+      if (anon && !isSignedOut()) {
         const u = getUser()
         setToken(DEV_TOKEN, u)
         setLocalUser(u)
         setVerified(true)
-      } catch {
-        if (cancelled) return
-        await loadConfig()
-        if (!cancelled) setVerified(false) // real auth required → login form
+        return
       }
+      setVerified(false) // show the login / continue screen
     }
     if (verified === null) bootstrap()
     return () => {
@@ -116,6 +124,15 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   const passwordMode = !!authConfig?.password
   const canSignup = !!authConfig?.registration
+
+  // --- no-auth dev: one-click re-entry after sign-out ---
+  function handleContinue() {
+    const u = getUser()
+    setToken(DEV_TOKEN, u)
+    setLocalUser(u)
+    clearSignedOut()
+    setVerified(true)
+  }
 
   // --- email + password (in-house identity provider) ---
   async function handlePassword(e: React.FormEvent) {
@@ -255,6 +272,21 @@ export function AuthGate({ children }: { children: ReactNode }) {
                   </p>
                 )}
               </form>
+            </CardContent>
+          </>
+        ) : noAuthMode ? (
+          <>
+            <CardHeader>
+              <CardTitle>Signed out</CardTitle>
+              <CardDescription>
+                This is a no-auth dev server (ADK_CC_ALLOW_NO_AUTH) — there's no
+                account to sign in with. Continue back into the app.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button onClick={handleContinue} className="w-full">
+                Continue
+              </Button>
             </CardContent>
           </>
         ) : (

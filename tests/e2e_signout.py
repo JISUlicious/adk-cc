@@ -81,20 +81,28 @@ def main() -> int:
             page.click('button[title="Settings"]')
             page.get_by_text("Sign out").first.click()
 
-            # must land on the login form (token-paste in no-auth mode)…
-            page.wait_for_selector("#token", timeout=10000)
-            check("sign-out lands on the login form", page.locator("#token").count() == 1)
+            # must land on the signed-out screen (no-auth → one-click Continue,
+            # NOT a dead-end token form you can't fill)…
+            page.wait_for_selector("text=Signed out", timeout=10000)
+            cont = page.get_by_role("button", name="Continue")
+            check("sign-out lands on the signed-out screen with Continue", cont.count() == 1)
 
             # …and STAY there — it must NOT bounce back into chat
             time.sleep(2.0)
             check("does NOT bounce back to chat after sign-out",
                   page.locator('button[title="Settings"]').count() == 0
-                  and page.locator("#token").count() == 1)
+                  and page.get_by_role("button", name="Continue").count() == 1)
 
             # a hard reload keeps us signed out (marker persists in the tab)
             page.reload(wait_until="networkidle")
-            page.wait_for_selector("#token", timeout=10000)
-            check("stays signed out across reload", page.locator("#token").count() == 1)
+            page.wait_for_selector("text=Signed out", timeout=10000)
+            check("stays signed out across reload",
+                  page.get_by_role("button", name="Continue").count() == 1)
+
+            # Continue → back into the app (this is the "log back in" path)
+            page.get_by_role("button", name="Continue").click()
+            page.wait_for_selector('button[title="Settings"]', timeout=20000)
+            check("Continue re-enters the app", page.locator('button[title="Settings"]').count() == 1)
 
             browser.close()
         print(f"\nsign-out e2e: {_passed} passed, {_failed} failed")
