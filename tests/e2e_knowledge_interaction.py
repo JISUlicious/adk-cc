@@ -40,9 +40,11 @@ def main() -> int:
     from adk_cc.wiki import WikiStore
     from adk_cc.wiki.page import Page
     w = WikiStore.for_tenant("local", root=root).ensure()
-    w.write_domain_page(Page("gpu", {"title": "GPU", "sources": ["s1"]},
-                             "GPUs use SIMT. See [[cpu]] for the scalar contrast.\n"))
-    w.write_domain_page(Page("cpu", {"title": "CPU", "sources": ["s2"]},
+    # markdown-rich body to verify the renderer (heading/list/bold) + a wikilink
+    w.write_domain_page(Page("gpu", {"title": "GPU", "type": "concept", "sources": ["s1"]},
+                             "## Overview\nGPUs use **SIMT**. Traits:\n\n- wide\n- parallel\n\n"
+                             "See [[cpu]] for the scalar contrast.\n"))
+    w.write_domain_page(Page("cpu", {"title": "CPU", "type": "concept", "sources": ["s2"]},
                              "CPUs use deep pipelines and big caches.\n"))
 
     env = dict(os.environ)
@@ -106,6 +108,16 @@ def main() -> int:
             node_shown = opened and detail_open()
             page.screenshot(path=SHOT_NODE, full_page=False)
             print(f"  [{'PASS' if node_shown else 'FAIL'}] node click → detail pane shows page content")
+
+            # markdown rendering: if the GPU page is open, the body should render
+            # as real markdown (list/bold), not preformatted text.
+            md_ok = (page.locator("aside ul li").count() > 0
+                     and page.locator("aside strong").count() > 0)
+            if page.locator("aside:has-text('SIMT')").count() > 0:
+                print(f"  [{'PASS' if md_ok else 'FAIL'}] wiki body renders as markdown (list + bold)")
+                node_shown = node_shown and md_ok
+            else:
+                print("  [info] GPU page not the one opened — markdown check skipped this run")
 
             # If GPU is open, its body has a [[cpu]] link rendered as a button.
             link_ok = False

@@ -185,3 +185,66 @@ export function Markdown({ children }: { children: string }) {
     </ReactMarkdown>
   )
 }
+
+function _slugify(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
+}
+
+/** Rewrite `[[target|alias]]` / `[[target]]` into markdown links using a
+ * `wiki:` scheme the WikiMarkdown `a` renderer intercepts for in-app nav. */
+function _linkifyWikilinks(body: string): string {
+  return body.replace(/\[\[([^\]]+)\]\]/g, (_m, inner: string) => {
+    const [target, alias] = inner.split("|")
+    const slug = _slugify((target || "").trim())
+    const label = (alias || target || "").trim()
+    return slug ? `[${label}](wiki:${slug})` : label
+  })
+}
+
+// Allow safe schemes + our wiki: scheme; drop javascript:/data:/etc.
+function _urlTransform(url: string): string {
+  if (url.startsWith("wiki:")) return url
+  if (/^(https?:|mailto:|tel:|#|\/)/i.test(url)) return url
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) return url // relative / scheme-less
+  return ""
+}
+
+/** GFM markdown for wiki pages: full formatting AND clickable `[[wikilinks]]`
+ * that navigate within the graph (via `onWikiLink(slug)`) instead of opening a
+ * new tab. */
+export function WikiMarkdown({
+  children,
+  onWikiLink,
+}: {
+  children: string
+  onWikiLink: (slug: string) => void
+}) {
+  const components = {
+    ...MARKDOWN_COMPONENTS,
+    a: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
+      const href = props.href || ""
+      if (href.startsWith("wiki:")) {
+        const slug = href.slice("wiki:".length)
+        return (
+          <button
+            type="button"
+            onClick={() => onWikiLink(slug)}
+            className="text-primary underline underline-offset-2 hover:opacity-80"
+          >
+            {props.children}
+          </button>
+        )
+      }
+      return <a className="text-primary hover:underline" target="_blank" rel="noreferrer" {...props} />
+    },
+  }
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      urlTransform={_urlTransform}
+      components={components}
+    >
+      {_linkifyWikilinks(children)}
+    </ReactMarkdown>
+  )
+}

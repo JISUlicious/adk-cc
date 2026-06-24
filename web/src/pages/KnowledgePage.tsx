@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { ArrowLeft, Maximize2 } from "lucide-react"
 import ForceGraph2D from "react-force-graph-2d"
 import { Button } from "@/components/ui/button"
+import { WikiMarkdown } from "@/lib/markdown"
 import {
   fetchWikiGraph,
   fetchWikiPage,
@@ -219,48 +220,23 @@ function DetailPane({
         {p.title}
         {p.contested && <span className="ml-2 text-xs text-amber-600">⚠ contested</span>}
       </h2>
-      <WikiBody body={p.body || ""} onWikiLink={onWikiLink} />
+      {(() => {
+        const ty = p.frontmatter?.type as string | undefined
+        const tags = p.frontmatter?.tags as string[] | undefined
+        if (!ty && !(tags && tags.length)) return null
+        return (
+          <p className="text-xs text-muted-foreground">
+            {ty || ""}
+            {tags && tags.length ? (ty ? " · " : "") + tags.join(", ") : ""}
+          </p>
+        )
+      })()}
+      <div className="leading-relaxed [&_p]:my-1.5">
+        <WikiMarkdown onWikiLink={onWikiLink}>{p.body || ""}</WikiMarkdown>
+      </div>
       {p.sources && p.sources.length > 0 && (
         <p className="mt-3 text-xs text-muted-foreground">sources: {p.sources.join(", ")}</p>
       )}
     </div>
-  )
-}
-
-/** Render a wiki body, turning [[slug|alias]] into clickable links that focus
- * the target node. Not full markdown — wikilink-aware preformatted text. */
-function WikiBody({ body, onWikiLink }: { body: string; onWikiLink: (slug: string) => void }) {
-  const parts = useMemo(() => {
-    const out: Array<{ text: string; slug?: string }> = []
-    const re = /\[\[([^\]]+)\]\]/g
-    let last = 0
-    let m: RegExpExecArray | null
-    while ((m = re.exec(body)) !== null) {
-      if (m.index > last) out.push({ text: body.slice(last, m.index) })
-      const target = m[1].split("|")[0].trim()
-      const slug = target.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
-      out.push({ text: m[1].split("|").pop()!.trim(), slug })
-      last = re.lastIndex
-    }
-    if (last < body.length) out.push({ text: body.slice(last) })
-    return out
-  }, [body])
-
-  return (
-    <p className="whitespace-pre-wrap">
-      {parts.map((seg, i) =>
-        seg.slug ? (
-          <button
-            key={i}
-            onClick={() => onWikiLink(seg.slug!)}
-            className="text-primary underline underline-offset-2 hover:opacity-80"
-          >
-            {seg.text}
-          </button>
-        ) : (
-          <span key={i}>{seg.text}</span>
-        ),
-      )}
-    </p>
   )
 }
