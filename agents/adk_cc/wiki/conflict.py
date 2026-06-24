@@ -87,6 +87,8 @@ class ClaimRecord:
     doc_id: str
     sources: list[str] = field(default_factory=list)  # EXTERNAL source ids
     created: str = ""
+    type: str = "concept"                              # llm-wiki page category
+    tags: list[str] = field(default_factory=list)      # ≤3 kebab labels
 
     @property
     def claim_hash(self) -> str:

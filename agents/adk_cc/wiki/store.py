@@ -186,22 +186,32 @@ class WikiStore:
         title: Optional[str] = None,
         topic: Optional[str] = None,
         sources: Optional[list[str]] = None,
+        type: Optional[str] = None,
+        tags: Optional[list[str]] = None,
         extra_frontmatter: Optional[dict[str, Any]] = None,
         doc_id: Optional[str] = None,
     ) -> InboxDoc:
         """Capture a doc/claim into the user's inbox. Slug from `topic` else
         `title` else the first body line; `doc_id` unique (`<slug>__<hash8>`)
-        unless given. Idempotent when an explicit `doc_id` is reused."""
+        unless given. Idempotent when an explicit `doc_id` is reused. `type`
+        (entity|concept|source|comparison|query, default concept) and `tags`
+        (≤3 kebab) follow the llm-wiki skill schema."""
         slug = pagelib.slugify(topic or title or _first_line(text)) or "note"
         if doc_id is None:
             doc_id = f"{slug}__{_short_hash(text)}"
         doc_id = _safe_id(doc_id, "doc_id")
+        now = _now_iso()
         fm: dict[str, Any] = {
             "title": title or _first_line(text) or slug,
             "slug": slug,
+            "type": type if type in pagelib._PAGE_TYPES else "concept",
             "captured_by": user_id,
-            "created": _now_iso(),
+            "created": now,
+            "updated": now,
         }
+        norm_tags = pagelib.normalize_tags(tags)
+        if norm_tags:
+            fm["tags"] = norm_tags
         if sources:
             fm["sources"] = list(sources)
         if extra_frontmatter:

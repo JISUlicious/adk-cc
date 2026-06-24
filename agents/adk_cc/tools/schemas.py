@@ -319,3 +319,18 @@ class WikiAddArgs(BaseModel):
             "have the librarian merge your note into it."
         ),
     )
+    type: Optional[str] = Field(
+        default=None,
+        description=(
+            "Page category: entity | concept | source | comparison | query. "
+            "Defaults to 'concept'. Use 'entity' for a person/org/product/place, "
+            "'concept' for a topic/technique, 'comparison' for a contrast."
+        ),
+    )
+    tags: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "Up to 3 short kebab-case organizational labels (e.g. 'iclr-2024'). "
+            "Don't tag things that should be their own page — link those instead."
+        ),
+    )

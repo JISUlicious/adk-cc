@@ -205,6 +205,8 @@ class WikiAddTool(AdkCcTool):
             args.text,
             title=args.title,
             topic=args.topic,
+            type=args.type,
+            tags=args.tags,
         )
         return {
             "status": "ok",

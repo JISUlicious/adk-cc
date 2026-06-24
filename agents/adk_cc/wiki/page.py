@@ -10,6 +10,10 @@ Parsing round-trips frontmatter through PyYAML and keeps the body
 verbatim. The frontmatter keys this layer understands:
 
   title:       display title (else derived from the first H1, else slug)
+  type:        page category (entity|concept|source|comparison|query); llm-wiki
+               skill field, defaults to 'concept'
+  tags:        up to 3 kebab-case labels (llm-wiki skill field; see normalize_tags)
+  updated:     ISO-8601 last-update timestamp (skill field; falls back to created)
   sources:     list of source-doc ids backing the page (cite-or-quarantine)
   no_promote:  truthy → never merged into domain (privacy; alias: sensitive)
   contested:   truthy → page records a true contradiction (queryable)
@@ -28,6 +32,21 @@ import yaml
 
 _FENCE = "---"
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+
+# llm-wiki skill page categories (frontmatter `type`).
+_PAGE_TYPES = ("entity", "concept", "source", "comparison", "query")
+
+
+def normalize_tags(tags) -> list[str]:
+    """Skill tag policy: kebab-case, deduped, max 3. Tolerant of str|list."""
+    if isinstance(tags, str):
+        tags = [tags]
+    out: list[str] = []
+    for t in tags or []:
+        s = slugify(str(t))
+        if s and s not in out:
+            out.append(s)
+    return out[:3]
 _H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 # A closing frontmatter fence: a line that is exactly `---` (optional
@@ -81,6 +100,23 @@ class Page:
     def sources(self) -> list[str]:
         s = self.frontmatter.get("sources")
         return [str(x) for x in s] if isinstance(s, list) else []
+
+    @property
+    def type(self) -> str:
+        """Page category (llm-wiki skill): entity|concept|source|comparison|
+        query. Defaults to 'concept' when unset."""
+        t = self.frontmatter.get("type")
+        return t if t in _PAGE_TYPES else "concept"
+
+    @property
+    def tags(self) -> list[str]:
+        t = self.frontmatter.get("tags")
+        return [str(x) for x in t] if isinstance(t, list) else []
+
+    @property
+    def updated(self) -> str:
+        """Last-update timestamp (skill field). Falls back to `created`."""
+        return str(self.frontmatter.get("updated") or self.frontmatter.get("created") or "")
 
     @property
     def contested(self) -> bool:

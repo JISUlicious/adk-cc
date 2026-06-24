@@ -57,6 +57,8 @@ def mount_knowledge_routes(app) -> None:
                 "id": slug,
                 "label": page.title,
                 "kind": "domain",
+                "type": page.type,
+                "tags": page.tags,
                 "contested": bool(page.contested),
                 "sources": len(page.sources),
             })

@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional, Union
 
@@ -270,6 +271,8 @@ class Librarian:
                     doc_id=doc.doc_id,
                     sources=doc.page.sources,
                     created=str(doc.page.frontmatter.get("created", "")),
+                    type=doc.page.type,
+                    tags=doc.page.tags,
                 )
                 report.claims_seen += 1
                 # sticky idempotency: if already queued and NOT since
@@ -485,6 +488,18 @@ def _apply_resolution(page: Page, res: Resolution) -> Page:
     claim = res.claim
     fm = dict(page.frontmatter)
     fm.setdefault("title", _titleize(page.slug))
+    # llm-wiki skill frontmatter: carry type, union tags (≤3), stamp timestamps.
+    fm.setdefault("type", getattr(claim, "type", None) or "concept")
+    claim_tags = getattr(claim, "tags", None) or []
+    if claim_tags:
+        merged_tags = list(fm.get("tags") or [])
+        for t in claim_tags:
+            if t not in merged_tags:
+                merged_tags.append(t)
+        fm["tags"] = merged_tags[:3]
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    fm.setdefault("created", claim.created or now)
+    fm["updated"] = now
     # union external sources
     srcs = list(fm.get("sources") or [])
     for s in claim.sources:
