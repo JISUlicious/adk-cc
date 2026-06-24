@@ -52,6 +52,23 @@ def mount_org_routes(app, identity) -> None:
         auth = _require_admin(request)
         return {"members": identity.list_members(auth.tenant_id)}
 
+    @router.post("/orgs/members")
+    async def create_member(request: Request):
+        # Admin provisions a user directly (email + initial password + role) in
+        # their own org. Complements invites — useful for single-org deployments.
+        auth = _require_admin(request)
+        body = await _json(request)
+        try:
+            return identity.provision_member(
+                auth.tenant_id,
+                email=body.get("email") or "",
+                password=body.get("password") or "",
+                name=(body.get("name") or "").strip(),
+                role=body.get("role") or "member",
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     @router.post("/orgs/invites")
     async def create_invite(request: Request):
         auth = _require_admin(request)

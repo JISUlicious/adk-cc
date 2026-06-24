@@ -5,8 +5,10 @@ import { Button } from "@/components/ui/button"
 import { McpAdminTab } from "@/components/admin/McpAdminTab"
 import { SkillsAdminTab } from "@/components/admin/SkillsAdminTab"
 import { ModelAdminTab } from "@/components/admin/ModelAdminTab"
+import { UsersAdminTab } from "@/components/admin/UsersAdminTab"
 
 const TABS = [
+  { id: "users", label: "Users" },
   { id: "mcp", label: "MCP Servers" },
   { id: "skills", label: "Skills" },
   { id: "models", label: "Model Endpoints" },
@@ -17,7 +19,7 @@ type TabId = (typeof TABS)[number]["id"]
 export function AdminPage() {
   const { tab } = useParams<{ tab?: string }>()
   const navigate = useNavigate()
-  const active: TabId = (TABS.find((t) => t.id === tab)?.id ?? "mcp") as TabId
+  const active: TabId = (TABS.find((t) => t.id === tab)?.id ?? "users") as TabId
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-6">
@@ -48,6 +50,7 @@ export function AdminPage() {
       </nav>
 
       <main>
+        {active === "users" && <UsersAdminTab />}
         {active === "mcp" && <McpAdminTab />}
         {active === "skills" && <SkillsAdminTab />}
         {active === "models" && <ModelAdminTab />}

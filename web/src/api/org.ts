@@ -50,6 +50,18 @@ export function listMembers(): Promise<{ members: Member[] }> {
   return apiFetch("/orgs/members")
 }
 
+export function createUser(
+  email: string,
+  password: string,
+  name: string,
+  role: string,
+): Promise<Member> {
+  return apiFetch("/orgs/members", {
+    method: "POST",
+    body: JSON.stringify({ email, password, name, role }),
+  })
+}
+
 export function createInvite(email: string, role: string): Promise<CreatedInvite> {
   return apiFetch("/orgs/invites", { method: "POST", body: JSON.stringify({ email, role }) })
 }

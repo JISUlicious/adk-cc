@@ -161,6 +161,18 @@ class IdentityService:
     def list_members(self, tenant_id: str) -> list[dict]:
         return [self._member_dict(u) for u in self.store.list_by_tenant(tenant_id)]
 
+    def provision_member(self, tenant_id: str, *, email: str, password: str,
+                        name: str = "", role: str = MEMBER_ROLE) -> dict:
+        """Admin path: create a user directly in the org with a password (no
+        invite). Role is restricted to {admin, member} — ownership isn't grantable."""
+        role = role or MEMBER_ROLE
+        if role not in self.allowed_roles():
+            raise ValueError(f"invalid role: {role}")
+        ident = self.provider.provision(
+            email=email, password=password, name=name, tenant_id=tenant_id, roles=[role])
+        u = self.store.get(ident.user_id)
+        return self._member_dict(u)
+
     def create_invite(self, tenant_id: str, email: str, role: str = MEMBER_ROLE,
                       ttl_s: int = _INVITE_TTL_S) -> InviteRecord:
         role = role or MEMBER_ROLE

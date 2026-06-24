@@ -123,7 +123,7 @@ def build_fastapi_app(
             # SPA PAGE shells must load anonymously (the React app boots, then
             # makes authenticated API calls). API routes stay gated.
             spa_pages = (
-                "/admin", "/admin/mcp", "/admin/skills", "/admin/models",
+                "/admin", "/admin/users", "/admin/mcp", "/admin/skills", "/admin/models",
                 "/knowledge", "/org", "/account",
             )
             exempt_exact = ("/", "/favicon.svg", "/favicon.ico") + spa_pages
@@ -230,7 +230,8 @@ def _mount_ui(app, dist_dir: str) -> None:
     # (e.g. /admin/model-endpoints) that get registered later. Add new SPA
     # page tabs here as they're created (and to the auth-exempt list above).
     for _spa_path in (
-        "/admin", "/admin/mcp", "/admin/skills", "/admin/models", "/knowledge", "/org", "/account",
+        "/admin", "/admin/users", "/admin/mcp", "/admin/skills", "/admin/models",
+        "/knowledge", "/org", "/account",
     ):
         app.add_api_route(
             _spa_path,
