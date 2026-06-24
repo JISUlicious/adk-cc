@@ -5,6 +5,7 @@ import { ChatPage } from "@/pages/ChatPage"
 import { AdminPage } from "@/pages/AdminPage"
 import { KnowledgePage } from "@/pages/KnowledgePage"
 import { OrgPage } from "@/pages/OrgPage"
+import { AccountPage } from "@/pages/AccountPage"
 import { AcceptInvitePage } from "@/pages/AcceptInvitePage"
 
 function App() {
@@ -24,6 +25,7 @@ function App() {
                 <Route path="/admin/:tab" element={<AdminPage />} />
                 <Route path="/knowledge" element={<KnowledgePage />} />
                 <Route path="/org" element={<OrgPage />} />
+                <Route path="/account" element={<AccountPage />} />
               </Routes>
             </AuthGate>
           }

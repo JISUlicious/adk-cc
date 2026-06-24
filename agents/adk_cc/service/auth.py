@@ -220,6 +220,7 @@ class JwtAuthExtractor:
         roles_claim: str = "roles",
         scopes_claim: str = "scope",
         jwks_cache_ttl_seconds: int = 300,
+        extra_validate: Optional[Callable[[dict], None]] = None,
     ) -> None:
         if jwks_url is None and jwks is None:
             raise ValueError("JwtAuthExtractor needs either jwks_url or jwks")
@@ -231,6 +232,10 @@ class JwtAuthExtractor:
         self._roles_claim = roles_claim
         self._scopes_claim = scopes_claim
         self._ttl = jwks_cache_ttl_seconds
+        # Optional post-validation hook (e.g. PAT revocation): called with the
+        # decoded claims after signature/exp/iss/aud checks pass. It may raise
+        # HTTPException to reject the token.
+        self._extra_validate = extra_validate
 
         # If a static `jwks` dict was passed, prime the cache and skip
         # all fetching. Otherwise fetch lazily on first call.
@@ -325,6 +330,8 @@ class JwtAuthExtractor:
             raise HTTPException(
                 status_code=401, detail=f"missing {self._tenant_claim} claim"
             )
+        if self._extra_validate is not None:
+            self._extra_validate(claims)  # may raise HTTPException (e.g. revoked PAT)
         roles = _coerce_str_set(claims.get(self._roles_claim))
         scopes = _coerce_str_set(claims.get(self._scopes_claim))
         return AuthPrincipal(str(user_id), str(tenant_id), roles, scopes)

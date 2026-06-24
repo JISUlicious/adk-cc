@@ -1,5 +1,5 @@
 import { useEffect } from "react"
-import { X, Moon, Sun, Monitor, LogOut, Shield, Network, Users } from "lucide-react"
+import { X, Moon, Sun, Monitor, LogOut, Shield, Network, Users, User } from "lucide-react"
 import { Button } from "./ui/button"
 import { useTheme, type ThemeMode } from "@/lib/theme"
 import { clearToken, getToken, getUser, maybeAdmin, markSignedOut } from "@/api/auth"
@@ -102,7 +102,13 @@ export function SettingsDialog({
             <ReadOnlyRow label="Bearer token" value={masked} mono />
           </section>
 
-          <section className="pt-2 border-t">
+          <section className="pt-2 border-t space-y-2">
+            <a href="/account">
+              <Button variant="outline" size="sm" className="w-full">
+                <User className="h-3.5 w-3.5" />
+                Account
+              </Button>
+            </a>
             <a href="/knowledge">
               <Button variant="outline" size="sm" className="w-full">
                 <Network className="h-3.5 w-3.5" />

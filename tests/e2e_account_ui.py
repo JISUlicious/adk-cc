@@ -1,0 +1,150 @@
+"""E2E: account self-service through the UI (real browser, no model).
+
+Navigates to the Account page, edits the profile name, changes the password,
+and creates + revokes an API key — verifying the once-shown token appears.
+
+Run: .venv/bin/python tests/e2e_account_ui.py
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+os.environ.setdefault("ADK_CC_SKIP_DOTENV", "1")
+os.environ.setdefault("ADK_CC_API_KEY", "stub")
+
+import requests
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PORT = 8921
+BASE = f"http://127.0.0.1:{PORT}"
+
+_passed = _failed = 0
+
+
+def check(name, ok):
+    global _passed, _failed
+    print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
+    if ok:
+        _passed += 1
+    else:
+        _failed += 1
+
+
+def main() -> int:
+    if not os.path.isfile(os.path.join(REPO, "web", "dist", "index.html")):
+        print("SKIP: web/dist not built."); return 0
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        print("SKIP: playwright unavailable."); return 0
+
+    root = tempfile.mkdtemp(prefix="acct-ui-")
+    iddir = os.path.join(root, "identity")
+    os.makedirs(iddir, exist_ok=True)
+    from adk_cc.identity.store import JsonFileUserStore
+    from adk_cc.identity.provider import EmailPasswordProvider
+    store = JsonFileUserStore(os.path.join(iddir, "users.json"))
+    EmailPasswordProvider(store, mode="single", global_tenant_id="acme").provision(
+        email="alice@acme.io", password="password123", name="Alice", tenant_id="acme", roles=["admin"])
+
+    env = dict(os.environ)
+    env.update({
+        "ADK_CC_AGENTS_DIR": os.path.join(REPO, "agents"),
+        "ADK_CC_AUTH_PASSWORD": "1", "ADK_CC_TENANCY_MODE": "single",
+        "ADK_CC_GLOBAL_TENANT_ID": "acme", "ADK_CC_IDENTITY_DIR": iddir,
+        "ADK_CC_SERVE_UI": "1", "ADK_CC_SKIP_DOTENV": "1", "ADK_CC_API_KEY": "stub",
+    })
+    env.pop("ADK_CC_ALLOW_NO_AUTH", None)
+    proc = subprocess.Popen(
+        [os.path.join(REPO, ".venv/bin/uvicorn"), "adk_cc.service.server:make_app",
+         "--factory", "--host", "127.0.0.1", "--port", str(PORT)],
+        cwd=REPO, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(80):
+            try:
+                if requests.get(BASE + "/auth/config", timeout=2).ok:
+                    break
+            except Exception:
+                time.sleep(0.25)
+
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1100, "height": 900})
+            page.goto(BASE + "/", wait_until="networkidle")
+            page.wait_for_selector("#email", timeout=10000)
+            page.fill("#email", "alice@acme.io")
+            page.fill("#password", "password123")
+            page.click("button[type=submit]")
+            page.wait_for_selector('button[title="Settings"]', timeout=20000)
+
+            # navigate to the Account page
+            page.goto(BASE + "/account", wait_until="networkidle")
+            page.wait_for_selector("text=Account", timeout=10000)
+            page.wait_for_selector("text=Change password", timeout=10000)
+            email_val = page.locator("input[disabled]").first.input_value()
+            check("Account page loads (profile + password + api keys sections)",
+                  page.get_by_text("API keys").count() > 0
+                  and page.get_by_text("Change password").count() > 0
+                  and email_val == "alice@acme.io")
+
+            # update name (the Name input is the editable, non-disabled text input
+            # in the Profile section; email input is disabled)
+            name_input = page.locator("input:not([disabled])").first
+            name_input.fill("Alice Updated")
+            page.get_by_role("button", name="Save").click()
+            page.wait_for_selector("text=Saved.", timeout=10000)
+            check("profile name save shows confirmation", page.get_by_text("Saved.").count() > 0)
+            # persisted on the server
+            tok = requests.post(BASE + "/auth/login",
+                                json={"email": "alice@acme.io", "password": "password123"}, timeout=5).json()["access_token"]
+            me = requests.get(BASE + "/auth/me", headers={"Authorization": f"Bearer {tok}"}, timeout=5).json()
+            check("name persisted to the server", me.get("name") == "Alice Updated")
+
+            # change password via UI
+            page.fill('input[placeholder="Current password"]', "password123")
+            page.fill('input[placeholder="New password (min 8 chars)"]', "newpassword1")
+            page.get_by_role("button", name="Update password").click()
+            page.wait_for_selector("text=Password changed.", timeout=10000)
+            check("password change shows confirmation", page.get_by_text("Password changed.").count() > 0)
+            check("new password works on the server",
+                  requests.post(BASE + "/auth/login",
+                                json={"email": "alice@acme.io", "password": "newpassword1"}, timeout=5).status_code == 200)
+
+            # create an API key → token shown once
+            page.fill('input[placeholder="key name (e.g. ci)"]', "laptop")
+            page.get_by_role("button", name="Create key").click()
+            page.wait_for_selector("text=won't be shown again", timeout=10000)
+            shown_token = page.locator("code").first.inner_text().strip()
+            check("created API key shows a one-time token (a JWT)",
+                  len(shown_token.split(".")) == 3)
+            check("the new key is listed",
+                  page.locator("li").filter(has_text="laptop").count() > 0)
+            # the shown token actually works
+            check("shown PAT authorizes a gated API call",
+                  requests.get(BASE + "/list-apps", headers={"Authorization": f"Bearer {shown_token}"}, timeout=5).status_code == 200)
+
+            # revoke it → row gone, token rejected
+            page.locator("li").filter(has_text="laptop").get_by_role("button", name="Revoke").click()
+            time.sleep(0.8)
+            check("revoked key removed from the list",
+                  page.locator("li").filter(has_text="laptop").count() == 0)
+            check("revoked PAT now rejected (401)",
+                  requests.get(BASE + "/list-apps", headers={"Authorization": f"Bearer {shown_token}"}, timeout=5).status_code == 401)
+
+            browser.close()
+        print(f"\naccount UI e2e: {_passed} passed, {_failed} failed")
+        return 1 if _failed else 0
+    finally:
+        proc.kill()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -12,22 +12,30 @@ import os
 import secrets
 import time
 
-from .models import InviteRecord
+from .models import ApiKeyRecord, InviteRecord
+from .passwords import hash_password, verify_password
 from .provider import EmailPasswordProvider, Identity
-from .store import JsonFileInviteStore, JsonFileUserStore, normalize_email
+from .store import (
+    JsonFileApiKeyStore,
+    JsonFileInviteStore,
+    JsonFileUserStore,
+    normalize_email,
+)
 from .tokens import TokenIssuer
 
 MEMBER_ROLE = "member"
 OWNER_ROLE = "owner"
 _INVITE_TTL_S = 7 * 24 * 3600
+_PAT_TTL_S = 365 * 24 * 3600  # personal access tokens: 1 year
 
 
 class IdentityService:
-    def __init__(self, *, provider, issuer: TokenIssuer, mode: str, invites=None) -> None:
+    def __init__(self, *, provider, issuer: TokenIssuer, mode: str, invites=None, api_keys=None) -> None:
         self.provider = provider
         self.issuer = issuer
         self.mode = mode
         self.invites = invites
+        self.api_keys = api_keys
 
     @property
     def store(self):
@@ -64,7 +72,8 @@ class IdentityService:
             store, mode=mode, global_tenant_id=global_tenant, admin_role=admin_role
         )
         invites = JsonFileInviteStore(os.path.join(base, "invites.json"))
-        svc = cls(provider=provider, issuer=issuer, mode=mode, invites=invites)
+        api_keys = JsonFileApiKeyStore(os.path.join(base, "api_keys.json"))
+        svc = cls(provider=provider, issuer=issuer, mode=mode, invites=invites, api_keys=api_keys)
         svc._maybe_bootstrap_admin(global_tenant, admin_role)
         return svc
 
@@ -96,7 +105,22 @@ class IdentityService:
             tenant_claim=i.tenant_claim,
             roles_claim=i.roles_claim,
             scopes_claim=i.scopes_claim,
+            extra_validate=self._validate_pat,
         )
+
+    def _validate_pat(self, claims) -> None:
+        """Post-validation hook: reject a personal access token whose handle has
+        been revoked (or vanished). Non-PAT tokens pass through untouched."""
+        if not claims.get("pat"):
+            return
+        from fastapi import HTTPException
+
+        jti = claims.get("jti")
+        rec = self.api_keys.get(jti) if (self.api_keys and jti) else None
+        if rec is None or rec.revoked:
+            raise HTTPException(status_code=401, detail="api key revoked")
+        rec.last_used = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self.api_keys.update(rec)
 
     def token_for(self, ident: Identity) -> str:
         return self.issuer.issue(
@@ -224,3 +248,62 @@ class IdentityService:
                   if self.admin_role in m.roles and m.status == "active"]
         if len(admins) <= 1 and any(m.user_id == user_id for m in admins):
             raise ValueError("cannot remove the last admin of the org")
+
+    # ------------------------------------------------------------------
+    # Account self-service (the signed-in user acts on their OWN account).
+    # ------------------------------------------------------------------
+    def profile(self, user_id: str) -> dict:
+        u = self.store.get(user_id)
+        if u is None:
+            raise KeyError("user not found")
+        return {"id": u.user_id, "email": u.email, "name": u.name,
+                "tenant": u.tenant_id, "roles": list(u.roles)}
+
+    def update_profile(self, user_id: str, *, name: str) -> dict:
+        u = self.store.get(user_id)
+        if u is None:
+            raise KeyError("user not found")
+        u.name = (name or "").strip()
+        self.store.update(u)
+        return self.profile(user_id)
+
+    def change_password(self, user_id: str, *, current: str, new: str) -> None:
+        u = self.store.get(user_id)
+        if u is None:
+            raise KeyError("user not found")
+        if not verify_password(current, u.password_hash):
+            raise ValueError("current password is incorrect")
+        if len(new or "") < 8:
+            raise ValueError("new password must be at least 8 characters")
+        u.password_hash = hash_password(new)
+        self.store.update(u)
+
+    def create_api_key(self, user_id: str, *, name: str) -> tuple[ApiKeyRecord, str]:
+        """Mint a long-lived PAT (JWT). Returns (record, token); the token is
+        shown ONCE and never stored — only its revocable handle is."""
+        u = self.store.get(user_id)
+        if u is None:
+            raise KeyError("user not found")
+        if u.status != "active":
+            raise ValueError("account is not active")
+        jti = secrets.token_urlsafe(12)
+        token = self.issuer.issue(
+            user_id=u.user_id, tenant_id=u.tenant_id, roles=tuple(u.roles),
+            email=u.email, name=u.name, ttl_s=_PAT_TTL_S, jti=jti, extra={"pat": True},
+        )
+        rec = ApiKeyRecord(id=jti, user_id=user_id, name=(name or "").strip() or "api key",
+                           created=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        self.api_keys.create(rec)
+        return rec, token
+
+    def list_api_keys(self, user_id: str) -> list[dict]:
+        return [{"id": k.id, "name": k.name, "created": k.created,
+                 "last_used": k.last_used, "revoked": k.revoked}
+                for k in self.api_keys.list_by_user(user_id) if not k.revoked]
+
+    def revoke_api_key(self, user_id: str, key_id: str) -> None:
+        rec = self.api_keys.get(key_id)
+        if rec is None or rec.user_id != user_id:
+            raise KeyError("api key not found")
+        rec.revoked = True
+        self.api_keys.update(rec)

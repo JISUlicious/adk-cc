@@ -15,7 +15,7 @@ from pathlib import Path
 
 from filelock import FileLock
 
-from .models import InviteRecord, UserRecord
+from .models import ApiKeyRecord, InviteRecord, UserRecord
 
 
 def normalize_email(email: str) -> str:
@@ -166,4 +166,64 @@ class JsonFileInviteStore(InviteStore):
                 InviteRecord.from_dict(d)
                 for d in self._read().values()
                 if d.get("tenant_id") == tenant_id
+            ]
+
+
+class ApiKeyStore(ABC):
+    @abstractmethod
+    def create(self, key: ApiKeyRecord) -> None: ...
+
+    @abstractmethod
+    def get(self, key_id: str) -> ApiKeyRecord | None: ...
+
+    @abstractmethod
+    def update(self, key: ApiKeyRecord) -> None: ...
+
+    @abstractmethod
+    def list_by_user(self, user_id: str) -> list[ApiKeyRecord]: ...
+
+
+class JsonFileApiKeyStore(ApiKeyStore):
+    """Personal access tokens in one JSON object {id: record}, filelock-protected."""
+
+    def __init__(self, path: str) -> None:
+        self._path = Path(path)
+        self._lock = FileLock(str(self._path) + ".lock")
+
+    def _read(self) -> dict:
+        if not self._path.exists():
+            return {}
+        with self._path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _write(self, data: dict) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        tmp.replace(self._path)
+
+    def create(self, key: ApiKeyRecord) -> None:
+        with self._lock:
+            data = self._read()
+            data[key.id] = key.to_dict()
+            self._write(data)
+
+    def get(self, key_id: str) -> ApiKeyRecord | None:
+        with self._lock:
+            d = self._read().get(key_id)
+        return ApiKeyRecord.from_dict(d) if d else None
+
+    def update(self, key: ApiKeyRecord) -> None:
+        with self._lock:
+            data = self._read()
+            data[key.id] = key.to_dict()
+            self._write(data)
+
+    def list_by_user(self, user_id: str) -> list[ApiKeyRecord]:
+        with self._lock:
+            return [
+                ApiKeyRecord.from_dict(d)
+                for d in self._read().values()
+                if d.get("user_id") == user_id
             ]

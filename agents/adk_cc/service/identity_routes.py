@@ -85,17 +85,72 @@ def mount_identity_routes(app, identity) -> None:
             "user": identity.user_dict(ident),
         }
 
-    @router.get("/auth/me")
-    async def me(request: Request):
+    def _require_auth(request: Request):
         auth = getattr(request.state, "adk_cc_auth", None)
         if auth is None:
             raise HTTPException(status_code=401, detail="not authenticated")
-        return {
-            "id": auth.user_id,
-            "tenant": auth.tenant_id,
-            "roles": sorted(auth.roles),
-            "scopes": sorted(auth.scopes),
-        }
+        return auth
+
+    @router.get("/auth/me")
+    async def me(request: Request):
+        auth = _require_auth(request)
+        try:
+            prof = identity.profile(auth.user_id)
+        except KeyError:
+            prof = {"id": auth.user_id, "email": "", "name": "", "tenant": auth.tenant_id}
+        return {**prof, "roles": sorted(auth.roles), "scopes": sorted(auth.scopes)}
+
+    @router.patch("/auth/profile")
+    async def update_profile(request: Request):
+        auth = _require_auth(request)
+        body = await _json(request)
+        try:
+            return identity.update_profile(auth.user_id, name=body.get("name") or "")
+        except KeyError:
+            raise HTTPException(status_code=404, detail="user not found")
+
+    @router.post("/auth/password")
+    async def change_password(request: Request):
+        auth = _require_auth(request)
+        body = await _json(request)
+        try:
+            identity.change_password(
+                auth.user_id,
+                current=body.get("current_password") or "",
+                new=body.get("new_password") or "",
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="user not found")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"status": "ok"}
+
+    @router.get("/auth/api-keys")
+    async def list_api_keys(request: Request):
+        auth = _require_auth(request)
+        return {"keys": identity.list_api_keys(auth.user_id)}
+
+    @router.post("/auth/api-keys")
+    async def create_api_key(request: Request):
+        auth = _require_auth(request)
+        body = await _json(request)
+        try:
+            rec, token = identity.create_api_key(auth.user_id, name=body.get("name") or "")
+        except KeyError:
+            raise HTTPException(status_code=404, detail="user not found")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # The token is returned ONCE here and never again.
+        return {"id": rec.id, "name": rec.name, "created": rec.created, "token": token}
+
+    @router.delete("/auth/api-keys/{key_id}")
+    async def revoke_api_key(key_id: str, request: Request):
+        auth = _require_auth(request)
+        try:
+            identity.revoke_api_key(auth.user_id, key_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="api key not found")
+        return {"status": "revoked"}
 
     @router.post("/auth/logout")
     async def logout():

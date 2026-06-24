@@ -75,6 +75,8 @@ class TokenIssuer:
         email: str = "",
         name: str = "",
         ttl_s: int | None = None,
+        jti: str | None = None,
+        extra: dict | None = None,
     ) -> str:
         from authlib.jose import jwt
 
@@ -96,6 +98,10 @@ class TokenIssuer:
             payload["email"] = email
         if name:
             payload["name"] = name
+        if jti:
+            payload["jti"] = jti
+        if extra:
+            payload.update(extra)
         tok = jwt.encode({"alg": "RS256", "kid": self._kid}, payload, self._key)
         return tok.decode("utf-8") if isinstance(tok, bytes) else tok
 

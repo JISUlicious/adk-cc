@@ -29,6 +29,27 @@ class UserRecord:
 
 
 @dataclass
+class ApiKeyRecord:
+    """A personal access token (PAT). The token itself is a long-lived JWT shown
+    ONCE at creation and never stored; this record is the revocable handle —
+    validation rejects a token whose `id` (the JWT `jti`) is revoked or absent."""
+
+    id: str
+    user_id: str
+    name: str = ""
+    created: str = ""
+    last_used: str = ""
+    revoked: bool = False
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ApiKeyRecord":
+        return cls(**{k: d[k] for k in cls.__dataclass_fields__ if k in d})
+
+
+@dataclass
 class InviteRecord:
     """A pending invitation to join a tenant/org with a given role. The token
     is the share secret (the invite link carries it); accepting it creates a
