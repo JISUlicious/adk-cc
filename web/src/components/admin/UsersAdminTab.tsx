@@ -89,10 +89,10 @@ export function UsersAdminTab() {
             <label className="text-xs text-muted-foreground">Name</label>
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="optional" />
           </div>
-          <div className="space-y-1">
-            <label className="text-xs text-muted-foreground">Role</label>
+          <div className="min-w-[110px] space-y-1">
+            <label className="block text-xs text-muted-foreground">Role</label>
             <select value={role} onChange={(e) => setRole(e.target.value)}
-                    className="h-9 rounded-md border border-input bg-background px-2 text-sm">
+                    className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm">
               {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
           </div>
