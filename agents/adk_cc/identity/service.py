@@ -8,10 +8,11 @@ Keycloak) is the single swap point for a future login variant.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import secrets
 import time
-
 import uuid
 
 from .models import ApiKeyRecord, AuditEvent, InviteRecord
@@ -30,6 +31,30 @@ MEMBER_ROLE = "member"
 OWNER_ROLE = "owner"
 _INVITE_TTL_S = 7 * 24 * 3600
 _PAT_TTL_S = 365 * 24 * 3600  # personal access tokens: 1 year
+
+_log = logging.getLogger(__name__)
+
+
+def _fire_and_forget(fn, *args) -> None:
+    """Run a blocking side-effect (a best-effort store write) OFF the event
+    loop without awaiting it, so the request never waits on the I/O. Falls back
+    to a direct synchronous call when there's no running loop (tests/cron)."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            fn(*args)
+        except Exception as e:  # noqa: BLE001 — best-effort
+            _log.warning("identity: background write failed (%s: %s)", type(e).__name__, e)
+        return
+    fut = loop.run_in_executor(None, fn, *args)
+
+    def _log_err(f) -> None:
+        exc = f.exception()
+        if exc is not None:
+            _log.warning("identity: background write failed (%s: %s)", type(exc).__name__, exc)
+
+    fut.add_done_callback(_log_err)
 
 
 class IdentityService:
@@ -126,8 +151,11 @@ class IdentityService:
         rec = self.api_keys.get(jti) if (self.api_keys and jti) else None
         if rec is None or rec.revoked:
             raise HTTPException(status_code=401, detail="api key revoked")
+        # The last_used stamp is a whole-file rewrite — do it off-loop and don't
+        # await it, so a PAT-bearing request isn't gated on the write. (The
+        # revocation read above stays inline: it's a small read and it gates auth.)
         rec.last_used = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        self.api_keys.update(rec)
+        _fire_and_forget(self.api_keys.update, rec)
 
     def token_for(self, ident: Identity) -> str:
         return self.issuer.issue(
@@ -331,16 +359,24 @@ class IdentityService:
     # Audit + usage (Phase 6). record() is called from the routes after each
     # action; the audit log and usage summary are read by admins for their org.
     # ------------------------------------------------------------------
-    def record(self, tenant_id: str, actor_id: str, action: str,
-               *, target: str = "", detail: str = "", actor_email: str = "") -> None:
+    async def record(self, tenant_id: str, actor_id: str, action: str,
+                     *, target: str = "", detail: str = "", actor_email: str = "") -> None:
+        # The audit write (actor-email lookup + filelock + whole-array rewrite)
+        # runs OFF the event loop via to_thread — so it never blocks the loop /
+        # health checks — but is AWAITED so the log is immediately consistent (an
+        # admin reading the audit right after an action sees it).
         if self.audit is None:
             return
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        await asyncio.to_thread(
+            self._record_sync, tenant_id, actor_id, action, target, detail, actor_email, ts)
+
+    def _record_sync(self, tenant_id, actor_id, action, target, detail, actor_email, ts) -> None:
         if not actor_email:
             u = self.store.get(actor_id)
             actor_email = u.email if u else ""
         self.audit.append(AuditEvent(
-            id=uuid.uuid4().hex,
-            ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            id=uuid.uuid4().hex, ts=ts,
             tenant_id=tenant_id, actor_id=actor_id, actor_email=actor_email,
             action=action, target=target, detail=detail,
         ))
