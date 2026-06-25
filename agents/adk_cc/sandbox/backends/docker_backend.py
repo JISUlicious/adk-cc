@@ -131,6 +131,11 @@ class DockerBackend(SandboxBackend):
         safe = "".join(c if c.isalnum() or c in "_.-" else "-" for c in self._session_id)
         return f"adk-cc-{safe}"
 
+    def container_cwd(self, host_abs_path: str) -> str:
+        # The host workspace root is bind-mounted at CONTAINER_WORKSPACE, so
+        # that's what `pwd` returns and where absolute paths must live.
+        return CONTAINER_WORKSPACE
+
     def _to_container_path(self, host_path: str) -> str:
         """Translate a sandbox-host path to the container's /workspace path."""
         if self._workspace_abs_path is None:

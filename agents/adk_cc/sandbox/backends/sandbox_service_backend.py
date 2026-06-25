@@ -227,6 +227,10 @@ class SandboxServiceBackend(SandboxBackend):
         ) as client:
             yield client
 
+    def container_cwd(self, host_abs_path: str) -> str:
+        # The service mounts the workspace at CONTAINER_WORKSPACE.
+        return CONTAINER_WORKSPACE
+
     def _to_container_path(self, host_path: str) -> str:
         """Translate an agent-side absolute path to a /workspace-relative path.
 

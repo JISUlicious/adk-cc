@@ -454,6 +454,11 @@ class _LenientLoadSkillResourceTool(LoadSkillResourceTool):
         super().__init__(toolset)
         self.description = (
             "Loads a resource file from within a skill, in bounded slices. "
+            "A skill's bundled files (references/, assets/, scripts/) live WITH "
+            "the skill, NOT in your workspace or execution sandbox — you cannot "
+            "reach them with read_file/run_bash or by any filesystem path; read "
+            "them ONLY through this tool, by skill name + the file's relative "
+            "path within the skill. "
             "Canonical paths start with 'references/', 'assets/', or "
             "'scripts/'; files at the skill root or other subdirs also "
             "resolve (pass the relative path or bare filename). Returns up to "

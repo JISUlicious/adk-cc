@@ -281,6 +281,10 @@ class DaytonaBackend(SandboxBackend):
     def _proxy_url(self, path: str) -> str:
         return f"{self._proxy_base}{path}"
 
+    def container_cwd(self, host_abs_path: str) -> str:
+        # Daytona runs in its own sandbox rooted at workspace_path.
+        return self._workspace_path
+
     def _to_sandbox_path(self, host_path: str) -> str:
         """Translate a host-side workspace path to its in-sandbox equivalent.
 
