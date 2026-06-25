@@ -18,10 +18,15 @@ Mitigation, at the one layer that owns this parse: replace the ``json`` name
 inside ADK's lite_llm module with a thin shim that delegates everything to
 the real stdlib json, EXCEPT ``loads``, which:
   1. tries strict json.loads first — zero behavior change for valid JSON;
-  2. on JSONDecodeError, repairs the most common model malformation (invalid
-     backslash escapes inside string values) and retries;
-  3. if it still can't parse, re-raises the ORIGINAL error so callers see a
-     coherent failure rather than a repair artifact.
+  2. on JSONDecodeError, repairs the most common model malformations (invalid
+     backslash escapes / raw control chars / trailing commas) and retries;
+  3. as a last tier, completes a TRUNCATED tool call (a model that stopped
+     mid-emission) by appending ONLY the missing }/] closers — never a string
+     value or a missing value, so it recovers `{"skill_name": "x"` losslessly
+     but refuses to fabricate `{"skill_name": "x` or `{"skill_name": `;
+  4. if it still can't parse, re-raises the ORIGINAL error so callers see a
+     coherent failure rather than a repair artifact (logging a clear WARNING
+     when the cause is truncation rather than malformation).
 
 Default-ON: tool-call JSON from a model is untrusted by nature, so tolerant
 parsing is the safer default. Disable with ``ADK_CC_TOLERANT_TOOL_JSON=0``.
@@ -33,8 +38,12 @@ Caveats:
     JSON escape (the valid set is " \\ / b f n r t and u-hex). This recovers
     the overwhelmingly common case (a literal backslash the model forgot to
     double) without touching legitimate escapes. It is NOT a general JSON
-    repairer — unbalanced quotes/braces still fail (and re-raise the original
-    error), which is the right conservative behavior.
+    repairer.
+  - Truncation completion only appends missing CLOSERS; it deliberately does
+    NOT close an unterminated string or supply a missing value, because the
+    truncated token (`"my-sk` vs `"my-skill"`) is unknowable from the text —
+    fabricating it would call the tool with the WRONG argument, which is worse
+    than failing. Those cases re-raise (with a truncation WARNING) by design.
   - Scoped to ADK's lite_llm module only; the stdlib json is untouched
     everywhere else.
 """
@@ -76,6 +85,58 @@ def _repair_invalid_escapes(s: str) -> str:
 def _strip_trailing_commas(s: str) -> str:
     """Remove a comma immediately before a closing } or ] (JSON5-ism)."""
     return _TRAILING_COMMA.sub(r"\1", s)
+
+
+def _json_scan(s: str) -> tuple[bool, list[str]]:
+    r"""Walk `s` as JSON tracking string state and the open-bracket stack.
+
+    Returns ``(in_string, stack)`` where ``in_string`` is True if the text ends
+    INSIDE a string value (an unterminated string), and ``stack`` holds the
+    closers (``}`` / ``]``) still needed, innermost last. Brackets and quotes
+    inside string values are ignored; ``\\`` escapes are respected.
+    """
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in s:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            stack.append("}")
+        elif ch == "[":
+            stack.append("]")
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+    return in_string, stack
+
+
+def _complete_truncated(s: str) -> str | None:
+    r"""Complete a TRUNCATED tool call by appending only the missing closing
+    brackets/braces — never a string value or a missing value.
+
+    A model that stops mid-emission leaves JSON that is structurally incomplete.
+    When the ONLY thing missing is the closers (the values present are complete,
+    e.g. ``{"skill_name": "my-skill"`` → add ``}``), this recovers it
+    losslessly. It REFUSES (returns None) when the text ends inside a string
+    (``{"skill_name": "my-sk`` — the value itself was cut, and closing the quote
+    would fabricate a wrong value) or when there's nothing to close. A dangling
+    ``key:`` (``{"skill_name": ``) gets its ``}`` appended but won't parse, so
+    the caller's parse attempt fails and the original error is surfaced — we
+    never invent a value.
+    """
+    in_string, stack = _json_scan(s)
+    if in_string or not stack:
+        return None
+    return s + "".join(reversed(stack))
 
 
 # Ordered repair pipeline. Each entry is (label, transform). They're applied
@@ -123,20 +184,50 @@ def tolerant_loads(s, *args, **kwargs):
             candidate = transform(candidate)
             applied.append(label)
             attempts.append(("+".join(applied), candidate))
+
+        # Final tier: structural completion of a TRUNCATED tool call (the model
+        # stopped mid-emission). Appends only the missing }/] closers — never
+        # fabricates a string or a missing value (see _complete_truncated) — and
+        # composes the malformation repairs on top of the completed text.
+        completed = _complete_truncated(text)
+        if completed is not None:
+            cand = completed
+            attempts.append(("complete-truncated", cand))
+            for label, transform in _REPAIRS:
+                cand = transform(cand)
+                attempts.append(("complete-truncated+" + label, cand))
+
         for label, cand in attempts:
             try:
                 result = _stdlib_json.loads(cand, **recover_kwargs)
             except _stdlib_json.JSONDecodeError:
                 continue
             _log.warning(
-                "tolerant_tool_json: recovered malformed tool-call JSON via "
-                "[%s] (original error: %s at pos %s) — the model emitted "
-                "non-strict JSON in a tool argument",
+                "tolerant_tool_json: recovered tool-call JSON via [%s] "
+                "(original error: %s at pos %s) — the model emitted "
+                "non-strict%s JSON in a tool argument",
                 label,
                 first_error.msg,
                 getattr(first_error, "pos", "?"),
+                "/truncated" if label.startswith("complete-truncated") else "",
             )
             return result
+
+        # Nothing recovered it. If the text is structurally TRUNCATED (ends
+        # inside a string, or has unbalanced brackets we couldn't safely close),
+        # say so explicitly — the model's tool call was cut off mid-emission,
+        # which is a different problem (token cap / unreliable model) than a
+        # malformed-but-complete argument. We still raise the ORIGINAL error so
+        # the failure type is unchanged for callers.
+        in_string, stack = _json_scan(text)
+        if in_string or stack:
+            _log.warning(
+                "tolerant_tool_json: tool-call JSON appears TRUNCATED "
+                "(%s) and can't be recovered without fabricating a value — "
+                "the model stopped mid tool-call. Snippet: %r",
+                "unterminated string" if in_string else "unbalanced brackets",
+                text[:120],
+            )
         raise first_error  # nothing recovered it — surface the original
 
 

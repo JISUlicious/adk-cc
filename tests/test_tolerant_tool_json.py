@@ -83,16 +83,51 @@ def test_empty_and_simple():
     print("OK test_empty_and_simple")
 
 
-# --- still fails on genuinely-broken input -------------------------------
+# --- completes a TRUNCATED tool call (missing closers only) --------------
+# A model that stops mid-emission leaves structurally-incomplete JSON. When the
+# values present are COMPLETE and only the closing }/] is missing, recover it
+# losslessly; when a value itself is cut, refuse (don't fabricate).
 
-def test_unbalanced_still_raises():
-    for bad in ('{"a": 1', '[1, 2', 'not json', '{"a": }'):
+def test_truncation_missing_brace_recovered():
+    # the reported pattern: value complete, only the } is missing
+    assert tolerant_loads('{"skill_name": "my-skill"') == {"skill_name": "my-skill"}
+    assert tolerant_loads('{"a": 1') == {"a": 1}
+    assert tolerant_loads('[1, 2') == [1, 2]
+    print("OK test_truncation_missing_brace_recovered")
+
+
+def test_truncation_lone_open_brace_becomes_empty():
+    assert tolerant_loads("{") == {}
+    assert tolerant_loads("[") == []
+    print("OK test_truncation_lone_open_brace_becomes_empty")
+
+
+def test_truncation_nested_and_composes_with_repairs():
+    assert tolerant_loads('[{"a": 1}') == [{"a": 1}]
+    assert tolerant_loads('{"a": [1, 2') == {"a": [1, 2]}
+    assert tolerant_loads('{"a": {"b": 1}') == {"a": {"b": 1}}
+    assert tolerant_loads('{"a": 1,') == {"a": 1}  # truncated AND trailing comma
+    print("OK test_truncation_nested_and_composes_with_repairs")
+
+
+def test_completion_ignores_brackets_inside_strings():
+    # the { inside the string value must NOT be counted as an open bracket
+    assert tolerant_loads('{"tmpl": "a {b} c"') == {"tmpl": "a {b} c"}
+    print("OK test_completion_ignores_brackets_inside_strings")
+
+
+# --- still fails on genuinely-broken / unrecoverable input ----------------
+
+def test_unrecoverable_still_raises():
+    # not JSON, or recovery would require FABRICATING a value (an unterminated
+    # string value, or a missing value) — must raise, never invent.
+    for bad in ('not json', '{"a": }', '{"skill_name": "my-sk', '{"skill_name": '):
         try:
             tolerant_loads(bad)
             assert False, f"expected failure for {bad!r}"
         except json.JSONDecodeError:
             pass
-    print("OK test_unbalanced_still_raises")
+    print("OK test_unrecoverable_still_raises")
 
 
 def test_non_str_input_passthrough():
@@ -128,7 +163,11 @@ if __name__ == "__main__":
     test_combined_escape_and_newline()
     test_valid_json_byte_identical()
     test_empty_and_simple()
-    test_unbalanced_still_raises()
+    test_truncation_missing_brace_recovered()
+    test_truncation_lone_open_brace_becomes_empty()
+    test_truncation_nested_and_composes_with_repairs()
+    test_completion_ignores_brackets_inside_strings()
+    test_unrecoverable_still_raises()
     test_non_str_input_passthrough()
     test_patch_installs_on_lite_llm()
     print("\nall tolerant-tool-json tests passed")
