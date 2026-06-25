@@ -151,6 +151,63 @@ def test_web_fetch_does_not_block_loop():
         srv.shutdown()
 
 
+# ---------- real path: SelectableLlm resolve/warm are offloaded ----------
+# The first model call builds the LiteLlm delegate, and litellm's cold import is
+# heavy (~hundreds of ms) — done on the loop it would stall every concurrent
+# request (health checks included) during the first turn. generate_content_async
+# and warm() both resolve via asyncio.to_thread; a slow resolve must NOT stall.
+class _FakeDelegate:
+    async def generate_content_async(self, req, stream=False):  # noqa: D401
+        yield "ok"
+
+
+def test_model_resolve_does_not_block_loop():
+    from adk_cc.models.selectable import SelectableLlm
+
+    class _SlowResolveModel(SelectableLlm):
+        def _resolve_delegate(self):  # simulate litellm cold-build cost
+            time.sleep(_BLOCK_S)
+            return _FakeDelegate()
+
+    m = _SlowResolveModel(default_model_id="fake")
+
+    async def run():
+        async with _Probe() as probe:
+            out = [r async for r in m.generate_content_async(None)]
+        return probe.max_gap, out
+
+    gap, out = asyncio.run(run())
+    assert out == ["ok"], out
+    assert gap < _FREE, f"model resolve stalled the loop (max gap {gap:.3f}s)"
+
+
+def test_model_warm_keeps_loop_free_and_is_best_effort():
+    from adk_cc.models.selectable import SelectableLlm
+
+    class _SlowResolveModel(SelectableLlm):
+        def _resolve_delegate(self):
+            time.sleep(_BLOCK_S)
+            return _FakeDelegate()
+
+    m = _SlowResolveModel(default_model_id="fake")
+
+    async def run():
+        async with _Probe() as probe:
+            await m.warm()
+        return probe.max_gap
+
+    gap = asyncio.run(run())
+    assert gap < _FREE, f"warm() stalled the loop (max gap {gap:.3f}s)"
+
+    # best-effort: a config error during warm must never propagate (it would
+    # otherwise crash server startup).
+    class _BoomModel(SelectableLlm):
+        def _resolve_delegate(self):
+            raise RuntimeError("no active endpoint")
+
+    asyncio.run(_BoomModel(default_model_id="fake").warm())  # must not raise
+
+
 def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

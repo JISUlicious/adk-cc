@@ -19,6 +19,7 @@ Design choices:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import threading
 import time
@@ -48,6 +49,8 @@ if TYPE_CHECKING:
 _pace_creation_lock = threading.Lock()
 _pace_lock: Optional["asyncio.Lock"] = None
 _pace_last_at: float = 0.0
+
+_log = logging.getLogger(__name__)
 
 
 def _model_min_interval() -> float:
@@ -184,9 +187,26 @@ class SelectableLlm(BaseLlm):
         self, llm_request: "LlmRequest", stream: bool = False
     ) -> "AsyncGenerator[LlmResponse, None]":
         await _pace_model_call()  # opt-in global rate-limit throttle
-        delegate = self._resolve_delegate()
+        # Resolve the delegate OFF the event loop: the first call (cache miss)
+        # builds the LiteLlm delegate — and litellm's cold import is ~hundreds of
+        # ms — and EVERY call reads the model-registry file. Both are blocking;
+        # on the loop they'd stall all requests (health checks included) during
+        # the first model turn. to_thread keeps the loop free. (The build is
+        # cached, so steady-state resolves are a tiny off-loop file read.)
+        delegate = await asyncio.to_thread(self._resolve_delegate)
         async for resp in delegate.generate_content_async(llm_request, stream=stream):
             yield resp
+
+    async def warm(self) -> None:
+        """Pre-build the active delegate OFF the loop (e.g. at server startup),
+        so the first request doesn't pay litellm's cold import. Best-effort:
+        config errors (no active endpoint / missing key) are swallowed — the
+        request path's offloaded resolve is the fallback."""
+        try:
+            await asyncio.to_thread(self._resolve_delegate)
+            _log.info("SelectableLlm: model delegate warmed (%s)", self.model)
+        except Exception as e:  # noqa: BLE001 — warm-up must never break startup
+            _log.debug("SelectableLlm.warm skipped (%s: %s)", type(e).__name__, e)
 
     def connect(self, llm_request: "LlmRequest"):
         return self._resolve_delegate().connect(llm_request)

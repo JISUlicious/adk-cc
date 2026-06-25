@@ -78,11 +78,12 @@ def build_fastapi_app(
 
         register_s3_artifact_scheme()
 
-    # Optional in-process memory-consolidation scheduler. None unless
-    # ADK_CC_MEMORY=1 and ADK_CC_MEMORY_CONSOLIDATE_INTERVAL_S>0, in which case
-    # this lifespan runs the periodic episodic→semantic pass for the server's
-    # lifetime. ADK wraps the passed lifespan in its own (async with lifespan),
-    # so startup/shutdown both fire. Passing None leaves the app unchanged.
+    # Server lifespan. ALWAYS present: at startup it warms the LiteLlm delegate
+    # off the loop so the first request doesn't pay litellm's cold import on the
+    # event loop. When ADK_CC_MEMORY=1 and ADK_CC_MEMORY_CONSOLIDATE_INTERVAL_S>0
+    # it ALSO runs the periodic episodic→semantic consolidation pass for the
+    # server's lifetime. ADK wraps the passed lifespan in its own (async with
+    # lifespan), so startup/shutdown both fire.
     from .memory_scheduler import make_consolidation_lifespan
 
     fastapi_app = get_fast_api_app(

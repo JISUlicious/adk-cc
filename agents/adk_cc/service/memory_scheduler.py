@@ -141,30 +141,42 @@ async def _loop(interval: float, delay: float) -> None:
 
 
 def make_consolidation_lifespan():
-    """Return an ASGI lifespan context manager that runs the consolidation loop
-    for the server's lifetime, or None when disabled (caller then passes
-    lifespan=None and ADK builds the app unchanged)."""
-    if not scheduler_enabled():
-        return None
-
-    interval = _interval_s()
-    delay = _delay_s()
+    """Return the server's ASGI lifespan. ALWAYS present (never None) because it
+    warms the model delegate at startup — independent of the memory feature — so
+    the first model call doesn't pay litellm's cold import on the event loop. It
+    additionally runs the memory consolidation loop when that's enabled."""
+    sched = scheduler_enabled()
+    interval = _interval_s() if sched else 0.0
+    delay = _delay_s() if sched else 0.0
 
     @contextlib.asynccontextmanager
     async def _lifespan(app):
-        task = asyncio.create_task(
-            _loop(interval, delay), name="adk_cc_memory_consolidation"
-        )
-        _log.info(
-            "memory consolidation scheduler started (every %.0fs, first pass in %.0fs)",
-            interval, delay,
-        )
+        # Warm the LiteLlm delegate OFF the loop before serving traffic — the
+        # cold litellm import (~hundreds of ms) would otherwise run on the loop
+        # during the first request's first model call and stall health checks.
+        # Best-effort; the request path's offloaded resolve is the fallback.
+        try:
+            from ..agent import MODEL
+            await MODEL.warm()
+        except Exception as e:  # noqa: BLE001 — warm-up must never break startup
+            _log.debug("model warm-up skipped (%s: %s)", type(e).__name__, e)
+
+        task = None
+        if sched:
+            task = asyncio.create_task(
+                _loop(interval, delay), name="adk_cc_memory_consolidation"
+            )
+            _log.info(
+                "memory consolidation scheduler started (every %.0fs, first pass in %.0fs)",
+                interval, delay,
+            )
         try:
             yield
         finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-            _log.info("memory consolidation scheduler stopped")
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                _log.info("memory consolidation scheduler stopped")
 
     return _lifespan
