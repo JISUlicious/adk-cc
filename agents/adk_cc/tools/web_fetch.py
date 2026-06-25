@@ -28,6 +28,7 @@ the backend-egress path closes it fully — that hardening is not in this stage.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import ipaddress
 import os
@@ -172,6 +173,63 @@ def _resolves_to_internal(host: str) -> bool:
     return any(_ip_is_internal(info[4][0]) for info in infos)
 
 
+def _fetch_and_process(url: str, max_bytes: int) -> dict[str, Any]:
+    """The BLOCKING part of web_fetch — DNS + connect + read (up to 10s) and the
+    CPU-bound PDF/text processing. Run via ``asyncio.to_thread`` so none of it
+    runs on the event loop (a single slow fetch would otherwise stall every
+    other request, health checks included)."""
+    req = Request(url, headers={"User-Agent": "adk-cc/0.1"})
+    try:
+        with urlopen(req, timeout=10) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            status_code = resp.status
+            # PDFs must be read whole to parse, so use a larger cap when
+            # the response declares itself a PDF.
+            is_pdf_ct = "application/pdf" in content_type.lower()
+            read_cap = _pdf_max_bytes() if is_pdf_ct else max_bytes
+            body = resp.read(read_cap + 1)
+            body_truncated = len(body) > read_cap
+            if body_truncated:
+                body = body[:read_cap]
+    except HTTPError as e:
+        return {"status": "http_error", "url": url, "status_code": e.code, "error": str(e)}
+    except URLError as e:
+        return {"status": "error", "url": url, "error": str(e)}
+
+    base = {"status": "ok", "url": url, "status_code": status_code, "content_type": content_type}
+
+    # PDF → extract text (don't return raw binary as garbled UTF-8).
+    if is_pdf_ct or body[:5] == b"%PDF-":
+        text, pages, via = _extract_pdf_text(body)
+        if text and text.strip():
+            clipped = text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+            return {
+                **base, "content_kind": "pdf_text", "pages": pages, "extracted_via": via,
+                "content": clipped, "truncated": body_truncated or len(clipped) < len(text),
+            }
+        return {
+            **base, "content_kind": "pdf", "bytes": len(body), "content": "",
+            "note": (
+                "Fetched a PDF but could not extract text "
+                f"({'truncated download' if body_truncated else 'no extractor / empty'})"
+                ". Try the HTML page (e.g. an arxiv.org/abs/<id> URL) or "
+                "install 'pypdf' to enable extraction."
+            ),
+        }
+
+    # Non-text binary (images, archives, …) → marker, not garbled text.
+    if not _looks_textual(content_type, body):
+        return {
+            **base, "content_kind": "binary", "bytes": len(body), "content": "",
+            "note": "Binary content not decoded as text.",
+        }
+
+    return {
+        **base, "content_kind": "text",
+        "content": body.decode("utf-8", errors="replace"), "truncated": body_truncated,
+    }
+
+
 class WebFetchTool(AdkCcTool):
     meta = ToolMeta(
         name="web_fetch",
@@ -209,8 +267,9 @@ class WebFetchTool(AdkCcTool):
                     ),
                     "allowed_hosts": list(allowed),
                 }
-        elif not _allow_private() and _resolves_to_internal(host):
-            # OPEN mode SSRF guard.
+        elif not _allow_private() and await asyncio.to_thread(_resolves_to_internal, host):
+            # OPEN mode SSRF guard. The DNS resolution is blocking, so it's
+            # offloaded too.
             return {
                 "status": "host_not_allowed",
                 "error": (
@@ -220,77 +279,6 @@ class WebFetchTool(AdkCcTool):
                 ),
             }
 
-        req = Request(args.url, headers={"User-Agent": "adk-cc/0.1"})
-        try:
-            with urlopen(req, timeout=10) as resp:
-                content_type = resp.headers.get("Content-Type", "")
-                status_code = resp.status
-                # PDFs must be read whole to parse, so use a larger cap when
-                # the response declares itself a PDF.
-                is_pdf_ct = "application/pdf" in content_type.lower()
-                read_cap = _pdf_max_bytes() if is_pdf_ct else args.max_bytes
-                body = resp.read(read_cap + 1)
-                body_truncated = len(body) > read_cap
-                if body_truncated:
-                    body = body[:read_cap]
-        except HTTPError as e:
-            return {
-                "status": "http_error",
-                "url": args.url,
-                "status_code": e.code,
-                "error": str(e),
-            }
-        except URLError as e:
-            return {"status": "error", "url": args.url, "error": str(e)}
-
-        base = {
-            "status": "ok",
-            "url": args.url,
-            "status_code": status_code,
-            "content_type": content_type,
-        }
-
-        # PDF → extract text (don't return raw binary as garbled UTF-8).
-        if is_pdf_ct or body[:5] == b"%PDF-":
-            text, pages, via = _extract_pdf_text(body)
-            if text and text.strip():
-                clipped = text.encode("utf-8")[: args.max_bytes].decode(
-                    "utf-8", errors="ignore"
-                )
-                return {
-                    **base,
-                    "content_kind": "pdf_text",
-                    "pages": pages,
-                    "extracted_via": via,
-                    "content": clipped,
-                    "truncated": body_truncated or len(clipped) < len(text),
-                }
-            return {
-                **base,
-                "content_kind": "pdf",
-                "bytes": len(body),
-                "content": "",
-                "note": (
-                    "Fetched a PDF but could not extract text "
-                    f"({'truncated download' if body_truncated else 'no extractor / empty'})"
-                    ". Try the HTML page (e.g. an arxiv.org/abs/<id> URL) or "
-                    "install 'pypdf' to enable extraction."
-                ),
-            }
-
-        # Non-text binary (images, archives, …) → marker, not garbled text.
-        if not _looks_textual(content_type, body):
-            return {
-                **base,
-                "content_kind": "binary",
-                "bytes": len(body),
-                "content": "",
-                "note": "Binary content not decoded as text.",
-            }
-
-        return {
-            **base,
-            "content_kind": "text",
-            "content": body.decode("utf-8", errors="replace"),
-            "truncated": body_truncated,
-        }
+        # The blocking network round-trip + PDF/text processing run OFF the
+        # event loop, so a slow fetch never stalls other requests/health checks.
+        return await asyncio.to_thread(_fetch_and_process, args.url, args.max_bytes)
