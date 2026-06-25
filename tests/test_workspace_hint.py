@@ -18,7 +18,7 @@ os.environ.setdefault("ADK_CC_API_KEY", "stub")
 
 from google.adk.models.llm_request import LlmRequest
 
-from adk_cc.plugins.workspace_hint import WorkspaceHintPlugin, _MARKER
+from adk_cc.plugins.workspace_hint import WorkspaceHintPlugin, _MARKER, _in_context_cwd
 from adk_cc.tools import GrepTool, ReadFileTool, WebFetchTool, WriteFileTool
 
 
@@ -94,11 +94,72 @@ def test_disabled_via_env():
     print("OK disabled_via_env")
 
 
+class _FakeDockerBackend:
+    """Stand-in: reports /workspace as its in-context cwd, like DockerBackend."""
+    def container_cwd(self, host_abs_path):
+        return "/workspace"
+
+
+def test_backends_report_in_context_cwd():
+    # Each backend maps the host workspace to the path the model actually sees.
+    from adk_cc.sandbox.backends.noop_backend import NoopBackend
+    from adk_cc.sandbox.backends.docker_backend import DockerBackend, CONTAINER_WORKSPACE
+    from adk_cc.sandbox.backends.sandbox_service_backend import SandboxServiceBackend
+    from adk_cc.sandbox.backends.daytona_backend import DaytonaBackend
+    host = "/srv/ws/acme/alice"
+    assert NoopBackend().container_cwd(host) == host  # host-exec → identity
+    # __new__ bypasses __init__ (no daemon); container_cwd is stateless.
+    assert object.__new__(DockerBackend).container_cwd(host) == CONTAINER_WORKSPACE == "/workspace"
+    assert object.__new__(SandboxServiceBackend).container_cwd(host) == "/workspace"
+    d = object.__new__(DaytonaBackend)
+    d._workspace_path = "/home/daytona"
+    assert d.container_cwd(host) == "/home/daytona"
+    print("OK backends_report_in_context_cwd")
+
+
+def test_hint_uses_container_path_under_sandbox():
+    plugin = WorkspaceHintPlugin()
+    req = _request_with(ReadFileTool())
+    state = {
+        "temp:sandbox_workspace": {"abs_path": "/work/acme/alice"},
+        "temp:sandbox_backend": _FakeDockerBackend(),
+    }
+    _run(plugin, req, state)
+    desc = _decl(req, "read_file").description or ""
+    assert "/workspace" in desc, desc[-160:]       # container path surfaced
+    assert "/work/acme/alice" not in desc           # NOT the host path
+    print("OK hint_uses_container_path_under_sandbox")
+
+
+def test_in_context_cwd_fallbacks():
+    host = {"abs_path": "/h/acme/alice"}
+    # noop-shaped backend (identity) → host
+    cc = SimpleNamespace(state={"temp:sandbox_workspace": host,
+                                "temp:sandbox_backend": _FakeDockerBackend()}, session=None)
+    assert _in_context_cwd(cc) == "/workspace"
+    # no backend seeded → host path
+    cc2 = SimpleNamespace(state={"temp:sandbox_workspace": host}, session=None)
+    assert _in_context_cwd(cc2) == "/h/acme/alice"
+    print("OK in_context_cwd_fallbacks")
+
+
+def test_skill_resource_contract_present():
+    import inspect
+    from adk_cc.tools import skills
+    src = inspect.getsource(skills._LenientLoadSkillResourceTool.__init__)
+    assert "NOT in your workspace" in src and "by skill name" in src
+    print("OK skill_resource_contract_present")
+
+
 def main():
     test_injects_workspace_into_path_tools_from_state()
     test_falls_back_to_env_then_cwd()
     test_idempotent_within_request()
     test_disabled_via_env()
+    test_backends_report_in_context_cwd()
+    test_hint_uses_container_path_under_sandbox()
+    test_in_context_cwd_fallbacks()
+    test_skill_resource_contract_present()
     print("\nall workspace-hint tests passed")
 
 

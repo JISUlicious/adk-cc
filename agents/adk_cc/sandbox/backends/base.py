@@ -128,6 +128,21 @@ class SandboxBackend(ABC):
         """
         return None
 
+    def container_cwd(self, host_abs_path: str) -> str:
+        """The workspace directory as seen INSIDE this backend's execution
+        context — i.e. what `pwd` returns and what absolute paths the model
+        forms must fall under.
+
+        For host-exec backends (NoopBackend) this IS the host path, so the
+        default returns it unchanged. Sandboxed backends bind/mount the host
+        workspace to a fixed in-container root and override this (DockerBackend
+        and SandboxServiceBackend → "/workspace", DaytonaBackend → its
+        workspace_path). The workspace hint surfaces THIS to the model — not the
+        host path — so an absolute path it constructs actually exists where its
+        tools run.
+        """
+        return host_abs_path
+
     async def close(self) -> None:
         """Tear down per-session state (e.g. stop and remove a container).
 

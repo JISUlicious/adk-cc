@@ -3,11 +3,16 @@
 The model often fumbles paths because nothing tells it where it is: tools
 resolve relative paths against the workspace root and `display_path` shows
 paths relative to it, but the model never sees that root. This plugin appends
-the resolved workspace directory to the FS/exec tools' declaration
-descriptions on `before_model_callback` (the same per-request declaration-
-mutation seam `ToolTitlePlugin` uses), so the model is told its working
-directory every turn — dynamically, from session state (the real per-session
-workspace) or `ADK_CC_WORKSPACE_ROOT`, not a hardcoded string.
+the working directory to the FS/exec tools' declaration descriptions on
+`before_model_callback` (the same per-request declaration-mutation seam
+`ToolTitlePlugin` uses), so the model is told its working directory every turn.
+
+Crucially it surfaces the IN-EXECUTION-CONTEXT path, not the host path: under a
+sandbox the host workspace is mounted at a fixed root (docker/service →
+`/workspace`, daytona → `/home/daytona`), which is what `pwd` returns and what
+the model's absolute paths must match. The value comes from the active backend
+(`SandboxBackend.container_cwd`) applied to the session's real workspace (state
+or `ADK_CC_WORKSPACE_ROOT`); noop falls back to the host path.
 
 Always attached; set `ADK_CC_DISABLE_WORKSPACE_HINT=1` to turn it off.
 """
@@ -26,6 +31,10 @@ _log = logging.getLogger(__name__)
 
 # Set by TenancyPlugin / sandbox layer; a WorkspaceRoot or its dict form.
 _WS_STATE_KEY = "temp:sandbox_workspace"
+# The active SandboxBackend, set alongside the workspace. Used to translate the
+# host workspace path to the path the model actually sees inside its execution
+# environment (e.g. /workspace under docker) — see SandboxBackend.container_cwd.
+_BACKEND_STATE_KEY = "temp:sandbox_backend"
 
 # Tools whose path args anchor at the workspace root (run_bash's cwd is the
 # workspace too). MCP / skill tools are left alone — their paths aren't ours.
@@ -70,6 +79,23 @@ def _workspace_path(callback_context: CallbackContext) -> str:
     return abs_path
 
 
+def _in_context_cwd(callback_context: CallbackContext) -> str:
+    """The working directory as the MODEL sees it — the in-execution-context
+    path, NOT the host path. Under a sandbox (docker/daytona/service) the host
+    workspace is mounted at a fixed root (/workspace, /home/daytona), which is
+    what `pwd` returns and what the model's absolute paths must match; under
+    noop it's the host path. Falls back to the host path if no backend is seeded.
+    """
+    host = _workspace_path(callback_context)
+    backend = _state_get(callback_context, _BACKEND_STATE_KEY)
+    if backend is not None and hasattr(backend, "container_cwd"):
+        try:
+            return backend.container_cwd(host) or host
+        except Exception:
+            pass
+    return host
+
+
 class WorkspaceHintPlugin(BasePlugin):
     """Appends the workspace dir to FS/exec tool descriptions each turn."""
 
@@ -82,11 +108,12 @@ class WorkspaceHintPlugin(BasePlugin):
         if os.environ.get("ADK_CC_DISABLE_WORKSPACE_HINT") == "1":
             return None
         try:
-            ws = _workspace_path(callback_context)
+            ws = _in_context_cwd(callback_context)
             hint = (
-                f"\n\n{_MARKER} `{ws}`. Paths resolve relative to this directory "
-                f"— prefer workspace-relative paths (e.g. `src/app.py`); any "
-                f"absolute path must fall under this root."
+                f"\n\n{_MARKER} `{ws}` (this is what `pwd` returns where your "
+                f"tools run). Paths resolve relative to it — prefer "
+                f"workspace-relative paths (e.g. `src/app.py`); an absolute path "
+                f"must be under this root."
             )
             for tool in (llm_request.config.tools or []):
                 for decl in (getattr(tool, "function_declarations", None) or []):
