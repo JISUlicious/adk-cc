@@ -41,6 +41,7 @@ import logging
 import os
 import shlex
 import tarfile
+import threading
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -114,9 +115,13 @@ class DockerBackend(SandboxBackend):
         # None / False for the dev path; the cache mount is skipped there
         # because dev is single-user and ~/.cache lives on the host.
         self._is_per_user_layout: bool = False
-        self._client = client or _build_client()
+        # Built LAZILY (off the event loop) on first use — _build_client with
+        # version="auto" does a blocking /version handshake to the daemon, which
+        # must never run on the request loop. See _get_client.
+        self._client = client
         self._container: Any = None  # docker.models.containers.Container
         self._lock = asyncio.Lock()
+        self._client_lock = threading.Lock()
 
     # --- helpers ---------------------------------------------------------
 
@@ -143,8 +148,20 @@ class DockerBackend(SandboxBackend):
         # writes will fail.
         return host_path
 
+    def _get_client(self) -> "docker.DockerClient":
+        """Build the docker client lazily and OFF the event loop (the
+        version="auto" daemon handshake blocks). MUST only be called from inside
+        asyncio.to_thread; double-checked + thread-locked so a build runs once."""
+        if self._client is None:
+            with self._client_lock:
+                if self._client is None:
+                    self._client = _build_client()
+        return self._client
+
     async def _ensure_container(self) -> Any:
         async with self._lock:
+            # Build the client off-loop on first use (the /version handshake).
+            await asyncio.to_thread(self._get_client)
             if self._container is not None:
                 # Refresh state in case Docker reaped the container.
                 try:
@@ -241,6 +258,7 @@ class DockerBackend(SandboxBackend):
         run a one-shot helper container that bind-mounts the workspace
         parent and creates the dir from inside.
         """
+        await asyncio.to_thread(self._get_client)  # build client off-loop
         self._workspace_abs_path = ws.abs_path
         self._tenant_id = ws.tenant_id
         # Track whether we're in the production per-user layout so

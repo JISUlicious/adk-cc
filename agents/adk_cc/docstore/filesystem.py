@@ -7,6 +7,14 @@ overlap, title-weighted) — the same algorithm the wiki/memory layers used
 before, relocated here so it travels with the store contract. A service
 backend (SQLite FTS, OpenSearch, a vector DB) implements `search` natively and
 swaps in with no caller changes.
+
+Concurrency: writes are atomic per file (temp + os.replace), but there is NO
+cross-process lock around read-modify-write sequences (index/settings/changelog
+updates). This is safe for the intended deployment — a SINGLE uvicorn worker
+(the in-memory pacing/credential/consolidation state already assumes one
+process) plus the single-writer librarian per tenant domain. Running
+`uvicorn --workers >1` against this store risks lost updates; use a
+service-backed DocumentStore (or add a per-key filelock) for multi-worker.
 """
 
 from __future__ import annotations

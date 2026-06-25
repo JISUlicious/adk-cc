@@ -12,6 +12,8 @@ and call the provider's methods, so an OIDC/Keycloak provider reuses this module
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Request, Response
 
 # Public paths the auth middleware must let through unauthenticated (you can't
@@ -59,7 +61,7 @@ def mount_identity_routes(app, identity) -> None:
         ident = await identity.provider.login_password(email, password)
         if ident is None:
             raise HTTPException(status_code=401, detail="invalid email or password")
-        identity.record(ident.tenant_id, ident.user_id, "login", actor_email=ident.email)
+        await identity.record(ident.tenant_id, ident.user_id, "login", actor_email=ident.email)
         return {
             "access_token": identity.token_for(ident),
             "token_type": "Bearer",
@@ -80,7 +82,7 @@ def mount_identity_routes(app, identity) -> None:
             )
         except (ValueError, PermissionError) as e:
             raise HTTPException(status_code=400, detail=str(e))
-        identity.record(ident.tenant_id, ident.user_id, "signup", actor_email=ident.email)
+        await identity.record(ident.tenant_id, ident.user_id, "signup", actor_email=ident.email)
         return {
             "access_token": identity.token_for(ident),
             "token_type": "Bearer",
@@ -97,7 +99,7 @@ def mount_identity_routes(app, identity) -> None:
     async def me(request: Request):
         auth = _require_auth(request)
         try:
-            prof = identity.profile(auth.user_id)
+            prof = await asyncio.to_thread(identity.profile, auth.user_id)
         except KeyError:
             prof = {"id": auth.user_id, "email": "", "name": "", "tenant": auth.tenant_id}
         return {**prof, "roles": sorted(auth.roles), "scopes": sorted(auth.scopes)}
@@ -107,10 +109,10 @@ def mount_identity_routes(app, identity) -> None:
         auth = _require_auth(request)
         body = await _json(request)
         try:
-            prof = identity.update_profile(auth.user_id, name=body.get("name") or "")
+            prof = await asyncio.to_thread(identity.update_profile, auth.user_id, name=body.get("name") or "")
         except KeyError:
             raise HTTPException(status_code=404, detail="user not found")
-        identity.record(auth.tenant_id, auth.user_id, "profile.updated")
+        await identity.record(auth.tenant_id, auth.user_id, "profile.updated")
         return prof
 
     @router.post("/auth/password")
@@ -118,7 +120,7 @@ def mount_identity_routes(app, identity) -> None:
         auth = _require_auth(request)
         body = await _json(request)
         try:
-            identity.change_password(
+            await asyncio.to_thread(identity.change_password, 
                 auth.user_id,
                 current=body.get("current_password") or "",
                 new=body.get("new_password") or "",
@@ -127,25 +129,25 @@ def mount_identity_routes(app, identity) -> None:
             raise HTTPException(status_code=404, detail="user not found")
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        identity.record(auth.tenant_id, auth.user_id, "password.changed")
+        await identity.record(auth.tenant_id, auth.user_id, "password.changed")
         return {"status": "ok"}
 
     @router.get("/auth/api-keys")
     async def list_api_keys(request: Request):
         auth = _require_auth(request)
-        return {"keys": identity.list_api_keys(auth.user_id)}
+        return {"keys": await asyncio.to_thread(identity.list_api_keys, auth.user_id)}
 
     @router.post("/auth/api-keys")
     async def create_api_key(request: Request):
         auth = _require_auth(request)
         body = await _json(request)
         try:
-            rec, token = identity.create_api_key(auth.user_id, name=body.get("name") or "")
+            rec, token = await asyncio.to_thread(identity.create_api_key, auth.user_id, name=body.get("name") or "")
         except KeyError:
             raise HTTPException(status_code=404, detail="user not found")
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        identity.record(auth.tenant_id, auth.user_id, "apikey.created", target=rec.name)
+        await identity.record(auth.tenant_id, auth.user_id, "apikey.created", target=rec.name)
         # The token is returned ONCE here and never again.
         return {"id": rec.id, "name": rec.name, "created": rec.created, "token": token}
 
@@ -153,10 +155,10 @@ def mount_identity_routes(app, identity) -> None:
     async def revoke_api_key(key_id: str, request: Request):
         auth = _require_auth(request)
         try:
-            identity.revoke_api_key(auth.user_id, key_id)
+            await asyncio.to_thread(identity.revoke_api_key, auth.user_id, key_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="api key not found")
-        identity.record(auth.tenant_id, auth.user_id, "apikey.revoked", target=key_id)
+        await identity.record(auth.tenant_id, auth.user_id, "apikey.revoked", target=key_id)
         return {"status": "revoked"}
 
     @router.post("/auth/logout")

@@ -255,7 +255,10 @@ class MemoryPlugin(BasePlugin):
             if not query:
                 return None
             store = MemoryStore.for_tenant(tenant_id)
-            block = recall_context(store, user_id, query, budget_tokens=_recall_budget())
+            # recall scans/parses the user's memory files — offload so this
+            # per-turn read never blocks the event loop / health checks.
+            block = await asyncio.to_thread(
+                recall_context, store, user_id, query, budget_tokens=_recall_budget())
             if block:
                 _append_to_system_instruction(llm_request, block)
         except Exception as e:  # noqa: BLE001 — recall must never break a turn
@@ -289,9 +292,15 @@ class MemoryPlugin(BasePlugin):
             # proposed slug on any model failure.
             from ..memory import resolve_facts
             resolutions = await resolve_facts(model, store, user_id, facts)
-            for res in resolutions:
-                store.add_episodic(user_id, res.fact, topic=res.topic,
-                                   sources=[sid] if sid else None)
+
+            def _persist() -> None:
+                for res in resolutions:
+                    store.add_episodic(user_id, res.fact, topic=res.topic,
+                                       sources=[sid] if sid else None)
+
+            # The episodic writes (put_doc + changelog append per fact) are
+            # offloaded so the capture path doesn't occupy the loop after the run.
+            await asyncio.to_thread(_persist)
             _log.info("memory: captured %d fact(s) for user=%s", len(resolutions), user_id)
             # Hybrid promotion: this turn just grew the unprocessed backlog, so
             # this is the only moment it can cross the threshold — check here

@@ -107,7 +107,9 @@ class EmailPasswordProvider(IdentityProvider):
         rec = await asyncio.to_thread(self.store.get_by_email, email)
         if rec is None or rec.status != "active":
             return None
-        if not verify_password(password, rec.password_hash):
+        # scrypt is CPU-bound (~16 MiB, tens of ms) — offload it so a login
+        # (unauthenticated, hot) never blocks the event loop / health checks.
+        if not await asyncio.to_thread(verify_password, password, rec.password_hash):
             return None
         return Identity(rec.user_id, rec.tenant_id, tuple(rec.roles), (), rec.email, rec.name)
 
