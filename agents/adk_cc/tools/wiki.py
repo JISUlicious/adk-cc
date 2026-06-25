@@ -16,6 +16,7 @@ Scope comes from the tenant context TenancyPlugin seeds into session state
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any, Optional
 
@@ -79,8 +80,9 @@ class WikiSearchTool(AdkCcTool):
 
     async def _execute(self, args: WikiSearchArgs, ctx: ToolContext) -> dict[str, Any]:
         store, user_id = _store_and_user(ctx)
-        hits = searchlib.search(
-            store, args.query, user_id=user_id, limit=args.limit
+        # Full corpus scan over domain + inbox docs — offload off the loop.
+        hits = await asyncio.to_thread(
+            searchlib.search, store, args.query, user_id=user_id, limit=args.limit
         )
         return {
             "status": "ok",
@@ -116,26 +118,28 @@ class WikiReadTool(AdkCcTool):
         slug = pagelib.slugify(args.slug)
         scope = (args.scope or "auto").lower()
 
-        inbox_page = None
-        if scope in ("auto", "inbox"):
-            for doc in store.list_inbox(user_id):
-                if doc.slug == slug:
-                    inbox_page = doc.page
-                    break
-        domain_page = None
-        if scope in ("auto", "domain"):
-            domain_page = store.read_domain_page(slug)
-
-        chosen, chosen_scope = None, None
-        if scope == "inbox":
-            chosen, chosen_scope = inbox_page, "inbox"
-        elif scope == "domain":
-            chosen, chosen_scope = domain_page, "domain"
-        else:  # auto: private note shadows shared wiki for this user
-            if inbox_page is not None:
+        def _resolve():
+            """All the blocking store reads, run off the loop in one hop."""
+            inbox_page = None
+            if scope in ("auto", "inbox"):
+                for doc in store.list_inbox(user_id):
+                    if doc.slug == slug:
+                        inbox_page = doc.page
+                        break
+            domain_page = store.read_domain_page(slug) if scope in ("auto", "domain") else None
+            if scope == "inbox":
                 chosen, chosen_scope = inbox_page, "inbox"
-            else:
+            elif scope == "domain":
                 chosen, chosen_scope = domain_page, "domain"
+            else:  # auto: private note shadows shared wiki for this user
+                chosen = inbox_page if inbox_page is not None else domain_page
+                chosen_scope = "inbox" if inbox_page is not None else "domain"
+            # When auto-reading the private note, note if the shared wiki also
+            # has this topic so the model reconciles rather than assumes.
+            also = chosen_scope == "inbox" and store.read_domain_page(slug) is not None
+            return chosen, chosen_scope, also
+
+        chosen, chosen_scope, also_in_domain = await asyncio.to_thread(_resolve)
 
         if chosen is None:
             return {
@@ -143,11 +147,6 @@ class WikiReadTool(AdkCcTool):
                 "slug": slug,
                 "error": f"no {scope} page for slug {slug!r}",
             }
-        # When auto-reading the private note, tell the model the shared wiki
-        # also has this topic so it can reconcile rather than assume.
-        also_in_domain = (
-            chosen_scope == "inbox" and store.read_domain_page(slug) is not None
-        )
         return {
             "status": "ok",
             "slug": slug,
@@ -200,7 +199,8 @@ class WikiAddTool(AdkCcTool):
                 "matched": reason,
             }
         store, user_id = _store_and_user(ctx)
-        doc = store.add_inbox(
+        doc = await asyncio.to_thread(
+            store.add_inbox,
             user_id,
             args.text,
             title=args.title,
