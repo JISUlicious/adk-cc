@@ -119,14 +119,18 @@ export function SettingsModal({
         </aside>
 
         {/* content */}
-        <div className="relative flex-1 overflow-y-auto">
-          <button
-            type="button" onClick={onClose} aria-label="Close"
-            className="absolute right-3 top-3 z-10 text-muted-foreground hover:text-foreground"
-          >
-            <X className="h-4 w-4" />
-          </button>
-          <div className="space-y-5 p-5">
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          {/* fixed header — close button stays put while the body scrolls */}
+          <div className="flex shrink-0 items-center justify-between border-b border-border/60 px-5 py-2.5">
+            <h2 className="text-sm font-medium">{TABS.find((t) => t.id === tab)?.label ?? ""}</h2>
+            <button
+              type="button" onClick={onClose} aria-label="Close"
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="flex-1 divide-y divide-border/60 overflow-y-auto px-5">
             {tab === "account" && (<><AccountInfoSections /><CustomVariablesSection /></>)}
             {tab === "appearance" && (<ThemeSection />)}
             {tab === "mcp" && (<><UserMcpSection />{isAdmin && <AdminBlock title="Org MCP servers"><McpAdminTab /></AdminBlock>}</>)}
@@ -144,7 +148,7 @@ export function SettingsModal({
 
 function AdminBlock({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="rounded-lg border border-border p-4">
+    <section className="py-5">
       <div className="mb-3 flex items-center gap-2">
         <h3 className="text-sm font-semibold">{title}</h3>
         <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">admin · org</span>
@@ -169,7 +173,7 @@ function ThemeSection() {
     </button>
   )
   return (
-    <section className="rounded-lg border border-border p-4">
+    <section className="py-5">
       <h3 className="mb-3 text-sm font-semibold">Appearance</h3>
       <div className="flex gap-2">
         {opt("light", "Light", Sun)}

@@ -52,9 +52,9 @@ export function AccountPage() {
         <h1 className="text-lg font-semibold">Account</h1>
       </header>
 
-      <div className="flex-1 space-y-6 p-4">
+      <div className="flex-1 divide-y divide-border/60 px-4">
         {error && (
-          <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>
+          <p className="mt-4 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>
         )}
         <ProfileSection me={me} onSaved={setMe} />
         <PasswordSection />
@@ -69,7 +69,7 @@ export function AccountPage() {
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="rounded-lg border border-border p-4">
+    <section className="py-5">
       <h2 className="mb-3 text-sm font-semibold">{title}</h2>
       {children}
     </section>
