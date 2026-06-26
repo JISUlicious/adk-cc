@@ -21,7 +21,7 @@ import { ArtifactsPanel } from "@/components/ArtifactsPanel"
 import { ContextGauge } from "@/components/ContextGauge"
 import { CompactionBadge } from "@/components/CompactionBadge"
 import { fetchContextLimits, type ContextLimits } from "@/api/context"
-import { SettingsDialog } from "@/components/SettingsDialog"
+import { SettingsModal } from "@/components/SettingsModal"
 import { listSecrets } from "@/api/account"
 import { type SlashAction } from "@/components/SlashCommandMenu"
 import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/lib/theme"
@@ -446,7 +446,7 @@ export function ChatPage() {
           onClose={() => setTasksOpen(false)}
         />
       )}
-      <SettingsDialog
+      <SettingsModal
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
         secretsMissing={secretsMissing}

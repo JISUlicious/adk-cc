@@ -76,6 +76,20 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
+/** Profile + password + API keys, with its own `me` fetch — for embedding in
+ * the Settings modal's Account tab (the page above composes the same pieces). */
+export function AccountInfoSections() {
+  const [me, setMe] = useState<Me | null>(null)
+  useEffect(() => { getMe().then(setMe).catch(() => {}) }, [])
+  return (
+    <>
+      <ProfileSection me={me} onSaved={setMe} />
+      <PasswordSection />
+      <ApiKeysSection />
+    </>
+  )
+}
+
 function ProfileSection({ me, onSaved }: { me: Me | null; onSaved: (m: Me) => void }) {
   const [name, setName] = useState("")
   const [status, setStatus] = useState<string | null>(null)
@@ -244,7 +258,7 @@ function SecretGroupCard({ group, onChanged, onError }: { group: SecretGroup; on
   )
 }
 
-function SecretsSection() {
+export function SecretsSection() {
   const [view, setView] = useState<SecretsView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [newKey, setNewKey] = useState("")
@@ -418,7 +432,7 @@ function ApiKeysSection() {
   )
 }
 
-function UserMcpSection() {
+export function UserMcpSection() {
   const [servers, setServers] = useState<UserMcpServer[] | null>(null)
   const [available, setAvailable] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -503,7 +517,7 @@ function UserMcpSection() {
   )
 }
 
-function UserSkillsSection() {
+export function UserSkillsSection() {
   const [skills, setSkills] = useState<string[] | null>(null)
   const [available, setAvailable] = useState(true)
   const [error, setError] = useState<string | null>(null)

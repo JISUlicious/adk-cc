@@ -175,11 +175,11 @@ def main() -> int:
             page.wait_for_selector('button[title*="Settings"]', timeout=10000)
             check("Settings gear shows a missing-secrets badge",
                   page.locator('button[title*="need setup"]').count() > 0)
-            # opening the Settings dialog → the Account button also carries the badge
+            # opening the Settings modal → the Secrets sidebar tab carries the badge
             page.locator('button[title*="Settings"]').click()
-            page.wait_for_selector('a[href="/account"]', timeout=5000)
-            check("Settings dialog Account button shows the missing badge",
-                  page.locator('a[href="/account"]').get_by_text("1", exact=True).count() > 0)
+            page.wait_for_selector("text=Appearance", timeout=8000)  # modal open (Account tab)
+            check("Settings modal Secrets tab shows the missing badge",
+                  page.get_by_role("button", name="Secrets").get_by_text("1", exact=True).count() > 0)
             page.keyboard.press("Escape")
             page.goto(BASE + "/account", wait_until="networkidle")
             page.wait_for_selector("text=Secrets", timeout=10000)
