@@ -76,7 +76,7 @@ class TenantMcpToolset(BaseToolset):
         if readonly_context is None:
             return []
 
-        # tenant_id lives in session state, seeded by TenancyPlugin.
+        # tenant_id + user_id live in session state, seeded by TenancyPlugin.
         try:
             state = readonly_context.session.state
             tenant = state.get("temp:tenant_context")
@@ -85,8 +85,10 @@ class TenantMcpToolset(BaseToolset):
                 if tenant is not None and hasattr(tenant, "tenant_id")
                 else None
             )
+            user_id = getattr(tenant, "user_id", None) if tenant is not None else None
         except Exception:
             tenant_id = None
+            user_id = None
         if not tenant_id:
             return []
 
@@ -94,9 +96,14 @@ class TenantMcpToolset(BaseToolset):
         out: list[BaseTool] = []
         for cfg in configs:
             try:
+                # User-over-tenant: a user's personal MCP token (set via
+                # /auth/secrets) overrides the org's shared one; falls back to
+                # the tenant-shared token when the user has none.
                 secret = (
                     await self._credentials.get(
-                        tenant_id=tenant_id, key=cfg.credential_key
+                        tenant_id=tenant_id,
+                        key=cfg.credential_key,
+                        user_id=user_id or None,
                     )
                     if cfg.credential_key
                     else None
