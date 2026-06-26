@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { ArrowLeft, Copy, Check, Trash2, KeyRound, Plus } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -14,11 +14,18 @@ import {
   listSecrets,
   setSecret,
   deleteSecret,
+  listUserMcpServers,
+  putUserMcpServer,
+  deleteUserMcpServer,
+  listUserSkills,
+  uploadUserSkill,
+  deleteUserSkill,
   type Me,
   type ApiKey,
   type SecretInput,
   type SecretGroup,
   type SecretsView,
+  type UserMcpServer,
 } from "@/api/account"
 
 /**
@@ -52,6 +59,8 @@ export function AccountPage() {
         <ProfileSection me={me} onSaved={setMe} />
         <PasswordSection />
         <SecretsSection />
+        <UserMcpSection />
+        <UserSkillsSection />
         <ApiKeysSection />
       </div>
     </div>
@@ -405,6 +414,153 @@ function ApiKeysSection() {
           ))}
         </ul>
       )}
+    </Section>
+  )
+}
+
+function UserMcpSection() {
+  const [servers, setServers] = useState<UserMcpServer[] | null>(null)
+  const [available, setAvailable] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [name, setName] = useState("")
+  const [transport, setTransport] = useState("http")
+  const [url, setUrl] = useState("")
+  const [credKey, setCredKey] = useState("")
+
+  const reload = useCallback(() => {
+    listUserMcpServers()
+      .then((s) => { setServers(s); setAvailable(true) })
+      .catch((e) => {
+        if (e instanceof ApiError && e.status === 404) setAvailable(false)
+        else setError(msg(e))
+      })
+  }, [])
+  useEffect(reload, [reload])
+
+  async function add(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
+    if (!name.trim() || !url.trim()) return
+    try {
+      await putUserMcpServer({ server_name: name.trim(), transport, url: url.trim(), credential_key: credKey.trim() || null })
+      setName(""); setUrl(""); setCredKey("")
+      reload()
+    } catch (err) { setError(msg(err)) }
+  }
+  async function remove(n: string) {
+    try { await deleteUserMcpServer(n); reload() } catch (err) { setError(msg(err)) }
+  }
+
+  if (!available) return null
+  const list = servers ?? []
+  return (
+    <Section title="Your MCP servers">
+      <p className="mb-3 text-xs text-muted-foreground">
+        Personal MCP servers, used alongside your org's (yours win on a name clash). Put each
+        server's token in <strong>Secrets</strong> above under its <code>credential_key</code>.
+      </p>
+      {error && <p className="mb-2 text-sm text-destructive">{error}</p>}
+      {list.length > 0 && (
+        <ul className="mb-3 divide-y divide-border">
+          {list.map((s) => (
+            <li key={s.server_name} className="flex items-center gap-2 py-2">
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm">
+                  <span className="font-mono">{s.server_name}</span>{" "}
+                  <span className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">{s.transport}</span>{" "}
+                  {s.scope === "tenant"
+                    ? <span className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">From org</span>
+                    : <span className="rounded bg-emerald-500/15 px-1 py-0.5 text-[10px] text-emerald-600">Personal</span>}
+                </p>
+                <p className="truncate text-xs text-muted-foreground">{s.url}{s.credential_key ? ` · token: ${s.credential_key}` : ""}</p>
+              </div>
+              {s.scope !== "tenant" && (
+                <Button variant="ghost" size="sm" onClick={() => remove(s.server_name)} title="Remove">
+                  <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                </Button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      <form onSubmit={add} className="space-y-2 border-t border-border/60 pt-3">
+        <div className="flex items-center gap-2">
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="server name" className="w-40 font-mono text-xs" />
+          <select value={transport} onChange={(e) => setTransport(e.target.value)}
+                  className="h-9 rounded-md border border-input bg-background px-2 text-sm">
+            <option value="http">http</option>
+            <option value="sse">sse</option>
+            <option value="stdio">stdio</option>
+          </select>
+          <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://… or command" className="flex-1" />
+        </div>
+        <div className="flex items-center gap-2">
+          <Input value={credKey} onChange={(e) => setCredKey(e.target.value)} placeholder="credential_key (optional)" className="flex-1 font-mono text-xs" />
+          <Button type="submit" size="sm" disabled={!name.trim() || !url.trim()}><Plus className="h-3.5 w-3.5" /> Add</Button>
+        </div>
+      </form>
+    </Section>
+  )
+}
+
+function UserSkillsSection() {
+  const [skills, setSkills] = useState<string[] | null>(null)
+  const [available, setAvailable] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  const reload = useCallback(() => {
+    listUserSkills()
+      .then((s) => { setSkills(s); setAvailable(true) })
+      .catch((e) => {
+        if (e instanceof ApiError && e.status === 404) setAvailable(false)
+        else setError(msg(e))
+      })
+  }, [])
+  useEffect(reload, [reload])
+
+  async function upload(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
+    const f = fileRef.current?.files?.[0]
+    if (!f) return
+    const name = f.name.replace(/\.zip$/i, "")
+    try {
+      await uploadUserSkill(name, f)
+      if (fileRef.current) fileRef.current.value = ""
+      reload()
+    } catch (err) { setError(msg(err)) }
+  }
+  async function remove(n: string) {
+    try { await deleteUserSkill(n); reload() } catch (err) { setError(msg(err)) }
+  }
+
+  if (!available) return null
+  const list = skills ?? []
+  return (
+    <Section title="Your skills">
+      <p className="mb-3 text-xs text-muted-foreground">
+        Upload a skill as a <code className="rounded bg-muted px-1">.zip</code> (a folder with a
+        <code className="rounded bg-muted px-1">SKILL.md</code>). Used alongside your org's skills
+        (yours win on a name clash). Any secrets it declares appear in <strong>Secrets</strong> above.
+      </p>
+      {error && <p className="mb-2 text-sm text-destructive">{error}</p>}
+      {list.length > 0 && (
+        <ul className="mb-3 divide-y divide-border">
+          {list.map((n) => (
+            <li key={n} className="flex items-center gap-2 py-2">
+              <span className="flex-1 truncate text-sm font-mono">{n}</span>
+              <Button variant="ghost" size="sm" onClick={() => remove(n)} title="Remove">
+                <Trash2 className="h-3.5 w-3.5 text-destructive" />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <form onSubmit={upload} className="flex items-center gap-2 border-t border-border/60 pt-3">
+        <input ref={fileRef} type="file" accept=".zip" className="flex-1 text-sm" />
+        <Button type="submit" size="sm"><Plus className="h-3.5 w-3.5" /> Upload</Button>
+      </form>
     </Section>
   )
 }

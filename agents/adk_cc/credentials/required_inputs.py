@@ -176,6 +176,12 @@ def required_inputs(
     return val
 
 
+def invalidate_cache() -> None:
+    """Drop the skill-declaration cache — call after a skill is uploaded/removed
+    so the new declarations surface immediately (don't wait out the TTL)."""
+    _CACHE.clear()
+
+
 def declared_secret_keys(
     tenant_id: Optional[str] = None,
     user_id: Optional[str] = None,

@@ -96,3 +96,51 @@ export function setSecret(key: string, value: string): Promise<unknown> {
 export function deleteSecret(key: string): Promise<unknown> {
   return apiFetch(`/auth/secrets/${encodeURIComponent(key)}`, { method: "DELETE" })
 }
+
+/**
+ * Per-user MCP servers & skills (self-service). Unioned with the org's at
+ * session time, the user's shadowing the org's by name. Endpoints are only
+ * mounted when the backing roots are configured — callers treat a failed
+ * GET as "feature unavailable" and hide the section.
+ */
+export interface UserMcpServer {
+  server_name: string
+  transport: string
+  url: string
+  credential_key?: string | null
+  scope?: "user" | "tenant"
+}
+
+export async function listUserMcpServers(): Promise<UserMcpServer[]> {
+  const r = await apiFetch<{ servers: UserMcpServer[] }>("/auth/mcp-servers")
+  return r.servers
+}
+
+export function putUserMcpServer(s: UserMcpServer): Promise<unknown> {
+  const body = { transport: s.transport, url: s.url, credential_key: s.credential_key || null }
+  return apiFetch(`/auth/mcp-servers/${encodeURIComponent(s.server_name)}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  })
+}
+
+export function deleteUserMcpServer(name: string): Promise<unknown> {
+  return apiFetch(`/auth/mcp-servers/${encodeURIComponent(name)}`, { method: "DELETE" })
+}
+
+export async function listUserSkills(): Promise<string[]> {
+  const r = await apiFetch<{ skills: string[] }>("/auth/skills")
+  return r.skills
+}
+
+export function uploadUserSkill(name: string, zip: Blob): Promise<unknown> {
+  return apiFetch(`/auth/skills/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/zip" },
+    body: zip,
+  })
+}
+
+export function deleteUserSkill(name: string): Promise<unknown> {
+  return apiFetch(`/auth/skills/${encodeURIComponent(name)}`, { method: "DELETE" })
+}

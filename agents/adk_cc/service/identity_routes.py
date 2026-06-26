@@ -372,6 +372,9 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
                         shutil.move(tmp, target)
             except zipfile.BadZipFile:
                 raise HTTPException(status_code=400, detail="body is not a valid zip")
+            from ..credentials.required_inputs import invalidate_cache
+
+            invalidate_cache()  # new declarations surface immediately
             await identity.record(auth.tenant_id, auth.user_id, "skill.uploaded", target=s)
             return {"status": "ok"}
 
@@ -382,6 +385,9 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
             target = _user_skill_dir(auth) / s
             if target.exists():
                 shutil.rmtree(target)
+            from ..credentials.required_inputs import invalidate_cache
+
+            invalidate_cache()
             await identity.record(auth.tenant_id, auth.user_id, "skill.deleted", target=s)
             return {"status": "deleted", "skill_name": s}
 
