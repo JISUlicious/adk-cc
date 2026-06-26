@@ -109,13 +109,13 @@ export function TeamSection() {
   }
 
   return (
-      <div className="space-y-6">
+      <div className="divide-y divide-border/60">
         {error && (
-          <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>
+          <p className="mt-4 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>
         )}
 
         {/* Invite */}
-        <section className="rounded-lg border border-border p-4">
+        <section className="py-5">
           <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
             <UserPlus className="h-4 w-4" /> Invite a member
           </h2>
@@ -153,12 +153,12 @@ export function TeamSection() {
         </section>
 
         {/* Members */}
-        <section className="rounded-lg border border-border">
-          <h2 className="border-b border-border px-4 py-2.5 text-sm font-semibold">
+        <section className="py-5">
+          <h2 className="mb-3 text-sm font-semibold">
             Members {!loading && `(${members.length})`}
           </h2>
           {loading ? (
-            <p className="px-4 py-3 text-sm text-muted-foreground">Loading…</p>
+            <p className="py-3 text-sm text-muted-foreground">Loading…</p>
           ) : (
             <ul className="divide-y divide-border">
               {members.map((m) => {
@@ -166,7 +166,7 @@ export function TeamSection() {
                 const isOwner = m.roles.includes("owner")
                 const disabled = m.status === "disabled"
                 return (
-                  <li key={m.id} className="flex items-center gap-3 px-4 py-2.5">
+                  <li key={m.id} className="flex items-center gap-3 py-2.5">
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm">
                         {m.email}
@@ -230,7 +230,7 @@ export function TeamSection() {
               {invites.map((inv) => {
                 const url = `${window.location.origin}/invite/${inv.token}`
                 return (
-                  <li key={inv.token} className="flex items-center gap-3 px-4 py-2.5">
+                  <li key={inv.token} className="flex items-center gap-3 py-2.5">
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm">{inv.email}</p>
                       <p className="text-xs text-muted-foreground">{inv.role}</p>

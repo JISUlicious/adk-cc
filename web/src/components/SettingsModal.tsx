@@ -130,8 +130,9 @@ export function SettingsModal({
             {tab === "team" && (<TeamSection />)}
             {tab === "advanced" && (<><AdminBlock title="Model endpoints"><ModelAdminTab /></AdminBlock>{isAdmin && <OrgCredentialsSection />}</>)}
           </div>
-          {/* soft fade at the top — content scrolls under it, no hard border */}
-          <div className="faded-header-edge pointer-events-none absolute inset-x-0 top-0 h-10" />
+          {/* soft fade at the top — content scrolls under it, no hard border.
+              `right-2.5` keeps the fade off the scrollbar gutter. */}
+          <div className="faded-header-edge pointer-events-none absolute left-0 right-2.5 top-0 h-6" />
           {/* close button — pinned to the panel's top-right (outside the scroll area) */}
           <button
             type="button" onClick={onClose} aria-label="Close"
