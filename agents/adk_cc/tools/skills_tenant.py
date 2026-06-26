@@ -34,7 +34,6 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.base_toolset import BaseToolset
 from google.adk.tools.skill_toolset import SkillToolset
 
-from .skills import discover_skills
 
 _log = logging.getLogger(__name__)
 
@@ -61,6 +60,34 @@ class TenantSkillToolset(BaseToolset):
             raise ValueError(f"unsafe tenant_id for filesystem: {tenant_id!r}")
         return safe
 
+    def _scoped_skill_sources(self, tenant_id: str, user_id: Optional[str]):
+        """`(skill, skill_dir)` pairs from the union of the user's PERSONAL
+        skills and the TENANT's, the user's shadowing the tenant's by name (dirs
+        ordered user-first). Mirrors the user-over-tenant credential layout:
+        `<root>/<tenant>/` and `<root>/<tenant>/_users/<user>/`."""
+        try:
+            tenant_dir = self._skill_root / self._safe_tenant(tenant_id)
+        except ValueError as e:
+            _log.warning("TenantSkillToolset: %s", e)
+            return []
+
+        dirs: list[Path] = []
+        if user_id:
+            try:
+                udir = tenant_dir / "_users" / self._safe_tenant(user_id)
+                if udir.is_dir():
+                    dirs.append(udir)
+            except ValueError:
+                pass  # unsafe user_id → just skip the personal scope
+        if tenant_dir.is_dir():
+            dirs.append(tenant_dir)
+        if not dirs:
+            return []
+
+        from .skills import discover_skills_with_sources
+
+        return discover_skills_with_sources(dirs)  # dedup by name, user wins
+
     async def get_tools(
         self, readonly_context: Optional[ReadonlyContext] = None
     ) -> list[BaseTool]:
@@ -74,24 +101,18 @@ class TenantSkillToolset(BaseToolset):
                 if tenant is not None and hasattr(tenant, "tenant_id")
                 else None
             )
+            user_id = getattr(tenant, "user_id", None) if tenant is not None else None
         except Exception:
             tenant_id = None
+            user_id = None
         if not tenant_id:
             return []
 
-        try:
-            tenant_dir = self._skill_root / self._safe_tenant(tenant_id)
-        except ValueError as e:
-            _log.warning("TenantSkillToolset: %s", e)
-            return []
-        if not tenant_dir.is_dir():
+        sourced = self._scoped_skill_sources(tenant_id, user_id)
+        if not sourced:
             return []
 
-        skills = discover_skills(tenant_dir)
-        if not skills:
-            return []
         # Same bounded/lazy/guarded treatment as the single-tenant factory.
-        # (skill dir == tenant_dir/<skill name>, enforced by ADK's loader.)
         from .skills import (
             _SkillResourceSearchTool,
             _build_skill_dir_index,
@@ -99,11 +120,11 @@ class TenantSkillToolset(BaseToolset):
             _patch_skill_tools,
             _prune_oversized_resources,
         )
-
+        skills = [s for s, _ in sourced]
         max_bytes = _file_max_bytes()
         for skill in skills:
             _prune_oversized_resources(skill, max_bytes)
-        pairs = [(skill, (tenant_dir / skill.name).resolve()) for skill in skills]
+        pairs = [(skill, skill_dir.resolve()) for skill, skill_dir in sourced]
         skill_dirs = _build_skill_dir_index(pairs)
         inner = SkillToolset(
             skills=skills,
