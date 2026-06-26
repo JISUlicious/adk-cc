@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -121,3 +122,90 @@ def declared_secret_keys(*, refresh: bool = False) -> set[str]:
     """Just the declared ids — the allowlist used to scope sandbox injection.
     Empty set when nothing is declared (caller then falls back to all secrets)."""
     return {ri.id for ri in required_inputs(refresh=refresh)}
+
+
+# --- grouping (Settings UI: env vars per skill / per MCP) ------------------
+
+@dataclass(frozen=True)
+class InputGroup:
+    kind: str  # "skill" | "mcp"
+    name: str  # e.g. "pdf-processing" or "github"
+    inputs: list[RequiredInput]
+
+
+async def discover_mcp_required_inputs(tenant_id: str) -> list[RequiredInput]:
+    """MCP servers' credential requirements, as RequiredInputs grouped by server
+    (source = "mcp:<server_name>"). Unions the static file
+    (ADK_CC_MCP_SERVERS_FILE) and the per-tenant registry
+    (ADK_CC_TENANT_REGISTRY_DIR). Best-effort; any error → fewer entries."""
+    out: list[RequiredInput] = []
+
+    def _ri(cfg) -> Optional[RequiredInput]:
+        key = getattr(cfg, "credential_key", None)
+        if not key:
+            return None
+        name = getattr(cfg, "server_name", "?")
+        return RequiredInput(
+            id=key,
+            description=f"Auth token for the “{name}” MCP server",
+            source=f"mcp:{name}",
+        )
+
+    # static file
+    path = os.environ.get("ADK_CC_MCP_SERVERS_FILE")
+    if path:
+        try:
+            from ..tools.mcp import McpServerConfig
+
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+            for entry in raw if isinstance(raw, list) else []:
+                try:
+                    ri = _ri(McpServerConfig.model_validate(entry))
+                    if ri:
+                        out.append(ri)
+                except Exception:  # noqa: BLE001 — skip a bad entry
+                    pass
+        except Exception as e:  # noqa: BLE001
+            _log.debug("static MCP enumerate failed (%s: %s)", type(e).__name__, e)
+
+    # per-tenant registry
+    reg_dir = os.environ.get("ADK_CC_TENANT_REGISTRY_DIR")
+    if reg_dir and tenant_id:
+        try:
+            from ..service.registry import JsonFileTenantResourceRegistry
+            from ..tools.mcp_tenant import McpServerConfig
+
+            reg = JsonFileTenantResourceRegistry(
+                root=reg_dir, kind="mcp", model=McpServerConfig, id_attr="server_name"
+            )
+            for cfg in await reg.list_for_tenant(tenant_id):
+                ri = _ri(cfg)
+                if ri:
+                    out.append(ri)
+        except Exception as e:  # noqa: BLE001
+            _log.debug("tenant MCP enumerate failed (%s: %s)", type(e).__name__, e)
+
+    return out
+
+
+async def discover_groups(tenant_id: str) -> list[InputGroup]:
+    """Declared required inputs grouped by their owning skill / MCP server,
+    sorted (skills then MCP, by name). Dedups ids within a group."""
+    buckets: dict[tuple[str, str], dict[str, RequiredInput]] = {}
+
+    def add(ri: RequiredInput) -> None:
+        kind, _, name = ri.source.partition(":")
+        buckets.setdefault((kind or "skill", name or ri.source), {}).setdefault(ri.id, ri)
+
+    for ri in required_inputs():
+        add(ri)
+    for ri in await discover_mcp_required_inputs(tenant_id):
+        add(ri)
+
+    groups = [
+        InputGroup(kind=k, name=n, inputs=list(v.values()))
+        for (k, n), v in buckets.items()
+    ]
+    groups.sort(key=lambda g: (g.kind != "skill", g.kind, g.name))
+    return groups

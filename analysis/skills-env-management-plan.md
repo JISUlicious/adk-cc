@@ -24,10 +24,15 @@ Companion: [skills-env-management-gap.md](./skills-env-management-gap.md)
 - Phase 2 (partial) — `user_id` threaded into `sandbox_env.resolve()` and the
   tenancy backend factory.
 - Phase 4 (API + UI) — self-service `/auth/secrets` GET/PUT/DELETE (names+scope
-  only) AND the Settings → **Secrets** panel (AccountPage): lists declared +
-  status, set/update (password field), remove; values never shown. Real-browser
-  e2e (`tests/e2e_account_ui.py`, +6 checks): add → Set badge → stored at user
-  scope → value never returned by API → remove.
+  only) AND the Settings → **Secrets** panel (AccountPage): values never shown.
+  GET returns inputs **grouped by owning skill / MCP server** (+ `other` for
+  custom keys) with a `missing_required` count; the UI renders one card per
+  skill/MCP with a "needs setup" badge, and a count badge on the Settings gear
+  + Account button. MCP servers enumerated from the static file + tenant
+  registry. Real-browser e2e (`tests/e2e_account_ui.py`, 20 checks): grouped
+  rendering, group badge, gear badge, add → Set badge → stored at user scope →
+  value never returned by API → remove. Full UI→agent→Daytona chain
+  (`e2e_secrets_ui_full.py`, 6/6).
 - Phase 2 (MCP) — `TenantMcpToolset` resolves tokens user-over-tenant
   (`user_id` threaded into `credentials.get`). `tests/test_mcp_user_scope.py`
 - **Live agent-API e2e PASS** (noop backend): alice sets a personal secret →

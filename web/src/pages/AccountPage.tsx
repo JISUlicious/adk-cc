@@ -16,7 +16,9 @@ import {
   deleteSecret,
   type Me,
   type ApiKey,
-  type SecretItem,
+  type SecretInput,
+  type SecretGroup,
+  type SecretsView,
 } from "@/api/account"
 
 /**
@@ -145,7 +147,7 @@ function PasswordSection() {
   )
 }
 
-function SecretStatusBadge({ status, required }: { status: SecretItem["status"]; required: boolean }) {
+function SecretStatusBadge({ status, required }: { status: SecretInput["status"]; required: boolean }) {
   if (status === "user")
     return <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600">Set</span>
   if (status === "tenant")
@@ -157,7 +159,7 @@ function SecretStatusBadge({ status, required }: { status: SecretItem["status"];
   )
 }
 
-function SecretRow({ item, onChanged, onError }: { item: SecretItem; onChanged: () => void; onError: (m: string) => void }) {
+function SecretRow({ item, onChanged, onError }: { item: SecretInput; onChanged: () => void; onError: (m: string) => void }) {
   const [value, setValue] = useState("")
   const [saved, setSaved] = useState(false)
 
@@ -212,14 +214,35 @@ function SecretRow({ item, onChanged, onError }: { item: SecretItem; onChanged: 
   )
 }
 
+function SecretGroupCard({ group, onChanged, onError }: { group: SecretGroup; onChanged: () => void; onError: (m: string) => void }) {
+  const label = group.kind === "mcp" ? `MCP · ${group.name}` : `Skill · ${group.name}`
+  return (
+    <div className="rounded-md border border-border/60 p-3">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="text-xs font-medium">{label}</span>
+        {group.missing > 0 && (
+          <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">
+            {group.missing} needs setup
+          </span>
+        )}
+      </div>
+      <ul className="divide-y divide-border/60">
+        {group.inputs.map((it) => (
+          <SecretRow key={it.key} item={it} onChanged={onChanged} onError={onError} />
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 function SecretsSection() {
-  const [items, setItems] = useState<SecretItem[]>([])
+  const [view, setView] = useState<SecretsView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [newKey, setNewKey] = useState("")
   const [newVal, setNewVal] = useState("")
 
   const reload = useCallback(() => {
-    listSecrets().then((r) => setItems(r.secrets)).catch((e) => setError(msg(e)))
+    listSecrets().then(setView).catch((e) => setError(msg(e)))
   }, [])
   useEffect(reload, [reload])
 
@@ -238,22 +261,39 @@ function SecretsSection() {
     }
   }
 
+  const groups = view?.groups ?? []
+  const other = view?.other ?? []
+  const missing = view?.missing_required ?? 0
+
   return (
     <Section title="Secrets">
       <p className="mb-3 text-xs text-muted-foreground">
-        Credentials your skills and MCP servers need (API keys, tokens). Stored encrypted, resolved
-        per request, and <strong>never shown again or sent to the model</strong>. Your personal value
-        overrides any your org provides.
+        Credentials your skills and MCP servers need (API keys, tokens), grouped by what requires
+        them. Stored encrypted, resolved per request, and <strong>never shown again or sent to the
+        model</strong>. Your personal value overrides any your org provides.
+        {missing > 0 && (
+          <span className="ml-1 font-medium text-amber-600">{missing} required value{missing === 1 ? "" : "s"} not set.</span>
+        )}
       </p>
       {error && <p className="mb-2 text-sm text-destructive">{error}</p>}
-      {items.length === 0 ? (
+      {groups.length === 0 && other.length === 0 ? (
         <p className="text-sm text-muted-foreground">No secrets required or set.</p>
       ) : (
-        <ul className="divide-y divide-border">
-          {items.map((it) => (
-            <SecretRow key={it.key} item={it} onChanged={reload} onError={setError} />
+        <div className="space-y-3">
+          {groups.map((g) => (
+            <SecretGroupCard key={`${g.kind}:${g.name}`} group={g} onChanged={reload} onError={setError} />
           ))}
-        </ul>
+          {other.length > 0 && (
+            <div className="rounded-md border border-border/60 p-3">
+              <div className="mb-1 text-xs font-medium text-muted-foreground">Other</div>
+              <ul className="divide-y divide-border/60">
+                {other.map((it) => (
+                  <SecretRow key={it.key} item={it} onChanged={reload} onError={setError} />
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
       )}
       <form onSubmit={addCustom} className="mt-3 flex items-center gap-2 border-t border-border/60 pt-3">
         <Input

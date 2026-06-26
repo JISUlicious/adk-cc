@@ -23,6 +23,7 @@ from adk_cc.credentials.required_inputs import (  # noqa: E402
     RequiredInput,
     _parse_declaration,
     declared_secret_keys,
+    discover_groups,
     required_inputs,
 )
 from adk_cc.sandbox.backends.noop_backend import NoopBackend  # noqa: E402
@@ -74,6 +75,33 @@ def test_discovery_from_skill_md():
         else:
             os.environ["ADK_CC_SKILLS_DIR"] = old
         declared_secret_keys(refresh=True)  # reset cache for other tests
+
+
+def test_discover_groups_by_skill():
+    parent = tempfile.mkdtemp(prefix="groups-")
+    sd = Path(parent) / "g-skill"
+    sd.mkdir()
+    (sd / "SKILL.md").write_text(
+        "---\nname: g-skill\n"
+        "description: A grouping test skill that requires a token to call out.\n"
+        "metadata:\n"
+        '  x-adk-cc/secrets: \'[{"id":"G_TOKEN","description":"grp token"}]\'\n'
+        "---\n\nBody.\n"
+    )
+    old = os.environ.get("ADK_CC_SKILLS_DIR")
+    os.environ["ADK_CC_SKILLS_DIR"] = parent
+    try:
+        declared_secret_keys(refresh=True)
+        groups = asyncio.run(discover_groups("acme"))
+        g = next((x for x in groups if x.kind == "skill" and x.name == "g-skill"), None)
+        assert g is not None, groups
+        assert [i.id for i in g.inputs] == ["G_TOKEN"], g
+    finally:
+        if old is None:
+            os.environ.pop("ADK_CC_SKILLS_DIR", None)
+        else:
+            os.environ["ADK_CC_SKILLS_DIR"] = old
+        declared_secret_keys(refresh=True)
 
 
 def test_runtime_env_allowlist_filters_to_declared():

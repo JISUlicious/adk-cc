@@ -57,18 +57,32 @@ export function revokeApiKey(id: string): Promise<unknown> {
 }
 
 /**
- * Per-user secrets (skills/MCP credentials). The API returns names + status
- * only — values are write-only and never returned. `status`: "user" = set
- * personally, "tenant" = provided by the org, "unset" = needs setup.
+ * Per-user secrets (skills/MCP credentials), grouped by the owning skill / MCP
+ * server. The API returns names + status only — values are write-only and
+ * never returned. `status`: "user" = set personally, "tenant" = provided by the
+ * org, "unset" = needs setup. `missing_required` powers the Settings badge.
  */
-export interface SecretItem {
+export interface SecretInput {
   key: string
   status: "user" | "tenant" | "unset"
   description: string
   required: boolean
 }
 
-export function listSecrets(): Promise<{ secrets: SecretItem[] }> {
+export interface SecretGroup {
+  kind: "skill" | "mcp"
+  name: string
+  inputs: SecretInput[]
+  missing: number
+}
+
+export interface SecretsView {
+  groups: SecretGroup[]
+  other: SecretInput[]
+  missing_required: number
+}
+
+export function listSecrets(): Promise<SecretsView> {
   return apiFetch("/auth/secrets")
 }
 

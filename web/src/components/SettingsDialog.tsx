@@ -19,9 +19,11 @@ import { cn } from "@/lib/utils"
 export function SettingsDialog({
   open,
   onClose,
+  secretsMissing = 0,
 }: {
   open: boolean
   onClose: () => void
+  secretsMissing?: number
 }) {
   const [mode, setMode] = useTheme()
 
@@ -104,9 +106,14 @@ export function SettingsDialog({
 
           <section className="pt-2 border-t space-y-2">
             <a href="/account">
-              <Button variant="outline" size="sm" className="w-full">
+              <Button variant="outline" size="sm" className="relative w-full">
                 <User className="h-3.5 w-3.5" />
                 Account
+                {secretsMissing > 0 && (
+                  <span className="absolute right-2 top-1/2 flex h-4 min-w-4 -translate-y-1/2 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-medium text-white">
+                    {secretsMissing}
+                  </span>
+                )}
               </Button>
             </a>
             <a href="/knowledge">

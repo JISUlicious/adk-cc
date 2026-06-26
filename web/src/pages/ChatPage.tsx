@@ -22,6 +22,7 @@ import { ContextGauge } from "@/components/ContextGauge"
 import { CompactionBadge } from "@/components/CompactionBadge"
 import { fetchContextLimits, type ContextLimits } from "@/api/context"
 import { SettingsDialog } from "@/components/SettingsDialog"
+import { listSecrets } from "@/api/account"
 import { type SlashAction } from "@/components/SlashCommandMenu"
 import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/lib/theme"
 
@@ -58,6 +59,16 @@ export function ChatPage() {
   const [refreshTick, setRefreshTick] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Count of required skill/MCP secrets the user hasn't set → badge on the
+  // Settings gear. Refreshed on mount and whenever the Settings dialog closes
+  // (the user may have just set some on the Account page).
+  const [secretsMissing, setSecretsMissing] = useState(0)
+  useEffect(() => {
+    if (settingsOpen) return
+    listSecrets()
+      .then((v) => setSecretsMissing(v.missing_required))
+      .catch(() => {})
+  }, [settingsOpen])
   // Mobile drawer state (no effect at lg+, where the rails are static).
   const [railOpen, setRailOpen] = useState(false)
   const [tasksOpen, setTasksOpen] = useState(false)
@@ -382,10 +393,16 @@ export function ChatPage() {
             <Button
               variant="outline"
               size="icon"
+              className="relative"
               onClick={() => setSettingsOpen(true)}
-              title="Settings"
+              title={secretsMissing > 0 ? `Settings — ${secretsMissing} secret(s) need setup` : "Settings"}
             >
               <SettingsIcon className="h-4 w-4" />
+              {secretsMissing > 0 && (
+                <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-medium text-white">
+                  {secretsMissing}
+                </span>
+              )}
             </Button>
           </div>
         </header>
@@ -432,6 +449,7 @@ export function ChatPage() {
       <SettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
+        secretsMissing={secretsMissing}
       />
     </div>
   )

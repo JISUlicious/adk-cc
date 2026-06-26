@@ -54,11 +54,25 @@ def main() -> int:
     EmailPasswordProvider(store, mode="single", global_tenant_id="acme").provision(
         email="alice@acme.io", password="password123", name="Alice", tenant_id="acme", roles=["admin"])
 
+    # A skill that DECLARES a required secret, so the Secrets panel renders a
+    # group + "needs setup" badge and the gear icon shows a count.
+    skdir = os.path.join(root, "skills", "demo-skill")
+    os.makedirs(skdir, exist_ok=True)
+    with open(os.path.join(skdir, "SKILL.md"), "w") as f:
+        f.write(
+            "---\nname: demo-skill\n"
+            "description: A demo skill that requires an API token to reach a third-party service.\n"
+            "metadata:\n"
+            '  x-adk-cc/secrets: \'[{"id":"DEMO_TOKEN","description":"Demo service API token","secret":true}]\'\n'
+            "---\nBody.\n"
+        )
+
     env = dict(os.environ)
     env.update({
         "ADK_CC_AGENTS_DIR": os.path.join(REPO, "agents"),
         "ADK_CC_AUTH_PASSWORD": "1", "ADK_CC_TENANCY_MODE": "single",
         "ADK_CC_GLOBAL_TENANT_ID": "acme", "ADK_CC_IDENTITY_DIR": iddir,
+        "ADK_CC_SKILLS_DIR": os.path.join(root, "skills"),
         "ADK_CC_SERVE_UI": "1", "ADK_CC_SKIP_DOTENV": "1", "ADK_CC_API_KEY": "stub",
     })
     env.pop("ADK_CC_ALLOW_NO_AUTH", None)
@@ -83,7 +97,7 @@ def main() -> int:
             page.fill("#email", "alice@acme.io")
             page.fill("#password", "password123")
             page.click("button[type=submit]")
-            page.wait_for_selector('button[title="Settings"]', timeout=20000)
+            page.wait_for_selector('button[title*="Settings"]', timeout=20000)
 
             # navigate to the Account page
             page.goto(BASE + "/account", wait_until="networkidle")
@@ -99,7 +113,8 @@ def main() -> int:
             # in the Profile section; email input is disabled)
             name_input = page.locator("input:not([disabled])").first
             name_input.fill("Alice Updated")
-            page.get_by_role("button", name="Save").click()
+            # scope to the Profile section — the Secrets section also has Save buttons
+            page.locator("section").filter(has_text="Profile").get_by_role("button", name="Save").click()
             page.wait_for_selector("text=Saved.", timeout=10000)
             check("profile name save shows confirmation", page.get_by_text("Saved.").count() > 0)
             # persisted on the server
@@ -122,7 +137,11 @@ def main() -> int:
             page.fill('input[placeholder="key name (e.g. ci)"]', "laptop")
             page.get_by_role("button", name="Create key").click()
             page.wait_for_selector("text=won't be shown again", timeout=10000)
-            shown_token = page.locator("code").first.inner_text().strip()
+            # scope to the fresh-token section ("won't be shown again" is unique
+            # to it — the Secrets section also has <code> tags and mentions
+            # "API keys" in its description)
+            shown_token = (page.locator("section").filter(has_text="won't be shown again")
+                           .locator("code").first.inner_text().strip())
             check("created API key shows a one-time token (a JWT)",
                   len(shown_token.split(".")) == 3)
             check("the new key is listed",
@@ -146,6 +165,25 @@ def main() -> int:
             h2 = {"Authorization": f"Bearer {tok2}"}
             check("Secrets section renders", page.get_by_text("Secrets", exact=True).count() > 0)
 
+            # the declaring skill shows as a group with a "needs setup" badge
+            check("declared skill renders as a group", page.get_by_text("demo-skill").count() > 0)
+            check("group shows a needs-setup badge", page.get_by_text("1 needs setup").count() > 0)
+            check("declared env var (DEMO_TOKEN) listed", page.get_by_text("DEMO_TOKEN").count() > 0)
+
+            # the gear badge (Settings icon) reflects the missing count on /chat
+            page.goto(BASE + "/", wait_until="networkidle")
+            page.wait_for_selector('button[title*="Settings"]', timeout=10000)
+            check("Settings gear shows a missing-secrets badge",
+                  page.locator('button[title*="need setup"]').count() > 0)
+            # opening the Settings dialog → the Account button also carries the badge
+            page.locator('button[title*="Settings"]').click()
+            page.wait_for_selector('a[href="/account"]', timeout=5000)
+            check("Settings dialog Account button shows the missing badge",
+                  page.locator('a[href="/account"]').get_by_text("1", exact=True).count() > 0)
+            page.keyboard.press("Escape")
+            page.goto(BASE + "/account", wait_until="networkidle")
+            page.wait_for_selector("text=Secrets", timeout=10000)
+
             # add a custom secret via the UI (CUSTOM_KEY + value → Add)
             page.fill('input[placeholder="CUSTOM_KEY"]', "MY_API_KEY")
             page.fill('input[placeholder="value"]', "super-secret-xyz")
@@ -155,8 +193,9 @@ def main() -> int:
             check("new secret appears with a Set badge",
                   row.count() > 0 and row.get_by_text("Set").count() > 0)
 
-            # server stores it under the user scope, and NEVER returns the value
-            secrets = requests.get(BASE + "/auth/secrets", headers=h2, timeout=5).json()["secrets"]
+            # server stores it under the user scope (custom key → "other"
+            # bucket since no skill/MCP declares it), and NEVER returns the value
+            secrets = requests.get(BASE + "/auth/secrets", headers=h2, timeout=5).json()["other"]
             item = next((s for s in secrets if s["key"] == "MY_API_KEY"), None)
             check("secret stored at user scope on the server", item is not None and item["status"] == "user")
             check("secret value is never returned by the API",
@@ -167,7 +206,7 @@ def main() -> int:
             time.sleep(0.8)
             check("removed secret disappears from the list",
                   page.locator("li").filter(has_text="MY_API_KEY").count() == 0)
-            secrets2 = requests.get(BASE + "/auth/secrets", headers=h2, timeout=5).json()["secrets"]
+            secrets2 = requests.get(BASE + "/auth/secrets", headers=h2, timeout=5).json()["other"]
             check("secret removed on the server",
                   not any(s["key"] == "MY_API_KEY" for s in secrets2))
 

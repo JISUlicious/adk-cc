@@ -196,30 +196,39 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
                     return "tenant"    # provided by the org (read-only here)
                 return "unset"
 
-            # Declared-required inputs first (so the UI can prompt for the
-            # missing ones), then any extra keys the user set that aren't
-            # declared. Names + status ONLY, never values.
-            try:
-                from ..credentials.required_inputs import required_inputs
-
-                declared = required_inputs()
-            except Exception:  # noqa: BLE001
-                declared = []
-            declared_ids = {ri.id for ri in declared}
-            items = [
-                {
+            def item(ri) -> dict:
+                return {
                     "key": ri.id,
                     "status": status_of(ri.id),
                     "description": ri.description,
                     "required": True,
                 }
-                for ri in declared
+
+            # Declared inputs grouped by owning skill / MCP server, so the UI
+            # can render one section each and badge the ones not yet set. Names
+            # + status ONLY, never values.
+            try:
+                from ..credentials.required_inputs import discover_groups
+
+                raw_groups = await discover_groups(auth.tenant_id)
+            except Exception:  # noqa: BLE001
+                raw_groups = []
+            declared_ids: set[str] = set()
+            groups = []
+            missing_required = 0
+            for g in raw_groups:
+                inputs = [item(ri) for ri in g.inputs]
+                miss = sum(1 for it in inputs if it["status"] == "unset")
+                missing_required += miss
+                declared_ids.update(it["key"] for it in inputs)
+                groups.append({"kind": g.kind, "name": g.name, "inputs": inputs, "missing": miss})
+
+            # keys the user set that no skill/MCP declares (custom)
+            other = [
+                {"key": k, "status": status_of(k), "description": "", "required": False}
+                for k in sorted((personal | shared) - declared_ids)
             ]
-            for k in sorted((personal | shared) - declared_ids):
-                items.append(
-                    {"key": k, "status": status_of(k), "description": "", "required": False}
-                )
-            return {"secrets": items}
+            return {"groups": groups, "other": other, "missing_required": missing_required}
 
         @router.put("/auth/secrets/{key}")
         async def put_secret(key: str, request: Request):
