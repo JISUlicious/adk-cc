@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { Link } from "react-router-dom"
-import { ArrowLeft, Copy, Check, UserPlus, Ban, RotateCcw } from "lucide-react"
+import { ArrowLeft, Copy, Check, Ban, RotateCcw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ApiError } from "@/api/client"
@@ -116,9 +116,7 @@ export function TeamSection() {
 
         {/* Invite */}
         <section className="py-5">
-          <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
-            <UserPlus className="h-4 w-4" /> Invite a member
-          </h2>
+          <h2 className="mb-3 text-sm font-semibold">Invite a member</h2>
           <form onSubmit={handleInvite} className="flex flex-wrap items-center gap-2">
             <Input
               type="email"

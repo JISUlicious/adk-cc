@@ -183,10 +183,12 @@ em {
    transparent below. Masks content scrolling up under a borderless header
    (the Settings modal) so there's a soft fade instead of a hard divider. */
 .faded-header-edge {
+  /* Solid for most of the element height, then a short fade at the bottom
+     edge — a taller masked area (h-10) with a small actual fade distance. */
   background: linear-gradient(
     to bottom,
     var(--background) 0%,
-    var(--background) 45%,
+    var(--background) 68%,
     transparent 100%
   );
 }
