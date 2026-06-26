@@ -449,7 +449,6 @@ export function ChatPage() {
       <SettingsModal
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        secretsMissing={secretsMissing}
       />
     </div>
   )

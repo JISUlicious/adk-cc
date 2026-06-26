@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import {
   X, Moon, Sun, Monitor, LogOut, User, KeyRound, Server, Boxes,
-  BarChart3, Users, SlidersHorizontal, Trash2, Plus,
+  BarChart3, Users, SlidersHorizontal, Trash2, Plus, Palette,
 } from "lucide-react"
 import { Button } from "./ui/button"
 import { Input } from "./ui/input"
@@ -9,7 +9,10 @@ import { useTheme, type ThemeMode } from "@/lib/theme"
 import { clearToken, maybeAdmin, markSignedOut } from "@/api/auth"
 import { ApiError } from "@/api/client"
 import { cn } from "@/lib/utils"
-import { AccountInfoSections, SecretsSection, UserMcpSection, UserSkillsSection } from "@/pages/AccountPage"
+import {
+  AccountInfoSections, CustomVariablesSection, UserMcpSection, UserSkillsSection, ApiKeysSection,
+} from "@/pages/AccountPage"
+import { listSecrets } from "@/api/account"
 import { McpAdminTab } from "./admin/McpAdminTab"
 import { SkillsAdminTab } from "./admin/SkillsAdminTab"
 import { UsageAdminTab } from "./admin/UsageAdminTab"
@@ -25,13 +28,14 @@ import { listCredentialKeys, putCredential, deleteCredential } from "@/api/admin
  * (which lives on only as a deep-link route).
  */
 
-type TabId = "account" | "secrets" | "mcp" | "skills" | "usage" | "team" | "advanced"
+type TabId = "account" | "appearance" | "mcp" | "skills" | "apikeys" | "usage" | "team" | "advanced"
 
 const TABS: { id: TabId; label: string; icon: typeof User; admin: boolean }[] = [
   { id: "account", label: "Account", icon: User, admin: false },
-  { id: "secrets", label: "Secrets", icon: KeyRound, admin: false },
+  { id: "appearance", label: "Appearance", icon: Palette, admin: false },
   { id: "mcp", label: "MCP", icon: Server, admin: false },
   { id: "skills", label: "Skills", icon: Boxes, admin: false },
+  { id: "apikeys", label: "API keys", icon: KeyRound, admin: false },
   { id: "usage", label: "Usage", icon: BarChart3, admin: true },
   { id: "team", label: "Team", icon: Users, admin: true },
   { id: "advanced", label: "Advanced", icon: SlidersHorizontal, admin: true },
@@ -40,14 +44,14 @@ const TABS: { id: TabId; label: string; icon: typeof User; admin: boolean }[] = 
 export function SettingsModal({
   open,
   onClose,
-  secretsMissing = 0,
 }: {
   open: boolean
   onClose: () => void
-  secretsMissing?: number
 }) {
   const isAdmin = maybeAdmin()
   const [tab, setTab] = useState<TabId>("account")
+  // per-tab "needs setup" counts (MCP / Skills) for the sidebar badges
+  const [miss, setMiss] = useState<{ mcp: number; skill: number }>({ mcp: 0, skill: 0 })
 
   useEffect(() => {
     if (!open) return
@@ -58,8 +62,20 @@ export function SettingsModal({
     return () => window.removeEventListener("keydown", onKey)
   }, [open, onClose])
 
+  useEffect(() => {
+    if (!open) return
+    listSecrets()
+      .then((v) => {
+        const sum = (k: "mcp" | "skill") =>
+          v.groups.filter((g) => g.kind === k).reduce((a, g) => a + g.missing, 0)
+        setMiss({ mcp: sum("mcp"), skill: sum("skill") })
+      })
+      .catch(() => {})
+  }, [open])
+
   if (!open) return null
   const tabs = TABS.filter((t) => !t.admin || isAdmin)
+  const tabMissing: Partial<Record<TabId, number>> = { mcp: miss.mcp, skills: miss.skill }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
@@ -84,9 +100,9 @@ export function SettingsModal({
               >
                 <t.icon className="h-3.5 w-3.5" />
                 {t.label}
-                {t.id === "secrets" && secretsMissing > 0 && (
+                {(tabMissing[t.id] ?? 0) > 0 && (
                   <span className="ml-auto flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-medium text-white">
-                    {secretsMissing}
+                    {tabMissing[t.id]}
                   </span>
                 )}
               </button>
@@ -111,13 +127,14 @@ export function SettingsModal({
             <X className="h-4 w-4" />
           </button>
           <div className="space-y-5 p-5">
-            {tab === "account" && (<><ThemeSection /><AccountInfoSections /></>)}
-            {tab === "secrets" && (<><SecretsSection />{isAdmin && <OrgCredentialsSection />}</>)}
+            {tab === "account" && (<><AccountInfoSections /><CustomVariablesSection /></>)}
+            {tab === "appearance" && (<ThemeSection />)}
             {tab === "mcp" && (<><UserMcpSection />{isAdmin && <AdminBlock title="Org MCP servers"><McpAdminTab /></AdminBlock>}</>)}
             {tab === "skills" && (<><UserSkillsSection />{isAdmin && <AdminBlock title="Org skills"><SkillsAdminTab /></AdminBlock>}</>)}
+            {tab === "apikeys" && (<ApiKeysSection />)}
             {tab === "usage" && (<><AdminBlock title="Usage"><UsageAdminTab /></AdminBlock><AdminBlock title="Audit log"><AuditAdminTab /></AdminBlock></>)}
             {tab === "team" && (<TeamSection />)}
-            {tab === "advanced" && (<AdminBlock title="Model endpoints"><ModelAdminTab /></AdminBlock>)}
+            {tab === "advanced" && (<><AdminBlock title="Model endpoints"><ModelAdminTab /></AdminBlock>{isAdmin && <OrgCredentialsSection />}</>)}
           </div>
         </div>
       </div>

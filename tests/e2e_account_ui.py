@@ -163,31 +163,34 @@ def main() -> int:
             tok2 = requests.post(BASE + "/auth/login",
                                  json={"email": "alice@acme.io", "password": "newpassword1"}, timeout=5).json()["access_token"]
             h2 = {"Authorization": f"Bearer {tok2}"}
-            check("Secrets section renders", page.get_by_text("Secrets", exact=True).count() > 0)
+            check("Custom variables section renders", page.get_by_text("Custom variables").count() > 0)
 
-            # the declaring skill shows as a group with a "needs setup" badge
-            check("declared skill renders as a group", page.get_by_text("demo-skill").count() > 0)
-            check("group shows a needs-setup badge", page.get_by_text("1 needs setup").count() > 0)
-            check("declared env var (DEMO_TOKEN) listed", page.get_by_text("DEMO_TOKEN").count() > 0)
+            # the declaring skill renders as a collapsible card (auto-expanded as
+            # it needs setup), surfacing its variable inline
+            check("declared skill renders as a card", page.get_by_text("demo-skill").count() > 0)
+            check("card shows a needs-setup badge", page.get_by_text("1 needs setup").count() > 0)
+            check("declared env var (DEMO_TOKEN) listed inline", page.get_by_text("DEMO_TOKEN").count() > 0)
 
             # the gear badge (Settings icon) reflects the missing count on /chat
             page.goto(BASE + "/", wait_until="networkidle")
             page.wait_for_selector('button[title*="Settings"]', timeout=10000)
             check("Settings gear shows a missing-secrets badge",
                   page.locator('button[title*="need setup"]').count() > 0)
-            # opening the Settings modal → the Secrets sidebar tab carries the badge
+            # opening the Settings modal → the Skills sidebar tab carries the badge
             page.locator('button[title*="Settings"]').click()
             page.wait_for_selector("text=Appearance", timeout=8000)  # modal open (Account tab)
-            check("Settings modal Secrets tab shows the missing badge",
-                  page.get_by_role("button", name="Secrets").get_by_text("1", exact=True).count() > 0)
+            skills_tab = page.get_by_role("button", name="Skills")
+            skills_tab.locator("text=1").wait_for(timeout=5000)  # badge appears after listSecrets
+            check("Settings modal Skills tab shows the missing badge",
+                  skills_tab.get_by_text("1", exact=True).count() > 0)
             page.keyboard.press("Escape")
             page.goto(BASE + "/account", wait_until="networkidle")
-            page.wait_for_selector("text=Secrets", timeout=10000)
+            page.wait_for_selector("text=Custom variables", timeout=10000)
 
-            # add a custom secret via the UI (CUSTOM_KEY + value → Add)
+            # add a custom variable via the UI (CUSTOM_KEY + value → Add)
             page.fill('input[placeholder="CUSTOM_KEY"]', "MY_API_KEY")
             page.fill('input[placeholder="value"]', "super-secret-xyz")
-            page.get_by_role("button", name="Add").click()
+            page.locator("section").filter(has_text="Custom variables").get_by_role("button", name="Add").click()
             page.wait_for_selector("text=MY_API_KEY", timeout=10000)
             row = page.locator("li").filter(has_text="MY_API_KEY")
             check("new secret appears with a Set badge",

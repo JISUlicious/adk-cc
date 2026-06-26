@@ -94,35 +94,36 @@ def main() -> int:
             page.click("button[type=submit]")
             page.wait_for_selector('button[title*="Settings"]', timeout=20000)
             page.goto(BASE + "/account", wait_until="networkidle")
-            page.wait_for_selector("text=Your MCP servers", timeout=10000)
-            check("Your MCP servers section renders", page.get_by_text("Your MCP servers").count() > 0)
-            check("Your skills section renders", page.get_by_text("Your skills").count() > 0)
+            page.wait_for_selector("text=MCP servers", timeout=10000)
+            check("MCP servers section renders", page.get_by_text("MCP servers").count() > 0)
+            check("Skills section renders", page.get_by_text("Upload a personal skill").count() > 0)
 
             # add a personal MCP server via the form
-            mcp = page.locator("section").filter(has_text="Your MCP servers")
+            mcp = page.locator("section").filter(has_text="MCP servers")
             mcp.locator('input[placeholder="server name"]').fill("mybox")
             mcp.locator('input[placeholder="https://… or command"]').fill("https://example/mcp")
             mcp.locator('input[placeholder="credential_key (optional)"]').fill("MYBOX_TOKEN")
-            mcp.get_by_role("button", name="Add").click()
+            mcp.get_by_role("button", name="Add server").click()
             page.wait_for_selector("text=mybox", timeout=10000)
-            check("personal MCP server appears with a Personal badge",
-                  page.locator("li").filter(has_text="mybox").get_by_text("Personal").count() > 0)
+            check("personal MCP server appears as a Personal card",
+                  mcp.locator("button").filter(has_text="mybox").get_by_text("Personal").count() > 0)
 
             # upload a personal skill via the file input
-            skills = page.locator("section").filter(has_text="Your skills")
+            skills = page.locator("section").filter(has_text="Upload a personal skill")
             skills.locator('input[type="file"]').set_input_files(zip_path)
             skills.get_by_role("button", name="Upload").click()
-            page.wait_for_selector("li:has-text('myskill')", timeout=10000)
-            check("personal skill appears in the list",
-                  skills.locator("li").filter(has_text="myskill").count() > 0)
+            page.wait_for_selector("text=myskill", timeout=10000)
+            check("personal skill appears as a card",
+                  skills.locator("button").filter(has_text="myskill").count() > 0)
 
-            # the Secrets grouping now shows both required env vars
+            # after reload, each item's required variable shows INLINE in its card
+            # (cards auto-expand because the values aren't set yet)
             page.reload(wait_until="networkidle")
-            page.wait_for_selector("text=Secrets", timeout=10000)
-            check("Secrets shows the personal MCP group", page.get_by_text("MCP · mybox").count() > 0)
-            check("Secrets shows the personal skill group", page.get_by_text("Skill · myskill").count() > 0)
-            check("MYBOX_TOKEN listed", page.get_by_text("MYBOX_TOKEN").count() > 0)
-            check("MYSKILL_TOKEN listed", page.get_by_text("MYSKILL_TOKEN").count() > 0)
+            page.wait_for_selector("text=MCP servers", timeout=10000)
+            check("MCP server card present", page.get_by_text("mybox").count() > 0)
+            check("skill card present", page.get_by_text("myskill").count() > 0)
+            check("MYBOX_TOKEN shown inline under its server", page.get_by_text("MYBOX_TOKEN").count() > 0)
+            check("MYSKILL_TOKEN shown inline under its skill", page.get_by_text("MYSKILL_TOKEN").count() > 0)
 
             # gear badge reflects the 2 new required secrets
             page.goto(BASE + "/", wait_until="networkidle")
@@ -131,7 +132,7 @@ def main() -> int:
                   page.locator('button[title*="need setup"]').count() > 0)
 
             page.goto(BASE + "/account", wait_until="networkidle")
-            page.wait_for_selector("text=Your MCP servers", timeout=10000)
+            page.wait_for_selector("text=MCP servers", timeout=10000)
             page.wait_for_timeout(400)
             page.screenshot(path=os.path.join(OUT, "ui_user_mcp_skills.png"), full_page=True)
             browser.close()
