@@ -76,6 +76,8 @@ from .plugins import (
     ToolCallValidatorPlugin,
     WorkspaceHintPlugin,
 )
+from .plugins.secret_redaction import SecretRedactionPlugin
+from .credentials import credential_provider_from_env
 from .service.tenancy import TenancyPlugin
 from .tools import (
     AskUserQuestionTool,
@@ -1074,6 +1076,13 @@ _app_kwargs = dict(
     # short-circuit only stops the *chain*, but audit's row is already
     # written by then.
     plugins=[
+        # Secret hygiene FIRST: its after_tool/after_model run before audit and
+        # trace (registration order = execution order), so they scrub resolved
+        # secret values out of tool results and model responses IN PLACE before
+        # anything logs, persists, or delivers them. No before_* hooks, so this
+        # doesn't disturb audit's "before_tool records first" property. Inert
+        # when no CredentialProvider is configured.
+        SecretRedactionPlugin(credential_provider_from_env()),
         AuditPlugin(),
         # Tenancy seeds state["temp:tenant_context"] / sandbox_workspace /
         # sandbox_backend before any tool fires AND calls

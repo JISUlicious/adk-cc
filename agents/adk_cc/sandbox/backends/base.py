@@ -40,6 +40,80 @@ class SandboxBackend(ABC):
 
     name: str = "abstract"
 
+    # ---- on-demand env injection (resolve-at-exec) ------------------------
+    # The session's secrets/env are resolved fresh per exec (TTL-cached) and
+    # merged into the command environment, so a secret a user provides AFTER
+    # the sandbox was created still reaches the next command — no recreate.
+    # Backends opt in by merging `await self._runtime_env()` into their exec
+    # environment. Resolution is user-over-tenant via the CredentialProvider;
+    # values never touch session state or the event record (side-channel only).
+
+    def configure_runtime_env(
+        self,
+        *,
+        credentials=None,
+        tenant_id: str = "local",
+        user_id: str = "",
+        env_spec=None,
+        ttl_s: float = 15.0,
+    ) -> None:
+        """Wire the per-session secret/env sources. Safe to call once at
+        backend construction; all fields optional (no provider → inert)."""
+        self._env_credentials = credentials
+        self._env_tenant_id = tenant_id
+        self._env_user_id = user_id
+        self._env_spec = env_spec
+        self._env_ttl_s = ttl_s
+        self._env_cache = None  # (expiry_monotonic, dict[str,str])
+
+    def invalidate_runtime_env(self) -> None:
+        self._env_cache = None
+
+    async def _runtime_env(self) -> dict:
+        """Resolve the env to inject for the NEXT command (TTL-cached).
+
+        = the operator `SandboxEnvSpec` (static/passthrough/credentials) PLUS
+        the session user's own secrets (each credential key → value),
+        user-over-tenant. Empty when nothing is configured. Never raises."""
+        import time
+
+        creds = getattr(self, "_env_credentials", None)
+        spec = getattr(self, "_env_spec", None)
+        if creds is None and (spec is None or spec.is_empty()):
+            return {}
+
+        now = time.monotonic()
+        cache = getattr(self, "_env_cache", None)
+        if cache and cache[0] > now:
+            return cache[1]
+
+        tenant_id = getattr(self, "_env_tenant_id", "local")
+        user_id = getattr(self, "_env_user_id", "") or None
+        env: dict = {}
+        try:
+            if spec is not None and not spec.is_empty():
+                env.update(
+                    await spec.resolve(
+                        tenant_id=tenant_id, user_id=user_id, credentials=creds
+                    )
+                )
+            if creds is not None:
+                names = set(await creds.list_keys(tenant_id=tenant_id))
+                if user_id:
+                    names |= set(
+                        await creds.list_keys(tenant_id=tenant_id, user_id=user_id)
+                    )
+                for name in names:
+                    val = await creds.get(tenant_id=tenant_id, key=name, user_id=user_id)
+                    if val:
+                        env[name] = val
+        except Exception:  # noqa: BLE001 — env resolution must never break exec
+            prev = getattr(self, "_env_cache", None)
+            return prev[1] if prev else {}
+
+        self._env_cache = (now + getattr(self, "_env_ttl_s", 15.0), env)
+        return env
+
     @abstractmethod
     async def exec(
         self,

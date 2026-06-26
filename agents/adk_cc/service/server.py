@@ -169,7 +169,14 @@ def build_fastapi_app(
         from .identity_routes import mount_identity_routes
         from .org_routes import mount_org_routes
 
-        mount_identity_routes(fastapi_app, identity)
+        # Per-user secrets (Settings → Secrets) need a CredentialProvider; built
+        # from the same env knobs as the agent/MCP/sandbox so all observe one
+        # store. None → the /auth/secrets routes simply aren't mounted.
+        from ..credentials import credential_provider_from_env
+
+        mount_identity_routes(
+            fastapi_app, identity, credentials=credential_provider_from_env()
+        )
         mount_org_routes(fastapi_app, identity)
 
     # Admin panel routes (default-OFF). Mounted BEFORE the UI StaticFiles

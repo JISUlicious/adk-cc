@@ -29,7 +29,17 @@ from abc import ABC, abstractmethod
 
 
 class CredentialProvider(ABC):
-    """Per-tenant opaque secret storage.
+    """Per-tenant (and optionally per-user) opaque secret storage.
+
+    Two scopes share one store, selected by the optional `user_id`:
+      - `user_id=None`  → the TENANT-SHARED scope (org secrets; admin-managed).
+      - `user_id=<id>`  → that user's PERSONAL scope (self-service).
+
+    Resolution is LAYERED on read: `get(user_id=X)` returns the user's personal
+    value if present, otherwise FALLS BACK to the tenant-shared value. Writes
+    and listing are scope-EXACT (no fallback) — a personal `put` never touches
+    the shared scope, and `list_keys(user_id=X)` lists only X's personal keys.
+    `user_id=None` everywhere preserves the original tenant-only behavior.
 
     Implementations: see `adk_cc.credentials.impls` for in-memory and
     encrypted-file defaults; operators wrap external systems (Vault, AWS
@@ -37,23 +47,37 @@ class CredentialProvider(ABC):
     """
 
     @abstractmethod
-    async def get(self, *, tenant_id: str, key: str) -> str | None:
-        """Return the stored secret or None if absent."""
+    async def get(
+        self, *, tenant_id: str, key: str, user_id: str | None = None
+    ) -> str | None:
+        """Return the stored secret or None if absent.
+
+        With `user_id`, returns the user's personal value, falling back to the
+        tenant-shared value (`user_id=None`) when the user has none.
+        """
 
     @abstractmethod
-    async def put(self, *, tenant_id: str, key: str, value: str) -> None:
-        """Store / overwrite a secret. Atomic per `(tenant_id, key)`."""
+    async def put(
+        self, *, tenant_id: str, key: str, value: str, user_id: str | None = None
+    ) -> None:
+        """Store / overwrite a secret at the EXACT scope given. Atomic per
+        `(tenant_id, user_id, key)`."""
 
     @abstractmethod
-    async def delete(self, *, tenant_id: str, key: str) -> None:
-        """Remove a secret. No-op if absent."""
+    async def delete(
+        self, *, tenant_id: str, key: str, user_id: str | None = None
+    ) -> None:
+        """Remove a secret at the EXACT scope given. No-op if absent."""
 
-    async def list_keys(self, *, tenant_id: str) -> list[str]:
-        """Return the credential KEY NAMES stored for a tenant (never values).
+    async def list_keys(
+        self, *, tenant_id: str, user_id: str | None = None
+    ) -> list[str]:
+        """Return the credential KEY NAMES at the EXACT scope (never values).
 
-        Powers the admin panel's credential list. NOT abstract — defaults to
-        an empty list so existing external implementations (Vault, etc.) keep
-        working without change; override to surface key names. The stock
-        in-memory + encrypted-file providers override this.
+        `user_id=None` → tenant-shared keys; `user_id=<id>` → that user's
+        personal keys. Powers the admin panel (shared) and the per-user Settings
+        page (personal). NOT abstract — defaults to an empty list so existing
+        external implementations (Vault, etc.) keep working without change;
+        override to surface key names. The stock providers override this.
         """
         return []

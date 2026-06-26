@@ -43,6 +43,7 @@ def make_default_backend(
     *,
     session_id: str = "local",
     tenant_id: str = "local",
+    user_id: str = "local",
     credentials: Any = None,  # Optional[CredentialProvider] — Any to keep the import lazy
 ) -> SandboxBackend:
     """Construct the backend named by `ADK_CC_SANDBOX_BACKEND` (default: noop).
@@ -56,33 +57,59 @@ def make_default_backend(
     and the corresponding `_SHARED_TOKEN` / `_API_KEY` env var is set,
     the backend uses the static token (dev / single-tenant). Other
     backends ignore it.
+
+    Every backend is then wired for ON-DEMAND env injection
+    (`configure_runtime_env`): the session user's secrets (user-over-tenant)
+    plus the operator `SandboxEnvSpec` are resolved at exec time and merged
+    into each command's environment. `user_id` selects the personal secret
+    scope.
     """
     name = os.environ.get("ADK_CC_SANDBOX_BACKEND", "noop").lower()
     if name == "noop":
-        return NoopBackend()
-    if name == "docker":
-        return DockerBackend(session_id=session_id, tenant_id=tenant_id)
-    if name == "e2b":
-        return E2BBackend()
-    if name == "sandbox_service":
+        backend: SandboxBackend = NoopBackend()
+    elif name == "docker":
+        backend = DockerBackend(session_id=session_id, tenant_id=tenant_id)
+    elif name == "e2b":
+        backend = E2BBackend()
+    elif name == "sandbox_service":
         from .backends.sandbox_service_backend import (
             make_sandbox_service_backend_from_env,
         )
 
-        return make_sandbox_service_backend_from_env(
+        backend = make_sandbox_service_backend_from_env(
             session_id=session_id,
             tenant_id=tenant_id,
             credentials=credentials,
         )
-    if name == "daytona":
+    elif name == "daytona":
         from .backends.daytona_backend import make_daytona_backend_from_env
 
-        return make_daytona_backend_from_env(
+        backend = make_daytona_backend_from_env(
             session_id=session_id,
             tenant_id=tenant_id,
             credentials=credentials,
         )
-    raise ValueError(f"unknown sandbox backend: {name!r}")
+    else:
+        raise ValueError(f"unknown sandbox backend: {name!r}")
+
+    # Wire on-demand env injection (no-op if no provider/spec is configured).
+    try:
+        from .sandbox_env import sandbox_env_spec_from_env
+
+        creds = credentials
+        if creds is None:
+            from ..credentials import credential_provider_from_env
+
+            creds = credential_provider_from_env()
+        backend.configure_runtime_env(
+            credentials=creds,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            env_spec=sandbox_env_spec_from_env(),
+        )
+    except Exception:  # noqa: BLE001 — env wiring must never break backend bring-up
+        pass
+    return backend
 
 
 _default_backend: SandboxBackend | None = None

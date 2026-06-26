@@ -1,7 +1,40 @@
 # Implementation Plan — Per-User Env/Secret Management + On-Demand Injection
 
-Status: plan · Date: 2026-06-26
+Status: in progress · Date: 2026-06-26
 Companion: [skills-env-management-gap.md](./skills-env-management-gap.md)
+
+## Implementation status
+
+**Done (implemented + tested):**
+- Phase 1 — per-user `CredentialProvider` (user-over-tenant) in both impls.
+  `tests/test_credentials_user_scope.py` ✅
+- Phase 6 — `SecretStr` + `SecretRedactionPlugin` (mutate-in-place, registered
+  FIRST so it scrubs before audit/trace/persist). `tests/test_secret_hygiene.py` ✅
+- Phase 5 (partial) — base `_runtime_env()` resolve-at-exec (TTL) +
+  `configure_runtime_env`; **NoopBackend** applies it per-subprocess (scoped
+  env, no global mutation). On-demand mid-session pickup unit-tested.
+- Phase 2 (partial) — `user_id` threaded into `sandbox_env.resolve()` and the
+  tenancy backend factory.
+- Phase 4 (API) — self-service `/auth/secrets` GET/PUT/DELETE (names+scope only).
+- **Live agent-API e2e PASS** (noop backend): alice sets a personal secret →
+  `run_bash` subprocess receives it (`len=20`) → tool result shows
+  `val=‹redacted:MYSECRET›`; raw value absent from the /run response AND the
+  persisted session. No regressions (`test_admin_panel` fails identically on
+  baseline — pre-existing, unrelated).
+
+**Deferred (not yet built):**
+- Phase 3 — skill `metadata["x-adk-cc/secrets"]` declaration registry (today the
+  backend injects ALL of the user's secrets as env vars, not per-skill-scoped).
+- Phase 2 (rest) — thread `user_id` into the **MCP** resolver
+  (`tools/mcp_tenant.py` still resolves tenant-only).
+- Phase 5 (rest) — per-exec `_runtime_env()` apply for **Docker / E2B /
+  SandboxService / Daytona** (only Noop applies it today; Daytona still injects
+  tenant-only at create-time). The version-counter invalidation signal (TTL only
+  for now).
+- Phase 4 (UI) — Settings → Secrets web panel.
+- Live **Daytona** e2e — Daytona LAN endpoint was unreachable (TCP open but HTTP
+  reset); e2e ran on noop instead. Rerun on Daytona once it serves.
+
 
 ## Goal
 

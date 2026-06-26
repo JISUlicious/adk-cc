@@ -126,7 +126,9 @@ class TenancyPlugin(BasePlugin):
         self._tenant_resolver = tenant_resolver or self._default_resolver
         self._backend_factory = backend_factory or (
             lambda ctx, session_id: make_default_backend(
-                session_id=session_id, tenant_id=ctx.tenant_id
+                session_id=session_id,
+                tenant_id=ctx.tenant_id,
+                user_id=ctx.user_id,
             )
         )
 

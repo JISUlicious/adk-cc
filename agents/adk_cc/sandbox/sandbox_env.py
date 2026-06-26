@@ -105,6 +105,7 @@ class SandboxEnvSpec:
         self,
         *,
         tenant_id: str,
+        user_id: Optional[str] = None,
         credentials: Optional["CredentialProvider"] = None,
         host_env: Optional[Mapping[str, str]] = None,
     ) -> dict[str, str]:
@@ -146,7 +147,9 @@ class SandboxEnvSpec:
                     env_name,
                 )
                 continue
-            val = await credentials.get(tenant_id=tenant_id, key=cred_key)
+            val = await credentials.get(
+                tenant_id=tenant_id, key=cred_key, user_id=user_id or None
+            )
             if val is None:
                 _log.warning(
                     "sandbox_env: credential key %r is not registered for "

@@ -36,7 +36,14 @@ async def _json(request: Request) -> dict:
     return body
 
 
-def mount_identity_routes(app, identity) -> None:
+def _safe_secret_key(key: str) -> str:
+    safe = "".join(c for c in key if c.isalnum() or c in "-_")
+    if safe != key or not safe:
+        raise HTTPException(status_code=400, detail="invalid secret key name")
+    return safe
+
+
+def mount_identity_routes(app, identity, credentials=None) -> None:
     router = APIRouter()
 
     @router.get("/auth/config")
@@ -166,5 +173,51 @@ def mount_identity_routes(app, identity) -> None:
         # Stateless JWT: the client drops the token. Endpoint exists for a
         # consistent client API and as the future home for session revocation.
         return Response(status_code=204)
+
+    # ---- per-user secrets (Settings → Secrets) ---------------------------
+    # Self-service personal credentials for skills/MCP, resolved user-over-
+    # tenant at use time. Mounted only when a CredentialProvider is configured.
+    # NEVER returns values — names + scope only. Writes go to the caller's
+    # PERSONAL scope; tenant-shared secrets are admin-managed elsewhere.
+    if credentials is not None:
+
+        @router.get("/auth/secrets")
+        async def list_secrets(request: Request):
+            auth = _require_auth(request)
+            personal = set(
+                await credentials.list_keys(tenant_id=auth.tenant_id, user_id=auth.user_id)
+            )
+            shared = set(await credentials.list_keys(tenant_id=auth.tenant_id))
+            items = [{"key": k, "scope": "user"} for k in sorted(personal)]
+            # tenant-shared keys the user hasn't overridden — shown read-only so
+            # the user knows the org already provides them.
+            items += [
+                {"key": k, "scope": "tenant"} for k in sorted(shared - personal)
+            ]
+            return {"secrets": items}  # names + scope ONLY, never values
+
+        @router.put("/auth/secrets/{key}")
+        async def put_secret(key: str, request: Request):
+            auth = _require_auth(request)
+            key = _safe_secret_key(key)
+            body = await _json(request)
+            value = body.get("value")
+            if not isinstance(value, str) or value == "":
+                raise HTTPException(status_code=400, detail="non-empty 'value' required")
+            await credentials.put(
+                tenant_id=auth.tenant_id, key=key, value=value, user_id=auth.user_id
+            )
+            await identity.record(auth.tenant_id, auth.user_id, "secret.set", target=key)
+            return {"status": "ok", "key": key, "scope": "user"}
+
+        @router.delete("/auth/secrets/{key}")
+        async def delete_secret(key: str, request: Request):
+            auth = _require_auth(request)
+            key = _safe_secret_key(key)
+            await credentials.delete(
+                tenant_id=auth.tenant_id, key=key, user_id=auth.user_id
+            )
+            await identity.record(auth.tenant_id, auth.user_id, "secret.deleted", target=key)
+            return {"status": "deleted", "key": key}
 
     app.include_router(router)

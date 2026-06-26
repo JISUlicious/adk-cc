@@ -114,11 +114,20 @@ class NoopBackend(SandboxBackend):
         if not cwd_p.is_dir():
             raise SandboxViolation(f"NoopBackend: cwd not a directory: {cwd!r}")
 
+        # On-demand env injection: merge the session's resolved secrets/env
+        # into THIS child's environment only (never mutates the server's
+        # os.environ → no cross-session leak). Scoped to the subprocess, like
+        # a container's per-exec env. Resolves fresh (TTL) so secrets provided
+        # after sandbox creation are picked up on the next command.
+        runtime_env = await self._runtime_env()
+        child_env = {**os.environ, **runtime_env} if runtime_env else None
+
         proc = await asyncio.create_subprocess_shell(
             cmd,
             cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=child_env,
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
