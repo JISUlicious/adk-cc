@@ -524,7 +524,6 @@ export function UserSkillsSection() {
   const [view, setView] = useState<SecretsView | null>(null)
   const [available, setAvailable] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [addOpen, setAddOpen] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
   const reload = useCallback(() => {
@@ -547,7 +546,6 @@ export function UserSkillsSection() {
     try {
       await uploadUserSkill(name, f)
       if (fileRef.current) fileRef.current.value = ""
-      setAddOpen(false)
       reload()
     } catch (err) { setError(msg(err)) }
   }
@@ -570,18 +568,11 @@ export function UserSkillsSection() {
       </p>
       {error && <p className="mb-2 text-sm text-destructive">{error}</p>}
       {available && (
-        <div>
-          <Button variant="outline" size="sm" onClick={() => setAddOpen((o) => !o)}>
-            <Plus className="h-3.5 w-3.5" /> Add new skill
-          </Button>
-          {addOpen && (
-            <form onSubmit={upload} className="mt-2 flex items-center gap-2 rounded-md border border-border/60 bg-muted/30 p-3">
-              <input ref={fileRef} type="file" accept=".zip"
-                     className="flex-1 text-sm text-muted-foreground file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-foreground hover:file:bg-accent" />
-              <Button type="submit" size="sm"><Plus className="h-3.5 w-3.5" /> Upload</Button>
-            </form>
-          )}
-        </div>
+        <form onSubmit={upload} className="flex items-center gap-2">
+          <input ref={fileRef} type="file" accept=".zip"
+                 className="flex-1 text-sm text-muted-foreground file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-foreground hover:file:bg-accent" />
+          <Button type="submit" size="sm"><Plus className="h-3.5 w-3.5" /> Upload</Button>
+        </form>
       )}
       {names.length > 0 && (
         <div className={cn("space-y-2", available && "mt-3 border-t border-border/60 pt-3")}>
