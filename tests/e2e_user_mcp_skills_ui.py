@@ -122,6 +122,10 @@ def main() -> int:
             page.wait_for_selector("text=MCP servers", timeout=10000)
             check("MCP server card present", page.get_by_text("mybox").count() > 0)
             check("skill card present", page.get_by_text("myskill").count() > 0)
+            # cards are collapsed by default — expand each to reveal its variable
+            page.locator("button").filter(has_text="mybox").first.click()
+            page.locator("button").filter(has_text="myskill").first.click()
+            page.wait_for_selector("text=MYBOX_TOKEN", timeout=8000)
             check("MYBOX_TOKEN shown inline under its server", page.get_by_text("MYBOX_TOKEN").count() > 0)
             check("MYSKILL_TOKEN shown inline under its skill", page.get_by_text("MYSKILL_TOKEN").count() > 0)
 

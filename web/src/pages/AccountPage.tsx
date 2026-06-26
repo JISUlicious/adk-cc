@@ -251,15 +251,11 @@ function VariableRows({ inputs, onChanged, onError }: { inputs: SecretInput[]; o
 function ItemCard({ title, scopeBadge, missing, children }: {
   title: string; scopeBadge?: React.ReactNode; missing?: number; children: React.ReactNode
 }) {
-  const needs = (missing ?? 0) > 0
-  const [open, setOpen] = useState(needs)
-  const [touched, setTouched] = useState(false)
-  // auto-expand once we learn it needs setup (variable groups load async),
-  // unless the user has manually toggled it.
-  useEffect(() => { if (!touched && needs) setOpen(true) }, [needs, touched])
+  const [open, setOpen] = useState(false)  // collapsed by default; the header's
+  // "needs setup" badge still flags items that want attention.
   return (
     <div className="rounded-md border border-border/60">
-      <button type="button" onClick={() => { setTouched(true); setOpen((o) => !o) }}
+      <button type="button" onClick={() => setOpen((o) => !o)}
               className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-accent/50">
         <ChevronRight className={cn("h-3.5 w-3.5 text-muted-foreground transition-transform", open && "rotate-90")} />
         <span className="font-mono text-sm">{title}</span>

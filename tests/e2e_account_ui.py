@@ -169,6 +169,9 @@ def main() -> int:
             # it needs setup), surfacing its variable inline
             check("declared skill renders as a card", page.get_by_text("demo-skill").count() > 0)
             check("card shows a needs-setup badge", page.get_by_text("1 needs setup").count() > 0)
+            # cards are collapsed by default — expand to reveal the inline variable
+            page.locator("button").filter(has_text="demo-skill").first.click()
+            page.wait_for_selector("text=DEMO_TOKEN", timeout=8000)
             check("declared env var (DEMO_TOKEN) listed inline", page.get_by_text("DEMO_TOKEN").count() > 0)
 
             # the gear badge (Settings icon) reflects the missing count on /chat
