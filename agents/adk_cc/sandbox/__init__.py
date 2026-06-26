@@ -101,11 +101,17 @@ def make_default_backend(
             from ..credentials import credential_provider_from_env
 
             creds = credential_provider_from_env()
+        # Least-privilege allowlist: the secrets the installed skills DECLARE
+        # they need (metadata["x-adk-cc/secrets"]). Empty → inject all the
+        # user's secrets (pre-declaration fallback). Cached across sessions.
+        from ..credentials.required_inputs import declared_secret_keys
+
         backend.configure_runtime_env(
             credentials=creds,
             tenant_id=tenant_id,
             user_id=user_id,
             env_spec=sandbox_env_spec_from_env(),
+            declared_keys=declared_secret_keys(),
         )
     except Exception:  # noqa: BLE001 — env wiring must never break backend bring-up
         pass

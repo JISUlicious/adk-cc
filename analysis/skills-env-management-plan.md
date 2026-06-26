@@ -30,9 +30,18 @@ Companion: [skills-env-management-gap.md](./skills-env-management-gap.md)
   persisted session. No regressions (`test_admin_panel` fails identically on
   baseline — pre-existing, unrelated).
 
+**Done (Phase 3):**
+- Skill declaration registry: `credentials/required_inputs.py` reads
+  `SKILL.md` `metadata["x-adk-cc/secrets"]` (JSON list / dict / comma forms),
+  unions across installed skills (cached). `_runtime_env()` now injects only
+  the **declared** keys (∩ what the user set) — least privilege — and falls back
+  to ALL user secrets when nothing is declared (rollout-safe). `/auth/secrets`
+  lists declared inputs + status (set/unset) so the UI can prompt. Verified:
+  unit (parse/discovery/allowlist filter/fallback), wiring (SKILL.md →
+  `make_default_backend` → `backend._env_declared_keys`), and the live Daytona
+  e2e still passes via the fallback path. `tests/test_required_inputs.py`
+
 **Deferred (not yet built):**
-- Phase 3 — skill `metadata["x-adk-cc/secrets"]` declaration registry (today the
-  backend injects ALL of the user's secrets as env vars, not per-skill-scoped).
 - Phase 2 (rest) — thread `user_id` into the **MCP** resolver
   (`tools/mcp_tenant.py` still resolves tenant-only).
 - Phase 5 (rest) — per-exec `_runtime_env()` apply for **Docker / E2B /

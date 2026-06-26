@@ -55,14 +55,21 @@ class SandboxBackend(ABC):
         tenant_id: str = "local",
         user_id: str = "",
         env_spec=None,
+        declared_keys=None,
         ttl_s: float = 15.0,
     ) -> None:
         """Wire the per-session secret/env sources. Safe to call once at
-        backend construction; all fields optional (no provider → inert)."""
+        backend construction; all fields optional (no provider → inert).
+
+        `declared_keys` (a set of credential key names declared-required by the
+        installed skills) is the least-privilege ALLOWLIST: when non-empty, only
+        the user's secrets whose key is in it are injected. When empty/None, ALL
+        of the user's secrets are injected (pre-declaration fallback)."""
         self._env_credentials = credentials
         self._env_tenant_id = tenant_id
         self._env_user_id = user_id
         self._env_spec = env_spec
+        self._env_declared_keys = declared_keys
         self._env_ttl_s = ttl_s
         self._env_cache = None  # (expiry_monotonic, dict[str,str])
 
@@ -103,6 +110,12 @@ class SandboxBackend(ABC):
                     names |= set(
                         await creds.list_keys(tenant_id=tenant_id, user_id=user_id)
                     )
+                # Least-privilege: when skills declare required secrets, inject
+                # only those (∩ what the user has set). No declarations → inject
+                # all (pre-declaration fallback).
+                declared = getattr(self, "_env_declared_keys", None)
+                if declared:
+                    names &= set(declared)
                 for name in names:
                     val = await creds.get(tenant_id=tenant_id, key=name, user_id=user_id)
                     if val:

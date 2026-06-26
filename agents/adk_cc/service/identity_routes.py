@@ -188,13 +188,38 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
                 await credentials.list_keys(tenant_id=auth.tenant_id, user_id=auth.user_id)
             )
             shared = set(await credentials.list_keys(tenant_id=auth.tenant_id))
-            items = [{"key": k, "scope": "user"} for k in sorted(personal)]
-            # tenant-shared keys the user hasn't overridden — shown read-only so
-            # the user knows the org already provides them.
-            items += [
-                {"key": k, "scope": "tenant"} for k in sorted(shared - personal)
+
+            def status_of(key: str) -> str:
+                if key in personal:
+                    return "user"      # set personally
+                if key in shared:
+                    return "tenant"    # provided by the org (read-only here)
+                return "unset"
+
+            # Declared-required inputs first (so the UI can prompt for the
+            # missing ones), then any extra keys the user set that aren't
+            # declared. Names + status ONLY, never values.
+            try:
+                from ..credentials.required_inputs import required_inputs
+
+                declared = required_inputs()
+            except Exception:  # noqa: BLE001
+                declared = []
+            declared_ids = {ri.id for ri in declared}
+            items = [
+                {
+                    "key": ri.id,
+                    "status": status_of(ri.id),
+                    "description": ri.description,
+                    "required": True,
+                }
+                for ri in declared
             ]
-            return {"secrets": items}  # names + scope ONLY, never values
+            for k in sorted((personal | shared) - declared_ids):
+                items.append(
+                    {"key": k, "status": status_of(k), "description": "", "required": False}
+                )
+            return {"secrets": items}
 
         @router.put("/auth/secrets/{key}")
         async def put_secret(key: str, request: Request):
