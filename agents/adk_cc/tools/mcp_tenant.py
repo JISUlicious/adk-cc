@@ -92,7 +92,9 @@ class TenantMcpToolset(BaseToolset):
         if not tenant_id:
             return []
 
-        configs = await self._registry.list_for_tenant(tenant_id)
+        # Union of the user's PERSONAL MCP servers and the TENANT's, the user's
+        # shadowing the tenant's by server_name (user-over-tenant).
+        configs = await self._registry.list_union(tenant_id, user_id or None)
         out: list[BaseTool] = []
         for cfg in configs:
             try:

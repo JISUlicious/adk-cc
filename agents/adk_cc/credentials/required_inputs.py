@@ -196,10 +196,12 @@ class InputGroup:
     inputs: list[RequiredInput]
 
 
-async def discover_mcp_required_inputs(tenant_id: str) -> list[RequiredInput]:
+async def discover_mcp_required_inputs(
+    tenant_id: str, user_id: Optional[str] = None
+) -> list[RequiredInput]:
     """MCP servers' credential requirements, as RequiredInputs grouped by server
     (source = "mcp:<server_name>"). Unions the static file
-    (ADK_CC_MCP_SERVERS_FILE) and the per-tenant registry
+    (ADK_CC_MCP_SERVERS_FILE) and the per-tenant+user registry
     (ADK_CC_TENANT_REGISTRY_DIR). Best-effort; any error → fewer entries."""
     out: list[RequiredInput] = []
 
@@ -242,7 +244,7 @@ async def discover_mcp_required_inputs(tenant_id: str) -> list[RequiredInput]:
             reg = JsonFileTenantResourceRegistry(
                 root=reg_dir, kind="mcp", model=McpServerConfig, id_attr="server_name"
             )
-            for cfg in await reg.list_for_tenant(tenant_id):
+            for cfg in await reg.list_union(tenant_id, user_id or None):
                 ri = _ri(cfg)
                 if ri:
                     out.append(ri)
@@ -266,7 +268,7 @@ async def discover_groups(
 
     for ri in required_inputs(tenant_id, user_id):
         add(ri)
-    for ri in await discover_mcp_required_inputs(tenant_id):
+    for ri in await discover_mcp_required_inputs(tenant_id, user_id):
         add(ri)
 
     groups = [

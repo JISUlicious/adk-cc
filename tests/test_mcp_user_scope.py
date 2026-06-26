@@ -41,7 +41,10 @@ class _FakeRegistry:
     def __init__(self, cfgs):
         self._cfgs = cfgs
 
-    async def list_for_tenant(self, tenant_id):
+    async def list_for_tenant(self, tenant_id, user_id=None):
+        return self._cfgs
+
+    async def list_union(self, tenant_id, user_id=None):
         return self._cfgs
 
 
