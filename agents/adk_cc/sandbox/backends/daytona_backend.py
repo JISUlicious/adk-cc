@@ -405,27 +405,24 @@ class DaytonaBackend(SandboxBackend):
             }
             if self._snapshot:
                 payload["snapshot"] = self._snapshot
-            # Env vars / per-tenant secrets the agent's in-sandbox commands
-            # need (git tokens, vendor API keys, …). Daytona bakes `env` into
-            # the sandbox's container environment, so every later `exec`
-            # inherits it. Resolved per-tenant here (session start), so a
-            # rotated secret applies on the next session. Only the KEY NAMES
-            # are logged, never the values (see sandbox_env.resolve).
-            if self._env_spec is not None and not self._env_spec.is_empty():
-                resolved_env = await self._env_spec.resolve(
-                    tenant_id=self._tenant_id,
-                    credentials=self._credentials,
+            # Env vars / secrets the agent's in-sandbox commands need (git
+            # tokens, vendor API keys, the session user's personal secrets, …).
+            # Daytona bakes `env` into the sandbox's container environment, so
+            # every later `exec` inherits it. Resolved USER-OVER-TENANT via
+            # _runtime_env (operator SandboxEnvSpec + the user's own secrets),
+            # so each user gets their own values. Only KEY NAMES are logged.
+            resolved_env = await self._runtime_env()
+            if resolved_env:
+                payload["env"] = resolved_env
+                log.info(
+                    "daytona: injecting %d env var(s) into sandbox for "
+                    "session %s (tenant=%s user=%s): %s",
+                    len(resolved_env),
+                    self._session_id,
+                    self._tenant_id,
+                    getattr(self, "_env_user_id", ""),
+                    sorted(resolved_env),  # names only
                 )
-                if resolved_env:
-                    payload["env"] = resolved_env
-                    log.info(
-                        "daytona: injecting %d env var(s) into sandbox for "
-                        "session %s (tenant=%s): %s",
-                        len(resolved_env),
-                        self._session_id,
-                        self._tenant_id,
-                        sorted(resolved_env),  # names only
-                    )
             async with self._client() as client:
                 resp = await client.post(
                     self._api_url("/api/sandbox"),
@@ -699,6 +696,14 @@ class DaytonaBackend(SandboxBackend):
         if timeout_s and timeout_s > 0:
             # Daytona's spec calls this `timeout` (seconds); we mirror.
             body["timeout"] = int(timeout_s)
+        # On-demand env injection (resolve-at-exec): merge the session user's
+        # secrets (user-over-tenant) + operator SandboxEnvSpec into THIS
+        # command's env, via the toolbox execute `env` map. TTL-cached, so a
+        # secret provided after sandbox creation reaches the next command
+        # without recreating the sandbox. Empty → field omitted (unchanged).
+        runtime_env = await self._runtime_env()
+        if runtime_env:
+            body["env"] = runtime_env
         # `network` arg is not sent per-call: Daytona enforces network
         # policy at sandbox-create time (networkBlockAll / networkAllowList),
         # not per-exec. Documented in the module docstring as a known

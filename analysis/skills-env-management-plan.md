@@ -12,7 +12,15 @@ Companion: [skills-env-management-gap.md](./skills-env-management-gap.md)
   FIRST so it scrubs before audit/trace/persist). `tests/test_secret_hygiene.py` ✅
 - Phase 5 (partial) — base `_runtime_env()` resolve-at-exec (TTL) +
   `configure_runtime_env`; **NoopBackend** applies it per-subprocess (scoped
-  env, no global mutation). On-demand mid-session pickup unit-tested.
+  env, no global mutation; true on-demand). **DaytonaBackend** injects it at
+  sandbox-create (its native env model) + sends a per-exec `env` (best-effort).
+  On-demand mid-session pickup unit-tested (noop).
+- **Live Daytona e2e PASS** (real remote sandbox over LAN, HTTPS + self-signed):
+  alice's personal secret baked into the sandbox (`len=20`), result shows
+  `val=‹redacted:MYSECRET›`, raw value absent from /run resp, session DB, and
+  server log (names-only). Note: on Daytona injection is create-time, so a
+  secret set MID-session reaches the next session/sandbox, not necessarily the
+  next command (noop does true per-command on-demand).
 - Phase 2 (partial) — `user_id` threaded into `sandbox_env.resolve()` and the
   tenancy backend factory.
 - Phase 4 (API) — self-service `/auth/secrets` GET/PUT/DELETE (names+scope only).
@@ -28,12 +36,10 @@ Companion: [skills-env-management-gap.md](./skills-env-management-gap.md)
 - Phase 2 (rest) — thread `user_id` into the **MCP** resolver
   (`tools/mcp_tenant.py` still resolves tenant-only).
 - Phase 5 (rest) — per-exec `_runtime_env()` apply for **Docker / E2B /
-  SandboxService / Daytona** (only Noop applies it today; Daytona still injects
-  tenant-only at create-time). The version-counter invalidation signal (TTL only
-  for now).
+  SandboxService** (Noop + Daytona done). True on-demand (per-command) on
+  Daytona depends on its toolbox honoring per-exec `env`; today it's create-time
+  baking. The version-counter invalidation signal (TTL only for now).
 - Phase 4 (UI) — Settings → Secrets web panel.
-- Live **Daytona** e2e — Daytona LAN endpoint was unreachable (TCP open but HTTP
-  reset); e2e ran on noop instead. Rerun on Daytona once it serves.
 
 
 ## Goal
