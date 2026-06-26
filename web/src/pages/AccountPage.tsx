@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { Link } from "react-router-dom"
-import { ArrowLeft, Copy, Check, Trash2, KeyRound } from "lucide-react"
+import { ArrowLeft, Copy, Check, Trash2, KeyRound, Plus } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ApiError } from "@/api/client"
@@ -11,8 +11,12 @@ import {
   listApiKeys,
   createApiKey,
   revokeApiKey,
+  listSecrets,
+  setSecret,
+  deleteSecret,
   type Me,
   type ApiKey,
+  type SecretItem,
 } from "@/api/account"
 
 /**
@@ -45,6 +49,7 @@ export function AccountPage() {
         )}
         <ProfileSection me={me} onSaved={setMe} />
         <PasswordSection />
+        <SecretsSection />
         <ApiKeysSection />
       </div>
     </div>
@@ -135,6 +140,139 @@ function PasswordSection() {
             <span className={`text-xs ${ok ? "text-muted-foreground" : "text-destructive"}`}>{status}</span>
           )}
         </div>
+      </form>
+    </Section>
+  )
+}
+
+function SecretStatusBadge({ status, required }: { status: SecretItem["status"]; required: boolean }) {
+  if (status === "user")
+    return <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600">Set</span>
+  if (status === "tenant")
+    return <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">From org</span>
+  return (
+    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${required ? "bg-amber-500/15 text-amber-600" : "bg-muted text-muted-foreground"}`}>
+      {required ? "Needs setup" : "Not set"}
+    </span>
+  )
+}
+
+function SecretRow({ item, onChanged, onError }: { item: SecretItem; onChanged: () => void; onError: (m: string) => void }) {
+  const [value, setValue] = useState("")
+  const [saved, setSaved] = useState(false)
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault()
+    if (!value) return
+    try {
+      await setSecret(item.key, value)
+      setValue("")
+      setSaved(true)
+      setTimeout(() => setSaved(false), 1500)
+      onChanged()
+    } catch (err) {
+      onError(msg(err))
+    }
+  }
+
+  async function remove() {
+    try {
+      await deleteSecret(item.key)
+      onChanged()
+    } catch (err) {
+      onError(msg(err))
+    }
+  }
+
+  return (
+    <li className="py-2">
+      <div className="flex items-center gap-2">
+        <code className="text-sm">{item.key}</code>
+        <SecretStatusBadge status={item.status} required={item.required} />
+        {saved && <Check className="h-3.5 w-3.5 text-emerald-600" />}
+        {item.status === "user" && (
+          <Button variant="ghost" size="sm" className="ml-auto" onClick={remove} title="Remove your value">
+            <Trash2 className="h-3.5 w-3.5 text-destructive" />
+          </Button>
+        )}
+      </div>
+      {item.description && <p className="mt-0.5 text-xs text-muted-foreground">{item.description}</p>}
+      <form onSubmit={save} className="mt-1 flex items-center gap-2">
+        <Input
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={item.status === "unset" ? "enter value" : "update value"}
+          className="flex-1"
+          autoComplete="off"
+        />
+        <Button type="submit" size="sm" disabled={!value}>Save</Button>
+      </form>
+    </li>
+  )
+}
+
+function SecretsSection() {
+  const [items, setItems] = useState<SecretItem[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [newKey, setNewKey] = useState("")
+  const [newVal, setNewVal] = useState("")
+
+  const reload = useCallback(() => {
+    listSecrets().then((r) => setItems(r.secrets)).catch((e) => setError(msg(e)))
+  }, [])
+  useEffect(reload, [reload])
+
+  async function addCustom(e: React.FormEvent) {
+    e.preventDefault()
+    setError(null)
+    const k = newKey.trim()
+    if (!k || !newVal) return
+    try {
+      await setSecret(k, newVal)
+      setNewKey("")
+      setNewVal("")
+      reload()
+    } catch (err) {
+      setError(msg(err))
+    }
+  }
+
+  return (
+    <Section title="Secrets">
+      <p className="mb-3 text-xs text-muted-foreground">
+        Credentials your skills and MCP servers need (API keys, tokens). Stored encrypted, resolved
+        per request, and <strong>never shown again or sent to the model</strong>. Your personal value
+        overrides any your org provides.
+      </p>
+      {error && <p className="mb-2 text-sm text-destructive">{error}</p>}
+      {items.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No secrets required or set.</p>
+      ) : (
+        <ul className="divide-y divide-border">
+          {items.map((it) => (
+            <SecretRow key={it.key} item={it} onChanged={reload} onError={setError} />
+          ))}
+        </ul>
+      )}
+      <form onSubmit={addCustom} className="mt-3 flex items-center gap-2 border-t border-border/60 pt-3">
+        <Input
+          value={newKey}
+          onChange={(e) => setNewKey(e.target.value)}
+          placeholder="CUSTOM_KEY"
+          className="w-40 font-mono text-xs"
+        />
+        <Input
+          type="password"
+          value={newVal}
+          onChange={(e) => setNewVal(e.target.value)}
+          placeholder="value"
+          className="flex-1"
+          autoComplete="off"
+        />
+        <Button type="submit" size="sm" disabled={!newKey.trim() || !newVal}>
+          <Plus className="h-3.5 w-3.5" /> Add
+        </Button>
       </form>
     </Section>
   )

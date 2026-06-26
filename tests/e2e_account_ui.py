@@ -1,7 +1,8 @@
 """E2E: account self-service through the UI (real browser, no model).
 
 Navigates to the Account page, edits the profile name, changes the password,
-and creates + revokes an API key — verifying the once-shown token appears.
+creates + revokes an API key (verifying the once-shown token), and adds +
+removes a per-user secret (verifying the value is never returned by the API).
 
 Run: .venv/bin/python tests/e2e_account_ui.py
 """
@@ -137,6 +138,38 @@ def main() -> int:
                   page.locator("li").filter(has_text="laptop").count() == 0)
             check("revoked PAT now rejected (401)",
                   requests.get(BASE + "/list-apps", headers={"Authorization": f"Bearer {shown_token}"}, timeout=5).status_code == 401)
+
+            # --- Secrets panel (per-user skills/MCP credentials) ---
+            # password was changed to newpassword1 above; use it for server checks.
+            tok2 = requests.post(BASE + "/auth/login",
+                                 json={"email": "alice@acme.io", "password": "newpassword1"}, timeout=5).json()["access_token"]
+            h2 = {"Authorization": f"Bearer {tok2}"}
+            check("Secrets section renders", page.get_by_text("Secrets", exact=True).count() > 0)
+
+            # add a custom secret via the UI (CUSTOM_KEY + value → Add)
+            page.fill('input[placeholder="CUSTOM_KEY"]', "MY_API_KEY")
+            page.fill('input[placeholder="value"]', "super-secret-xyz")
+            page.get_by_role("button", name="Add").click()
+            page.wait_for_selector("text=MY_API_KEY", timeout=10000)
+            row = page.locator("li").filter(has_text="MY_API_KEY")
+            check("new secret appears with a Set badge",
+                  row.count() > 0 and row.get_by_text("Set").count() > 0)
+
+            # server stores it under the user scope, and NEVER returns the value
+            secrets = requests.get(BASE + "/auth/secrets", headers=h2, timeout=5).json()["secrets"]
+            item = next((s for s in secrets if s["key"] == "MY_API_KEY"), None)
+            check("secret stored at user scope on the server", item is not None and item["status"] == "user")
+            check("secret value is never returned by the API",
+                  "super-secret-xyz" not in requests.get(BASE + "/auth/secrets", headers=h2, timeout=5).text)
+
+            # remove it → row gone, server no longer lists it
+            row.get_by_title("Remove your value").click()  # the Trash (Remove) button
+            time.sleep(0.8)
+            check("removed secret disappears from the list",
+                  page.locator("li").filter(has_text="MY_API_KEY").count() == 0)
+            secrets2 = requests.get(BASE + "/auth/secrets", headers=h2, timeout=5).json()["secrets"]
+            check("secret removed on the server",
+                  not any(s["key"] == "MY_API_KEY" for s in secrets2))
 
             browser.close()
         print(f"\naccount UI e2e: {_passed} passed, {_failed} failed")

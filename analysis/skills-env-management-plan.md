@@ -23,7 +23,13 @@ Companion: [skills-env-management-gap.md](./skills-env-management-gap.md)
   next command (noop does true per-command on-demand).
 - Phase 2 (partial) — `user_id` threaded into `sandbox_env.resolve()` and the
   tenancy backend factory.
-- Phase 4 (API) — self-service `/auth/secrets` GET/PUT/DELETE (names+scope only).
+- Phase 4 (API + UI) — self-service `/auth/secrets` GET/PUT/DELETE (names+scope
+  only) AND the Settings → **Secrets** panel (AccountPage): lists declared +
+  status, set/update (password field), remove; values never shown. Real-browser
+  e2e (`tests/e2e_account_ui.py`, +6 checks): add → Set badge → stored at user
+  scope → value never returned by API → remove.
+- Phase 2 (MCP) — `TenantMcpToolset` resolves tokens user-over-tenant
+  (`user_id` threaded into `credentials.get`). `tests/test_mcp_user_scope.py`
 - **Live agent-API e2e PASS** (noop backend): alice sets a personal secret →
   `run_bash` subprocess receives it (`len=20`) → tool result shows
   `val=‹redacted:MYSECRET›`; raw value absent from the /run response AND the
@@ -42,13 +48,10 @@ Companion: [skills-env-management-gap.md](./skills-env-management-gap.md)
   e2e still passes via the fallback path. `tests/test_required_inputs.py`
 
 **Deferred (not yet built):**
-- Phase 2 (rest) — thread `user_id` into the **MCP** resolver
-  (`tools/mcp_tenant.py` still resolves tenant-only).
 - Phase 5 (rest) — per-exec `_runtime_env()` apply for **Docker / E2B /
   SandboxService** (Noop + Daytona done). True on-demand (per-command) on
   Daytona depends on its toolbox honoring per-exec `env`; today it's create-time
   baking. The version-counter invalidation signal (TTL only for now).
-- Phase 4 (UI) — Settings → Secrets web panel.
 
 
 ## Goal

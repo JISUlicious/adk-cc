@@ -55,3 +55,30 @@ export function createApiKey(name: string): Promise<CreatedApiKey> {
 export function revokeApiKey(id: string): Promise<unknown> {
   return apiFetch(`/auth/api-keys/${encodeURIComponent(id)}`, { method: "DELETE" })
 }
+
+/**
+ * Per-user secrets (skills/MCP credentials). The API returns names + status
+ * only — values are write-only and never returned. `status`: "user" = set
+ * personally, "tenant" = provided by the org, "unset" = needs setup.
+ */
+export interface SecretItem {
+  key: string
+  status: "user" | "tenant" | "unset"
+  description: string
+  required: boolean
+}
+
+export function listSecrets(): Promise<{ secrets: SecretItem[] }> {
+  return apiFetch("/auth/secrets")
+}
+
+export function setSecret(key: string, value: string): Promise<unknown> {
+  return apiFetch(`/auth/secrets/${encodeURIComponent(key)}`, {
+    method: "PUT",
+    body: JSON.stringify({ value }),
+  })
+}
+
+export function deleteSecret(key: string): Promise<unknown> {
+  return apiFetch(`/auth/secrets/${encodeURIComponent(key)}`, { method: "DELETE" })
+}
