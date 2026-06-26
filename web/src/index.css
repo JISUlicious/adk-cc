@@ -179,6 +179,18 @@ em {
   );
 }
 
+/* Inverse of faded-top-edge: solid background at the very top fading to
+   transparent below. Masks content scrolling up under a borderless header
+   (the Settings modal) so there's a soft fade instead of a hard divider. */
+.faded-header-edge {
+  background: linear-gradient(
+    to bottom,
+    var(--background) 0%,
+    var(--background) 45%,
+    transparent 100%
+  );
+}
+
 /* Theme-aware scrollbars. `color-scheme` makes the native (overlay) scrollbar
    render dark in dark mode; the custom thumb (WebKit/Chromium) darkens on
    hover. --muted-foreground is themed, so the thumb tracks light/dark. */

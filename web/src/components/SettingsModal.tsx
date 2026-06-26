@@ -119,18 +119,8 @@ export function SettingsModal({
         </aside>
 
         {/* content */}
-        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          {/* fixed header — close button stays put while the body scrolls */}
-          <div className="flex shrink-0 items-center justify-between border-b border-border/60 px-5 py-2.5">
-            <h2 className="text-sm font-medium">{TABS.find((t) => t.id === tab)?.label ?? ""}</h2>
-            <button
-              type="button" onClick={onClose} aria-label="Close"
-              className="text-muted-foreground hover:text-foreground"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-          <div className="flex-1 divide-y divide-border/60 overflow-y-auto px-5">
+        <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+          <div className="flex-1 divide-y divide-border/60 overflow-y-auto px-5 pt-6">
             {tab === "account" && (<><AccountInfoSections /><CustomVariablesSection /></>)}
             {tab === "appearance" && (<ThemeSection />)}
             {tab === "mcp" && (<><UserMcpSection />{isAdmin && <AdminBlock title="Org MCP servers"><McpAdminTab /></AdminBlock>}</>)}
@@ -140,6 +130,15 @@ export function SettingsModal({
             {tab === "team" && (<TeamSection />)}
             {tab === "advanced" && (<><AdminBlock title="Model endpoints"><ModelAdminTab /></AdminBlock>{isAdmin && <OrgCredentialsSection />}</>)}
           </div>
+          {/* soft fade at the top — content scrolls under it, no hard border */}
+          <div className="faded-header-edge pointer-events-none absolute inset-x-0 top-0 h-7" />
+          {/* close button — pinned to the panel's top-right (outside the scroll area) */}
+          <button
+            type="button" onClick={onClose} aria-label="Close"
+            className="absolute right-3 top-3 z-10 text-muted-foreground hover:text-foreground"
+          >
+            <X className="h-4 w-4" />
+          </button>
         </div>
       </div>
     </div>
