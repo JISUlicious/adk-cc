@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Plus, Trash2, X } from "lucide-react"
+import { Plus, Trash2, X, Settings as SettingsIcon } from "lucide-react"
 import {
   createSession,
   deleteSession,
@@ -31,6 +31,10 @@ export function SessionRail({
    * column (always visible). */
   open,
   onClose,
+  /** Account footer (pinned to the bottom of the rail, claude.ai-style). */
+  userLabel,
+  onOpenSettings,
+  secretsMissing = 0,
 }: {
   userId: string
   appName: string | null
@@ -40,6 +44,9 @@ export function SessionRail({
   refreshTick: number
   open: boolean
   onClose: () => void
+  userLabel: string
+  onOpenSettings: () => void
+  secretsMissing?: number
 }) {
   const [apps, setApps] = useState<string[]>([])
   const [sessions, setSessions] = useState<Session[]>([])
@@ -249,6 +256,28 @@ export function SessionRail({
             </li>
           ))}
         </ul>
+      </div>
+      {/* Account footer — user + settings, pinned to the bottom (claude.ai-style). */}
+      <div className="border-t border-border/60 p-2">
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-accent"
+          title={secretsMissing > 0 ? `Settings — ${secretsMissing} value(s) need setup` : "Settings"}
+        >
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold uppercase text-primary">
+            {userLabel?.[0] ?? "?"}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-sm">{userLabel}</span>
+          <span className="relative shrink-0">
+            <SettingsIcon className="h-4 w-4 text-muted-foreground" />
+            {secretsMissing > 0 && (
+              <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-medium text-white">
+                {secretsMissing}
+              </span>
+            )}
+          </span>
+        </button>
       </div>
       </aside>
     </>

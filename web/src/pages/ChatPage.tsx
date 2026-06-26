@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Settings as SettingsIcon, Menu, ListChecks } from "lucide-react"
+import { Menu, ListChecks } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { clearToken, getUser, getToken, decodeJwtPayload, markSignedOut } from "@/api/auth"
 import {
@@ -334,6 +334,9 @@ export function ChatPage() {
         refreshTick={refreshTick}
         open={railOpen}
         onClose={() => setRailOpen(false)}
+        userLabel={userLabel}
+        onOpenSettings={() => setSettingsOpen(true)}
+        secretsMissing={secretsMissing}
       />
       <div className="flex flex-1 flex-col min-w-0">
         <header className="flex items-center justify-between gap-2 px-3 sm:px-6 py-3 border-b border-border/60">
@@ -365,9 +368,6 @@ export function ChatPage() {
               />
             )}
             {session && <ContextGauge current={ctxTokens} limits={ctxLimits} />}
-            <span className="hidden md:inline text-sm text-muted-foreground">
-              Signed in as <span className="font-medium text-foreground">{userLabel}</span>
-            </span>
             {appName && session && (
               <ArtifactsPanel
                 appName={appName}
@@ -390,20 +390,6 @@ export function ChatPage() {
                 </span>
               </Button>
             )}
-            <Button
-              variant="outline"
-              size="icon"
-              className="relative"
-              onClick={() => setSettingsOpen(true)}
-              title={secretsMissing > 0 ? `Settings — ${secretsMissing} secret(s) need setup` : "Settings"}
-            >
-              <SettingsIcon className="h-4 w-4" />
-              {secretsMissing > 0 && (
-                <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-medium text-white">
-                  {secretsMissing}
-                </span>
-              )}
-            </Button>
           </div>
         </header>
         {error && (
