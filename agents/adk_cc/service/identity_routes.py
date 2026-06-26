@@ -210,7 +210,7 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
             try:
                 from ..credentials.required_inputs import discover_groups
 
-                raw_groups = await discover_groups(auth.tenant_id)
+                raw_groups = await discover_groups(auth.tenant_id, auth.user_id)
             except Exception:  # noqa: BLE001
                 raw_groups = []
             declared_ids: set[str] = set()

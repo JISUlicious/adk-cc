@@ -111,7 +111,7 @@ def make_default_backend(
             tenant_id=tenant_id,
             user_id=user_id,
             env_spec=sandbox_env_spec_from_env(),
-            declared_keys=declared_secret_keys(),
+            declared_keys=declared_secret_keys(tenant_id, user_id),
         )
     except Exception:  # noqa: BLE001 — env wiring must never break backend bring-up
         pass

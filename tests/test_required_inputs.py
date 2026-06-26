@@ -104,6 +104,40 @@ def test_discover_groups_by_skill():
         declared_secret_keys(refresh=True)
 
 
+def _mk_skill(d: Path, name: str, key: str):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(
+        f"---\nname: {name}\n"
+        f"description: A scoped test skill named {name} that needs a token to run.\n"
+        f"metadata:\n  x-adk-cc/secrets: '[{{\"id\":\"{key}\"}}]'\n---\n\nBody.\n"
+    )
+
+
+def test_user_and_tenant_skill_discovery():
+    root = tempfile.mkdtemp(prefix="tu-skills-")
+    _mk_skill(Path(root) / "acme" / "tenant-skill", "tenant-skill", "TENANT_KEY")
+    _mk_skill(Path(root) / "acme" / "_users" / "alice" / "user-skill", "user-skill", "USER_KEY")
+    old = os.environ.get("ADK_CC_TENANT_SKILLS_DIR")
+    os.environ["ADK_CC_TENANT_SKILLS_DIR"] = root
+    try:
+        from adk_cc.credentials.required_inputs import declared_secret_keys, discover_groups
+
+        alice = declared_secret_keys("acme", "alice", refresh=True)
+        assert "TENANT_KEY" in alice and "USER_KEY" in alice, alice  # union
+        bob = declared_secret_keys("acme", "bob", refresh=True)
+        assert "TENANT_KEY" in bob and "USER_KEY" not in bob, bob  # bob: no personal skills
+        other = declared_secret_keys("beta", "alice", refresh=True)
+        assert "TENANT_KEY" not in other and "USER_KEY" not in other, other  # tenant isolation
+        groups = asyncio.run(discover_groups("acme", "alice"))
+        names = {g.name for g in groups if g.kind == "skill"}
+        assert {"tenant-skill", "user-skill"} <= names, names
+    finally:
+        if old is None:
+            os.environ.pop("ADK_CC_TENANT_SKILLS_DIR", None)
+        else:
+            os.environ["ADK_CC_TENANT_SKILLS_DIR"] = old
+
+
 def test_runtime_env_allowlist_filters_to_declared():
     creds = InMemoryCredentialProvider(shared=False)
     asyncio.run(creds.put(tenant_id="acme", key="DECLARED", value="d", user_id="alice"))

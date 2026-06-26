@@ -26,7 +26,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 _log = logging.getLogger(__name__)
@@ -85,43 +87,104 @@ def _parse_declaration(raw: Any, *, source: str) -> list[RequiredInput]:
     return out
 
 
-def discover_skill_required_inputs() -> list[RequiredInput]:
-    """Union of declared required inputs across all installed skills (first id
-    wins on dups). Best-effort: any discovery error → empty list."""
-    try:
-        from ..tools.skills import discover_skills
+def _safe(value: str) -> Optional[str]:
+    safe = "".join(c for c in value if c.isalnum() or c in "-_")
+    return safe if (safe and safe == value) else None
 
-        skills = discover_skills()
-    except Exception as e:  # noqa: BLE001
-        _log.debug("required-inputs skill discovery failed (%s: %s)", type(e).__name__, e)
+
+def _scope_skill_dirs(tenant_id: Optional[str], user_id: Optional[str]) -> list[Path]:
+    """Tenant + user skill dirs under ADK_CC_TENANT_SKILLS_DIR, mirroring
+    TenantSkillToolset's layout (`<root>/<tenant>/` and
+    `<root>/<tenant>/_users/<user>/`). User dir first so it wins id collisions."""
+    root = os.environ.get("ADK_CC_TENANT_SKILLS_DIR")
+    if not root or not tenant_id:
         return []
-    seen: dict[str, RequiredInput] = {}
+    t = _safe(tenant_id)
+    if not t:
+        return []
+    base = Path(root) / t
+    dirs: list[Path] = []
+    if user_id and (u := _safe(user_id)):
+        ud = base / "_users" / u
+        if ud.is_dir():
+            dirs.append(ud)
+    if base.is_dir():
+        dirs.append(base)
+    return dirs
+
+
+def _inputs_from_skills(skills) -> list[RequiredInput]:
+    out: list[RequiredInput] = []
     for sk in skills:
         fm = getattr(sk, "frontmatter", None)
         md = getattr(fm, "metadata", None) or {}
         raw = md.get(SECRETS_METADATA_KEY) if isinstance(md, dict) else None
         if not raw:
             continue
-        for ri in _parse_declaration(raw, source=f"skill:{getattr(fm, 'name', '?')}"):
+        out.extend(_parse_declaration(raw, source=f"skill:{getattr(fm, 'name', '?')}"))
+    return out
+
+
+def discover_skill_required_inputs(
+    tenant_id: Optional[str] = None, user_id: Optional[str] = None
+) -> list[RequiredInput]:
+    """Union of declared required inputs across the skills visible to a user:
+    the per-USER upload dir, the TENANT dir, and the GLOBAL dirs — in that
+    precedence (first id wins). Best-effort: any discovery error → skipped."""
+    try:
+        from ..tools.skills import discover_skills
+    except Exception as e:  # noqa: BLE001
+        _log.debug("skills import failed (%s: %s)", type(e).__name__, e)
+        return []
+
+    seen: dict[str, RequiredInput] = {}
+    # user + tenant dirs first (so they shadow global on id collision), then global
+    for d in _scope_skill_dirs(tenant_id, user_id):
+        try:
+            for ri in _inputs_from_skills(discover_skills(d)):
+                seen.setdefault(ri.id, ri)
+        except Exception as e:  # noqa: BLE001
+            _log.debug("scope skill discovery failed (%s)", e)
+    try:
+        for ri in _inputs_from_skills(discover_skills()):
             seen.setdefault(ri.id, ri)
+    except Exception as e:  # noqa: BLE001
+        _log.debug("global skill discovery failed (%s)", e)
     return list(seen.values())
 
 
-_CACHE: Optional[list[RequiredInput]] = None
+# Short per-(tenant,user) TTL cache — hot-reload like the toolsets (an uploaded
+# skill appears within the TTL) without rescanning the FS on every call.
+_TTL_S = 10.0
+_CACHE: dict[tuple[str, str], tuple[float, list[RequiredInput]]] = {}
 
 
-def required_inputs(*, refresh: bool = False) -> list[RequiredInput]:
-    """Cached union of declared inputs (skills don't change at runtime)."""
-    global _CACHE
-    if _CACHE is None or refresh:
-        _CACHE = discover_skill_required_inputs()
-    return _CACHE
+def required_inputs(
+    tenant_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    *,
+    refresh: bool = False,
+) -> list[RequiredInput]:
+    """TTL-cached union of declared inputs for (tenant, user)."""
+    key = (tenant_id or "", user_id or "")
+    now = time.monotonic()
+    hit = _CACHE.get(key)
+    if not refresh and hit and hit[0] > now:
+        return hit[1]
+    val = discover_skill_required_inputs(tenant_id, user_id)
+    _CACHE[key] = (now + _TTL_S, val)
+    return val
 
 
-def declared_secret_keys(*, refresh: bool = False) -> set[str]:
+def declared_secret_keys(
+    tenant_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    *,
+    refresh: bool = False,
+) -> set[str]:
     """Just the declared ids — the allowlist used to scope sandbox injection.
     Empty set when nothing is declared (caller then falls back to all secrets)."""
-    return {ri.id for ri in required_inputs(refresh=refresh)}
+    return {ri.id for ri in required_inputs(tenant_id, user_id, refresh=refresh)}
 
 
 # --- grouping (Settings UI: env vars per skill / per MCP) ------------------
@@ -189,16 +252,19 @@ async def discover_mcp_required_inputs(tenant_id: str) -> list[RequiredInput]:
     return out
 
 
-async def discover_groups(tenant_id: str) -> list[InputGroup]:
+async def discover_groups(
+    tenant_id: str, user_id: Optional[str] = None
+) -> list[InputGroup]:
     """Declared required inputs grouped by their owning skill / MCP server,
-    sorted (skills then MCP, by name). Dedups ids within a group."""
+    sorted (skills then MCP, by name). Dedups ids within a group. Includes the
+    user's personal skills + the tenant's, plus MCP servers."""
     buckets: dict[tuple[str, str], dict[str, RequiredInput]] = {}
 
     def add(ri: RequiredInput) -> None:
         kind, _, name = ri.source.partition(":")
         buckets.setdefault((kind or "skill", name or ri.source), {}).setdefault(ri.id, ri)
 
-    for ri in required_inputs():
+    for ri in required_inputs(tenant_id, user_id):
         add(ri)
     for ri in await discover_mcp_required_inputs(tenant_id):
         add(ri)
