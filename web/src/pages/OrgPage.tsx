@@ -25,7 +25,9 @@ import {
  */
 const ROLES = ["member", "admin"]
 
-export function OrgPage() {
+/** Team management (invites + members + roles), embeddable in the Settings
+ * modal's Team tab AND wrapped by OrgPage as a deep-link page. */
+export function TeamSection() {
   const [members, setMembers] = useState<Member[]>([])
   const [invites, setInvites] = useState<PendingInvite[]>([])
   const [loading, setLoading] = useState(true)
@@ -37,7 +39,6 @@ export function OrgPage() {
 
   const payload = decodeJwtPayload(getToken() ?? "")
   const me = (payload?.sub as string) || ""
-  const org = (payload?.tenant as string) || ""
 
   const load = useCallback(() => {
     setLoading(true)
@@ -108,18 +109,7 @@ export function OrgPage() {
   }
 
   return (
-    <div className="mx-auto flex min-h-screen max-w-3xl flex-col">
-      <header className="flex items-center gap-3 border-b border-border/60 px-4 py-3">
-        <Link to="/">
-          <Button variant="ghost" size="icon" title="Back to chat">
-            <ArrowLeft className="h-5 w-5" />
-          </Button>
-        </Link>
-        <h1 className="text-lg font-semibold">Team</h1>
-        {org && <span className="text-sm text-muted-foreground">· {org}</span>}
-      </header>
-
-      <div className="flex-1 space-y-6 p-4">
+      <div className="space-y-6">
         {error && (
           <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>
         )}
@@ -258,6 +248,25 @@ export function OrgPage() {
             </ul>
           </section>
         )}
+      </div>
+  )
+}
+
+export function OrgPage() {
+  const org = (decodeJwtPayload(getToken() ?? "")?.tenant as string) || ""
+  return (
+    <div className="mx-auto flex min-h-screen max-w-3xl flex-col">
+      <header className="flex items-center gap-3 border-b border-border/60 px-4 py-3">
+        <Link to="/">
+          <Button variant="ghost" size="icon" title="Back to chat">
+            <ArrowLeft className="h-5 w-5" />
+          </Button>
+        </Link>
+        <h1 className="text-lg font-semibold">Team</h1>
+        {org && <span className="text-sm text-muted-foreground">· {org}</span>}
+      </header>
+      <div className="flex-1 p-4">
+        <TeamSection />
       </div>
     </div>
   )

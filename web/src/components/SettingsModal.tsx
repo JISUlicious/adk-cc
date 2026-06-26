@@ -15,7 +15,7 @@ import { SkillsAdminTab } from "./admin/SkillsAdminTab"
 import { UsageAdminTab } from "./admin/UsageAdminTab"
 import { AuditAdminTab } from "./admin/AuditAdminTab"
 import { ModelAdminTab } from "./admin/ModelAdminTab"
-import { UsersAdminTab } from "./admin/UsersAdminTab"
+import { TeamSection } from "@/pages/OrgPage"
 import { listCredentialKeys, putCredential, deleteCredential } from "@/api/admin"
 
 /**
@@ -116,7 +116,7 @@ export function SettingsModal({
             {tab === "mcp" && (<><UserMcpSection />{isAdmin && <AdminBlock title="Org MCP servers"><McpAdminTab /></AdminBlock>}</>)}
             {tab === "skills" && (<><UserSkillsSection />{isAdmin && <AdminBlock title="Org skills"><SkillsAdminTab /></AdminBlock>}</>)}
             {tab === "usage" && (<><AdminBlock title="Usage"><UsageAdminTab /></AdminBlock><AdminBlock title="Audit log"><AuditAdminTab /></AdminBlock></>)}
-            {tab === "team" && (<AdminBlock title="Team"><UsersAdminTab /></AdminBlock>)}
+            {tab === "team" && (<TeamSection />)}
             {tab === "advanced" && (<AdminBlock title="Model endpoints"><ModelAdminTab /></AdminBlock>)}
           </div>
         </div>
