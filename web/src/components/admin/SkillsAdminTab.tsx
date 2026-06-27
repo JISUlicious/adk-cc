@@ -43,47 +43,41 @@ export function SkillsAdminTab() {
   }
 
   return (
-    <div className="space-y-4">
-      {error && <p className="text-sm text-destructive">{error}</p>}
+    <div>
+      {error && <p className="mb-2 text-sm text-destructive">{error}</p>}
 
-      <p className="text-sm text-muted-foreground">
+      <p className="mb-3 text-xs text-muted-foreground">
         Upload a skill as a <code className="rounded bg-muted px-1">.zip</code> containing
         a <code className="rounded bg-muted px-1">SKILL.md</code> manifest. Skills
         hot-reload — available on the next session.
       </p>
 
-      <div className="rounded-md border border-border p-4 space-y-3">
-        <div className="grid grid-cols-2 gap-3">
-          <label className="text-sm">
-            Skill name
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="my-skill"
-            />
-          </label>
-          <label className="text-sm">
-            Zip file
-            <Input
-              ref={fileRef}
-              type="file"
-              accept=".zip,application/zip"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            />
-          </label>
-        </div>
-        <Button size="sm" onClick={upload} disabled={busy}>
-          <Upload className="mr-1 h-4 w-4" /> Upload
+      <form onSubmit={(e) => { e.preventDefault(); upload() }} className="flex items-center gap-2">
+        <Input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="skill name"
+          className="w-40 font-mono text-xs"
+        />
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".zip,application/zip"
+          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          className="flex-1 text-sm text-muted-foreground file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5 file:text-xs file:font-medium file:text-foreground hover:file:bg-accent"
+        />
+        <Button type="submit" size="sm" disabled={busy}>
+          <Upload className="h-3.5 w-3.5" /> Upload
         </Button>
-      </div>
+      </form>
 
       {loading ? (
-        <p className="text-sm text-muted-foreground">Loading…</p>
+        <p className="mt-3 text-sm text-muted-foreground">Loading…</p>
       ) : data && data.length > 0 ? (
-        <ul className="divide-y divide-border rounded-md border border-border">
+        <ul className="mt-3 divide-y divide-border/60 border-t border-border/60 pt-1">
           {data.map((s) => (
-            <li key={s} className="flex items-center justify-between p-3">
-              <span className="font-medium">{s}</span>
+            <li key={s} className="flex items-center justify-between py-2.5">
+              <span className="text-sm font-medium">{s}</span>
               <Button
                 size="icon"
                 variant="ghost"
@@ -97,7 +91,7 @@ export function SkillsAdminTab() {
           ))}
         </ul>
       ) : (
-        <p className="text-sm text-muted-foreground">No skills uploaded.</p>
+        <p className="mt-3 text-sm text-muted-foreground">No skills uploaded.</p>
       )}
     </div>
   )

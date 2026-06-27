@@ -55,21 +55,21 @@ export function McpAdminTab() {
   }
 
   return (
-    <div className="space-y-4">
-      {error && <p className="text-sm text-destructive">{error}</p>}
+    <div>
+      {error && <p className="mb-2 text-sm text-destructive">{error}</p>}
 
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <p className="text-xs text-muted-foreground">
           MCP servers available to the agent. Tools appear as{" "}
           <code className="rounded bg-muted px-1">mcp__&lt;name&gt;__*</code>.
         </p>
-        <Button size="sm" onClick={() => setDraft({ ...BLANK })} disabled={!!draft}>
-          <Plus className="mr-1 h-4 w-4" /> Add
+        <Button size="sm" variant="outline" onClick={() => setDraft({ ...BLANK })} disabled={!!draft}>
+          <Plus className="h-3.5 w-3.5" /> Add
         </Button>
       </div>
 
       {draft && (
-        <div className="rounded-md border border-border p-4 space-y-3">
+        <div className="mb-3 space-y-3 rounded-md border border-border/60 bg-muted/30 p-3">
           <div className="grid grid-cols-2 gap-3">
             <label className="text-sm">
               Name
@@ -130,9 +130,9 @@ export function McpAdminTab() {
       {loading ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : data && data.length > 0 ? (
-        <ul className="divide-y divide-border rounded-md border border-border">
+        <ul className="mt-3 divide-y divide-border/60 border-t border-border/60 pt-1">
           {data.map((s) => (
-            <li key={s.server_name} className="flex items-center justify-between p-3">
+            <li key={s.server_name} className="flex items-center justify-between py-2.5">
               <div className="min-w-0">
                 <p className="font-medium">{s.server_name}</p>
                 <p className="truncate text-xs text-muted-foreground">
