@@ -193,8 +193,9 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
     # ---- per-user secrets (Settings → Secrets) ---------------------------
     # Self-service personal credentials for skills/MCP, resolved user-over-
     # tenant at use time. Mounted only when a CredentialProvider is configured.
-    # NEVER returns values — names + scope only. Writes go to the caller's
-    # PERSONAL scope; tenant-shared secrets are admin-managed elsewhere.
+    # Returns names + scope; a value is returned ONLY for inputs a manifest
+    # declares non-secret. Writes go to the caller's PERSONAL scope; tenant-
+    # shared secrets are admin-managed elsewhere.
     if credentials is not None:
 
         @router.get("/auth/secrets")
@@ -212,17 +213,29 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
                     return "tenant"    # provided by the org (read-only here)
                 return "unset"
 
-            def item(ri) -> dict:
-                return {
+            async def item(ri) -> dict:
+                st = status_of(ri.id)
+                out = {
                     "key": ri.id,
-                    "status": status_of(ri.id),
+                    "status": st,
                     "description": ri.description,
                     "required": True,
+                    "secret": ri.secret,
                 }
+                # A manifest can declare an input as non-secret (e.g. a region or
+                # endpoint). Those values are safe to surface so the UI shows /
+                # edits them as plain text. Secret values are NEVER returned.
+                if not ri.secret and st != "unset":
+                    val = await credentials.get(
+                        tenant_id=auth.tenant_id, key=ri.id, user_id=auth.user_id
+                    )
+                    if val is not None:
+                        out["value"] = val
+                return out
 
             # Declared inputs grouped by owning skill / MCP server, so the UI
-            # can render one section each and badge the ones not yet set. Names
-            # + status ONLY, never values.
+            # can render one section each and badge the ones not yet set. Secret
+            # values are never returned; non-secret values are (see item()).
             try:
                 from ..credentials.required_inputs import discover_groups
 
@@ -233,15 +246,16 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
             groups = []
             missing_required = 0
             for g in raw_groups:
-                inputs = [item(ri) for ri in g.inputs]
+                inputs = [await item(ri) for ri in g.inputs]
                 miss = sum(1 for it in inputs if it["status"] == "unset")
                 missing_required += miss
                 declared_ids.update(it["key"] for it in inputs)
                 groups.append({"kind": g.kind, "name": g.name, "inputs": inputs, "missing": miss})
 
-            # keys the user set that no skill/MCP declares (custom)
+            # keys the user set that no skill/MCP declares (custom) — undeclared,
+            # so treat as secret (write-only) by default.
             other = [
-                {"key": k, "status": status_of(k), "description": "", "required": False}
+                {"key": k, "status": status_of(k), "description": "", "required": False, "secret": True}
                 for k in sorted((personal | shared) - declared_ids)
             ]
             return {"groups": groups, "other": other, "missing_required": missing_required}

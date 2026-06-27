@@ -57,16 +57,21 @@ export function revokeApiKey(id: string): Promise<unknown> {
 }
 
 /**
- * Per-user secrets (skills/MCP credentials), grouped by the owning skill / MCP
- * server. The API returns names + status only — values are write-only and
- * never returned. `status`: "user" = set personally, "tenant" = provided by the
- * org, "unset" = needs setup. `missing_required` powers the Settings badge.
+ * Per-user variables (skills/MCP credentials + config), grouped by the owning
+ * skill / MCP server. `status`: "user" = set personally, "tenant" = provided by
+ * the org, "unset" = needs setup. `missing_required` powers the Settings badge.
+ *
+ * `secret` marks sensitive values: those are write-only and never returned. A
+ * manifest may declare an input non-secret (`secret: false`), in which case its
+ * current `value` is returned and shown/edited as plain text.
  */
 export interface SecretInput {
   key: string
   status: "user" | "tenant" | "unset"
   description: string
   required: boolean
+  secret: boolean
+  value?: string
 }
 
 export interface SecretGroup {

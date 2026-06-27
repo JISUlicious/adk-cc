@@ -182,7 +182,10 @@ function SecretStatusBadge({ status, required }: { status: SecretInput["status"]
 }
 
 function SecretRow({ item, onChanged, onError }: { item: SecretInput; onChanged: () => void; onError: (m: string) => void }) {
-  const [value, setValue] = useState("")
+  // Secret inputs are write-only: the field starts empty and masks input.
+  // Non-secret inputs show their current value as editable plain text.
+  const original = item.value ?? ""
+  const [value, setValue] = useState(item.secret ? "" : original)
   const [saved, setSaved] = useState(false)
 
   async function save(e: React.FormEvent) {
@@ -190,7 +193,7 @@ function SecretRow({ item, onChanged, onError }: { item: SecretInput; onChanged:
     if (!value) return
     try {
       await setSecret(item.key, value)
-      setValue("")
+      if (item.secret) setValue("")  // keep non-secret value visible after save
       setSaved(true)
       setTimeout(() => setSaved(false), 1500)
       onChanged()
@@ -208,6 +211,9 @@ function SecretRow({ item, onChanged, onError }: { item: SecretInput; onChanged:
     }
   }
 
+  // Non-secret: only enable Save once the value actually changed.
+  const canSave = item.secret ? !!value : !!value && value !== original
+
   return (
     <li className="py-2">
       <div className="flex items-center gap-2">
@@ -223,14 +229,14 @@ function SecretRow({ item, onChanged, onError }: { item: SecretInput; onChanged:
       {item.description && <p className="mt-0.5 text-xs text-muted-foreground">{item.description}</p>}
       <form onSubmit={save} className="mt-1 flex items-center gap-2">
         <Input
-          type="password"
+          type={item.secret ? "password" : "text"}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           placeholder={item.status === "unset" ? "enter value" : "update value"}
           className="flex-1"
           autoComplete="off"
         />
-        <Button type="submit" size="sm" disabled={!value}>Save</Button>
+        <Button type="submit" size="sm" disabled={!canSave}>Save</Button>
       </form>
     </li>
   )
