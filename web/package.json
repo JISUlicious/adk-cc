@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:desktop": "tsc -b && VITE_ADK_CC_DESKTOP=1 vite build --outDir dist-desktop",
+    "dev:desktop": "VITE_ADK_CC_DESKTOP=1 vite",
     "lint": "eslint .",
     "preview": "vite preview"
   },
