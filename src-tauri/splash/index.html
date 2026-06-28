@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>adk-cc</title>
+    <style>
+      :root { color-scheme: light dark; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: flex; align-items: center; justify-content: center;
+        font-family: Charter, Georgia, Palatino, "Times New Roman", serif;
+        background: #f5f4ed; color: #6b6a64;
+      }
+      @media (prefers-color-scheme: dark) { body { background: #141413; color: #a4a297; } }
+      .box { text-align: center; }
+      .dot { display: inline-block; width: 8px; height: 8px; border-radius: 9999px;
+             background: #1B365D; animation: pulse 1s ease-in-out infinite; }
+      @media (prefers-color-scheme: dark) { .dot { background: #6FA0D8; } }
+      @keyframes pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+      .title { font-size: 18px; font-weight: 600; margin-bottom: 10px; color: inherit; }
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      <div class="title">adk-cc</div>
+      <div class="dot"></div>
+      <p style="font-size: 13px;">Starting the local agent…</p>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "adk-cc",
+  "version": "0.1.0",
+  "identifier": "com.adk-cc.desktop",
+  "build": {
+    "frontendDist": "./splash",
+    "beforeDevCommand": "npm --prefix ../web run build:desktop",
+    "beforeBuildCommand": "npm --prefix ../web run build:desktop"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "adk-cc",
+        "width": 1200,
+        "height": 820,
+        "minWidth": 760,
+        "minHeight": 480
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png"]
+  }
+}

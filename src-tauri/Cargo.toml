@@ -1,0 +1,20 @@
+[package]
+name = "adk-cc-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "adk-cc desktop shell"
+authors = ["adk-cc"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+getrandom = "0.2"
+base64 = "0.22"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
