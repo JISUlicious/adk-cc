@@ -55,7 +55,9 @@ export function ChatPage({
   Rail?: ComponentType<RailProps>
   Settings?: ComponentType<SettingsModalProps>
 } = {}) {
-  const userId = getUser()
+  // Stateful so the desktop rail can switch the active user_id (= project);
+  // the web rail never calls setUserId, so web keeps a fixed account id.
+  const [userId, setUserId] = useState(getUser())
   // Friendly display label — email/name from the token, NOT the opaque user_id
   // (which is what `userId` holds and is used for the API session path).
   const userLabel = (() => {
@@ -331,6 +333,7 @@ export function ChatPage({
     <div className="flex h-screen overflow-hidden">
       <Rail
         userId={userId}
+        setUserId={setUserId}
         appName={appName}
         onAppChange={(a) => {
           setAppName(a)

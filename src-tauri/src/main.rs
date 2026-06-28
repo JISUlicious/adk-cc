@@ -131,6 +131,8 @@ fn spawn_backend(data: &PathBuf) -> std::io::Result<Child> {
         ])
         .env("ADK_CC_AGENTS_DIR", &agents)
         .env("ADK_CC_ALLOW_NO_AUTH", "1")
+        .env("ADK_CC_DESKTOP", "1")
+        .env("ADK_CC_DESKTOP_DATA", data)
         .env("ADK_CC_TENANCY_MODE", "single")
         .env("ADK_CC_GLOBAL_TENANT_ID", "local")
         .env("ADK_CC_SERVE_UI", "1")

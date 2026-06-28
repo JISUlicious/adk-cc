@@ -179,6 +179,11 @@ def build_fastapi_app(
         )
         mount_org_routes(fastapi_app, identity)
 
+    # Desktop project registry (default-OFF; ADK_CC_DESKTOP=1). Mounted before
+    # the UI catch-all so /desktop/* wins on path match.
+    from .desktop_routes import mount_desktop_routes
+    mount_desktop_routes(fastapi_app)
+
     # Admin panel routes (default-OFF). Mounted BEFORE the UI StaticFiles
     # mount — the SPA is mounted at `/` (a catch-all) and would otherwise
     # shadow the admin API routes. Built against the same registry /

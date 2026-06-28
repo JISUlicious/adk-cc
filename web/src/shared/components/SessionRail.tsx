@@ -15,6 +15,9 @@ import { SessionList } from "@/shared/sessions/SessionList"
  *  so ChatPage can accept either via its `Rail` prop. */
 export interface RailProps {
   userId: string
+  /** Desktop only: switch the active user_id (= project). The web rail ignores
+   *  this — its user_id is fixed to the signed-in account. */
+  setUserId?: (u: string) => void
   appName: string | null
   onAppChange: (app: string) => void
   sessionId: string | null
