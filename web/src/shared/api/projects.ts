@@ -25,3 +25,11 @@ export function addProject(path: string): Promise<{ project: Project }> {
 export function removeProject(id: string): Promise<unknown> {
   return apiFetch(`/desktop/projects/${encodeURIComponent(id)}`, { method: "DELETE" })
 }
+
+/** Remove a session's git worktree (+ its branch). Call on session delete. */
+export function removeSessionWorktree(projectId: string, sessionId: string): Promise<unknown> {
+  return apiFetch(
+    `/desktop/worktree/${encodeURIComponent(projectId)}/${encodeURIComponent(sessionId)}`,
+    { method: "DELETE" },
+  )
+}

@@ -1068,6 +1068,18 @@ _compaction_config = _make_compaction_config()
 # are defined above (near tool instantiation) so plan-mode tools can use
 # the env default for their internal mode check.
 
+def _make_tenancy_plugin() -> TenancyPlugin:
+    """Desktop mode (ADK_CC_DESKTOP=1) binds each session's workspace to a git
+    worktree of its project — the resolver maps user_id (= project id) → repo →
+    a per-session worktree. Otherwise the standard single-/multi-tenant behavior
+    (workspace from ADK_CC_WORKSPACE_ROOT / CWD)."""
+    if os.environ.get("ADK_CC_DESKTOP") == "1":
+        from .service.desktop_workspace import desktop_tenant_resolver
+
+        return TenancyPlugin(tenant_resolver=desktop_tenant_resolver)
+    return TenancyPlugin(default_workspace_root=os.environ.get("ADK_CC_WORKSPACE_ROOT"))
+
+
 _app_kwargs = dict(
     name="adk_cc",
     root_agent=root_agent,
@@ -1092,9 +1104,7 @@ _app_kwargs = dict(
         # evaluate. Reads ADK_CC_WORKSPACE_ROOT from env (or CWD when
         # unset for dev). Safe in single-user dev — degrades to
         # tenant_id="local", user_id="local".
-        TenancyPlugin(
-            default_workspace_root=os.environ.get("ADK_CC_WORKSPACE_ROOT")
-        ),
+        _make_tenancy_plugin(),
         # AuthZ hard gate (subject×action×resource). Runs after Tenancy
         # (identity seeded) and BEFORE PermissionPlugin, so a hard deny
         # never reaches the confirmation prompt. Default-OFF: inert unless

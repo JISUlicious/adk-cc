@@ -3,7 +3,7 @@ import { Plus, X, Settings as SettingsIcon, ChevronRight, FolderPlus, Trash2 } f
 import {
   createSession, deleteSession, listApps, listSessions, type Session,
 } from "@/shared/api/sessions"
-import { listProjects, addProject, removeProject, type Project } from "@/shared/api/projects"
+import { listProjects, addProject, removeProject, removeSessionWorktree, type Project } from "@/shared/api/projects"
 import { Button } from "@/shared/components/ui/button"
 import { cn } from "@/shared/lib/utils"
 import { SessionList } from "@/shared/sessions/SessionList"
@@ -116,6 +116,7 @@ export function ProjectRail({
     if (!confirm(`Delete session ${s.id.slice(0, 8)}…?`)) return
     try {
       await deleteSession(appName!, projectId, s.id)
+      await removeSessionWorktree(projectId, s.id).catch(() => {})
       setSessionsByProject((m) => ({ ...m, [projectId]: (m[projectId] ?? []).filter((x) => x.id !== s.id) }))
       if (userId === projectId && sessionId === s.id) onSelect(null)
     } catch (e) {

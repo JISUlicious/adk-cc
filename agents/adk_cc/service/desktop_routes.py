@@ -128,3 +128,11 @@ def mount_desktop_routes(app) -> None:
         kept = [it for it in items if it.get("id") != project_id]
         save_projects(kept)
         return {"status": "removed", "id": project_id}
+
+    @app.delete("/desktop/worktree/{project_id}/{session_id}", include_in_schema=False)
+    async def remove_session_worktree(project_id: str, session_id: str):  # noqa: ANN202
+        # Lazy import breaks the desktop_routes <-> desktop_workspace cycle.
+        from .desktop_workspace import remove_worktree
+
+        remove_worktree(project_id, session_id)
+        return {"status": "removed"}
