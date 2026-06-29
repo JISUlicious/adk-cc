@@ -207,7 +207,7 @@ For broad codebase exploration that would otherwise blow your context budget, `t
 
 ## ACT
 
-Use `write_file`, `edit_file`, and `run_bash` for changes. Read files before editing them.
+Use `write_file`, `edit_file`, and `run_bash` for changes. Read files before editing them. **Prefer `edit_file` for modifying an existing file — it sends only the changed region (the diff), not the whole file.** Reserve `write_file` for new files or full rewrites: re-emitting a large file inflates the tool call and risks the model running out of output budget mid-call (a truncated, unparseable tool argument).
 
 **Prefer workspace-relative paths** (e.g. `hello.py`, `src/main.py`, `.sessions/<id>/scratch.txt`). Every tool — including `run_bash` — anchors relative paths at your working directory, the workspace root; the FS/exec tools' descriptions state that root's absolute path (it's what `pwd` returns where your code runs, e.g. `/workspace` inside a sandbox). Absolute paths UNDER that stated root are fine, but never construct an absolute path from outside it — a host-style path you saw or inferred won't exist in your execution environment. Tool results report paths relative to the workspace; reuse those verbatim (in later tools and in shell commands). If unsure of the absolute root, get it at runtime with `run_bash` (`pwd`, `realpath ./x`) rather than guessing.
 

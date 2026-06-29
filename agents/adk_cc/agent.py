@@ -52,6 +52,8 @@ from google.adk.apps.app import App
 from google.adk.models.lite_llm import LiteLlm
 from google.genai import types
 
+from .models.selectable import resolve_max_output_tokens
+
 from . import prompts
 from .logging_setup import configure_logging
 from .permissions import PermissionMode, SettingsHierarchy
@@ -77,6 +79,7 @@ from .plugins import (
     WorkspaceHintPlugin,
 )
 from .plugins.secret_redaction import SecretRedactionPlugin
+from .plugins.truncated_tool_call import TruncatedToolCallPlugin
 from .credentials import credential_provider_from_env
 from .service.tenancy import TenancyPlugin
 from .tools import (
@@ -135,11 +138,26 @@ def _force_coordinator_continuation(callback_context: Context) -> types.Content:
 #   ADK_CC_API_KEY=<token>
 _BOOT_MODEL_ID = os.environ.get("ADK_CC_MODEL", "openai/Qwen3.6-35B-A3B-UD-MLX-4bit")
 _BOOT_API_BASE = os.environ.get("ADK_CC_API_BASE", "http://localhost:18000/v1")
-_boot_litellm = LiteLlm(
-    model=_BOOT_MODEL_ID,
-    api_base=_BOOT_API_BASE,
-    api_key=os.environ["ADK_CC_API_KEY"],
-)
+
+
+def _build_boot_litellm(max_tokens):
+    """Build the boot/default LiteLlm at a given output cap (falsy → uncapped).
+
+    Used both for the base delegate and — handed to SelectableLlm as the
+    ``default_delegate_factory`` — for the higher-cap rebuild on escalation, so
+    the escalated copy is built the same way instead of scraping LiteLlm internals.
+    """
+    return LiteLlm(
+        model=_BOOT_MODEL_ID,
+        api_base=_BOOT_API_BASE,
+        api_key=os.environ["ADK_CC_API_KEY"],
+        # Cap output tokens when configured (ADK_CC_MAX_OUTPUT_TOKENS) — prevents
+        # the model stopping mid tool-call on endpoints with a low output limit.
+        **({"max_tokens": max_tokens} if max_tokens else {}),
+    )
+
+
+_boot_litellm = _build_boot_litellm(resolve_max_output_tokens())
 
 
 def _make_model():
@@ -162,6 +180,7 @@ def _make_model():
     return SelectableLlm(
         registry_path_env="ADK_CC_MODEL_REGISTRY_FILE",
         default_delegate=_boot_litellm,
+        default_delegate_factory=_build_boot_litellm,
         default_model_id=_BOOT_MODEL_ID,
     )
 
@@ -1104,7 +1123,17 @@ _app_kwargs = dict(
         # evaluate. Reads ADK_CC_WORKSPACE_ROOT from env (or CWD when
         # unset for dev). Safe in single-user dev — degrades to
         # tenant_id="local", user_id="local".
+        # Desktop mode binds the workspace to a per-session git worktree via the
+        # resolver; otherwise standard single-/multi-tenant (ADK_CC_WORKSPACE_ROOT
+        # / CWD). _make_tenancy_plugin's non-desktop branch == the prior explicit
+        # TenancyPlugin(default_workspace_root=...).
         _make_tenancy_plugin(),
+        # Graceful degradation for a model cut off mid tool-call: tolerant_tool_json
+        # returns a marker (TRUNCATED_TOOL_CALL_KEY) for an unrecoverable truncation
+        # instead of raising; this turns that marker into a clean retry error before
+        # the tool runs — so a cutoff is a soft retry, not a turn crash. Before
+        # AuthZ/Permission: no point gating/confirming a truncated call.
+        TruncatedToolCallPlugin(),
         # AuthZ hard gate (subject×action×resource). Runs after Tenancy
         # (identity seeded) and BEFORE PermissionPlugin, so a hard deny
         # never reaches the confirmation prompt. Default-OFF: inert unless
