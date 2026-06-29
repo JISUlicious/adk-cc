@@ -34,26 +34,46 @@ if TYPE_CHECKING:
     from .endpoints import ModelEndpointConfig, ModelEndpointRegistry
 
 
-def resolve_max_output_tokens(cfg: "Optional[ModelEndpointConfig]" = None) -> Optional[int]:
-    """The output-token cap for a model call (litellm ``max_tokens``).
+# Always cap output by default (like Claude Code: CAPPED_DEFAULT_MAX_TOKENS=8000,
+# escalated to ESCALATED_MAX_TOKENS=64000 on truncation). A cap prevents a model
+# stopping mid tool-call when an endpoint's own default output limit is too low —
+# the root cause behind truncated tool-call JSON (plugins/tolerant_tool_json).
+_DEFAULT_MAX_OUTPUT_TOKENS = 8192
+_DEFAULT_ESCALATED_MAX_TOKENS = 32768
 
-    Precedence: a per-endpoint ``max_tokens`` override, else
-    ``ADK_CC_MAX_OUTPUT_TOKENS``, else None (the server's own default — uncapped
-    from our side). Setting this is the root-cause fix for a model stopping mid
-    tool-call when the endpoint's default output limit is too low (which then
-    surfaces as truncated tool-call JSON; see plugins/tolerant_tool_json)."""
+
+def resolve_max_output_tokens(cfg: "Optional[ModelEndpointConfig]" = None) -> Optional[int]:
+    """The BASE output-token cap (litellm ``max_tokens``).
+
+    Precedence: per-endpoint ``max_tokens`` override > ``ADK_CC_MAX_OUTPUT_TOKENS``
+    > a sane default (8192). ``ADK_CC_MAX_OUTPUT_TOKENS=0`` (or negative) opts OUT
+    (uncapped — the endpoint's own default applies)."""
     per_endpoint = getattr(cfg, "max_tokens", None) if cfg is not None else None
     if per_endpoint:
         return int(per_endpoint)
     raw = os.environ.get("ADK_CC_MAX_OUTPUT_TOKENS")
-    if raw:
-        try:
-            n = int(raw)
-        except ValueError:
-            _log.warning("ADK_CC_MAX_OUTPUT_TOKENS=%r is not an int — ignoring", raw)
-            return None
-        return n if n > 0 else None
-    return None
+    if raw is None or raw == "":
+        return _DEFAULT_MAX_OUTPUT_TOKENS
+    try:
+        n = int(raw)
+    except ValueError:
+        _log.warning("ADK_CC_MAX_OUTPUT_TOKENS=%r is not an int — using default", raw)
+        return _DEFAULT_MAX_OUTPUT_TOKENS
+    return n if n > 0 else None  # 0 / negative → explicitly uncapped
+
+
+def escalated_max_output_tokens() -> Optional[int]:
+    """The cap to escalate to after a model truncates mid tool-call
+    (finish_reason=MAX_TOKENS) — cf. Claude Code escalating 8k→64k so the retry
+    has headroom. ``ADK_CC_MAX_OUTPUT_TOKENS_ESCALATED`` overrides; 0 disables."""
+    raw = os.environ.get("ADK_CC_MAX_OUTPUT_TOKENS_ESCALATED")
+    if raw is None or raw == "":
+        return _DEFAULT_ESCALATED_MAX_TOKENS
+    try:
+        n = int(raw)
+    except ValueError:
+        return _DEFAULT_ESCALATED_MAX_TOKENS
+    return n if n > 0 else None
 
 
 # --------------------------------------------------------------------------
@@ -142,6 +162,13 @@ class SelectableLlm(BaseLlm):
         self._default_delegate = default_delegate
         self._cache: dict[tuple, BaseLlm] = {}
         self._lock = threading.RLock()
+        # Claude-Code-style escalation: once the model hits finish_reason=
+        # MAX_TOKENS, raise the effective cap for subsequent calls (the model's
+        # truncated-tool-call retry then has more room). Monotonic-sticky for the
+        # process; only ever RAISES a cap. The escalated default delegate is a
+        # higher-cap rebuild of the boot delegate, lazily built on first need.
+        self._escalated = False
+        self._escalated_default_delegate: Optional[BaseLlm] = None
 
     def _get_registry(self) -> "Optional[ModelEndpointRegistry]":
         if self._registry is not None:
@@ -169,7 +196,7 @@ class SelectableLlm(BaseLlm):
                 raise RuntimeError(
                     "SelectableLlm has no active endpoint and no default delegate"
                 )
-            return self._default_delegate
+            return self._escalated_default() if self._escalated else self._default_delegate
 
         key = (active.model, active.api_base, active.api_key_env)
         with self._lock:
@@ -201,10 +228,65 @@ class SelectableLlm(BaseLlm):
                 )
             kwargs["api_key"] = api_key
         # else: intentionally keyless endpoint (api_key_env == "") — no key.
-        max_tokens = resolve_max_output_tokens(cfg)
+        max_tokens = self._effective_cap(resolve_max_output_tokens(cfg))
         if max_tokens:
             kwargs["max_tokens"] = max_tokens
         return LiteLlm(**kwargs)
+
+    def _effective_cap(self, base: Optional[int]) -> Optional[int]:
+        """The cap to use for the next call: the escalated value once the model
+        has hit MAX_TOKENS, else the base. Never lowers a cap; never caps an
+        already-uncapped base."""
+        if base is None or not self._escalated:
+            return base
+        esc = escalated_max_output_tokens()
+        return esc if (esc and esc > base) else base
+
+    def _escalated_default(self) -> BaseLlm:
+        """A higher-cap rebuild of the boot/default delegate (it was built once
+        with the base cap; escalation needs a copy at the escalated cap). Reads
+        the boot delegate's own kwargs (api_base/api_key live in LiteLlm's
+        _additional_args). Best-effort — falls back to the base delegate."""
+        with self._lock:
+            if self._escalated_default_delegate is not None:
+                return self._escalated_default_delegate
+            base = self._default_delegate
+            esc = base
+            cap = self._effective_cap(resolve_max_output_tokens())
+            try:
+                from google.adk.models.lite_llm import LiteLlm
+
+                args = dict(getattr(base, "_additional_args", {}) or {})
+                if cap:
+                    args["max_tokens"] = cap
+                esc = LiteLlm(model=getattr(base, "model", self.model), **args)
+            except Exception as e:  # noqa: BLE001 — never break on a rebuild
+                _log.debug("escalated default rebuild failed (%s) — using base", e)
+                esc = base
+            self._escalated_default_delegate = esc
+            return esc
+
+    def _on_max_tokens(self) -> None:
+        """Handle finish_reason=MAX_TOKENS: log the root cause and, the first
+        time, escalate the effective cap for subsequent calls (rebuild delegates
+        at the higher cap). Mirrors Claude Code's 8k→64k escalation."""
+        esc = escalated_max_output_tokens()
+        if self._escalated or not esc:
+            _log.warning(
+                "SelectableLlm: model %s hit finish_reason=MAX_TOKENS — a tool "
+                "call may be truncated (output cap reached).", self.model,
+            )
+            return
+        with self._lock:
+            self._escalated = True
+            self._cache.clear()  # rebuild registry delegates at the escalated cap
+            self._escalated_default_delegate = None
+        _log.warning(
+            "SelectableLlm: model %s hit finish_reason=MAX_TOKENS — escalating "
+            "max_tokens to %d for subsequent calls (set "
+            "ADK_CC_MAX_OUTPUT_TOKENS_ESCALATED=0 to disable).",
+            self.model, esc,
+        )
 
     # -- BaseLlm interface (delegate everything) -----------------------
 
@@ -220,17 +302,12 @@ class SelectableLlm(BaseLlm):
         # cached, so steady-state resolves are a tiny off-loop file read.)
         delegate = await asyncio.to_thread(self._resolve_delegate)
         async for resp in delegate.generate_content_async(llm_request, stream=stream):
-            # Root-cause signal for tolerant_tool_json's truncation recovery: a
+            # Root cause for tolerant_tool_json's truncation recovery: a
             # MAX_TOKENS finish means the model ran out of output budget — likely
-            # mid tool-call. Surface it so operators raise the cap rather than
-            # only seeing the downstream "truncated tool-call JSON" warning.
+            # mid tool-call. Log it AND escalate the cap (Claude-Code-style) so
+            # the model's truncated-tool-call retry has more room.
             if getattr(getattr(resp, "finish_reason", None), "name", None) == "MAX_TOKENS":
-                _log.warning(
-                    "SelectableLlm: model %s hit finish_reason=MAX_TOKENS (output "
-                    "token cap) — a tool call may be truncated. Raise the cap via "
-                    "ADK_CC_MAX_OUTPUT_TOKENS or the endpoint's max_tokens.",
-                    self.model,
-                )
+                self._on_max_tokens()
             yield resp
 
     async def warm(self) -> None:
