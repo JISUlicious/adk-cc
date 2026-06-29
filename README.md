@@ -65,6 +65,9 @@ adk web agents
 adk run agents/adk_cc
 
 # Option C: FastAPI + custom React UI (see "Web UI" below)
+
+# Option D: native desktop app (single-user, no login; see "Desktop app" below)
+#   npm --prefix web run build:desktop && cargo run --manifest-path src-tauri/Cargo.toml
 ```
 
 ## Web UI
@@ -125,6 +128,66 @@ ADK_CC_SERVE_UI=1                  # mount the SPA from web/dist at /
 ADK_CC_UI_DIST=/path/to/web/dist   # override default (<repo>/web/dist)
 ADK_CC_DEV_API=http://...:8000     # dev-only, for the Vite proxy
 ```
+
+## Desktop app (Tauri)
+
+A native desktop build wraps the same backend + React UI as a **single-user
+local app** (Tauri v2 / Rust). One window, one bundled backend, **no login**.
+The UI is the **same shared components** as the web app behind a thin desktop
+shell, selected at build time by `VITE_ADK_CC_DESKTOP=1` — the default (no-flag)
+build is still today's web app, so the web side is unchanged.
+
+What's different from the web app:
+
+- **Projects = local git directories.** The sidebar is two levels: **L1
+  projects → L2 that project's sessions**. "Add" picks a folder (a non-repo
+  folder is `git init`-ed on add).
+- **Each session runs in its own git worktree** of the project repo (branch
+  `adk-cc/<session-id>`), so parallel sessions are isolated working copies.
+- **Single-user, no auth**; per-project history under a local data dir.
+
+### Prerequisites
+
+- Rust toolchain (`cargo`) — first build compiles the Tauri deps (minutes).
+- Node + the web deps: `npm --prefix web install`.
+- The repo `.venv` with the Python backend installed (same as the web app).
+- A `.env` with your model key/endpoint (`ADK_CC_API_KEY` / `ADK_CC_MODEL` /
+  `ADK_CC_API_BASE`) — the sidecar runs with the repo as its CWD and loads it.
+
+### Run it (dev)
+
+```bash
+# 1. Build the desktop UI bundle (the backend sidecar serves web/dist-desktop)
+npm --prefix web run build:desktop
+
+# 2. Build + launch the app (opens the window, spawns the backend on :8765)
+cargo run --manifest-path src-tauri/Cargo.toml
+```
+
+One-liner if you have the Tauri CLI (`cargo install tauri-cli`): `cargo tauri
+dev` — it runs `build:desktop` for you via `beforeDevCommand`, then launches.
+
+The shell (`src-tauri/src/main.rs`) spawns
+`.venv/bin/uvicorn adk_cc.service.server:make_app --factory --port 8765` from
+the repo with the single-user env baked in — `ADK_CC_ALLOW_NO_AUTH=1`,
+`ADK_CC_DESKTOP=1`, `ADK_CC_TENANCY_MODE=single`, sqlite sessions,
+encrypted-file secrets, `noop` sandbox, `ADK_CC_SERVE_UI=1` from
+`web/dist-desktop` — polls `/list-apps`, points the window at
+`http://127.0.0.1:8765/`, and kills the backend on exit.
+
+Frontend scripts: `build:desktop` (production bundle → `web/dist-desktop`),
+`dev:desktop` (Vite dev server with the desktop shell, for UI iteration).
+
+### Data + distribution
+
+Per-user data lives under **`~/.adk-cc-desktop`**: `sessions.db`,
+`credential.key` (+ `secrets/`), `projects.json`, and
+`worktrees/<project>/<session>`. Delete it to reset.
+
+`cargo tauri build` produces a bundle, but v1 **runs the repo `.venv`** (the
+compile-time repo path) — a frozen/bundled backend and signed installers are a
+follow-up, as are the session diff/merge UI (v1 isolates in worktrees and shows
+the branch name) and per-project settings beyond Appearance.
 
 ## Local model
 
