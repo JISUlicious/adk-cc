@@ -22,6 +22,7 @@ from adk_cc.plugins.tolerant_tool_json import (
     tolerant_loads,
     install_tolerant_tool_json,
     _TolerantJsonShim,
+    TRUNCATED_TOOL_CALL_KEY,
 )
 
 
@@ -119,15 +120,24 @@ def test_completion_ignores_brackets_inside_strings():
 # --- still fails on genuinely-broken / unrecoverable input ----------------
 
 def test_unrecoverable_still_raises():
-    # not JSON, or recovery would require FABRICATING a value (an unterminated
-    # string value, or a missing value) — must raise, never invent.
-    for bad in ('not json', '{"a": }', '{"skill_name": "my-sk', '{"skill_name": '):
+    # genuinely malformed-but-COMPLETE (NOT a truncation) → raise, never invent.
+    for bad in ('not json', '{"a": }', '{"a" "b"}'):
         try:
             tolerant_loads(bad)
             assert False, f"expected failure for {bad!r}"
         except json.JSONDecodeError:
             pass
     print("OK test_unrecoverable_still_raises")
+
+
+def test_truncated_midvalue_degrades_to_marker():
+    # The VALUE itself was cut off (Tier 2): closing it would fabricate the wrong
+    # argument, so instead of raising (which would crash the turn) tolerant_loads
+    # returns a marker. TruncatedToolCallPlugin turns that into a clean retry.
+    for bad in ('{"skill_name": "my-sk', '{"skill_name": ', '{"a": 1, "b": "cut'):
+        out = tolerant_loads(bad)
+        assert out == {TRUNCATED_TOOL_CALL_KEY: True}, (bad, out)
+    print("OK test_truncated_midvalue_degrades_to_marker")
 
 
 def test_non_str_input_passthrough():
@@ -168,6 +178,7 @@ if __name__ == "__main__":
     test_truncation_nested_and_composes_with_repairs()
     test_completion_ignores_brackets_inside_strings()
     test_unrecoverable_still_raises()
+    test_truncated_midvalue_degrades_to_marker()
     test_non_str_input_passthrough()
     test_patch_installs_on_lite_llm()
     print("\nall tolerant-tool-json tests passed")

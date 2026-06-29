@@ -79,6 +79,7 @@ from .plugins import (
     WorkspaceHintPlugin,
 )
 from .plugins.secret_redaction import SecretRedactionPlugin
+from .plugins.truncated_tool_call import TruncatedToolCallPlugin
 from .credentials import credential_provider_from_env
 from .service.tenancy import TenancyPlugin
 from .tools import (
@@ -1101,6 +1102,12 @@ _app_kwargs = dict(
         TenancyPlugin(
             default_workspace_root=os.environ.get("ADK_CC_WORKSPACE_ROOT")
         ),
+        # Graceful degradation for a model cut off mid tool-call: tolerant_tool_json
+        # returns a marker (TRUNCATED_TOOL_CALL_KEY) for an unrecoverable truncation
+        # instead of raising; this turns that marker into a clean retry error before
+        # the tool runs — so a cutoff is a soft retry, not a turn crash. Before
+        # AuthZ/Permission: no point gating/confirming a truncated call.
+        TruncatedToolCallPlugin(),
         # AuthZ hard gate (subject×action×resource). Runs after Tenancy
         # (identity seeded) and BEFORE PermissionPlugin, so a hard deny
         # never reaches the confirmation prompt. Default-OFF: inert unless

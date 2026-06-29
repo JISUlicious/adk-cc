@@ -24,9 +24,11 @@ the real stdlib json, EXCEPT ``loads``, which:
      mid-emission) by appending ONLY the missing }/] closers — never a string
      value or a missing value, so it recovers `{"skill_name": "x"` losslessly
      but refuses to fabricate `{"skill_name": "x` or `{"skill_name": `;
-  4. if it still can't parse, re-raises the ORIGINAL error so callers see a
-     coherent failure rather than a repair artifact (logging a clear WARNING
-     when the cause is truncation rather than malformation).
+  4. if it still can't parse: a TRUNCATED tool call (model cut off mid-value)
+     degrades to a retry MARKER (TRUNCATED_TOOL_CALL_KEY) instead of raising — so
+     the turn survives and TruncatedToolCallPlugin returns a clean retry error;
+     a genuinely malformed-but-complete argument re-raises the ORIGINAL error
+     (callers see a coherent failure, not a repair artifact).
 
 Default-ON: tool-call JSON from a model is untrusted by nature, so tolerant
 parsing is the safer default. Disable with ``ADK_CC_TOLERANT_TOOL_JSON=0``.
@@ -58,6 +60,14 @@ import re
 _log = logging.getLogger(__name__)
 
 _PATCHED_FLAG = "_adk_cc_tolerant_json_patched"
+
+# Returned by tolerant_loads when a tool call is TRUNCATED mid-value (the model
+# was cut off mid-emission) and can't be recovered without fabricating the
+# argument. Instead of raising — which crashes the whole turn — we return this
+# marker; TruncatedToolCallPlugin intercepts it in before_tool_callback and
+# turns it into a clean retry error, so the turn survives. Namespaced so it can
+# never collide with a real tool argument.
+TRUNCATED_TOOL_CALL_KEY = "__adk_cc_truncated_tool_call__"
 
 # A backslash that does NOT start a valid JSON escape. Valid escapes are:
 #   \" \\ \/ \b \f \n \r \t  and  \uXXXX
@@ -221,14 +231,22 @@ def tolerant_loads(s, *args, **kwargs):
         # the failure type is unchanged for callers.
         in_string, stack = _json_scan(text)
         if in_string or stack:
+            # TRUNCATION (the model was cut off mid-emission). Re-raising here
+            # would crash the whole turn. Degrade gracefully instead: return a
+            # marker that TruncatedToolCallPlugin converts into a clean retry
+            # error in before_tool_callback — the tool never runs with partial
+            # args, the model gets a coherent "resend complete arguments"
+            # signal, and the turn survives.
             _log.warning(
-                "tolerant_tool_json: tool-call JSON appears TRUNCATED "
-                "(%s) and can't be recovered without fabricating a value — "
-                "the model stopped mid tool-call. Snippet: %r",
+                "tolerant_tool_json: tool-call JSON appears TRUNCATED (%s) and "
+                "can't be recovered without fabricating a value — the model "
+                "stopped mid tool-call. Degrading to a retry marker. Snippet: %r",
                 "unterminated string" if in_string else "unbalanced brackets",
                 text[:120],
             )
-        raise first_error  # nothing recovered it — surface the original
+            return {TRUNCATED_TOOL_CALL_KEY: True}
+        # Genuinely malformed (NOT truncated) — surface the original error.
+        raise first_error
 
 
 class _TolerantJsonShim:
