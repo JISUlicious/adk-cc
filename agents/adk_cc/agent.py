@@ -138,15 +138,26 @@ def _force_coordinator_continuation(callback_context: Context) -> types.Content:
 #   ADK_CC_API_KEY=<token>
 _BOOT_MODEL_ID = os.environ.get("ADK_CC_MODEL", "openai/Qwen3.6-35B-A3B-UD-MLX-4bit")
 _BOOT_API_BASE = os.environ.get("ADK_CC_API_BASE", "http://localhost:18000/v1")
-_boot_max_tokens = resolve_max_output_tokens()
-_boot_litellm = LiteLlm(
-    model=_BOOT_MODEL_ID,
-    api_base=_BOOT_API_BASE,
-    api_key=os.environ["ADK_CC_API_KEY"],
-    # Cap output tokens when configured (ADK_CC_MAX_OUTPUT_TOKENS) — prevents the
-    # model stopping mid tool-call on endpoints with a low default output limit.
-    **({"max_tokens": _boot_max_tokens} if _boot_max_tokens else {}),
-)
+
+
+def _build_boot_litellm(max_tokens):
+    """Build the boot/default LiteLlm at a given output cap (falsy → uncapped).
+
+    Used both for the base delegate and — handed to SelectableLlm as the
+    ``default_delegate_factory`` — for the higher-cap rebuild on escalation, so
+    the escalated copy is built the same way instead of scraping LiteLlm internals.
+    """
+    return LiteLlm(
+        model=_BOOT_MODEL_ID,
+        api_base=_BOOT_API_BASE,
+        api_key=os.environ["ADK_CC_API_KEY"],
+        # Cap output tokens when configured (ADK_CC_MAX_OUTPUT_TOKENS) — prevents
+        # the model stopping mid tool-call on endpoints with a low output limit.
+        **({"max_tokens": max_tokens} if max_tokens else {}),
+    )
+
+
+_boot_litellm = _build_boot_litellm(resolve_max_output_tokens())
 
 
 def _make_model():
@@ -169,6 +180,7 @@ def _make_model():
     return SelectableLlm(
         registry_path_env="ADK_CC_MODEL_REGISTRY_FILE",
         default_delegate=_boot_litellm,
+        default_delegate_factory=_build_boot_litellm,
         default_model_id=_BOOT_MODEL_ID,
     )
 

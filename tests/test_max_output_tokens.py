@@ -54,6 +54,15 @@ def main() -> int:
     _set_env("2048")
     check("cfg without max_tokens falls back to env", resolve_max_output_tokens(cfg_none) == 2048)
 
+    # per-endpoint 0 / negative → uncapped (same semantics as the env var), NOT
+    # the falsy-fallthrough-to-default bug.
+    cfg_zero = ModelEndpointConfig(name="z", model="openai/z", api_base="http://z", api_key_env="", max_tokens=0)
+    _set_env("4096")
+    check("per-endpoint max_tokens=0 → uncapped (not env/default)", resolve_max_output_tokens(cfg_zero) is None)
+    cfg_neg = ModelEndpointConfig(name="n", model="openai/n", api_base="http://n", api_key_env="", max_tokens=-5)
+    check("per-endpoint negative → uncapped (not forwarded verbatim)", resolve_max_output_tokens(cfg_neg) is None)
+    _set_env(None)
+
     # --- _build_litellm threads the cap into the delegate ---
     _set_env(None)
     sel = SelectableLlm(default_model_id="m")
@@ -72,10 +81,31 @@ def main() -> int:
     check("escalated default = 32768", escalated_max_output_tokens() == 32768)
     s2 = SelectableLlm(default_model_id="m")
     check("base cap before escalation", s2._effective_cap(8192) == 8192)
-    s2._escalated = True
+    s2._cap_floor = escalated_max_output_tokens()  # 32768
     check("cap raises after escalation", s2._effective_cap(8192) == 32768)
     check("escalation never lowers a cap", s2._effective_cap(65536) == 65536)
     check("escalation no-op on an uncapped base", s2._effective_cap(None) is None)
+
+    # escalation lifts the env/default cap but leaves an EXPLICIT per-endpoint
+    # cap (the operator's deliberate limit) untouched.
+    _set_env(None)
+    s3 = SelectableLlm(default_model_id="m")
+    s3._cap_floor = 32768
+    d_explicit = s3._build_litellm(cfg)  # cfg.max_tokens=1234 (explicit)
+    check("escalation leaves an explicit per-endpoint cap untouched",
+          getattr(d_explicit, "_additional_args", {}).get("max_tokens") == 1234)
+    d_default = s3._build_litellm(cfg_none)  # no per-endpoint cap → env/default, lifted
+    check("escalation lifts the env/default cap",
+          getattr(d_default, "_additional_args", {}).get("max_tokens") == 32768)
+
+    # ESCALATED <= base must NOT flip the floor or claim to escalate.
+    os.environ["ADK_CC_MAX_OUTPUT_TOKENS"] = "60000"
+    os.environ["ADK_CC_MAX_OUTPUT_TOKENS_ESCALATED"] = "32768"
+    s4 = SelectableLlm(default_model_id="m")
+    s4._on_max_tokens()
+    check("no phantom escalation when ESCALATED <= base", s4._cap_floor is None)
+    os.environ.pop("ADK_CC_MAX_OUTPUT_TOKENS", None)
+    os.environ.pop("ADK_CC_MAX_OUTPUT_TOKENS_ESCALATED", None)
 
     # --- finish_reason=MAX_TOKENS logs a root-cause warning ---
     class _FR:
@@ -101,7 +131,7 @@ def main() -> int:
             out = [r async for r in s.generate_content_async(None)]
         finally:
             lg.removeHandler(handler); lg.setLevel(old)
-        return out, msgs, s._escalated
+        return out, msgs, s._cap_floor is not None
 
     out, msgs, escalated_after = asyncio.run(run())
     check("all responses still yielded (passthrough)", len(out) == 2)

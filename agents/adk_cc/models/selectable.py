@@ -23,7 +23,7 @@ import logging
 import os
 import threading
 import time
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Optional
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Optional
 
 from google.adk.models.base_llm import BaseLlm
 
@@ -42,38 +42,49 @@ _DEFAULT_MAX_OUTPUT_TOKENS = 8192
 _DEFAULT_ESCALATED_MAX_TOKENS = 32768
 
 
+def _cap_from(raw, *, default: Optional[int], warn_name: Optional[str] = None) -> Optional[int]:
+    """Normalize one max-output-tokens value to a litellm ``max_tokens``.
+
+    Empty/None → ``default``; non-int → ``default`` (warns if ``warn_name`` is
+    given); ``n > 0`` → ``n``; ``n <= 0`` → ``None`` (explicitly uncapped). The
+    single home of the "0/negative means uncapped" rule, so the per-endpoint and
+    env knobs can't drift apart."""
+    if raw is None or raw == "":
+        return default
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        if warn_name:
+            _log.warning("%s=%r is not an int — using default", warn_name, raw)
+        return default
+    return n if n > 0 else None  # 0 / negative → explicitly uncapped
+
+
 def resolve_max_output_tokens(cfg: "Optional[ModelEndpointConfig]" = None) -> Optional[int]:
     """The BASE output-token cap (litellm ``max_tokens``).
 
     Precedence: per-endpoint ``max_tokens`` override > ``ADK_CC_MAX_OUTPUT_TOKENS``
-    > a sane default (8192). ``ADK_CC_MAX_OUTPUT_TOKENS=0`` (or negative) opts OUT
-    (uncapped — the endpoint's own default applies)."""
+    > a sane default (8192). A value of 0 (or negative) — at EITHER the
+    per-endpoint or the env level — opts OUT (uncapped; the endpoint's own
+    default applies)."""
     per_endpoint = getattr(cfg, "max_tokens", None) if cfg is not None else None
-    if per_endpoint:
-        return int(per_endpoint)
-    raw = os.environ.get("ADK_CC_MAX_OUTPUT_TOKENS")
-    if raw is None or raw == "":
-        return _DEFAULT_MAX_OUTPUT_TOKENS
-    try:
-        n = int(raw)
-    except ValueError:
-        _log.warning("ADK_CC_MAX_OUTPUT_TOKENS=%r is not an int — using default", raw)
-        return _DEFAULT_MAX_OUTPUT_TOKENS
-    return n if n > 0 else None  # 0 / negative → explicitly uncapped
+    if per_endpoint is not None:
+        return _cap_from(per_endpoint, default=None)  # 0 / negative → uncapped
+    return _cap_from(
+        os.environ.get("ADK_CC_MAX_OUTPUT_TOKENS"),
+        default=_DEFAULT_MAX_OUTPUT_TOKENS,
+        warn_name="ADK_CC_MAX_OUTPUT_TOKENS",
+    )
 
 
 def escalated_max_output_tokens() -> Optional[int]:
     """The cap to escalate to after a model truncates mid tool-call
     (finish_reason=MAX_TOKENS) — cf. Claude Code escalating 8k→64k so the retry
     has headroom. ``ADK_CC_MAX_OUTPUT_TOKENS_ESCALATED`` overrides; 0 disables."""
-    raw = os.environ.get("ADK_CC_MAX_OUTPUT_TOKENS_ESCALATED")
-    if raw is None or raw == "":
-        return _DEFAULT_ESCALATED_MAX_TOKENS
-    try:
-        n = int(raw)
-    except ValueError:
-        return _DEFAULT_ESCALATED_MAX_TOKENS
-    return n if n > 0 else None
+    return _cap_from(
+        os.environ.get("ADK_CC_MAX_OUTPUT_TOKENS_ESCALATED"),
+        default=_DEFAULT_ESCALATED_MAX_TOKENS,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -145,6 +156,7 @@ class SelectableLlm(BaseLlm):
         registry: "Optional[ModelEndpointRegistry]" = None,
         registry_path_env: Optional[str] = None,
         default_delegate: Optional[BaseLlm] = None,
+        default_delegate_factory: "Optional[Callable[[Optional[int]], BaseLlm]]" = None,
         default_model_id: str = "",
     ) -> None:
         # Initialize the BaseLlm `model` field with the current active id (or
@@ -160,14 +172,17 @@ class SelectableLlm(BaseLlm):
         # config is picked up regardless of import order.
         self._registry_path_env = registry_path_env
         self._default_delegate = default_delegate
+        self._default_delegate_factory = default_delegate_factory
         self._cache: dict[tuple, BaseLlm] = {}
         self._lock = threading.RLock()
         # Claude-Code-style escalation: once the model hits finish_reason=
-        # MAX_TOKENS, raise the effective cap for subsequent calls (the model's
-        # truncated-tool-call retry then has more room). Monotonic-sticky for the
-        # process; only ever RAISES a cap. The escalated default delegate is a
-        # higher-cap rebuild of the boot delegate, lazily built on first need.
-        self._escalated = False
+        # MAX_TOKENS, raise a process-wide floor under the env/default cap for
+        # subsequent calls, so the model's truncated-tool-call retry has more
+        # room. `_cap_floor` is None until the first truncation, then the
+        # escalated value — monotonic-sticky, only ever raises. The escalated
+        # default delegate is a higher-cap rebuild of the boot delegate, built
+        # lazily on first need via `default_delegate_factory`.
+        self._cap_floor: Optional[int] = None
         self._escalated_default_delegate: Optional[BaseLlm] = None
 
     def _get_registry(self) -> "Optional[ModelEndpointRegistry]":
@@ -196,7 +211,7 @@ class SelectableLlm(BaseLlm):
                 raise RuntimeError(
                     "SelectableLlm has no active endpoint and no default delegate"
                 )
-            return self._escalated_default() if self._escalated else self._default_delegate
+            return self._escalated_default() if self._cap_floor is not None else self._default_delegate
 
         key = (active.model, active.api_base, active.api_key_env)
         with self._lock:
@@ -228,57 +243,65 @@ class SelectableLlm(BaseLlm):
                 )
             kwargs["api_key"] = api_key
         # else: intentionally keyless endpoint (api_key_env == "") — no key.
-        max_tokens = self._effective_cap(resolve_max_output_tokens(cfg))
+        base = resolve_max_output_tokens(cfg)
+        # Escalation lifts only the env/default cap; an explicit per-endpoint
+        # ``max_tokens`` (including 0 = uncapped) is the operator's deliberate
+        # choice and is left exactly as set.
+        explicit = getattr(cfg, "max_tokens", None) is not None
+        max_tokens = base if explicit else self._effective_cap(base)
         if max_tokens:
             kwargs["max_tokens"] = max_tokens
         return LiteLlm(**kwargs)
 
     def _effective_cap(self, base: Optional[int]) -> Optional[int]:
-        """The cap to use for the next call: the escalated value once the model
-        has hit MAX_TOKENS, else the base. Never lowers a cap; never caps an
-        already-uncapped base."""
-        if base is None or not self._escalated:
+        """Lift ``base`` to the escalation floor once the model has hit
+        MAX_TOKENS. Never lowers a cap; never caps an already-uncapped base."""
+        floor = self._cap_floor
+        if floor is None or base is None:
             return base
-        esc = escalated_max_output_tokens()
-        return esc if (esc and esc > base) else base
+        return floor if floor > base else base
 
     def _escalated_default(self) -> BaseLlm:
-        """A higher-cap rebuild of the boot/default delegate (it was built once
-        with the base cap; escalation needs a copy at the escalated cap). Reads
-        the boot delegate's own kwargs (api_base/api_key live in LiteLlm's
-        _additional_args). Best-effort — falls back to the base delegate."""
+        """The boot/default delegate rebuilt at the escalated cap (it was built
+        once at the base cap; escalation needs a copy with more room). Rebuilt via
+        ``default_delegate_factory`` — the same builder agent.py uses for the boot
+        delegate — so there is no scraping of LiteLlm internals. Best-effort:
+        falls back to the base delegate if no factory was supplied or it fails."""
         with self._lock:
             if self._escalated_default_delegate is not None:
                 return self._escalated_default_delegate
-            base = self._default_delegate
-            esc = base
-            cap = self._effective_cap(resolve_max_output_tokens())
-            try:
-                from google.adk.models.lite_llm import LiteLlm
-
-                args = dict(getattr(base, "_additional_args", {}) or {})
-                if cap:
-                    args["max_tokens"] = cap
-                esc = LiteLlm(model=getattr(base, "model", self.model), **args)
-            except Exception as e:  # noqa: BLE001 — never break on a rebuild
-                _log.debug("escalated default rebuild failed (%s) — using base", e)
-                esc = base
+            esc = self._default_delegate
+            if self._default_delegate_factory is not None:
+                try:
+                    esc = self._default_delegate_factory(
+                        self._effective_cap(resolve_max_output_tokens())
+                    )
+                except Exception as e:  # noqa: BLE001 — never break on a rebuild
+                    _log.debug("escalated default rebuild failed (%s) — using base", e)
+                    esc = self._default_delegate
             self._escalated_default_delegate = esc
             return esc
 
     def _on_max_tokens(self) -> None:
-        """Handle finish_reason=MAX_TOKENS: log the root cause and, the first
-        time, escalate the effective cap for subsequent calls (rebuild delegates
-        at the higher cap). Mirrors Claude Code's 8k→64k escalation."""
+        """Handle finish_reason=MAX_TOKENS. The FIRST time, escalate the cap floor
+        for subsequent calls (so the model's truncated-tool-call retry has more
+        room) and rebuild delegates at the higher cap — mirrors Claude Code's
+        8k→64k escalation. Once escalated, later hits are silent (the floor is
+        already raised), so we don't spam the log."""
+        if self._cap_floor is not None:
+            return  # already escalated — nothing more to do
         esc = escalated_max_output_tokens()
-        if self._escalated or not esc:
+        base = resolve_max_output_tokens()
+        if not esc or (base is not None and esc <= base):
+            # Escalation disabled, or it wouldn't actually raise the cap — log the
+            # root cause without a misleading "escalating" claim or cache churn.
             _log.warning(
-                "SelectableLlm: model %s hit finish_reason=MAX_TOKENS — a tool "
-                "call may be truncated (output cap reached).", self.model,
+                "SelectableLlm: model %s hit finish_reason=MAX_TOKENS — output cap "
+                "reached; a tool call may be truncated.", self.model,
             )
             return
         with self._lock:
-            self._escalated = True
+            self._cap_floor = esc
             self._cache.clear()  # rebuild registry delegates at the escalated cap
             self._escalated_default_delegate = None
         _log.warning(
