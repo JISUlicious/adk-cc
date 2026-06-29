@@ -24,11 +24,14 @@ the real stdlib json, EXCEPT ``loads``, which:
      mid-emission) by appending ONLY the missing }/] closers — never a string
      value or a missing value, so it recovers `{"skill_name": "x"` losslessly
      but refuses to fabricate `{"skill_name": "x` or `{"skill_name": `;
-  4. if it still can't parse: a TRUNCATED tool call (model cut off mid-value)
-     degrades to a retry MARKER (TRUNCATED_TOOL_CALL_KEY) instead of raising — so
-     the turn survives and TruncatedToolCallPlugin returns a clean retry error;
-     a genuinely malformed-but-complete argument re-raises the ORIGINAL error
-     (callers see a coherent failure, not a repair artifact).
+  4. if it still can't parse: a TRUNCATED tool call (model cut off mid-value) OR
+     a complete arg with an EMPTY value (`{"k": }` — a key with no value) degrades
+     to a retry MARKER (TRUNCATED_TOOL_CALL_KEY) instead of raising — so the turn
+     survives and TruncatedToolCallPlugin returns a clean retry error. We never
+     fabricate the missing value (null would call the tool with a wrong arg). A
+     genuinely malformed argument re-raises the ORIGINAL error (with an
+     UNRECOVERABLE log: message, position, raw args) so callers see a coherent
+     failure, not a repair artifact.
 
 Default-ON: tool-call JSON from a model is untrusted by nature, so tolerant
 parsing is the safer default. Disable with ``ADK_CC_TOLERANT_TOOL_JSON=0``.
@@ -112,6 +115,42 @@ def _repair_invalid_escapes(s: str) -> str:
 def _strip_trailing_commas(s: str) -> str:
     """Remove a comma immediately before a closing } or ] (JSON5-ism)."""
     return _TRAILING_COMMA.sub(r"\1", s)
+
+
+# A colon whose VALUE is empty — `:` then optional whitespace then a closing
+# `}`/`]` or a `,` (`{"k": }`, `{"k": , ...}`). The model emitted a key with no
+# value. Used ONLY to DETECT this case so we can route it to the retry marker;
+# we never hand the null-filled value to the tool (that would fabricate the
+# argument the model failed to produce — see _empty_value_recoverable).
+_EMPTY_VALUE = re.compile(r":(\s*)([,}\]])")
+
+
+def _fill_missing_values(s: str) -> str:
+    """Fill empty object values with an explicit null (`{"k": }` → `{"k": null}`).
+    Heuristic/conservative; a DETECTOR only — never used as the tool argument."""
+    return _EMPTY_VALUE.sub(r": null\1\2", s)
+
+
+def _empty_value_recoverable(text: str, recover_kwargs: dict) -> bool:
+    """True when the parse failure is (only) empty object values: filling them
+    with null — composed with the same escape/comma repairs — makes it parse.
+
+    A DETECTOR for the missing-value case; the caller returns the retry MARKER,
+    NOT the null-filled dict, so we never fabricate the argument. Returns False
+    when there's no empty value to fill (a different malformation → should raise).
+    """
+    filled = _fill_missing_values(text)
+    if filled == text:
+        return False  # nothing to fill — not a missing-value failure
+    candidate = filled
+    for transform in (lambda x: x, _repair_invalid_escapes, _strip_trailing_commas):
+        candidate = transform(candidate)
+        try:
+            _stdlib_json.loads(candidate, **recover_kwargs)
+            return True
+        except _stdlib_json.JSONDecodeError:
+            continue
+    return False
 
 
 def _json_scan(s: str) -> tuple[bool, list[str]]:
@@ -246,7 +285,30 @@ def tolerant_loads(s, *args, **kwargs):
                 text[:120],
             )
             return {TRUNCATED_TOOL_CALL_KEY: True}
-        # Genuinely malformed (NOT truncated) — surface the original error.
+
+        # Balanced but unparseable. Is it the MISSING-VALUE case (`{"k": }` /
+        # `{"k": , ...}`)? The model emitted a key with no value. Filling the
+        # blanks with null parses, which identifies it as a recoverable "resend"
+        # case — but we DON'T hand the tool a fabricated null; we degrade to the
+        # same retry marker as truncation, so the turn survives without inventing
+        # an argument.
+        if _empty_value_recoverable(text, recover_kwargs):
+            _log.warning(
+                "tolerant_tool_json: tool-call JSON has an EMPTY value (e.g. "
+                "`{\"k\": }`) — the model emitted a key with no value. Degrading "
+                "to a retry marker (not fabricating null). Snippet: %r", text[:120],
+            )
+            return {TRUNCATED_TOOL_CALL_KEY: True}
+
+        # Genuinely malformed (not truncated, not a fillable empty value) —
+        # surface the ORIGINAL error so the failure type is unchanged for callers,
+        # with enough detail for operators to diagnose the model/prompt.
+        _log.warning(
+            "tolerant_tool_json: UNRECOVERABLE tool-call JSON — %s at pos %s "
+            "(not truncation, not an empty value). Surfacing the original error. "
+            "Raw args (first 200 chars): %r",
+            first_error.msg, getattr(first_error, "pos", "?"), text[:200],
+        )
         raise first_error
 
 

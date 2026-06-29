@@ -120,14 +120,28 @@ def test_completion_ignores_brackets_inside_strings():
 # --- still fails on genuinely-broken / unrecoverable input ----------------
 
 def test_unrecoverable_still_raises():
-    # genuinely malformed-but-COMPLETE (NOT a truncation) → raise, never invent.
-    for bad in ('not json', '{"a": }', '{"a" "b"}'):
+    # genuinely malformed-but-COMPLETE (NOT truncation, NOT an empty value) →
+    # raise, never invent. ('{"a": }' is now an empty-value case → marker; see
+    # test_missing_value_degrades_to_marker.)
+    for bad in ('not json', '{"a" "b"}', '[1 2]', '{"a": 1 "b": 2}'):
         try:
             tolerant_loads(bad)
             assert False, f"expected failure for {bad!r}"
         except json.JSONDecodeError:
             pass
     print("OK test_unrecoverable_still_raises")
+
+
+def test_missing_value_degrades_to_marker():
+    # A COMPLETE arg whose value is EMPTY (`{"k": }`) — the model emitted a key
+    # with no value. Re-raising would crash the turn; fabricating null would call
+    # the tool with a wrong arg. Instead degrade to the retry marker (like
+    # truncation): the model gets a clean "resend complete arguments" signal.
+    for bad in ('{"key": }', '{"key":}', '{"a": 1, "b": }', '{"a": , "b": 2}',
+                '{"a": {"b": }}'):
+        out = tolerant_loads(bad)
+        assert out == {TRUNCATED_TOOL_CALL_KEY: True}, (bad, out)
+    print("OK test_missing_value_degrades_to_marker")
 
 
 def test_truncated_midvalue_degrades_to_marker():
@@ -211,6 +225,7 @@ if __name__ == "__main__":
     test_completion_ignores_brackets_inside_strings()
     test_unrecoverable_still_raises()
     test_truncated_midvalue_degrades_to_marker()
+    test_missing_value_degrades_to_marker()
     test_non_str_input_passthrough()
     test_patch_installs_on_lite_llm()
     test_streaming_probe_stays_strict()
