@@ -45,7 +45,8 @@ Caveats:
     NOT close an unterminated string or supply a missing value, because the
     truncated token (`"my-sk` vs `"my-skill"`) is unknowable from the text —
     fabricating it would call the tool with the WRONG argument, which is worse
-    than failing. Those cases re-raise (with a truncation WARNING) by design.
+    than failing. Those cases degrade to the retry MARKER (item 4 above) rather
+    than fabricate a value.
   - Scoped to ADK's lite_llm module only; the stdlib json is untouched
     everywhere else.
 """
@@ -145,26 +146,6 @@ def _json_scan(s: str) -> tuple[bool, list[str]]:
     return in_string, stack
 
 
-def _complete_truncated(s: str) -> str | None:
-    r"""Complete a TRUNCATED tool call by appending only the missing closing
-    brackets/braces — never a string value or a missing value.
-
-    A model that stops mid-emission leaves JSON that is structurally incomplete.
-    When the ONLY thing missing is the closers (the values present are complete,
-    e.g. ``{"skill_name": "my-skill"`` → add ``}``), this recovers it
-    losslessly. It REFUSES (returns None) when the text ends inside a string
-    (``{"skill_name": "my-sk`` — the value itself was cut, and closing the quote
-    would fabricate a wrong value) or when there's nothing to close. A dangling
-    ``key:`` (``{"skill_name": ``) gets its ``}`` appended but won't parse, so
-    the caller's parse attempt fails and the original error is surfaced — we
-    never invent a value.
-    """
-    in_string, stack = _json_scan(s)
-    if in_string or not stack:
-        return None
-    return s + "".join(reversed(stack))
-
-
 # Ordered repair pipeline. Each entry is (label, transform). They're applied
 # CUMULATIVELY — every prefix of the list is attempted as a parse — so a
 # payload with two malformations (e.g. a bad escape AND a trailing comma)
@@ -201,6 +182,11 @@ def tolerant_loads(s, *args, **kwargs):
         recover_kwargs = dict(kwargs)
         recover_kwargs["strict"] = False
 
+        # Scan the text ONCE — the result drives BOTH the truncation-completion
+        # tier below AND (if nothing parses) the final truncated-vs-malformed
+        # classification, so we never re-scan the same text.
+        in_string, stack = _json_scan(text)
+
         # Try cumulative repairs: text → +escape → +escape+comma → ...
         applied: list[str] = []
         candidate = text
@@ -211,13 +197,14 @@ def tolerant_loads(s, *args, **kwargs):
             applied.append(label)
             attempts.append(("+".join(applied), candidate))
 
-        # Final tier: structural completion of a TRUNCATED tool call (the model
-        # stopped mid-emission). Appends only the missing }/] closers — never
-        # fabricates a string or a missing value (see _complete_truncated) — and
-        # composes the malformation repairs on top of the completed text.
-        completed = _complete_truncated(text)
-        if completed is not None:
-            cand = completed
+        # Final tier: structurally COMPLETE a TRUNCATED tool call by appending
+        # only the missing }/] closers — never a string value or a missing value.
+        # Safe only when the text doesn't end inside a string and has unclosed
+        # brackets; a dangling ``key:`` (``{"skill_name": ``) still won't parse,
+        # so it falls through to the marker below — we never invent a value. The
+        # malformation repairs compose on top of the completed text.
+        if not in_string and stack:
+            cand = text + "".join(reversed(stack))
             attempts.append(("complete-truncated", cand))
             for label, transform in _REPAIRS:
                 cand = transform(cand)
@@ -239,13 +226,11 @@ def tolerant_loads(s, *args, **kwargs):
             )
             return result
 
-        # Nothing recovered it. If the text is structurally TRUNCATED (ends
-        # inside a string, or has unbalanced brackets we couldn't safely close),
-        # say so explicitly — the model's tool call was cut off mid-emission,
-        # which is a different problem (token cap / unreliable model) than a
-        # malformed-but-complete argument. We still raise the ORIGINAL error so
-        # the failure type is unchanged for callers.
-        in_string, stack = _json_scan(text)
+        # Nothing recovered it. Classify with the SAME scan computed above: a
+        # structurally TRUNCATED arg (ends inside a string, or has brackets we
+        # couldn't safely close) degrades to a retry MARKER rather than crash the
+        # turn; a malformed-but-complete arg re-raises the ORIGINAL error so the
+        # failure type is unchanged for callers.
         if in_string or stack:
             # TRUNCATION (the model was cut off mid-emission). Re-raising here
             # would crash the whole turn. Degrade gracefully instead: return a
