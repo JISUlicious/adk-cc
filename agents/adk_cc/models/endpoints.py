@@ -36,6 +36,15 @@ class ModelEndpointConfig(BaseModel):
             "(e.g. a local model server that needs no auth)."
         ),
     )
+    max_tokens: Optional[int] = Field(
+        default=None,
+        description=(
+            "Optional output-token cap per call (litellm max_tokens). Prevents "
+            "the model stopping mid tool-call when the server's default output "
+            "limit is low — the root cause behind truncated tool-call JSON. "
+            "Falls back to ADK_CC_MAX_OUTPUT_TOKENS, then uncapped."
+        ),
+    )
 
     def masked(self) -> dict:
         """JSON-safe dict for API responses: includes whether the key env var

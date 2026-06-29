@@ -31,7 +31,29 @@ if TYPE_CHECKING:
     from google.adk.models.llm_request import LlmRequest
     from google.adk.models.llm_response import LlmResponse
 
-    from .endpoints import ModelEndpointRegistry
+    from .endpoints import ModelEndpointConfig, ModelEndpointRegistry
+
+
+def resolve_max_output_tokens(cfg: "Optional[ModelEndpointConfig]" = None) -> Optional[int]:
+    """The output-token cap for a model call (litellm ``max_tokens``).
+
+    Precedence: a per-endpoint ``max_tokens`` override, else
+    ``ADK_CC_MAX_OUTPUT_TOKENS``, else None (the server's own default — uncapped
+    from our side). Setting this is the root-cause fix for a model stopping mid
+    tool-call when the endpoint's default output limit is too low (which then
+    surfaces as truncated tool-call JSON; see plugins/tolerant_tool_json)."""
+    per_endpoint = getattr(cfg, "max_tokens", None) if cfg is not None else None
+    if per_endpoint:
+        return int(per_endpoint)
+    raw = os.environ.get("ADK_CC_MAX_OUTPUT_TOKENS")
+    if raw:
+        try:
+            n = int(raw)
+        except ValueError:
+            _log.warning("ADK_CC_MAX_OUTPUT_TOKENS=%r is not an int — ignoring", raw)
+            return None
+        return n if n > 0 else None
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -179,6 +201,9 @@ class SelectableLlm(BaseLlm):
                 )
             kwargs["api_key"] = api_key
         # else: intentionally keyless endpoint (api_key_env == "") — no key.
+        max_tokens = resolve_max_output_tokens(cfg)
+        if max_tokens:
+            kwargs["max_tokens"] = max_tokens
         return LiteLlm(**kwargs)
 
     # -- BaseLlm interface (delegate everything) -----------------------
@@ -195,6 +220,17 @@ class SelectableLlm(BaseLlm):
         # cached, so steady-state resolves are a tiny off-loop file read.)
         delegate = await asyncio.to_thread(self._resolve_delegate)
         async for resp in delegate.generate_content_async(llm_request, stream=stream):
+            # Root-cause signal for tolerant_tool_json's truncation recovery: a
+            # MAX_TOKENS finish means the model ran out of output budget — likely
+            # mid tool-call. Surface it so operators raise the cap rather than
+            # only seeing the downstream "truncated tool-call JSON" warning.
+            if getattr(getattr(resp, "finish_reason", None), "name", None) == "MAX_TOKENS":
+                _log.warning(
+                    "SelectableLlm: model %s hit finish_reason=MAX_TOKENS (output "
+                    "token cap) — a tool call may be truncated. Raise the cap via "
+                    "ADK_CC_MAX_OUTPUT_TOKENS or the endpoint's max_tokens.",
+                    self.model,
+                )
             yield resp
 
     async def warm(self) -> None:
