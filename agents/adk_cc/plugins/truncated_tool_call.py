@@ -1,16 +1,16 @@
-"""Graceful turn-level degradation for truncated tool calls (tolerant-json Tier 2).
+"""Graceful turn-level degradation for unusable tool-call arguments (tolerant-json Tier 2).
 
-When a model is cut off mid tool-call (it hit its output-token limit), the
-arguments JSON is truncated mid-VALUE. tolerant_tool_json can't recover that
-without fabricating the wrong argument, so — instead of raising, which crashes
-the whole turn — it returns a marker (``TRUNCATED_TOOL_CALL_KEY``).
+When a model's tool-call arguments JSON can't be parsed without fabricating a
+value — it was cut off mid-VALUE (output-token limit), or it left a value EMPTY
+(`{"key": }`) — tolerant_tool_json refuses to guess and returns a marker
+(``TRUNCATED_TOOL_CALL_KEY``) instead of raising (which would crash the turn).
 
 This plugin intercepts that marker in ``before_tool_callback`` and short-circuits
 the tool with a clean error result: the tool NEVER runs with partial/empty
 arguments, and the model receives a coherent "resend with complete arguments"
-signal so it can retry within the same turn. Net effect: a model cutoff that
-used to kill the turn ("Error in event_generator: …") becomes a soft, recoverable
-tool error.
+signal so it can retry within the same turn. Net effect: a bad tool-call emission
+that used to kill the turn ("Error in event_generator: …") becomes a soft,
+recoverable tool error.
 
 Pairs with the Tier 2 prevention work (configurable max_output_tokens +
 finish_reason=MAX_TOKENS logging in models/selectable.py), which reduces how
@@ -47,19 +47,19 @@ class TruncatedToolCallPlugin(BasePlugin):
         if isinstance(tool_args, dict) and tool_args.get(TRUNCATED_TOOL_CALL_KEY):
             name = getattr(tool, "name", "?")
             _log.warning(
-                "TruncatedToolCallPlugin: %r call was truncated mid-emission "
-                "(model hit its output-token limit) — returning a retry error "
-                "instead of crashing the turn.",
+                "TruncatedToolCallPlugin: %r call had unparseable arguments "
+                "(truncated mid-value, or an empty value) — returning a retry "
+                "error instead of crashing the turn.",
                 name,
             )
             return {
                 "status": "error",
                 "error": (
-                    f"Your previous `{name}` tool call was cut off mid-emission "
-                    "(the model reached its output-token limit), so its arguments "
-                    "were incomplete and could not be parsed. Re-send the "
-                    f"`{name}` call with the COMPLETE arguments. If an argument is "
-                    "very large (e.g. a big file/HTML blob), split the work into "
+                    f"Your previous `{name}` tool call could not be run: its "
+                    "arguments were incomplete or unparseable (cut off mid-value, "
+                    "or a value was left empty). Re-send the "
+                    f"`{name}` call with COMPLETE, valid arguments. If an argument "
+                    "is very large (e.g. a big file/HTML blob), split the work into "
                     "smaller calls."
                 ),
             }
