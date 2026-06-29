@@ -52,6 +52,8 @@ Caveats:
 
 from __future__ import annotations
 
+import contextvars
+import functools
 import json as _stdlib_json
 import logging
 import os
@@ -68,6 +70,20 @@ _PATCHED_FLAG = "_adk_cc_tolerant_json_patched"
 # turns it into a clean retry error, so the turn survives. Namespaced so it can
 # never collide with a real tool argument.
 TRUNCATED_TOOL_CALL_KEY = "__adk_cc_truncated_tool_call__"
+
+# Recovery (escape/comma/control repairs + truncation completion + the marker)
+# is applied ONLY while this is True — set just around ADK's FINAL args→dict
+# parse (`_message_to_generate_content_response`). It is False everywhere else,
+# crucially during ADK's STREAMING per-chunk completeness probe, which
+# `json.loads`'s the still-ACCUMULATING tool-call buffer. If recovery ran there,
+# a partial chunk like `{` would be "completed" to `{}` (and `{"k": "va` would
+# return the marker) — the probe would think the tool call is finished and
+# advance ADK's tool-call index, splitting the remaining chunks into bogus
+# entries. So the probe must see STRICT json (incomplete → raise → keep
+# accumulating); only the final parse recovers.
+_RECOVERY_ACTIVE: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "adk_cc_tolerant_recovery", default=False
+)
 
 # A backslash that does NOT start a valid JSON escape. Valid escapes are:
 #   \" \\ \/ \b \f \n \r \t  and  \uXXXX
@@ -249,15 +265,25 @@ def tolerant_loads(s, *args, **kwargs):
         raise first_error
 
 
+def _gated_loads(s, *args, **kwargs):
+    """The ``json.loads`` ADK's lite_llm sees. Tolerant recovery runs ONLY when
+    `_RECOVERY_ACTIVE` is set (the final args→dict parse); otherwise this is
+    plain strict ``json.loads`` — so the streaming per-chunk completeness probe
+    keeps accumulating an incomplete buffer instead of us 'completing' it."""
+    if _RECOVERY_ACTIVE.get():
+        return tolerant_loads(s, *args, **kwargs)
+    return _stdlib_json.loads(s, *args, **kwargs)
+
+
 class _TolerantJsonShim:
     """Delegates every attribute to stdlib json, overriding only ``loads``.
 
-    Installed as the ``json`` name inside ADK's lite_llm module so its
-    ``json.loads(tool_call.function.arguments)`` calls become tolerant, while
-    ``json.dumps`` and everything else behave exactly as before.
+    Installed as the ``json`` name inside ADK's lite_llm module. ``loads`` is
+    recovery-gated (see `_gated_loads` / `_RECOVERY_ACTIVE`); ``json.dumps`` and
+    everything else behave exactly as before.
     """
 
-    loads = staticmethod(tolerant_loads)
+    loads = staticmethod(_gated_loads)
 
     def __getattr__(self, name):  # everything except ``loads``
         return getattr(_stdlib_json, name)
@@ -285,6 +311,32 @@ def install_tolerant_tool_json() -> None:
         )
         return
     _ll.json = _TolerantJsonShim()
+
+    # Turn recovery ON only for the FINAL args→dict parse. ADK's response
+    # builder `_message_to_generate_content_response` does the real
+    # `json.loads(tool_call.function.arguments)`; the streaming per-chunk
+    # completeness probe runs OUTSIDE it, so it stays strict (the streaming-split
+    # fix). Best-effort: if the function isn't there, recovery simply never
+    # activates and json stays strict (no crash, no premature completion).
+    _builder = getattr(_ll, "_message_to_generate_content_response", None)
+    if callable(_builder) and not getattr(_builder, "_adk_cc_recovery_wrapped", False):
+
+        @functools.wraps(_builder)
+        def _recovering_builder(*args, **kwargs):
+            token = _RECOVERY_ACTIVE.set(True)
+            try:
+                return _builder(*args, **kwargs)
+            finally:
+                _RECOVERY_ACTIVE.reset(token)
+
+        _recovering_builder._adk_cc_recovery_wrapped = True  # type: ignore[attr-defined]
+        _ll._message_to_generate_content_response = _recovering_builder
+    else:
+        _log.warning(
+            "tolerant_tool_json: ADK lite_llm has no _message_to_generate_content_"
+            "response to wrap — tolerant recovery stays OFF (strict json) so the "
+            "streaming probe is safe, but malformed/truncated args won't recover."
+        )
     setattr(_ll, _PATCHED_FLAG, True)
 
 

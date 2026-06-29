@@ -154,15 +154,47 @@ def test_non_str_input_passthrough():
 def test_patch_installs_on_lite_llm():
     import adk_cc.plugins  # noqa: F401 — side-effect import triggers the patch
     from google.adk.models import lite_llm as ll
+    from adk_cc.plugins.tolerant_tool_json import _RECOVERY_ACTIVE
     assert isinstance(ll.json, _TolerantJsonShim), type(ll.json)
-    # the patched json.loads recovers a bad-escape arg…
-    assert ll.json.loads('{"content": "\\d"}')["content"] == "\\d"
-    # …and json.dumps still delegates to stdlib unchanged
+    # GATED: strict by default (the streaming-probe context) — a bad escape raises…
+    try:
+        ll.json.loads('{"content": "\\d"}')
+        assert False, "shim json.loads should be strict by default"
+    except json.JSONDecodeError:
+        pass
+    # …but recovers when recovery is active (the final args→dict parse context).
+    tok = _RECOVERY_ACTIVE.set(True)
+    try:
+        assert ll.json.loads('{"content": "\\d"}')["content"] == "\\d"
+    finally:
+        _RECOVERY_ACTIVE.reset(tok)
+    # json.dumps still delegates to stdlib unchanged
     assert ll.json.dumps({"a": 1}) == '{"a": 1}'
+    # the response builder is wrapped so recovery activates only inside it
+    assert getattr(ll._message_to_generate_content_response, "_adk_cc_recovery_wrapped", False)
     # idempotent: re-install doesn't double-wrap
     install_tolerant_tool_json()
     assert isinstance(ll.json, _TolerantJsonShim)
     print("OK test_patch_installs_on_lite_llm")
+
+
+def test_streaming_probe_stays_strict():
+    # Regression for the chunked-streaming split bug. ADK's per-chunk completeness
+    # probe json.loads's the ACCUMULATING buffer; it must be STRICT so a partial
+    # prefix RAISES (ADK keeps accumulating) instead of being 'completed' to {} or
+    # markered — which advanced ADK's tool-call index and split the remaining
+    # chunks. Repro: chunks '{', '"skill_name": "ml', 'cc-design"', '}'.
+    import adk_cc.plugins  # noqa: F401
+    from google.adk.models import lite_llm as ll
+    for partial in ('{', '{"skill_name": "ml', '{"skill_name": "mlcc-design"'):
+        try:
+            ll.json.loads(partial)  # default (probe) context → strict
+            assert False, f"streaming probe must be strict for partial {partial!r}"
+        except json.JSONDecodeError:
+            pass
+    # only the COMPLETE accumulation parses — the probe advances exactly once, at the end
+    assert ll.json.loads('{"skill_name": "mlcc-design"}') == {"skill_name": "mlcc-design"}
+    print("OK test_streaming_probe_stays_strict")
 
 
 if __name__ == "__main__":
@@ -181,4 +213,5 @@ if __name__ == "__main__":
     test_truncated_midvalue_degrades_to_marker()
     test_non_str_input_passthrough()
     test_patch_installs_on_lite_llm()
+    test_streaming_probe_stays_strict()
     print("\nall tolerant-tool-json tests passed")
