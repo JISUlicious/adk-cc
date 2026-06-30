@@ -23,6 +23,7 @@ import { CompactionBadge } from "@/shared/components/CompactionBadge"
 import { fetchContextLimits, type ContextLimits } from "@/shared/api/context"
 import { SettingsModal } from "@/shared/components/SettingsModal"
 import { listSecrets } from "@/shared/api/account"
+import { IS_DESKTOP } from "@/shared/lib/platform"
 import { type SlashAction } from "@/shared/components/SlashCommandMenu"
 import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/shared/lib/theme"
 
@@ -76,7 +77,9 @@ export function ChatPage({
   // (the user may have just set some on the Account page).
   const [secretsMissing, setSecretsMissing] = useState(0)
   useEffect(() => {
-    if (settingsOpen) return
+    // Desktop has no /auth/secrets (no identity provider); its Secrets tab manages
+    // secrets directly, so skip the web-only needs-setup badge probe.
+    if (settingsOpen || IS_DESKTOP) return
     listSecrets()
       .then((v) => setSecretsMissing(v.missing_required))
       .catch(() => {})
