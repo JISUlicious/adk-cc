@@ -9,16 +9,16 @@ import { cn } from "@/shared/lib/utils"
 import { SessionList } from "@/shared/sessions/SessionList"
 import { type RailProps } from "@/shared/components/SessionRail"
 
-/** Pick a folder: native Tauri dialog when running in the app, else a prompt
- *  (browser / tests). Tauri serves our page from a remote origin, so we call
- *  the dialog plugin over the global IPC bridge. */
-async function pickFolder(): Promise<string | null> {
-  const t = (window as unknown as { __TAURI__?: { core?: { invoke: (c: string, a?: unknown) => Promise<unknown> } } }).__TAURI__
-  if (t?.core?.invoke) {
-    const picked = await t.core.invoke("plugin:dialog|open", { options: { directory: true, multiple: false } })
-    return typeof picked === "string" ? picked : null
-  }
-  return window.prompt("Project folder path (absolute):")
+/** The Tauri global IPC `invoke`, available only inside the desktop app AND when
+ *  the webview was granted IPC for our sidecar origin (tauri.conf `withGlobalTauri`
+ *  + a capability listing the remote URL). Null in a plain browser or when IPC
+ *  isn't injected — callers then fall back to a typed-path input, because
+ *  `window.prompt` is a no-op in the macOS WKWebView Tauri uses. */
+function tauriInvoke(): ((cmd: string, args?: unknown) => Promise<unknown>) | null {
+  const t = (window as unknown as {
+    __TAURI__?: { core?: { invoke: (c: string, a?: unknown) => Promise<unknown> } }
+  }).__TAURI__
+  return t?.core?.invoke ?? null
 }
 
 /**
@@ -34,6 +34,8 @@ export function ProjectRail({
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [sessionsByProject, setSessionsByProject] = useState<Record<string, Session[]>>({})
   const [error, setError] = useState<string | null>(null)
+  const [pathPrompt, setPathPrompt] = useState(false)
+  const [pathInput, setPathInput] = useState("")
 
   useEffect(() => {
     let cancelled = false
@@ -74,11 +76,8 @@ export function ProjectRail({
     })
   }
 
-  async function addNew() {
-    setError(null)
+  async function doAddProject(path: string) {
     try {
-      const path = await pickFolder()
-      if (!path) return
       const { project } = await addProject(path)
       reloadProjects()
       setExpanded((prev) => new Set(prev).add(project.id))
@@ -86,6 +85,30 @@ export function ProjectRail({
     } catch (e) {
       setError(`Failed to add project: ${(e as Error).message}`)
     }
+  }
+
+  async function addNew() {
+    setError(null)
+    const invoke = tauriInvoke()
+    if (invoke) {
+      // Native folder picker (Tauri dialog plugin).
+      try {
+        const picked = await invoke("plugin:dialog|open", { options: { directory: true, multiple: false } })
+        if (typeof picked === "string") await doAddProject(picked)
+      } catch (e) {
+        setError(`Folder picker failed: ${(e as Error).message}`)
+      }
+    } else {
+      // No native IPC → reveal a typed-path input (window.prompt is a no-op here).
+      setPathInput("")
+      setPathPrompt((v) => !v)
+    }
+  }
+
+  async function submitPath() {
+    const p = pathInput.trim()
+    setPathPrompt(false)
+    if (p) await doAddProject(p)
   }
 
   async function removeProj(p: Project) {
@@ -154,6 +177,22 @@ export function ProjectRail({
             <FolderPlus className="h-3.5 w-3.5" /> Add
           </Button>
         </div>
+        {pathPrompt && (
+          <div className="flex gap-1 px-4 pb-2">
+            <input
+              autoFocus
+              value={pathInput}
+              onChange={(e) => setPathInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void submitPath()
+                else if (e.key === "Escape") setPathPrompt(false)
+              }}
+              placeholder="/absolute/path/to/project"
+              className="min-w-0 flex-1 rounded border border-input bg-background px-2 py-1 font-mono text-xs"
+            />
+            <Button size="sm" variant="outline" onClick={submitPath}>Add</Button>
+          </div>
+        )}
         {error && <p className="px-4 py-2 text-xs text-destructive">{error}</p>}
 
         <div className="flex-1 overflow-y-auto">

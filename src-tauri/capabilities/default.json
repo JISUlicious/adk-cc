@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core IPC + native folder picker (dialog) for the main window. The UI is served by the local backend sidecar (http://127.0.0.1:8765), a REMOTE origin to Tauri, so that URL is listed under `remote` — without it the webview gets no IPC and the picker silently does nothing.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://localhost:8765", "http://127.0.0.1:8765"]
+  },
+  "permissions": [
+    "core:default",
+    "dialog:allow-open"
+  ]
+}
