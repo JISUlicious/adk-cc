@@ -183,6 +183,10 @@ def build_fastapi_app(
     # the UI catch-all so /desktop/* wins on path match.
     from .desktop_routes import mount_desktop_routes
     mount_desktop_routes(fastapi_app)
+    # Desktop layered settings (global + per-project MCP/skills/secrets, global
+    # models) over the same stores the agent reads — no-auth, scope-keyed.
+    from .desktop_settings import mount_desktop_settings_routes
+    mount_desktop_settings_routes(fastapi_app)
 
     # Admin panel routes (default-OFF). Mounted BEFORE the UI StaticFiles
     # mount — the SPA is mounted at `/` (a catch-all) and would otherwise
