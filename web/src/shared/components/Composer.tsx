@@ -1,4 +1,4 @@
-import { useRef, useState, useMemo, type KeyboardEvent } from "react"
+import { useRef, useState, useMemo, type KeyboardEvent, type ReactNode } from "react"
 import { Send, Square, ClipboardList } from "lucide-react"
 import { Button } from "./ui/button"
 import { cn } from "@/shared/lib/utils"
@@ -34,6 +34,7 @@ export function Composer({
   isStreaming,
   disabled,
   mode,
+  footer,
 }: {
   onSend: (text: string) => void
   onAbort: () => void
@@ -41,6 +42,9 @@ export function Composer({
   isStreaming: boolean
   disabled: boolean
   mode: string | undefined
+  /** Rendered below the input, left-aligned within the same max-width column
+   *  (e.g. the context gauge) so it lines up with the input box. */
+  footer?: ReactNode
 }) {
   const [value, setValue] = useState("")
   const [slashCursor, setSlashCursor] = useState(0)
@@ -199,6 +203,7 @@ export function Composer({
         )}
           </div>
         </div>
+        {footer && <div className="mt-1 px-1">{footer}</div>}
       </div>
     </div>
   )

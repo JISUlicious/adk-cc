@@ -45,7 +45,7 @@ export function SessionList({
           >
             <div className="flex-1 min-w-0">
               <div className="truncate text-xs">{sessionTitle(s) ?? "New Chat"}</div>
-              <div className="truncate text-[10px] text-muted-foreground">{rowMeta(s)}</div>
+              <div className="truncate text-[10px] text-muted-foreground">{fmtWhen(s.lastUpdateTime)}</div>
             </div>
             <button
               type="button"
@@ -82,19 +82,4 @@ function fmtWhen(ts?: number): string {
   if (diff < day) return `${Math.floor(diff / h)}h ago`
   if (diff < 7 * day) return `${Math.floor(diff / day)}d ago`
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
-}
-
-/** Row subtitle: events · updated · artifacts. The list endpoint strips events
- *  and artifacts aren't in it, so those counts appear only once a session is
- *  enriched (events.length / artifactCount); the date is always available. */
-function rowMeta(s: Session): string {
-  const n = s.events?.length ?? 0
-  const arts = (s as Session & { artifactCount?: number }).artifactCount
-  return [
-    n > 0 ? `${n} event${n === 1 ? "" : "s"}` : "",
-    fmtWhen(s.lastUpdateTime),
-    typeof arts === "number" && arts > 0 ? `${arts} artifact${arts === 1 ? "" : "s"}` : "",
-  ]
-    .filter(Boolean)
-    .join(" · ")
 }

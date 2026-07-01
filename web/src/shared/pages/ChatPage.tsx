@@ -442,12 +442,8 @@ export function ChatPage({
           isStreaming={isStreaming}
           disabled={!session}
           mode={permissionMode}
+          footer={session ? <ContextGauge current={ctxTokens} limits={ctxLimits} /> : undefined}
         />
-        {session && (
-          <div className="flex justify-end px-3 pb-0.5 sm:px-6">
-            <ContextGauge current={ctxTokens} limits={ctxLimits} />
-          </div>
-        )}
       </div>
       {session && (
         <TaskSidebar
