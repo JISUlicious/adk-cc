@@ -124,7 +124,7 @@ export function Composer({
   const isPlan = mode === "plan"
 
   return (
-    <div className="adk-composer px-4 py-3 faded-top-edge">
+    <div className="adk-composer px-4 py-2 faded-top-edge">
       <div className="max-w-3xl mx-auto relative">
         {slashOpen && (
           <div className="absolute bottom-full left-0 right-0 mb-2">
@@ -135,25 +135,38 @@ export function Composer({
             />
           </div>
         )}
-        {/* Plan-mode decoration frames just the input: the border/bg tint AND
-            the badge/hint render ONLY in plan mode, so nothing reserves height
-            in the common non-plan case — the box then hugs the input row. */}
+        {/* Plan-mode decoration frames just the input. The wrapper +
+            badge slot are ALWAYS rendered so the footer height stays
+            constant across the mode toggle — only the border/bg/
+            badge-visibility light up when plan is active. */}
         <div
           className={cn(
-            "adk-composer-box rounded-md transition-colors",
-            isPlan && "space-y-2 border border-primary/50 bg-brand-tint p-2",
+            "adk-composer-box rounded-md border p-2 space-y-1 transition-colors",
+            isPlan
+              ? "border-primary/50 bg-brand-tint"
+              : "border-transparent bg-transparent",
           )}
         >
-          {isPlan && (
-            <div className="flex items-center gap-1.5 px-1 text-[11px] text-primary overflow-hidden">
+          {/* Meta row above the input: plan-mode hint on the left (invisible
+              when off), context gauge on the right. Always rendered so the box
+              height is constant, and it does double duty instead of an empty
+              spacer. */}
+          <div className="flex items-center gap-1.5 px-1 text-[11px]">
+            <div
+              className={cn(
+                "flex min-w-0 items-center gap-1.5 overflow-hidden text-primary",
+                !isPlan && "invisible",
+              )}
+            >
               <ClipboardList className="h-3.5 w-3.5 shrink-0" />
               <span className="font-medium shrink-0">Plan mode</span>
-              <span className="text-muted-foreground truncate">
+              <span className="truncate text-muted-foreground">
                 — agent will draft a plan; destructive tools are off
                 until you exit plan mode.
               </span>
             </div>
-          )}
+            {footer && <div className="adk-gauge-slot ml-auto shrink-0">{footer}</div>}
+          </div>
           <div className="flex items-end gap-2">
         <textarea
           ref={ref}
@@ -197,12 +210,6 @@ export function Composer({
         )}
           </div>
         </div>
-        {/* Fixed-height slot so the input doesn't shift when the gauge inside
-            toggles (ContextGauge renders nothing until there's usage). Matches
-            the gauge's `hidden sm:flex` so mobile reserves no space. */}
-        {footer && (
-          <div className="adk-gauge-slot mt-1 hidden h-4 items-center px-1 sm:flex">{footer}</div>
-        )}
       </div>
     </div>
   )
