@@ -135,31 +135,25 @@ export function Composer({
             />
           </div>
         )}
-        {/* Plan-mode decoration frames just the input. The wrapper +
-            badge slot are ALWAYS rendered so the footer height stays
-            constant across the mode toggle — only the border/bg/
-            badge-visibility light up when plan is active. */}
+        {/* Plan-mode decoration frames just the input: the border/bg tint AND
+            the badge/hint render ONLY in plan mode, so nothing reserves height
+            in the common non-plan case — the box then hugs the input row. */}
         <div
           className={cn(
-            "adk-composer-box rounded-md border p-2 space-y-2 transition-colors",
-            isPlan
-              ? "border-primary/50 bg-brand-tint"
-              : "border-transparent bg-transparent",
+            "adk-composer-box rounded-md transition-colors",
+            isPlan && "space-y-2 border border-primary/50 bg-brand-tint p-2",
           )}
         >
-          <div
-            className={cn(
-              "flex items-center gap-1.5 px-1 text-[11px] text-primary overflow-hidden",
-              !isPlan && "invisible",
-            )}
-          >
-            <ClipboardList className="h-3.5 w-3.5 shrink-0" />
-            <span className="font-medium shrink-0">Plan mode</span>
-            <span className="text-muted-foreground truncate">
-              — agent will draft a plan; destructive tools are off
-              until you exit plan mode.
-            </span>
-          </div>
+          {isPlan && (
+            <div className="flex items-center gap-1.5 px-1 text-[11px] text-primary overflow-hidden">
+              <ClipboardList className="h-3.5 w-3.5 shrink-0" />
+              <span className="font-medium shrink-0">Plan mode</span>
+              <span className="text-muted-foreground truncate">
+                — agent will draft a plan; destructive tools are off
+                until you exit plan mode.
+              </span>
+            </div>
+          )}
           <div className="flex items-end gap-2">
         <textarea
           ref={ref}
