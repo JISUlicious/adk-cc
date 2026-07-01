@@ -125,6 +125,22 @@ def _plan_mode_bash_ok(args: dict) -> bool:
     return is_read_only_command(str((args or {}).get("command") or ""))
 
 
+def _plan_block_reason(tool_name: str, args: dict) -> str:
+    """Deny reason for a tool blocked in plan mode. For run_bash, name the
+    offending command so the model/user sees *which* command was rejected (and
+    that the reason is it isn't read-only), not just a bare 'run_bash blocked'."""
+    if tool_name == "run_bash":
+        cmd = str((args or {}).get("command") or "").strip().replace("\n", " ")
+        if cmd:
+            shown = cmd if len(cmd) <= 120 else cmd[:117] + "..."
+            return (
+                f"run_bash is blocked in plan mode: command {shown!r} is not "
+                "read-only (only commands like ls / cat / git log are allowed "
+                "while planning)"
+            )
+    return f"{tool_name} is blocked in plan mode"
+
+
 def _decide_impl(
     *,
     tool: AdkCcTool,
@@ -160,7 +176,7 @@ def _decide_impl(
             )
         return PermissionDecision(
             behavior="deny",
-            reason=f"{tool_name} is blocked in plan mode",
+            reason=_plan_block_reason(tool_name, args),
         )
 
     # Step 2b: BYPASS skips the rest (the only gate is the deny check above).

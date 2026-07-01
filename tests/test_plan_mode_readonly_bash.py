@@ -72,6 +72,8 @@ def test_plan_blocks_mutating_bash() -> None:
     d = _decide(PermissionMode.PLAN, "touch newfile")
     assert d.behavior == "deny", d
     assert "blocked in plan mode" in d.reason, d
+    # The reason must name the offending command, not just "run_bash blocked".
+    assert "touch newfile" in d.reason, d
     print("OK test_plan_blocks_mutating_bash")
 
 
@@ -79,7 +81,20 @@ def test_plan_blocks_chained_command() -> None:
     # `ls; rm y` has a shell metachar → classifier rejects → plan-mode deny.
     d = _decide(PermissionMode.PLAN, "ls; rm y")
     assert d.behavior == "deny" and "blocked in plan mode" in d.reason, d
+    assert "ls; rm y" in d.reason, d
     print("OK test_plan_blocks_chained_command")
+
+
+def test_block_reason_truncates_long_command() -> None:
+    long_cmd = "cp " + "a" * 300 + " b"
+    d = _decide(PermissionMode.PLAN, long_cmd)
+    assert d.behavior == "deny", d
+    # The command is truncated (…) so a pathological command can't bloat the
+    # reason string, but the head is still shown.
+    assert "..." in d.reason, d
+    assert "a" * 200 not in d.reason, d
+    assert "cp " + "a" * 20 in d.reason, d
+    print("OK test_block_reason_truncates_long_command")
 
 
 def test_default_mode_plan_gate_inert() -> None:
@@ -95,6 +110,7 @@ def main() -> None:
     test_plan_allows_git_log()
     test_plan_blocks_mutating_bash()
     test_plan_blocks_chained_command()
+    test_block_reason_truncates_long_command()
     test_default_mode_plan_gate_inert()
     print("\nall plan-mode read-only bash tests passed")
 
