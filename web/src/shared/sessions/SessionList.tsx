@@ -44,21 +44,8 @@ export function SessionList({
             onClick={() => onSelect(s)}
           >
             <div className="flex-1 min-w-0">
-              {sessionTitle(s) ? (
-                <>
-                  <div className="text-xs truncate">{sessionTitle(s)}</div>
-                  <div className="font-mono text-[10px] text-muted-foreground truncate">
-                    {s.id.slice(0, 18)}
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="font-mono text-xs truncate">{s.id.slice(0, 18)}</div>
-                  <div className="text-[10px] text-muted-foreground">
-                    {s.events.length} event{s.events.length === 1 ? "" : "s"}
-                  </div>
-                </>
-              )}
+              <div className="truncate text-xs">{sessionTitle(s) ?? "New Chat"}</div>
+              <div className="truncate text-[10px] text-muted-foreground">{rowMeta(s)}</div>
             </div>
             <button
               type="button"
@@ -82,4 +69,32 @@ export function SessionList({
 export function sessionTitle(s: Session): string | undefined {
   const t = (s.state as Record<string, unknown> | undefined)?.["session_title"]
   return typeof t === "string" && t.trim() ? t.trim() : undefined
+}
+
+/** Compact "last updated" label from the Unix-seconds timestamp. */
+function fmtWhen(ts?: number): string {
+  if (!ts) return ""
+  const d = new Date(ts * 1000)
+  const diff = Date.now() - d.getTime()
+  const m = 60_000, h = 3.6e6, day = 8.64e7
+  if (diff < m) return "just now"
+  if (diff < h) return `${Math.floor(diff / m)}m ago`
+  if (diff < day) return `${Math.floor(diff / h)}h ago`
+  if (diff < 7 * day) return `${Math.floor(diff / day)}d ago`
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
+}
+
+/** Row subtitle: events · updated · artifacts. The list endpoint strips events
+ *  and artifacts aren't in it, so those counts appear only once a session is
+ *  enriched (events.length / artifactCount); the date is always available. */
+function rowMeta(s: Session): string {
+  const n = s.events?.length ?? 0
+  const arts = (s as Session & { artifactCount?: number }).artifactCount
+  return [
+    n > 0 ? `${n} event${n === 1 ? "" : "s"}` : "",
+    fmtWhen(s.lastUpdateTime),
+    typeof arts === "number" && arts > 0 ? `${arts} artifact${arts === 1 ? "" : "s"}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ")
 }

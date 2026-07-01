@@ -19,6 +19,7 @@ import { Composer } from "@/shared/components/Composer"
 import { TaskSidebar, deriveTasks } from "@/shared/components/TaskSidebar"
 import { ArtifactsPanel } from "@/shared/components/ArtifactsPanel"
 import { ContextGauge } from "@/shared/components/ContextGauge"
+import { sessionTitle } from "@/shared/sessions/SessionList"
 import { CompactionBadge } from "@/shared/components/CompactionBadge"
 import { fetchContextLimits, type ContextLimits } from "@/shared/api/context"
 import { SettingsModal } from "@/shared/components/SettingsModal"
@@ -367,12 +368,9 @@ export function ChatPage({
             >
               <Menu className="h-4 w-4" />
             </Button>
-            <span className="text-lg font-semibold tracking-tight shrink-0">
-              adk-cc
-            </span>
             {session && (
-              <span className="hidden sm:inline text-xs font-mono text-muted-foreground truncate">
-                {session.id}
+              <span className="text-base font-semibold tracking-tight truncate">
+                {sessionTitle(session) ?? "New Chat"}
               </span>
             )}
           </div>
@@ -383,7 +381,6 @@ export function ChatPage({
                 lastEndTs={compactions.lastEndTs}
               />
             )}
-            {session && <ContextGauge current={ctxTokens} limits={ctxLimits} />}
             {appName && session && (
               <ArtifactsPanel
                 appName={appName}
@@ -432,6 +429,11 @@ export function ChatPage({
             </div>
           )}
         </div>
+        {session && (
+          <div className="flex justify-end px-3 pt-1 sm:px-6">
+            <ContextGauge current={ctxTokens} limits={ctxLimits} />
+          </div>
+        )}
         <Composer
           onSend={handleSend}
           onAbort={handleAbort}
