@@ -432,8 +432,8 @@ export function ChatPage({
           </div>
           {/* Soft fades (matching the Settings modal): content dissolves under the
               header at the top and toward the input at the bottom — no hard divider. */}
-          <div className="faded-header-edge pointer-events-none absolute inset-x-0 top-0 h-5" />
-          <div className="faded-top-edge pointer-events-none absolute inset-x-0 bottom-0 h-5" />
+          <div className="faded-header-edge pointer-events-none absolute inset-x-0 top-0 h-4" />
+          <div className="faded-top-edge pointer-events-none absolute inset-x-0 bottom-0 h-4" />
         </div>
         <Composer
           onSend={handleSend}
