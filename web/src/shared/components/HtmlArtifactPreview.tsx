@@ -47,7 +47,8 @@ export function HtmlArtifactPreview({
   userId: string
   sessionId: string
   filename: string
-  version: number
+  /** Optional — omitted fetches the latest version. */
+  version?: number
 }) {
   const [html, setHtml] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)

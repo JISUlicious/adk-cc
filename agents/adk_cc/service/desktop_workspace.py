@@ -34,6 +34,16 @@ def _worktrees_root() -> Path:
     return p
 
 
+def session_worktree_path(project_id: str, session_id: str) -> Path:
+    """The session's worktree path WITHOUT creating it — for read-only viewing.
+
+    Unlike ``ensure_worktree``, this never spawns a git worktree: a brand-new
+    session has no worktree until its first turn, and merely *viewing* the file
+    panel must not create one. Callers check ``.is_dir()`` to detect the
+    not-yet-initialized case."""
+    return _worktrees_root() / project_id / session_id
+
+
 def _git(args: list[str], cwd: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
 

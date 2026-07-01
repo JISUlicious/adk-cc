@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react"
-import { Menu, ListChecks } from "lucide-react"
+import { Menu, PanelRight } from "lucide-react"
 import { Button } from "@/shared/components/ui/button"
 import { clearToken, getUser, getToken, decodeJwtPayload, markSignedOut } from "@/shared/api/auth"
 import {
@@ -16,8 +16,9 @@ import {
 import { SessionRail, type RailProps } from "@/shared/components/SessionRail"
 import { Thread } from "@/shared/components/Thread"
 import { Composer } from "@/shared/components/Composer"
-import { TaskSidebar, deriveTasks } from "@/shared/components/TaskSidebar"
-import { ArtifactsPanel } from "@/shared/components/ArtifactsPanel"
+import { TaskStrip } from "@/shared/components/TaskStrip"
+import { ArtifactsSidePanel } from "@/shared/components/ArtifactsSidePanel"
+import { type RightPanelProps } from "@/shared/components/RightPanelShell"
 import { ContextGauge } from "@/shared/components/ContextGauge"
 import { sessionTitle } from "@/shared/sessions/SessionList"
 import { CompactionBadge } from "@/shared/components/CompactionBadge"
@@ -53,9 +54,11 @@ export type SettingsModalProps = { open: boolean; onClose: () => void }
 export function ChatPage({
   Rail = SessionRail,
   Settings = SettingsModal,
+  RightPanel = ArtifactsSidePanel,
 }: {
   Rail?: ComponentType<RailProps>
   Settings?: ComponentType<SettingsModalProps>
+  RightPanel?: ComponentType<RightPanelProps>
 } = {}) {
   // Stateful so the desktop rail can switch the active user_id (= project);
   // the web rail never calls setUserId, so web keeps a fixed account id.
@@ -87,13 +90,10 @@ export function ChatPage({
   }, [settingsOpen])
   // Mobile drawer state (no effect at lg+, where the rails are static).
   const [railOpen, setRailOpen] = useState(false)
-  const [tasksOpen, setTasksOpen] = useState(false)
+  // Right-side panel (artifacts on web / file tree on desktop) mobile drawer.
+  const [rightPanelOpen, setRightPanelOpen] = useState(false)
   const abortRef = useRef<(() => void) | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
-
-  // Whether there are any tasks — drives the header's mobile tasks
-  // toggle (the right rail itself renders nothing when empty).
-  const taskCount = useMemo(() => deriveTasks(events).length, [events])
 
   // Context-fullness gauge (P2): server ladder fetched once; current usage =
   // the latest reported prompt_token_count across the loaded events.
@@ -381,26 +381,17 @@ export function ChatPage({
                 lastEndTs={compactions.lastEndTs}
               />
             )}
+            {/* Mobile: open the right-side panel (artifacts on web, files on
+                desktop). Static column at lg+, so this toggle is lg:hidden. */}
             {appName && session && (
-              <ArtifactsPanel
-                appName={appName}
-                userId={userId}
-                sessionId={session.id}
-              />
-            )}
-            {/* Mobile: open the tasks drawer (only when there are tasks). */}
-            {session && taskCount > 0 && (
               <Button
                 variant="outline"
                 size="icon"
-                className="lg:hidden relative"
-                onClick={() => setTasksOpen(true)}
-                title="Tasks"
+                className="lg:hidden"
+                onClick={() => setRightPanelOpen(true)}
+                title="Files & artifacts"
               >
-                <ListChecks className="h-4 w-4" />
-                <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[9px] font-medium text-primary-foreground">
-                  {taskCount}
-                </span>
+                <PanelRight className="h-4 w-4" />
               </Button>
             )}
           </div>
@@ -435,6 +426,8 @@ export function ChatPage({
           <div className="adk-fade-top faded-header-edge pointer-events-none absolute inset-x-0 top-0 h-4" />
           <div className="adk-fade-bottom faded-top-edge pointer-events-none absolute inset-x-0 bottom-0 h-4" />
         </div>
+        {/* Task list sits over the input, above the plan indicator. */}
+        {session && <TaskStrip events={events} />}
         <Composer
           onSend={handleSend}
           onAbort={handleAbort}
@@ -445,11 +438,13 @@ export function ChatPage({
           footer={session ? <ContextGauge current={ctxTokens} limits={ctxLimits} /> : undefined}
         />
       </div>
-      {session && (
-        <TaskSidebar
-          events={events}
-          open={tasksOpen}
-          onClose={() => setTasksOpen(false)}
+      {appName && session && (
+        <RightPanel
+          appName={appName}
+          userId={userId}
+          sessionId={session.id}
+          open={rightPanelOpen}
+          onClose={() => setRightPanelOpen(false)}
         />
       )}
       <Settings

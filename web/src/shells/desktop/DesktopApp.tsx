@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom"
 import { BackendReady } from "./BackendReady"
 import { ProjectRail } from "./ProjectRail"
 import { DesktopSettings } from "./DesktopSettings"
+import { FileTreeSidePanel } from "./FileTreeSidePanel"
 import { ChatPage } from "@/shared/pages/ChatPage"
 
 /**
@@ -15,7 +16,16 @@ export function DesktopApp() {
     <BrowserRouter>
       <BackendReady>
         <Routes>
-          <Route path="/" element={<ChatPage Rail={ProjectRail} Settings={DesktopSettings} />} />
+          <Route
+            path="/"
+            element={
+              <ChatPage
+                Rail={ProjectRail}
+                Settings={DesktopSettings}
+                RightPanel={FileTreeSidePanel}
+              />
+            }
+          />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BackendReady>
