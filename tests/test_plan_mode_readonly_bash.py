@@ -55,16 +55,16 @@ def _decide(mode: PermissionMode, command: str):
 
 def test_plan_allows_read_only_bash() -> None:
     d = _decide(PermissionMode.PLAN, "ls -la")
-    # Not blocked by the plan gate. (It still falls through to the destructive
-    # fallback → "ask" — the point is it is NOT a plan-mode deny.)
-    assert d.behavior != "deny" or "plan mode" not in d.reason, d
+    # Allowed OUTRIGHT — not blocked, and not merely bounced to a confirmation:
+    # read-only bash should run so planning isn't interrupted on every `ls`.
+    assert d.behavior == "allow", d
     assert "blocked in plan mode" not in d.reason, d
     print(f"OK test_plan_allows_read_only_bash (behavior={d.behavior})")
 
 
 def test_plan_allows_git_log() -> None:
     d = _decide(PermissionMode.PLAN, "git log --oneline -20")
-    assert "blocked in plan mode" not in d.reason, d
+    assert d.behavior == "allow", d
     print(f"OK test_plan_allows_git_log (behavior={d.behavior})")
 
 

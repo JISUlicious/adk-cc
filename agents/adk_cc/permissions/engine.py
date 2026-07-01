@@ -145,14 +145,23 @@ def _decide_impl(
         )
 
     # Step 2a: PLAN mode blocks every non-read-only tool — EXCEPT run_bash for a
-    # command classified strictly read-only (ls / cat / git log / …), so the agent
-    # can explore the workspace while planning. Mutating commands stay blocked.
+    # command classified strictly read-only (ls / cat / git log / …). Such a
+    # command is ALLOWED OUTRIGHT (not merely un-blocked): the classifier
+    # guarantees no writes, so it's as safe as the read_file/glob tools already
+    # available while planning, and a confirmation prompt on every `ls` would
+    # defeat "explore while you plan". Returning allow here also skips the
+    # destructive-run_bash confirmation below. Mutating commands stay blocked.
+    # (Deny rules in Step 1 already ran, so an explicit deny still wins.)
     if mode is PermissionMode.PLAN and not tool.meta.is_read_only:
-        if not (tool_name == "run_bash" and _plan_mode_bash_ok(args)):
+        if tool_name == "run_bash" and _plan_mode_bash_ok(args):
             return PermissionDecision(
-                behavior="deny",
-                reason=f"{tool_name} is blocked in plan mode",
+                behavior="allow",
+                reason="read-only run_bash permitted in plan mode",
             )
+        return PermissionDecision(
+            behavior="deny",
+            reason=f"{tool_name} is blocked in plan mode",
+        )
 
     # Step 2b: BYPASS skips the rest (the only gate is the deny check above).
     if mode is PermissionMode.BYPASS_PERMISSIONS:
