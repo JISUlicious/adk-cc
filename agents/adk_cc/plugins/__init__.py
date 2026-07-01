@@ -1,3 +1,4 @@
+from .ask_pause import AskPausePlugin
 from .ask_user_question_ui import AskUserQuestionUiHintPlugin
 from .audit import AuditPlugin
 from .authz import AuthzPlugin
@@ -25,6 +26,7 @@ from .tool_title import ToolTitlePlugin
 from .workspace_hint import WorkspaceHintPlugin
 
 __all__ = [
+    "AskPausePlugin",
     "AskUserQuestionUiHintPlugin",
     "AuditPlugin",
     "AuthzPlugin",

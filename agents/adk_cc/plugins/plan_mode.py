@@ -49,10 +49,13 @@ _SPECIALIST_AGENTS = frozenset({"Explore", "verification"})
 # tool-surface layer is stronger than relying on permission denials —
 # the model can't call what it doesn't see, and `ToolCallValidatorPlugin`
 # catches any hallucinated calls as a safety net.
+#
+# `run_bash` is deliberately NOT hidden: the permission engine allows it in
+# plan mode for strictly read-only commands (ls / cat / git log / …) and denies
+# any mutating command, so the model can explore the workspace while planning.
 _PLAN_MODE_HIDDEN_TOOLS = frozenset({
     "write_file",
     "edit_file",
-    "run_bash",
     "task_create",
     "task_update",
     "enter_plan_mode",
@@ -64,18 +67,21 @@ _NORMAL_MODE_HIDDEN_TOOLS = frozenset({"exit_plan_mode"})
 
 PLAN_MODE_REMINDER = """<system-reminder>
 YOU ARE CURRENTLY IN PLAN MODE. The user has asked you to plan rather
-than execute. You MUST NOT make any edits, run shell, or mutate task
-state. The write tools have been removed from your tool surface; use
-only the tools currently visible to you.
+than execute. You MUST NOT make edits or mutate task state. The write
+tools have been removed from your tool surface. `run_bash` is available
+but LIMITED TO READ-ONLY commands (ls, cat, find, grep, git log, …) —
+any mutating command is blocked. Use only the tools currently visible.
 
 ## Your process
 
 1. **Understand the request**: read the user's message carefully. If
    it's ambiguous, call `ask_user_question` BEFORE planning — clarifying
-   intent is cheaper than rewriting the plan. Call `read_current_plan`
-   first; if a plan already exists for this session, decide whether to
-   refine that thread (reuse the slug) or start a new one (different
-   slug).
+   intent is cheaper than rewriting the plan. Call it BY ITSELF: do NOT
+   emit any other tool call in the same turn. The turn pauses until the
+   user answers; you continue only once their answer is in hand. Call
+   `read_current_plan` first; if a plan already exists for this session,
+   decide whether to refine that thread (reuse the slug) or start a new
+   one (different slug).
 
 2. **Explore thoroughly**: find existing patterns and conventions with
    `glob_files`, `grep`, and `read_file`. Trace through relevant code
@@ -147,10 +153,25 @@ class PlanModeReminderPlugin(BasePlugin):
         callback_context: CallbackContext,
         llm_request: LlmRequest,
     ) -> Optional[LlmResponse]:
+        # Resolve the mode from the LIVE session state, not just the callback's
+        # view. Right after `enter_plan_mode` (same invocation) the callback
+        # snapshot can still report the pre-plan mode, which would leak the hidden
+        # tools for the very next turn. The invocation's session state carries the
+        # permission_mode delta the moment it's applied — the same live map the
+        # permission engine reads at execution time. Fall back to the snapshot,
+        # then the configured default.
+        mode = None
         try:
-            mode = callback_context.state.get("permission_mode")
+            mode = (
+                callback_context._invocation_context.session.state or {}
+            ).get("permission_mode")
         except Exception:
             mode = None
+        if not mode:
+            try:
+                mode = callback_context.state.get("permission_mode")
+            except Exception:
+                mode = None
         if not mode:
             mode = self._default_mode
         agent_name = getattr(callback_context, "agent_name", None)

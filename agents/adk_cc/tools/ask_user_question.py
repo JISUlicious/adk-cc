@@ -58,8 +58,10 @@ class AskUserQuestionTool(AdkCcTool):
     input_model = AskUserQuestionArgs
     description = (
         "Ask the user 1-4 multi-choice questions. The agent loop pauses "
-        "until the user answers via the frontend. Use sparingly — only "
-        "when the next step genuinely depends on user input."
+        "until the user answers via the frontend. Call this tool BY ITSELF "
+        "— do NOT emit any other tool call in the same turn (siblings would "
+        "otherwise continue the loop before the answer arrives). Use "
+        "sparingly — only when the next step genuinely depends on user input."
     )
 
     async def _execute(

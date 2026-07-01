@@ -117,6 +117,14 @@ def decide(
     return decision
 
 
+def _plan_mode_bash_ok(args: dict) -> bool:
+    """In plan mode, run_bash is allowed only for a strictly read-only command
+    (see tools/bash/readonly.py). Lazy import avoids a tools↔permissions cycle."""
+    from ..tools.bash.readonly import is_read_only_command
+
+    return is_read_only_command(str((args or {}).get("command") or ""))
+
+
 def _decide_impl(
     *,
     tool: AdkCcTool,
@@ -136,12 +144,15 @@ def _decide_impl(
             reason=f"denied by {deny.source.value} rule",
         )
 
-    # Step 2a: PLAN mode blocks every non-read-only tool.
+    # Step 2a: PLAN mode blocks every non-read-only tool — EXCEPT run_bash for a
+    # command classified strictly read-only (ls / cat / git log / …), so the agent
+    # can explore the workspace while planning. Mutating commands stay blocked.
     if mode is PermissionMode.PLAN and not tool.meta.is_read_only:
-        return PermissionDecision(
-            behavior="deny",
-            reason=f"{tool_name} is blocked in plan mode",
-        )
+        if not (tool_name == "run_bash" and _plan_mode_bash_ok(args)):
+            return PermissionDecision(
+                behavior="deny",
+                reason=f"{tool_name} is blocked in plan mode",
+            )
 
     # Step 2b: BYPASS skips the rest (the only gate is the deny check above).
     if mode is PermissionMode.BYPASS_PERMISSIONS:

@@ -62,6 +62,7 @@ from .permissions import PermissionMode, SettingsHierarchy
 # before any submodule logger fires. Idempotent — safe across reimports.
 configure_logging()
 from .plugins import (
+    AskPausePlugin,
     AskUserQuestionUiHintPlugin,
     AuditPlugin,
     AuthzPlugin,
@@ -1183,6 +1184,11 @@ _app_kwargs = dict(
         # form per question (instead of falling back to a free-form
         # textarea). after_model_callback runs after the LLM emits the
         # call but before ADK builds the event the UI consumes.
+        # Force ask_user_question to actually PAUSE: if the model emits it
+        # alongside other tool calls, drop the siblings so the ask is the sole
+        # (long-running) call and the loop waits for the user's answer. Runs
+        # before the UI-hint plugin so the surviving ask still gets its schema.
+        AskPausePlugin(),
         AskUserQuestionUiHintPlugin(),
         # Rewrites adk_request_confirmation events so adk web's bundled
         # UI renders an N-option dropdown form instead of its hardcoded
