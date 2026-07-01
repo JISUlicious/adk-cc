@@ -154,7 +154,7 @@ export function ProjectRail({
       )}
       <aside
         className={cn(
-          "flex w-72 max-w-[85vw] flex-col border-r border-border/60",
+          "adk-rail flex w-72 max-w-[85vw] flex-col border-r border-border/60",
           "bg-muted shadow-xl lg:bg-muted/40 lg:shadow-none",
           "fixed inset-y-0 left-0 z-40 transform transition-transform duration-200 ease-out",
           "lg:static lg:z-auto lg:max-w-none lg:translate-x-0 lg:transition-none",
@@ -171,9 +171,9 @@ export function ProjectRail({
           <img src="/favicon.svg" alt="" className="h-6 w-6 shrink-0" />
           <span className="text-base font-semibold tracking-tight">adk-cc</span>
         </div>
-        <div className="flex items-center justify-between px-4 py-2">
+        <div className="adk-rail-header flex items-center justify-between px-4 py-2">
           <span className="text-xs font-medium text-muted-foreground">Projects</span>
-          <Button size="sm" variant="outline" onClick={addNew} title="Add a project folder">
+          <Button size="sm" variant="outline" onClick={addNew} title="Add a project folder" className="adk-add-project">
             <FolderPlus className="h-3.5 w-3.5" /> Add
           </Button>
         </div>
@@ -205,7 +205,7 @@ export function ProjectRail({
             const isOpen = expanded.has(p.id)
             const sessions = sessionsByProject[p.id] ?? []
             return (
-              <div key={p.id} className="border-b border-border/40">
+              <div key={p.id} className="adk-project-row border-b border-border/40">
                 {/* L1: project row */}
                 <div className="group flex items-center gap-1 px-2 py-2 hover:bg-accent/60">
                   <button type="button" onClick={() => toggle(p.id)} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
@@ -246,7 +246,7 @@ export function ProjectRail({
         <div className="border-t border-border/60 p-2">
           <button
             type="button" onClick={onOpenSettings}
-            className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-muted-foreground hover:bg-accent"
+            className="adk-rail-settings flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-muted-foreground hover:bg-accent"
             title={secretsMissing > 0 ? `Settings — ${secretsMissing} value(s) need setup` : "Settings"}
           >
             <span className="relative">

@@ -124,7 +124,7 @@ export function Composer({
   const isPlan = mode === "plan"
 
   return (
-    <div className="px-4 py-3 faded-top-edge">
+    <div className="adk-composer px-4 py-3 faded-top-edge">
       <div className="max-w-3xl mx-auto relative">
         {slashOpen && (
           <div className="absolute bottom-full left-0 right-0 mb-2">
@@ -141,7 +141,7 @@ export function Composer({
             badge-visibility light up when plan is active. */}
         <div
           className={cn(
-            "rounded-md border p-2 space-y-2 transition-colors",
+            "adk-composer-box rounded-md border p-2 space-y-2 transition-colors",
             isPlan
               ? "border-primary/50 bg-brand-tint"
               : "border-transparent bg-transparent",
@@ -178,7 +178,7 @@ export function Composer({
           }
           disabled={disabled}
           rows={2}
-          className="flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+          className="adk-composer-input flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
         />
         {isStreaming ? (
           <Button
@@ -207,7 +207,7 @@ export function Composer({
             toggles (ContextGauge renders nothing until there's usage). Matches
             the gauge's `hidden sm:flex` so mobile reserves no space. */}
         {footer && (
-          <div className="mt-1 hidden h-4 items-center px-1 sm:flex">{footer}</div>
+          <div className="adk-gauge-slot mt-1 hidden h-4 items-center px-1 sm:flex">{footer}</div>
         )}
       </div>
     </div>

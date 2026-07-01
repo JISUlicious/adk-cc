@@ -52,11 +52,11 @@ export function SettingsFrame({
       onClick={onClose}
     >
       <div
-        className="flex h-[80vh] w-full max-w-3xl overflow-hidden rounded-lg border border-border bg-background shadow-lg"
+        className="adk-settings flex h-[80vh] w-full max-w-3xl overflow-hidden rounded-lg border border-border bg-background shadow-lg"
         onClick={(e) => e.stopPropagation()}
       >
         {/* sidebar */}
-        <aside className="flex w-44 flex-col border-r border-border/60 bg-muted/30">
+        <aside className="adk-settings-nav flex w-44 flex-col border-r border-border/60 bg-muted/30">
           <div className="flex items-center justify-between px-3 py-3">
             <h2 className="font-medium">Settings</h2>
           </div>
@@ -86,7 +86,7 @@ export function SettingsFrame({
         </aside>
 
         {/* content */}
-        <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+        <div className="adk-settings-content relative flex min-w-0 flex-1 flex-col overflow-hidden">
           <div className="flex-1 divide-y divide-border/60 overflow-y-auto px-5 pt-9">
             {active?.render()}
           </div>

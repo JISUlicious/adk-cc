@@ -35,7 +35,7 @@ export function ContextGauge({
 
   return (
     <div
-      className="hidden sm:flex items-center gap-1.5"
+      className="adk-context-gauge hidden sm:flex items-center gap-1.5"
       title={`Context: ~${current.toLocaleString()} / ${effective.toLocaleString()} tokens (${pct}%)`}
     >
       <div className="h-1.5 w-16 overflow-hidden rounded-full bg-muted">

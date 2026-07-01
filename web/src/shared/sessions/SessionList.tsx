@@ -32,20 +32,20 @@ export function SessionList({
           {emptyHint ?? "No sessions yet."}
         </p>
       )}
-      <ul className="flex flex-col">
+      <ul className="adk-session-list flex flex-col">
         {sessions.map((s) => (
           <li
             key={s.id}
             className={cn(
-              "group flex items-center gap-2 px-4 py-2 cursor-pointer hover:bg-accent",
+              "adk-session-row group flex items-center gap-2 px-4 py-2 cursor-pointer hover:bg-accent",
               s.id === selectedId &&
                 "bg-brand-tint hover:bg-brand-tint border-l-2 border-l-primary",
             )}
             onClick={() => onSelect(s)}
           >
             <div className="flex-1 min-w-0">
-              <div className="truncate text-xs">{sessionTitle(s) ?? "New Chat"}</div>
-              <div className="truncate text-[10px] text-muted-foreground">{fmtWhen(s.lastUpdateTime)}</div>
+              <div className="adk-session-title truncate text-xs">{sessionTitle(s) ?? "New Chat"}</div>
+              <div className="adk-session-meta truncate text-[10px] text-muted-foreground">{fmtWhen(s.lastUpdateTime)}</div>
             </div>
             <button
               type="button"

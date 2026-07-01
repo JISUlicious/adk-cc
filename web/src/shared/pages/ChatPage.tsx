@@ -355,8 +355,8 @@ export function ChatPage({
         onOpenSettings={() => setSettingsOpen(true)}
         secretsMissing={secretsMissing}
       />
-      <div className="flex flex-1 flex-col min-w-0">
-        <header className="flex items-center justify-between gap-2 px-3 sm:px-6 py-3">
+      <div className="adk-chat flex flex-1 flex-col min-w-0">
+        <header className="adk-chat-header flex items-center justify-between gap-2 px-3 sm:px-6 py-3">
           <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             {/* Mobile: open the session rail. */}
             <Button
@@ -369,7 +369,7 @@ export function ChatPage({
               <Menu className="h-4 w-4" />
             </Button>
             {session && (
-              <span className="text-base font-semibold tracking-tight truncate">
+              <span className="adk-chat-title text-base font-semibold tracking-tight truncate">
                 {sessionTitle(session) ?? "New Chat"}
               </span>
             )}
@@ -410,8 +410,8 @@ export function ChatPage({
             {error}
           </div>
         )}
-        <div className="relative min-h-0 flex-1">
-          <div ref={scrollRef} className="h-full overflow-y-auto">
+        <div className="adk-thread relative min-h-0 flex-1">
+          <div ref={scrollRef} className="adk-thread-scroll h-full overflow-y-auto">
             {session ? (
               <Thread
                 events={events}
@@ -432,8 +432,8 @@ export function ChatPage({
           </div>
           {/* Soft fades (matching the Settings modal): content dissolves under the
               header at the top and toward the input at the bottom — no hard divider. */}
-          <div className="faded-header-edge pointer-events-none absolute inset-x-0 top-0 h-4" />
-          <div className="faded-top-edge pointer-events-none absolute inset-x-0 bottom-0 h-4" />
+          <div className="adk-fade-top faded-header-edge pointer-events-none absolute inset-x-0 top-0 h-4" />
+          <div className="adk-fade-bottom faded-top-edge pointer-events-none absolute inset-x-0 bottom-0 h-4" />
         </div>
         <Composer
           onSend={handleSend}
