@@ -33,6 +33,7 @@ export function FileTreeSidePanel({
   sessionId,
   open,
   onClose,
+  refreshKey,
 }: RightPanelProps) {
   // Loaded directory listings, keyed by relative path ("" = root).
   const [dirs, setDirs] = useState<Record<string, DirEntry[]>>({})
@@ -71,6 +72,34 @@ export function FileTreeSidePanel({
     setSelectedFile(null)
     if (projectId && sessionId) void reload()
   }, [projectId, sessionId, reload])
+
+  // After each turn (refreshKey), re-fetch the currently-loaded directories so
+  // agent-created files appear — preserving expansion + the open file. Skips
+  // the initial render (no dirs loaded yet; the session effect handles that).
+  useEffect(() => {
+    const loaded = Object.keys(dirs)
+    if (loaded.length === 0) return
+    let cancelled = false
+    Promise.all(
+      loaded.map((pth) =>
+        listDir(projectId, sessionId, pth)
+          .then((r) => [pth, r.entries] as const)
+          .catch(() => null),
+      ),
+    ).then((results) => {
+      if (cancelled) return
+      setDirs((prev) => {
+        const next = { ...prev }
+        for (const r of results) if (r) next[r[0]] = r[1]
+        return next
+      })
+    })
+    return () => {
+      cancelled = true
+    }
+    // Intentionally keyed on refreshKey only; reads current `dirs` at that turn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey])
 
   async function toggleDir(path: string) {
     const next = new Set(expanded)

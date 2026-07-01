@@ -13,6 +13,9 @@ export type RightPanelProps = {
   sessionId: string
   open: boolean
   onClose: () => void
+  /** Bumped by ChatPage after every turn — panels reload to pick up
+   * artifacts/files the agent just produced, without a manual refresh. */
+  refreshKey?: number
 }
 
 /**

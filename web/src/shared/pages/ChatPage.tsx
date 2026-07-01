@@ -445,6 +445,7 @@ export function ChatPage({
           sessionId={session.id}
           open={rightPanelOpen}
           onClose={() => setRightPanelOpen(false)}
+          refreshKey={refreshTick}
         />
       )}
       <Settings

@@ -35,6 +35,7 @@ export function ArtifactsSidePanel({
   sessionId,
   open,
   onClose,
+  refreshKey,
 }: RightPanelProps) {
   const [rows, setRows] = useState<Row[]>([])
   const [loading, setLoading] = useState(false)
@@ -65,11 +66,16 @@ export function ArtifactsSidePanel({
     }
   }, [appName, userId, sessionId])
 
-  // Load on mount and whenever the session changes; clear any selection.
+  // Clear the viewer only when switching sessions (not on every turn refresh).
   useEffect(() => {
     setSelected(null)
+  }, [sessionId])
+
+  // Load on mount, on session change, and after each turn (refreshKey) so a
+  // just-produced artifact appears without a manual refresh.
+  useEffect(() => {
     if (appName && sessionId) void load()
-  }, [appName, sessionId, load])
+  }, [appName, sessionId, refreshKey, load])
 
   const refresh = (
     <button
