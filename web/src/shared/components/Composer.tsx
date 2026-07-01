@@ -203,7 +203,12 @@ export function Composer({
         )}
           </div>
         </div>
-        {footer && <div className="mt-1 px-1">{footer}</div>}
+        {/* Fixed-height slot so the input doesn't shift when the gauge inside
+            toggles (ContextGauge renders nothing until there's usage). Matches
+            the gauge's `hidden sm:flex` so mobile reserves no space. */}
+        {footer && (
+          <div className="mt-1 hidden h-4 items-center px-1 sm:flex">{footer}</div>
+        )}
       </div>
     </div>
   )
