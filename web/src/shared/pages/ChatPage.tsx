@@ -356,7 +356,7 @@ export function ChatPage({
         secretsMissing={secretsMissing}
       />
       <div className="flex flex-1 flex-col min-w-0">
-        <header className="flex items-center justify-between gap-2 px-3 sm:px-6 py-3 border-b border-border/60">
+        <header className="flex items-center justify-between gap-2 px-3 sm:px-6 py-3">
           <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             {/* Mobile: open the session rail. */}
             <Button
@@ -410,30 +410,31 @@ export function ChatPage({
             {error}
           </div>
         )}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto">
-          {session ? (
-            <Thread
-              events={events}
-              isStreaming={isStreaming}
-              onSubmitFunctionResponse={handleSubmitFunctionResponse}
-              appName={appName ?? ""}
-              userId={userId}
-              sessionId={session.id}
-            />
-          ) : (
-            <div className="flex h-full items-center justify-center p-12">
-              <p className="max-w-md text-center text-sm text-muted-foreground">
-                Pick a session from the left rail or click{" "}
-                <span className="font-mono">+ New</span> to start one.
-              </p>
-            </div>
-          )}
-        </div>
-        {session && (
-          <div className="flex justify-end px-3 pt-1 sm:px-6">
-            <ContextGauge current={ctxTokens} limits={ctxLimits} />
+        <div className="relative min-h-0 flex-1">
+          <div ref={scrollRef} className="h-full overflow-y-auto">
+            {session ? (
+              <Thread
+                events={events}
+                isStreaming={isStreaming}
+                onSubmitFunctionResponse={handleSubmitFunctionResponse}
+                appName={appName ?? ""}
+                userId={userId}
+                sessionId={session.id}
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center p-12">
+                <p className="max-w-md text-center text-sm text-muted-foreground">
+                  Pick a session from the left rail or click{" "}
+                  <span className="font-mono">+ New</span> to start one.
+                </p>
+              </div>
+            )}
           </div>
-        )}
+          {/* Soft fades (matching the Settings modal): content dissolves under the
+              header at the top and toward the input at the bottom — no hard divider. */}
+          <div className="faded-header-edge pointer-events-none absolute inset-x-0 top-0 h-8" />
+          <div className="faded-top-edge pointer-events-none absolute inset-x-0 bottom-0 h-8" />
+        </div>
         <Composer
           onSend={handleSend}
           onAbort={handleAbort}
@@ -442,6 +443,11 @@ export function ChatPage({
           disabled={!session}
           mode={permissionMode}
         />
+        {session && (
+          <div className="flex justify-end px-3 pb-0.5 sm:px-6">
+            <ContextGauge current={ctxTokens} limits={ctxLimits} />
+          </div>
+        )}
       </div>
       {session && (
         <TaskSidebar
