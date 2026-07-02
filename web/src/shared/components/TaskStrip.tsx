@@ -20,11 +20,11 @@ export function TaskStrip({ events }: { events: RunEvent[] }) {
   const openCount = tasks.filter((t) => t.status !== "completed").length
 
   return (
-    <div className="adk-task-strip border-t border-border/50 px-3 py-1.5">
+    <div className="adk-task-strip flex items-center gap-2 px-1 py-0.5 text-[11px]">
       <button
         type="button"
         onClick={() => setCollapsed((c) => !c)}
-        className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground"
+        className="flex shrink-0 items-center gap-1 text-muted-foreground hover:text-foreground"
         title={collapsed ? "Expand tasks" : "Collapse tasks"}
       >
         <ListChecks className="h-3.5 w-3.5" />
@@ -35,11 +35,16 @@ export function TaskStrip({ events }: { events: RunEvent[] }) {
         <ChevronDown className={cn("h-3 w-3 transition-transform", collapsed && "-rotate-90")} />
       </button>
       {!collapsed && (
-        <div className="adk-task-strip-items mt-1 flex gap-1.5 overflow-x-auto pb-1">
+        <div className="adk-task-strip-items flex min-w-0 gap-1.5 overflow-x-auto">
           {tasks.map((t) => (
             <span
               key={t.id}
-              className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-border/60 bg-background/60 px-2 py-0.5 text-[11px]"
+              className={cn(
+                "flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-0.5",
+                t.status === "in_progress"
+                  ? "border-primary/50 bg-primary/10 font-medium text-primary"
+                  : "border-border/60 bg-background/60",
+              )}
               title={t.description || t.title}
             >
               <StatusDot status={t.status} />
@@ -55,16 +60,24 @@ export function TaskStrip({ events }: { events: RunEvent[] }) {
 }
 
 function StatusDot({ status }: { status: TaskRow["status"] }) {
-  const color =
-    status === "completed" ? "#5a6e3a" : status === "in_progress" ? "hsl(var(--primary))" : undefined
+  // in_progress: a solid accent dot with a halo ring — always fully opaque so
+  // it reads clearly (no pulse, which dims it). completed: olive. pending:
+  // hollow muted ring.
+  if (status === "in_progress") {
+    return (
+      <span
+        className="h-2.5 w-2.5 shrink-0 rounded-full bg-primary ring-2 ring-primary/30"
+        aria-hidden
+      />
+    )
+  }
   return (
     <span
       className={cn(
         "h-2 w-2 shrink-0 rounded-full",
-        status === "in_progress" && "animate-pulse",
         status === "pending" && "border border-muted-foreground/60",
       )}
-      style={color ? { backgroundColor: color } : undefined}
+      style={status === "completed" ? { backgroundColor: "#5a6e3a" } : undefined}
       aria-hidden
     />
   )

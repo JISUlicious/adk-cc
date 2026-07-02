@@ -426,8 +426,6 @@ export function ChatPage({
           <div className="adk-fade-top faded-header-edge pointer-events-none absolute inset-x-0 top-0 h-4" />
           <div className="adk-fade-bottom faded-top-edge pointer-events-none absolute inset-x-0 bottom-0 h-4" />
         </div>
-        {/* Task list sits over the input, above the plan indicator. */}
-        {session && <TaskStrip events={events} />}
         <Composer
           onSend={handleSend}
           onAbort={handleAbort}
@@ -436,6 +434,7 @@ export function ChatPage({
           disabled={!session}
           mode={permissionMode}
           footer={session ? <ContextGauge current={ctxTokens} limits={ctxLimits} /> : undefined}
+          taskStrip={session ? <TaskStrip events={events} /> : undefined}
         />
       </div>
       {appName && session && (

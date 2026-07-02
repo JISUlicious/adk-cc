@@ -35,6 +35,7 @@ export function Composer({
   disabled,
   mode,
   footer,
+  taskStrip,
 }: {
   onSend: (text: string) => void
   onAbort: () => void
@@ -45,6 +46,9 @@ export function Composer({
   /** Rendered below the input, left-aligned within the same max-width column
    *  (e.g. the context gauge) so it lines up with the input box. */
   footer?: ReactNode
+  /** Slim strip stacked directly above the plan-mode row (e.g. the task list),
+   *  aligned to the same max-width column as the input. */
+  taskStrip?: ReactNode
 }) {
   const [value, setValue] = useState("")
   const [slashCursor, setSlashCursor] = useState(0)
@@ -124,7 +128,7 @@ export function Composer({
   const isPlan = mode === "plan"
 
   return (
-    <div className="adk-composer px-4 py-2 faded-top-edge">
+    <div className="adk-composer px-4 pt-0.5 pb-2 faded-top-edge">
       <div className="max-w-3xl mx-auto relative">
         {slashOpen && (
           <div className="absolute bottom-full left-0 right-0 mb-2">
@@ -135,13 +139,15 @@ export function Composer({
             />
           </div>
         )}
+        {/* Task strip stacked directly above the plan-mode row, same column. */}
+        {taskStrip}
         {/* Plan-mode decoration frames just the input. The wrapper +
             badge slot are ALWAYS rendered so the footer height stays
             constant across the mode toggle — only the border/bg/
             badge-visibility light up when plan is active. */}
         <div
           className={cn(
-            "adk-composer-box rounded-md border p-2 space-y-1 transition-colors",
+            "adk-composer-box rounded-md border px-2 py-1 space-y-0.5 transition-colors",
             isPlan
               ? "border-primary/50 bg-brand-tint"
               : "border-transparent bg-transparent",
