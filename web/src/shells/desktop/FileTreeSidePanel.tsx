@@ -15,6 +15,9 @@ import {
   type FileContent,
 } from "@/shared/api/desktop-files"
 import { RightPanelShell, type RightPanelProps } from "@/shared/components/RightPanelShell"
+import { SandboxedHtml } from "@/shared/components/SandboxedHtml"
+import { Markdown } from "@/shared/lib/markdown"
+import { isHtml, isMarkdown } from "@/shared/lib/filetypes"
 import { cn } from "@/shared/lib/utils"
 
 /**
@@ -253,19 +256,34 @@ function FileViewer({
           <div className="p-4 text-center text-xs text-muted-foreground">
             Binary file ({content.size.toLocaleString()} bytes) — not shown.
           </div>
+        ) : isHtml(name, content?.mime) ? (
+          <div className="p-2">
+            <SandboxedHtml html={content?.text ?? ""} title={name} />
+          </div>
+        ) : isMarkdown(name, content?.mime) ? (
+          <>
+            <div className="adk-md p-3 text-[13px] leading-relaxed">
+              <Markdown>{content?.text ?? ""}</Markdown>
+            </div>
+            {content?.truncated && <TruncatedNote />}
+          </>
         ) : (
           <>
             <pre className="whitespace-pre-wrap break-words p-3 text-[11px] leading-relaxed">
               {content?.text}
             </pre>
-            {content?.truncated && (
-              <div className="border-t border-border/60 px-3 py-1 text-[10px] text-muted-foreground">
-                Truncated at 1 MiB.
-              </div>
-            )}
+            {content?.truncated && <TruncatedNote />}
           </>
         )}
       </div>
+    </div>
+  )
+}
+
+function TruncatedNote() {
+  return (
+    <div className="border-t border-border/60 px-3 py-1 text-[10px] text-muted-foreground">
+      Truncated at 1 MiB.
     </div>
   )
 }

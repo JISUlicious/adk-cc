@@ -9,6 +9,8 @@ import {
 } from "@/shared/api/artifacts"
 import { HtmlArtifactPreview } from "./HtmlArtifactPreview"
 import { RightPanelShell, type RightPanelProps } from "./RightPanelShell"
+import { Markdown } from "@/shared/lib/markdown"
+import { isMarkdown } from "@/shared/lib/filetypes"
 import { cn } from "@/shared/lib/utils"
 
 /**
@@ -144,6 +146,7 @@ function ArtifactViewer({
 }) {
   const { filename, version } = selection
   const html = isHtmlArtifact(filename)
+  const md = isMarkdown(filename)
   const [text, setText] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(!html)
@@ -204,6 +207,10 @@ function ArtifactViewer({
           <div className="p-4 text-center text-xs text-muted-foreground">Loading…</div>
         ) : error ? (
           <div className="p-4 text-center text-xs text-muted-foreground">{error}</div>
+        ) : md ? (
+          <div className="adk-md p-3 text-[13px] leading-relaxed">
+            <Markdown>{text ?? ""}</Markdown>
+          </div>
         ) : (
           <pre className="whitespace-pre-wrap break-words p-3 text-[11px] leading-relaxed">{text}</pre>
         )}
