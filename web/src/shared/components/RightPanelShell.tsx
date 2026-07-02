@@ -1,5 +1,5 @@
-import { type ReactNode } from "react"
-import { X } from "lucide-react"
+import { useEffect, useState, type ReactNode } from "react"
+import { PanelRightClose, PanelRightOpen, X } from "lucide-react"
 import { cn } from "@/shared/lib/utils"
 
 /**
@@ -18,11 +18,15 @@ export type RightPanelProps = {
   refreshKey?: number
 }
 
+const COLLAPSE_KEY = "adk_cc.rightPanel.collapsed"
+
 /**
- * Shared chrome for the right-side panel: a static column at lg+, a
- * slide-in drawer below lg. Mirrors TaskSidebar's responsive shell so the
- * two right-rail surfaces feel identical. Concrete panels supply the title,
- * an optional header-right slot (e.g. a refresh button), and the body.
+ * Shared chrome for the right-side panel: a static column at lg+, a slide-in
+ * drawer below lg. Collapsible on desktop — a header button shrinks it to a
+ * thin rail with an expand button (state persisted in localStorage), so it can
+ * be tucked away without losing the affordance to bring it back. On mobile it
+ * stays a drawer (collapse doesn't apply; `open`/`onClose` govern). Concrete
+ * panels supply the title, an optional header-right slot, and the body.
  */
 export function RightPanelShell({
   title,
@@ -37,6 +41,21 @@ export function RightPanelShell({
   headerRight?: ReactNode
   children: ReactNode
 }) {
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(COLLAPSE_KEY) === "1"
+    } catch {
+      return false
+    }
+  })
+  useEffect(() => {
+    try {
+      localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0")
+    } catch {
+      /* private mode / disabled storage — collapse just won't persist */
+    }
+  }, [collapsed])
+
   return (
     <>
       {/* Mobile backdrop — tap to dismiss. */}
@@ -54,26 +73,53 @@ export function RightPanelShell({
           // Mobile: fixed drawer sliding in from the right.
           "fixed inset-y-0 right-0 z-40 w-80 max-w-[85vw] transform transition-transform duration-200 ease-out",
           open ? "translate-x-0" : "translate-x-full",
-          // lg+: static column.
-          "lg:static lg:z-auto lg:w-[22rem] lg:translate-x-0 lg:transition-none",
+          // lg+: static column; width follows the collapse toggle.
+          "lg:static lg:z-auto lg:translate-x-0 lg:transition-none",
+          collapsed ? "lg:w-10" : "lg:w-[22rem]",
         )}
       >
-        <div className="adk-right-panel-header flex items-center gap-2 px-3 py-3 border-b border-border/60">
-          <span className="text-xs font-medium">{title}</span>
-          <div className="ml-auto flex items-center gap-1">
-            {headerRight}
+        {/* Collapsed rail (desktop only): just an expand button. */}
+        {collapsed && (
+          <button
+            type="button"
+            onClick={() => setCollapsed(false)}
+            className="adk-right-panel-expand hidden lg:flex items-center justify-center py-3 text-muted-foreground hover:bg-accent"
+            title={`Show ${title}`}
+            aria-label={`Show ${title}`}
+          >
+            <PanelRightOpen className="h-4 w-4" />
+          </button>
+        )}
+        {/* Header + body — hidden on desktop when collapsed; always shown on
+            mobile (the drawer has no collapsed state). */}
+        <div className={cn("flex min-h-0 flex-1 flex-col", collapsed && "lg:hidden")}>
+          <div className="adk-right-panel-header flex items-center gap-2 px-3 py-3 border-b border-border/60">
+            {/* Desktop collapse button. */}
             <button
               type="button"
-              onClick={onClose}
-              className="lg:hidden rounded-md p-1 text-muted-foreground hover:bg-accent"
-              title="Close"
+              onClick={() => setCollapsed(true)}
+              className="hidden lg:inline-flex rounded-md p-1 text-muted-foreground hover:bg-accent"
+              title={`Hide ${title}`}
+              aria-label={`Hide ${title}`}
             >
-              <X className="h-4 w-4" />
+              <PanelRightClose className="h-4 w-4" />
             </button>
+            <span className="text-xs font-medium">{title}</span>
+            <div className="ml-auto flex items-center gap-1">
+              {headerRight}
+              <button
+                type="button"
+                onClick={onClose}
+                className="lg:hidden rounded-md p-1 text-muted-foreground hover:bg-accent"
+                title="Close"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
           </div>
-        </div>
-        <div className="adk-right-panel-body min-h-0 flex-1 overflow-y-auto">
-          {children}
+          <div className="adk-right-panel-body min-h-0 flex-1 overflow-y-auto">
+            {children}
+          </div>
         </div>
       </aside>
     </>
