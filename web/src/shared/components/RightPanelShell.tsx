@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react"
 import { PanelRightClose, PanelRightOpen, X } from "lucide-react"
 import { cn } from "@/shared/lib/utils"
 
@@ -19,14 +19,21 @@ export type RightPanelProps = {
 }
 
 const COLLAPSE_KEY = "adk_cc.rightPanel.collapsed"
+const WIDTH_KEY = "adk_cc.rightPanel.width"
+const MIN_W = 260
+const MAX_W = 760
+const DEFAULT_W = 352 // 22rem
 
 /**
  * Shared chrome for the right-side panel: a static column at lg+, a slide-in
- * drawer below lg. Collapsible on desktop — a header button shrinks it to a
- * thin rail with an expand button (state persisted in localStorage), so it can
- * be tucked away without losing the affordance to bring it back. On mobile it
- * stays a drawer (collapse doesn't apply; `open`/`onClose` govern). Concrete
- * panels supply the title, an optional header-right slot, and the body.
+ * drawer below lg.
+ *
+ *  - Collapsible: a header button shrinks it to a thin rail with an expand
+ *    button (persisted), so it can be tucked away without losing the affordance.
+ *  - Resizable: a drag handle on the left edge sets the column width at lg+
+ *    (persisted, clamped). Mobile stays a fixed-width drawer.
+ *
+ * Concrete panels supply the title, an optional header-right slot, and the body.
  */
 export function RightPanelShell({
   title,
@@ -48,13 +55,49 @@ export function RightPanelShell({
       return false
     }
   })
+  const [width, setWidth] = useState<number>(() => {
+    try {
+      const v = parseInt(localStorage.getItem(WIDTH_KEY) || "", 10)
+      return Number.isFinite(v) && v >= MIN_W && v <= MAX_W ? v : DEFAULT_W
+    } catch {
+      return DEFAULT_W
+    }
+  })
+
   useEffect(() => {
     try {
       localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0")
     } catch {
-      /* private mode / disabled storage — collapse just won't persist */
+      /* private mode — collapse just won't persist */
     }
   }, [collapsed])
+  useEffect(() => {
+    try {
+      localStorage.setItem(WIDTH_KEY, String(width))
+    } catch {
+      /* private mode — width just won't persist */
+    }
+  }, [width])
+
+  // Drag the left edge to resize (lg+ only). Dragging left widens the panel.
+  function onResizeStart(e: React.MouseEvent) {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = width
+    function onMove(ev: MouseEvent) {
+      setWidth(Math.min(MAX_W, Math.max(MIN_W, startW + (startX - ev.clientX))))
+    }
+    function onUp() {
+      document.removeEventListener("mousemove", onMove)
+      document.removeEventListener("mouseup", onUp)
+      document.body.style.userSelect = ""
+      document.body.style.cursor = ""
+    }
+    document.body.style.userSelect = "none"
+    document.body.style.cursor = "col-resize"
+    document.addEventListener("mousemove", onMove)
+    document.addEventListener("mouseup", onUp)
+  }
 
   return (
     <>
@@ -67,17 +110,28 @@ export function RightPanelShell({
         />
       )}
       <aside
+        style={{ "--rp-w": `${width}px` } as CSSProperties}
         className={cn(
           "adk-right-panel flex flex-col border-l border-border/60",
           "bg-muted shadow-xl lg:bg-muted/40 lg:shadow-none",
           // Mobile: fixed drawer sliding in from the right.
           "fixed inset-y-0 right-0 z-40 w-80 max-w-[85vw] transform transition-transform duration-200 ease-out",
           open ? "translate-x-0" : "translate-x-full",
-          // lg+: static column; width follows the collapse toggle.
-          "lg:static lg:z-auto lg:translate-x-0 lg:transition-none",
-          collapsed ? "lg:w-10" : "lg:w-[22rem]",
+          // lg+: in-flow column (relative so the resize handle can anchor to it);
+          // width follows the collapse toggle / the resizable width var.
+          "lg:relative lg:z-auto lg:translate-x-0 lg:transition-none",
+          collapsed ? "lg:w-10" : "lg:w-[var(--rp-w)]",
         )}
       >
+        {/* Resize handle (desktop, expanded only) — sits on the left edge. */}
+        {!collapsed && (
+          <div
+            onMouseDown={onResizeStart}
+            className="adk-right-panel-resize absolute left-0 top-0 z-10 hidden h-full w-1.5 -ml-0.5 cursor-col-resize hover:bg-primary/30 lg:block"
+            title="Drag to resize"
+            aria-hidden
+          />
+        )}
         {/* Collapsed rail (desktop only): just an expand button. */}
         {collapsed && (
           <button
