@@ -214,3 +214,13 @@ em {
 ::-webkit-scrollbar-thumb:hover {
   background-color: color-mix(in oklab, var(--muted-foreground) 60%, transparent);
 }
+
+/* The task strip is a slim single row — the 10px horizontal scrollbar above
+   would cover the chips on hover/scroll, so hide it there. Trackpad and
+   shift-wheel still scroll the row. */
+.adk-task-strip-items {
+  scrollbar-width: none; /* Firefox */
+}
+.adk-task-strip-items::-webkit-scrollbar {
+  display: none; /* WebKit — overrides the global 10px bar */
+}
