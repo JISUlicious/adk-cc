@@ -151,12 +151,23 @@ def _build_boot_litellm(max_tokens):
     return LiteLlm(
         model=_BOOT_MODEL_ID,
         api_base=_BOOT_API_BASE,
-        api_key=os.environ["ADK_CC_API_KEY"],
+        # `.get` (not `[...]`) so a fresh desktop install with no key yet still
+        # BOOTS — the UI loads and the user can fill ADK_CC_API_KEY in their
+        # settings.env; model calls fail with a clear auth error until they do.
+        api_key=os.environ.get("ADK_CC_API_KEY", ""),
         # Cap output tokens when configured (ADK_CC_MAX_OUTPUT_TOKENS) — prevents
         # the model stopping mid tool-call on endpoints with a low output limit.
         **({"max_tokens": max_tokens} if max_tokens else {}),
     )
 
+
+if not os.environ.get("ADK_CC_API_KEY"):
+    import logging as _logging
+
+    _logging.getLogger(__name__).warning(
+        "ADK_CC_API_KEY is not set — the server starts, but model calls will fail "
+        "until you set it (desktop app: ~/.adk-cc-desktop/settings.env)."
+    )
 
 _boot_litellm = _build_boot_litellm(resolve_max_output_tokens())
 
