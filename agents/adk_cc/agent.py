@@ -54,6 +54,7 @@ from google.genai import types
 
 from .models.selectable import resolve_max_output_tokens
 
+from . import deployment
 from . import prompts
 from .logging_setup import configure_logging
 from .permissions import PermissionMode, SettingsHierarchy
@@ -262,7 +263,7 @@ def _artifacts_supported() -> bool:
     Decided here from ADK_CC_SANDBOX_BACKEND (known at construction, default
     "noop"); a per-session backend override is caught by the tools' own
     runtime guard."""
-    return os.environ.get("ADK_CC_SANDBOX_BACKEND", "noop").lower() != "noop"
+    return deployment.sandbox_backend_name() != "noop"
 _skills = make_skill_toolset()  # None unless ADK_CC_SKILLS_DIR / skills/ has content
 
 
@@ -1104,7 +1105,7 @@ def _make_tenancy_plugin() -> TenancyPlugin:
     worktree of its project — the resolver maps user_id (= project id) → repo →
     a per-session worktree. Otherwise the standard single-/multi-tenant behavior
     (workspace from ADK_CC_WORKSPACE_ROOT / CWD)."""
-    if os.environ.get("ADK_CC_DESKTOP") == "1":
+    if deployment.is_desktop():
         from .service.desktop_workspace import desktop_tenant_resolver
 
         return TenancyPlugin(tenant_resolver=desktop_tenant_resolver)

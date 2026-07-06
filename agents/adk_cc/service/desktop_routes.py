@@ -23,18 +23,19 @@ from typing import Optional
 
 from fastapi import HTTPException, Request
 
+from .. import deployment
+
 _log = logging.getLogger(__name__)
 
 
+# Re-exported (kept as the canonical names callers import) — the single readers
+# now live in `deployment`.
 def desktop_enabled() -> bool:
-    return os.environ.get("ADK_CC_DESKTOP") == "1"
+    return deployment.is_desktop()
 
 
 def desktop_data_dir() -> Path:
-    raw = os.environ.get("ADK_CC_DESKTOP_DATA") or os.path.expanduser("~/.adk-cc-desktop")
-    p = Path(os.path.abspath(os.path.expanduser(raw)))
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    return deployment.desktop_data_dir()
 
 
 def _registry_path() -> Path:

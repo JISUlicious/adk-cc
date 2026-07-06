@@ -14,6 +14,7 @@ from typing import Any
 
 from google.adk.tools.tool_context import ToolContext
 
+from .. import deployment
 from .backends import (
     DaytonaBackend,
     DockerBackend,
@@ -64,7 +65,7 @@ def make_default_backend(
     into each command's environment. `user_id` selects the personal secret
     scope.
     """
-    name = os.environ.get("ADK_CC_SANDBOX_BACKEND", "noop").lower()
+    name = deployment.sandbox_backend_name()
     if name == "noop":
         backend: SandboxBackend = NoopBackend()
     elif name == "docker":
