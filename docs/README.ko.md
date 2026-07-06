@@ -9,3 +9,4 @@ Scope: 이 디렉터리는 **adk-cc 구현**만을 문서화합니다. Upstream 
 - [`05-production-deployment.ko.md`](./05-production-deployment.ko.md) — End-to-end 배포 런북 + readiness checklist. 토폴로지, 배포 단계, custom auth, 워크스페이스 저장소 티어 (Tier 1 단일 호스트 ~ Tier 4 service-mediated), day-2 ops, alpha-status 갭 목록 (security / reliability / observability / ops / 다중 테넌트 / config / tests).
 - [`06-confirmation-protocol.ko.md`](./06-confirmation-protocol.ko.md) — Tool-confirmation HITL prompt의 wire 프로토콜: outbound `ConfirmPrompt` 페이로드 모양, inbound `chose_id` 값, "Allow always" 세션 규칙 스코핑, payload 프로토콜을 말하지 않는 frontend를 위한 legacy `confirmed: bool` fallback.
 - [`07-web-ui.ko.md`](./07-web-ui.ko.md) — React 챗 UI 런북: stack, 소스 레이아웃, event flow, long-running tool resume 프로토콜, wire 형식 quirk, slash 명령어, 테마, dev + prod 실행 모드, env 변수.
+- [`08-desktop-app.ko.md`](./08-desktop-app.ko.md) — 단일 사용자 데스크톱 앱(Tauri + Python 사이드카): 데이터 디렉터리, `settings.env` 설정 파일, dev 실행 모드, 단일 파일 AppImage 인스톨러 빌드, relocatable 경로 레이아웃.
