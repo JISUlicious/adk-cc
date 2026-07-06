@@ -1,5 +1,8 @@
-"""Desktop git-worktree-per-session: creation, isolation, resolver seeding,
-teardown. Model-free / server-free.
+"""Desktop workspace: the resolver binds a session IN-PLACE to its project root
+(the user's real repo). The git-worktree helpers (ensure_worktree /
+remove_worktree) are retained but DORMANT — no longer on the desktop path,
+reserved for a future "isolate this session" toggle — so this also smoke-tests
+that they still function standalone. Model-free / server-free.
 
 Run: PYTHONPATH=agents .venv/bin/python tests/test_desktop_workspace.py
 """
@@ -51,6 +54,8 @@ def main() -> int:
         ensure_worktree, remove_worktree, desktop_tenant_resolver,
     )
 
+    # --- Dormant worktree helpers still function standalone (not on the desktop
+    #     path anymore, but kept for a future isolate-session mode). ---
     wt1 = ensure_worktree(repo, "projX", "sid1")
     check("session1 worktree created", os.path.exists(os.path.join(wt1, ".git")))
     check("session1 worktree has the repo's files", os.path.exists(os.path.join(wt1, "base.txt")))
@@ -67,21 +72,24 @@ def main() -> int:
     check("session2 worktree has the base repo files",
           os.path.exists(os.path.join(wt2, "base.txt")))
 
-    # resolver → context.workspace() yields the worktree as WorkspaceRoot
+    # --- The live desktop path: resolver → context.workspace() binds IN-PLACE
+    #     to the project root (NOT a per-session worktree). ---
     ctx = desktop_tenant_resolver("projX")
     ws = ctx.workspace("sid3")
-    check("resolver workspace is under the worktrees dir",
-          ws.abs_path.startswith(os.path.realpath(data)) and "worktrees" in ws.abs_path)
+    check("resolver workspace binds in-place to the project root",
+          os.path.realpath(ws.abs_path) == os.path.realpath(repo))
     check("resolver workspace has the repo's files", os.path.exists(os.path.join(ws.abs_path, "base.txt")))
+    check("resolver did NOT create a worktree for the session",
+          not os.path.isdir(os.path.join(data, "worktrees", "projX", "sid3")))
 
-    # the path a real turn uses: TenancyPlugin seeds the worktree into state
+    # the path a real turn uses: TenancyPlugin seeds the project root into state
     from adk_cc.service.tenancy import TenancyPlugin
     plugin = TenancyPlugin(tenant_resolver=desktop_tenant_resolver)
     state: dict = {}
     plugin._seed_state(state, user_id="projX", session=SimpleNamespace(id="sid4"))
     seeded = state.get("temp:sandbox_workspace")
-    check("TenancyPlugin seeds the worktree as sandbox_workspace",
-          seeded is not None and "worktrees/projX/sid4" in seeded.abs_path.replace(os.sep, "/"))
+    check("TenancyPlugin seeds the project root as sandbox_workspace",
+          seeded is not None and os.path.realpath(seeded.abs_path) == os.path.realpath(repo))
 
     # unbound user (no project) → flat scratch, not a worktree
     ws_local = desktop_tenant_resolver("local").workspace("sidL")

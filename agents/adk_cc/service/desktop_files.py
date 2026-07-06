@@ -1,16 +1,16 @@
 """Desktop file-tree + file-read routes (ADK_CC_DESKTOP=1).
 
-Read-only view of a session's git worktree for the desktop right-side file
-panel. Two routes, both strictly scoped to
-``<ADK_CC_DESKTOP_DATA>/worktrees/<project>/<session>/`` via a resolve()-based
-path guard that rejects any target escaping the worktree root (via ``..`` OR a
-symlink pointing outside). Mounted only when ADK_CC_DESKTOP=1; desktop is a
-single-user loopback service (no auth), so these are self-scoped by project +
-session id, both validated against the project registry.
+Read-only view of a session's workspace for the desktop right-side file panel.
+In in-place desktop mode that workspace IS the project's repo root, so the panel
+shows exactly where the agent works. Two routes, both strictly scoped to that
+root via a resolve()-based path guard that rejects any target escaping it (via
+``..`` OR a symlink pointing outside). Mounted only when ADK_CC_DESKTOP=1;
+desktop is a single-user loopback service (no auth), so these are self-scoped by
+project + session id, both validated against the project registry.
 
-Read-only by design: no write/rename/delete. Viewing must NOT create a git
-worktree, so it uses ``session_worktree_path`` (non-creating), not
-``ensure_worktree``.
+Read-only by design: no write/rename/delete. Viewing must NOT create anything,
+so it uses ``session_workspace_path`` (non-creating): it returns the bound
+project root, or None when no repo is bound.
 """
 
 from __future__ import annotations
@@ -38,25 +38,29 @@ def _safe(value: str, label: str) -> str:
 
 
 def _resolve_within(project_id: str, session_id: str, rel: str) -> Optional[Path]:
-    """Absolute path for ``rel`` inside the session's worktree.
+    """Absolute path for ``rel`` inside the session's workspace (in-place: the
+    project root).
 
-    Returns None when the worktree doesn't exist yet (a session with no turn).
-    Raises 404 for an unknown project, 403 for a path that escapes the worktree
-    root. Both root and target are ``.resolve()``d, so ``..`` is collapsed and
-    symlinks are followed before the containment check — a symlink inside the
-    worktree pointing outside is rejected.
+    Returns None when no project repo is bound. Raises 404 for an unknown
+    project, 403 for a path that escapes the workspace root. Both root and target
+    are ``.resolve()``d, so ``..`` is collapsed and symlinks are followed before
+    the containment check — a symlink inside the workspace pointing outside is
+    rejected.
     """
     from .desktop_routes import load_projects
-    from .desktop_workspace import session_worktree_path
+    from .desktop_workspace import session_workspace_path
 
     project_id = _safe(project_id, "project_id")
     session_id = _safe(session_id, "session_id")
     if not any(p.get("id") == project_id for p in load_projects()):
         raise HTTPException(status_code=404, detail=f"unknown project: {project_id}")
 
-    root = session_worktree_path(project_id, session_id).resolve()
-    if not root.is_dir():
-        return None  # worktree not created yet
+    # Root at the session's actual workspace (in-place: the project root), so the
+    # file panel shows exactly where the agent works. Mirrors the tenant resolver.
+    ws = session_workspace_path(project_id, session_id)
+    if ws is None or not ws.is_dir():
+        return None  # no bound project workspace
+    root = ws.resolve()
     target = (root / rel).resolve()
     if target != root and root not in target.parents:
         raise HTTPException(status_code=403, detail="path escapes workspace")
@@ -81,7 +85,7 @@ def mount_desktop_files_routes(app) -> None:  # noqa: ANN001
 
         target = _resolve_within(project_id, session_id, rel)
         if target is None:
-            # Worktree not created yet — empty state, not an error.
+            # No project repo bound yet — empty state, not an error.
             return {"root_exists": False, "path": rel, "entries": [], "truncated": False}
         if not target.is_dir():
             raise HTTPException(status_code=400, detail="not a directory")
@@ -93,7 +97,7 @@ def mount_desktop_files_routes(app) -> None:  # noqa: ANN001
             target.iterdir(), key=lambda c: (not c.is_dir(), c.name.lower())
         ):
             if child.name == ".git":
-                continue  # worktree .git file/dir is noise
+                continue  # the repo's .git dir is noise in the file panel
             is_dir = child.is_dir()
             try:
                 size = None if is_dir else child.stat().st_size

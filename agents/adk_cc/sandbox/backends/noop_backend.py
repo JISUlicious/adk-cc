@@ -31,6 +31,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ... import deployment
 from ..config import (
     ExecResult,
     FsReadConfig,
@@ -94,11 +95,12 @@ class NoopBackend(SandboxBackend):
         timeout_s: int,
         cwd: str,
     ) -> ExecResult:
-        # Guard 1: explicit-ack on prod-shaped paths.
-        if (
-            _is_prod_shaped(cwd)
-            and os.environ.get("ADK_CC_NOOP_ACK_HOST_EXEC") != "1"
-        ):
+        # Guard 1: explicit-ack on prod-shaped paths. The desktop profile
+        # acknowledges host exec by default (deployment.noop_ack_host_exec() →
+        # True when ADK_CC_DESKTOP=1), since desktop is single-user and works
+        # in-place in the user's real project root (which may be under /opt,
+        # /Volumes/…, /Users/Shared, …). ADK_CC_NOOP_ACK_HOST_EXEC still overrides.
+        if _is_prod_shaped(cwd) and not deployment.noop_ack_host_exec():
             raise SandboxViolation(
                 f"NoopBackend: refusing to exec in prod-shaped path {cwd!r}. "
                 "Either set ADK_CC_NOOP_ACK_HOST_EXEC=1 to acknowledge "
