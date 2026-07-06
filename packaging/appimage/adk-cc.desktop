@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=adk-cc
+Comment=adk-cc desktop
+Exec=adk-cc
+Icon=adk-cc
+Categories=Development;Utility;
+Terminal=false

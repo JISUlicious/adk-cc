@@ -11,9 +11,9 @@
 //      navigates the window from the splash to http://127.0.0.1:8765/.
 //   3. on app exit, the child is killed.
 //
-// Dev resolves the repo (and its .venv/agents/dist-desktop) from the compile-
-// time manifest dir. Shipping a frozen backend as a Tauri sidecar (externalBin)
-// for distributable installers is a separate follow-up.
+// Path resolution is relocatable (see `resolve_layout`): in a packaged build
+// the backend interpreter + agents + frontend live under `$APPDIR/usr/lib/adk-cc`
+// (the AppImage mount); in dev they resolve from the compile-time repo dir.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::io::{Read, Write};
@@ -109,19 +109,51 @@ fn ensure_fernet_key(data: &PathBuf) -> String {
     key
 }
 
-fn spawn_backend(data: &PathBuf) -> std::io::Result<Child> {
+/// Where the backend interpreter + app files live. Packaged: bundled inside the
+/// AppImage under `$APPDIR/usr/lib/adk-cc`. Dev: the compile-time repo.
+struct Layout {
+    python: PathBuf, // interpreter — we run `-m uvicorn`
+    agents: PathBuf, // ADK_CC_AGENTS_DIR (+ PYTHONPATH when bundled)
+    dist: PathBuf,   // ADK_CC_UI_DIST
+    cwd: PathBuf,
+    bundled: bool,
+}
+
+fn resolve_layout() -> Layout {
+    if let Ok(appdir) = std::env::var("APPDIR") {
+        let base = PathBuf::from(appdir).join("usr/lib/adk-cc");
+        return Layout {
+            python: base.join("python/bin/python3"),
+            agents: base.join("agents"),
+            dist: base.join("dist-desktop"),
+            cwd: base.clone(),
+            bundled: true,
+        };
+    }
     let repo = repo_dir();
-    let uvicorn = repo.join(".venv/bin/uvicorn");
-    let agents = repo.join("agents");
-    let dist = repo.join("web/dist-desktop");
+    Layout {
+        python: repo.join(".venv/bin/python"),
+        agents: repo.join("agents"),
+        dist: repo.join("web/dist-desktop"),
+        cwd: repo,
+        bundled: false,
+    }
+}
+
+fn spawn_backend(data: &PathBuf) -> std::io::Result<Child> {
+    let layout = resolve_layout();
     let key = ensure_fernet_key(data);
     let session_dsn = format!("sqlite:///{}/sessions.db", data.display());
 
-    // cwd = repo so the backend's load_dotenv() picks up .env (model API key,
-    // endpoint). load_dotenv does not override these explicit vars.
-    Command::new(uvicorn)
-        .current_dir(&repo)
+    // Run `python -m uvicorn` (works for both the dev venv and the bundled
+    // standalone python). Model config (API key/endpoint) comes from the user's
+    // settings.env in the data dir, loaded by the backend's dotenv bootstrap;
+    // load_dotenv does not override these explicit vars.
+    let mut cmd = Command::new(&layout.python);
+    cmd.current_dir(&layout.cwd)
         .args([
+            "-m",
+            "uvicorn",
             "adk_cc.service.server:make_app",
             "--factory",
             "--host",
@@ -129,20 +161,25 @@ fn spawn_backend(data: &PathBuf) -> std::io::Result<Child> {
             "--port",
             "8765",
         ])
-        .env("ADK_CC_AGENTS_DIR", &agents)
+        .env("ADK_CC_AGENTS_DIR", &layout.agents)
         .env("ADK_CC_ALLOW_NO_AUTH", "1")
         .env("ADK_CC_DESKTOP", "1")
         .env("ADK_CC_DESKTOP_DATA", data)
         .env("ADK_CC_TENANCY_MODE", "single")
         .env("ADK_CC_GLOBAL_TENANT_ID", "local")
         .env("ADK_CC_SERVE_UI", "1")
-        .env("ADK_CC_UI_DIST", &dist)
+        .env("ADK_CC_UI_DIST", &layout.dist)
         .env("ADK_CC_SESSION_DSN", session_dsn)
         .env("ADK_CC_CREDENTIAL_PROVIDER", "encrypted_file")
         .env("ADK_CC_CREDENTIAL_STORE_DIR", data.join("secrets"))
         .env("ADK_CC_CREDENTIAL_KEY", key)
-        .env("ADK_CC_SANDBOX_BACKEND", "noop")
-        .spawn()
+        .env("ADK_CC_SANDBOX_BACKEND", "noop");
+    // Packaged: adk_cc isn't pip-installed — import it from the shipped source
+    // (deps live in the bundled python). Mirrors the dev editable install.
+    if layout.bundled {
+        cmd.env("PYTHONPATH", &layout.agents);
+    }
+    cmd.spawn()
 }
 
 /// Readiness probe — a raw HTTP/1.0 GET /list-apps (the endpoint the desktop

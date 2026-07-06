@@ -1,0 +1,14 @@
+# Keep the AppImage build context small — everything heavy is regenerated in
+# the container (uv venv, npm ci, cargo build).
+.git
+.venv
+**/__pycache__
+**/.pytest_cache
+web/node_modules
+web/dist
+web/dist-desktop
+src-tauri/target
+dist
+analysis
+.DS_Store
+**/*.log
