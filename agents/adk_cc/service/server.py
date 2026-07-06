@@ -181,7 +181,13 @@ def build_fastapi_app(
 
     # Desktop project registry (default-OFF; ADK_CC_DESKTOP=1). Mounted before
     # the UI catch-all so /desktop/* wins on path match.
-    from .desktop_routes import mount_desktop_routes
+    from .desktop_routes import desktop_enabled, mount_desktop_routes
+    # First-run: drop a settings.env template in the data dir so the user has a
+    # place to put their model API key/endpoint (loaded by the dotenv bootstrap
+    # on the next launch). No-op if it already exists.
+    if desktop_enabled():
+        from .desktop_config import ensure_settings_template
+        ensure_settings_template()
     mount_desktop_routes(fastapi_app)
     # Desktop layered settings (global + per-project MCP/skills/secrets, global
     # models) over the same stores the agent reads — no-auth, scope-keyed.

@@ -7,8 +7,12 @@ even import the agent module, so `agent.py`'s eager
 Operators running `uvicorn adk_cc.service.server:make_app --factory`
 skip that bootstrap, so we mirror it here.
 
-Lookup order (`override=False` always, so a real process env wins):
+Lookup order (`override=False` always, so a real process env wins; earlier
+files win over later ones):
 
+  0. The desktop settings file (packaged app) — `$ADK_CC_SETTINGS_FILE`, or
+     `$ADK_CC_DESKTOP_DATA/settings.env` / `~/.adk-cc-desktop/settings.env` in
+     desktop context. Loaded first so a user's settings.env beats a repo .env.
   1. `<ADK_CC_AGENTS_DIR>/.env` if `ADK_CC_AGENTS_DIR` is set.
   2. `<this-package-dir>/../.env`  (repo root when installed editable).
   3. `<cwd>/.env`.
@@ -33,6 +37,17 @@ def _bootstrap_dotenv() -> None:
         return
 
     candidates: list[_Path] = []
+    # 0. Desktop settings file (installer / desktop app) — highest priority so a
+    #    user's settings.env wins over any repo/cwd .env. Scoped to desktop
+    #    context (explicit file, or ADK_CC_DESKTOP/_DATA set) so a plain web
+    #    server doesn't pick it up.
+    _settings = _os.environ.get("ADK_CC_SETTINGS_FILE")
+    if _settings:
+        candidates.append(_Path(_settings).expanduser())
+    elif _os.environ.get("ADK_CC_DESKTOP") == "1" or _os.environ.get("ADK_CC_DESKTOP_DATA"):
+        _data = _os.environ.get("ADK_CC_DESKTOP_DATA")
+        _base = _Path(_data) if _data else _Path.home() / ".adk-cc-desktop"
+        candidates.append(_base / "settings.env")
     agents_dir = _os.environ.get("ADK_CC_AGENTS_DIR")
     if agents_dir:
         candidates.append(_Path(agents_dir) / ".env")
