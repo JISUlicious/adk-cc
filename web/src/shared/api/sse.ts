@@ -49,6 +49,32 @@ export interface RunEvent {
   [key: string]: unknown
 }
 
+/**
+ * Whether an event is the turn's final response — mirrors ADK's server-side
+ * `Event.is_final_response()`. The UI uses this as the in-band "stop" signal so
+ * the "agent is working…" indicator clears when the reply is actually done,
+ * instead of waiting for the HTTP stream to close (which lags by any silent
+ * post-turn work, e.g. the out-of-band session-title model call — the ~5s tail).
+ *
+ * A `true` here means "the agent is done or now waiting on the user" (a
+ * long-running tool like ask_user_question / confirmation also counts, since the
+ * agent has stopped working). Callers should RE-ARM on any later non-final event
+ * so multi-agent turns (where each sub-agent emits its own final response before
+ * control returns) don't stop the indicator early.
+ */
+export function isFinalResponse(e: RunEvent): boolean {
+  const actions = (e.actions ?? {}) as { skipSummarization?: boolean }
+  const longRunning = (e as { longRunningToolIds?: unknown[] }).longRunningToolIds
+  if (actions.skipSummarization || (Array.isArray(longRunning) && longRunning.length > 0)) {
+    return true
+  }
+  if (e.partial) return false
+  const parts = e.content?.parts ?? []
+  const hasCall = parts.some((p) => p.functionCall)
+  const hasResp = parts.some((p) => p.functionResponse)
+  return !hasCall && !hasResp
+}
+
 export interface RunArgs {
   appName: string
   userId: string
@@ -74,7 +100,7 @@ export interface FunctionResponseArgs {
   response: unknown
 }
 
-interface StreamCallbacks {
+export interface StreamCallbacks {
   onEvent: (event: RunEvent) => void
   onError?: (err: Error) => void
   onClose?: () => void

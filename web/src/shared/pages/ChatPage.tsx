@@ -11,7 +11,9 @@ import {
 import {
   streamRun,
   streamFunctionResponse,
+  isFinalResponse,
   type RunEvent,
+  type StreamCallbacks,
 } from "@/shared/api/sse"
 import { SessionRail, type RailProps } from "@/shared/components/SessionRail"
 import { Thread } from "@/shared/components/Thread"
@@ -93,6 +95,11 @@ export function ChatPage({
   // Right-side panel (artifacts on web / file tree on desktop) mobile drawer.
   const [rightPanelOpen, setRightPanelOpen] = useState(false)
   const abortRef = useRef<(() => void) | null>(null)
+  // Monotonic per-turn id. Because the "working" indicator now clears on the
+  // in-band final-response event (not the socket close), the composer re-enables
+  // while the previous stream may still be draining its silent post-turn tail —
+  // so a stale stream's late onEvent/onClose must not disturb a newer turn.
+  const streamGen = useRef(0)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // Context-fullness gauge (P2): server ladder fetched once; current usage =
@@ -154,9 +161,37 @@ export function ChatPage({
     el.scrollTop = el.scrollHeight
   }, [events, isStreaming])
 
-  function attachStream(open: () => () => void) {
+  // Open a stream and own all of its state transitions. `make` receives the
+  // guarded callbacks and returns the stream's abort fn. The "working" indicator
+  // tracks the AGENT'S actual work: it clears on the turn's final-response event
+  // (the in-band stop signal) rather than waiting for the socket to close — which
+  // lags behind by any silent post-turn work (e.g. the session-title model call).
+  // Every callback is fenced by the turn's `gen`, so a prior stream finishing its
+  // tail can't stomp a newer turn.
+  function attachStream(make: (cb: StreamCallbacks) => () => void) {
+    const gen = ++streamGen.current
     setIsStreaming(true)
-    abortRef.current = open()
+    abortRef.current = make({
+      onEvent: (e) => {
+        if (gen !== streamGen.current) return
+        setEvents((prev) => [...prev, e])
+        // Final response → the reply is done (or the agent is now waiting on the
+        // user). Re-arm on any later non-final event (multi-agent turns emit a
+        // final response per sub-agent before control returns to the coordinator).
+        setIsStreaming(!isFinalResponse(e))
+      },
+      onError: (err) => {
+        if (gen !== streamGen.current) return
+        setError(err.message)
+        setIsStreaming(false)
+      },
+      onClose: () => {
+        if (gen !== streamGen.current) return
+        setIsStreaming(false)
+        abortRef.current = null
+        refreshAfterTurn()
+      },
+    })
   }
 
   function refreshAfterTurn() {
@@ -185,22 +220,8 @@ export function ChatPage({
     }
     setEvents((prev) => [...prev, optimistic])
 
-    attachStream(() =>
-      streamRun(
-        { appName, userId, sessionId: session.id, message: text },
-        {
-          onEvent: (e) => setEvents((prev) => [...prev, e]),
-          onError: (err) => {
-            setError(err.message)
-            setIsStreaming(false)
-          },
-          onClose: () => {
-            setIsStreaming(false)
-            abortRef.current = null
-            refreshAfterTurn()
-          },
-        },
-      ),
+    attachStream((cb) =>
+      streamRun({ appName, userId, sessionId: session.id, message: text }, cb),
     )
   }
 
@@ -228,33 +249,16 @@ export function ChatPage({
     }
     setEvents((prev) => [...prev, optimistic])
 
-    attachStream(() =>
+    attachStream((cb) =>
       streamFunctionResponse(
-        {
-          appName,
-          userId,
-          sessionId: session.id,
-          callId,
-          toolName,
-          response,
-        },
-        {
-          onEvent: (e) => setEvents((prev) => [...prev, e]),
-          onError: (err) => {
-            setError(err.message)
-            setIsStreaming(false)
-          },
-          onClose: () => {
-            setIsStreaming(false)
-            abortRef.current = null
-            refreshAfterTurn()
-          },
-        },
+        { appName, userId, sessionId: session.id, callId, toolName, response },
+        cb,
       ),
     )
   }
 
   function handleAbort() {
+    streamGen.current++ // fence: ignore any late callbacks from the aborted stream
     abortRef.current?.()
     abortRef.current = null
     setIsStreaming(false)
