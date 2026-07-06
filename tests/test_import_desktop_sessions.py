@@ -83,9 +83,14 @@ def main() -> None:
         assert not os.path.exists(os.path.join(base, "projects")), "dry run wrote files"
         print("OK dry-run counts + no writes")
 
+        # only-registered filter: projZ not in the set → skipped as unregistered.
+        s_filt = asyncio.run(migrate(db, base + "_x", dry_run=True, registered={"someoneelse"}))
+        assert s_filt["migrated"] == 0 and s_filt["unregistered"] == 1, s_filt
+        print("OK only-registered filter skips orphans")
+
         # Real run.
         s = asyncio.run(migrate(db, base, dry_run=False))
-        assert s == {"sessions": 1, "migrated": 1, "skipped": 0, "events": 2, "app_states": 0, "user_states": 1}, s
+        assert s == {"sessions": 1, "migrated": 1, "skipped": 0, "unregistered": 0, "events": 2, "app_states": 0, "user_states": 1}, s
 
         fss = FileSessionService(base)
         got = asyncio.run(fss.get_session(app_name=APP, user_id="projZ", session_id="s1"))
