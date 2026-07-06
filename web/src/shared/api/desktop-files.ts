@@ -1,10 +1,11 @@
 import { apiFetch } from "./client"
 
 /**
- * Read-only view of a session's git worktree, for the desktop file panel.
- * Backed by /desktop/files/* (mounted only in desktop mode). Both routes are
- * scoped + path-guarded server-side; `userId` here is the desktop project id
- * (ChatPage repurposes userId as the project id in the desktop shell).
+ * Read-only view of a session's in-place workspace (the project root), for the
+ * desktop file panel. Backed by /desktop/files/* (mounted only in desktop mode).
+ * Both routes are scoped + path-guarded server-side; `userId` here is the
+ * desktop project id (ChatPage repurposes userId as the project id in the
+ * desktop shell).
  */
 
 export interface DirEntry {

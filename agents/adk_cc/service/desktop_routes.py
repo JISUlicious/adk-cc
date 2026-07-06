@@ -137,3 +137,37 @@ def mount_desktop_routes(app) -> None:
 
         remove_worktree(project_id, session_id)
         return {"status": "removed"}
+
+    def _project_root(project_id: str) -> str:
+        """Validate a registered project and return its in-place repo root, or 404."""
+        if not any(p.get("id") == project_id for p in load_projects()):
+            raise HTTPException(status_code=404, detail=f"unknown project: {project_id}")
+        repo = project_repo_path(project_id)
+        if not repo or not os.path.isdir(repo):
+            raise HTTPException(status_code=400, detail="project has no bound repo")
+        return repo
+
+    @app.get("/desktop/checkpoint/list", include_in_schema=False)
+    async def checkpoint_list(request: Request):  # noqa: ANN202
+        q = request.query_params
+        project_id = q.get("project_id") or ""
+        session_id = q.get("session_id") or ""
+        if not project_id or not session_id:
+            raise HTTPException(status_code=400, detail="project_id and session_id required")
+        _project_root(project_id)  # validate (ignore root here)
+        from .desktop_checkpoint import list_checkpoints
+
+        return {"checkpoints": list_checkpoints(project_id, session_id)}
+
+    @app.post("/desktop/checkpoint/restore", include_in_schema=False)
+    async def checkpoint_restore(request: Request):  # noqa: ANN202
+        body = await request.json() or {}
+        project_id = str(body.get("project_id") or "")
+        session_id = str(body.get("session_id") or "")
+        sha = body.get("sha")  # optional → default: most recent (undo last turn)
+        if not project_id or not session_id:
+            raise HTTPException(status_code=400, detail="project_id and session_id required")
+        root = _project_root(project_id)
+        from .desktop_checkpoint import restore
+
+        return restore(project_id, session_id, root, sha=sha or None)

@@ -7,6 +7,7 @@ import {
   Folder,
   FolderOpen,
   RefreshCw,
+  Undo2,
 } from "lucide-react"
 import {
   listDir,
@@ -14,6 +15,7 @@ import {
   type DirEntry,
   type FileContent,
 } from "@/shared/api/desktop-files"
+import { listCheckpoints, restoreCheckpoint } from "@/shared/api/desktop-checkpoint"
 import { RightPanelShell, type RightPanelProps } from "@/shared/components/RightPanelShell"
 import { SandboxedHtml } from "@/shared/components/SandboxedHtml"
 import { Markdown } from "@/shared/lib/markdown"
@@ -21,10 +23,11 @@ import { isHtml, isMarkdown } from "@/shared/lib/filetypes"
 import { cn } from "@/shared/lib/utils"
 
 /**
- * Desktop right-panel: a lazy file tree of the session's git worktree with an
- * inline file viewer. Injected into ChatPage via the `RightPanel` seam by
- * DesktopApp (replacing the web ArtifactsSidePanel). `userId` is the desktop
- * project id. Read-only.
+ * Desktop right-panel: a lazy file tree of the session's in-place workspace (the
+ * project root) with an inline file viewer, plus an "Undo last turn" control
+ * that reverts the project to the checkpoint taken before the last turn.
+ * Injected into ChatPage via the `RightPanel` seam by DesktopApp (replacing the
+ * web ArtifactsSidePanel). `userId` is the desktop project id. Read-only view.
  */
 
 function join(parent: string, name: string): string {
@@ -45,6 +48,8 @@ export function FileTreeSidePanel({
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  const [canUndo, setCanUndo] = useState(false)
+  const [undoing, setUndoing] = useState(false)
 
   const loadDir = useCallback(
     async (path: string) => {
@@ -70,16 +75,54 @@ export function FileTreeSidePanel({
     }
   }, [loadDir])
 
+  // Whether an "Undo last turn" checkpoint exists for this session.
+  const refreshUndo = useCallback(async () => {
+    if (!projectId || !sessionId) {
+      setCanUndo(false)
+      return
+    }
+    try {
+      const res = await listCheckpoints(projectId, sessionId)
+      setCanUndo(res.checkpoints.length > 0)
+    } catch {
+      setCanUndo(false) // route only exists in desktop mode; ignore otherwise
+    }
+  }, [projectId, sessionId])
+
+  async function handleUndo() {
+    if (undoing || !projectId || !sessionId) return
+    if (!window.confirm("Undo the last turn? Files changed since the previous turn will be reverted (this is itself reversible).")) {
+      return
+    }
+    setUndoing(true)
+    try {
+      const res = await restoreCheckpoint(projectId, sessionId)
+      if (res.status === "error") setError(res.error || "restore failed")
+      await reload()
+      await refreshUndo()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setUndoing(false)
+    }
+  }
+
   // (Re)load the root whenever the session changes; clear any open file.
   useEffect(() => {
     setSelectedFile(null)
-    if (projectId && sessionId) void reload()
-  }, [projectId, sessionId, reload])
+    if (projectId && sessionId) {
+      void reload()
+      void refreshUndo()
+    }
+  }, [projectId, sessionId, reload, refreshUndo])
 
   // After each turn (refreshKey), re-fetch the currently-loaded directories so
   // agent-created files appear — preserving expansion + the open file. Skips
   // the initial render (no dirs loaded yet; the session effect handles that).
   useEffect(() => {
+    // A turn may have added a checkpoint → refresh Undo availability. Deferred
+    // to a microtask so the setState isn't synchronous in the effect body.
+    void Promise.resolve().then(refreshUndo)
     const loaded = Object.keys(dirs)
     if (loaded.length === 0) return
     let cancelled = false
@@ -121,15 +164,26 @@ export function FileTreeSidePanel({
     setExpanded(next)
   }
 
-  const refresh = (
-    <button
-      type="button"
-      onClick={() => void reload()}
-      className="rounded-md p-1 text-muted-foreground hover:bg-accent"
-      title="Refresh"
-    >
-      <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
-    </button>
+  const headerRight = (
+    <div className="flex items-center gap-0.5">
+      <button
+        type="button"
+        onClick={() => void handleUndo()}
+        disabled={!canUndo || undoing}
+        className="rounded-md p-1 text-muted-foreground hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
+        title="Undo last turn — revert files to before the last turn"
+      >
+        <Undo2 className={cn("h-3.5 w-3.5", undoing && "animate-pulse")} />
+      </button>
+      <button
+        type="button"
+        onClick={() => void reload()}
+        className="rounded-md p-1 text-muted-foreground hover:bg-accent"
+        title="Refresh"
+      >
+        <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+      </button>
+    </div>
   )
 
   function renderDir(path: string, depth: number) {
@@ -184,7 +238,7 @@ export function FileTreeSidePanel({
   }
 
   return (
-    <RightPanelShell title="Files" open={open} onClose={onClose} headerRight={refresh}>
+    <RightPanelShell title="Files" open={open} onClose={onClose} headerRight={headerRight}>
       {selectedFile ? (
         <FileViewer
           projectId={projectId}

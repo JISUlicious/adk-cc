@@ -193,8 +193,9 @@ def build_fastapi_app(
     # models) over the same stores the agent reads — no-auth, scope-keyed.
     from .desktop_settings import mount_desktop_settings_routes
     mount_desktop_settings_routes(fastapi_app)
-    # Desktop read-only file tree + file viewer over each session's worktree
-    # (for the right-side file panel). Scoped + path-guarded; no-auth.
+    # Desktop read-only file tree + file viewer over the session's in-place
+    # workspace (the project root; for the right-side file panel). Scoped +
+    # path-guarded; no-auth.
     from .desktop_files import mount_desktop_files_routes
     mount_desktop_files_routes(fastapi_app)
 

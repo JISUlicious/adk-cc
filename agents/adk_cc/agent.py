@@ -67,6 +67,7 @@ from .plugins import (
     AskUserQuestionUiHintPlugin,
     AuditPlugin,
     AuthzPlugin,
+    CheckpointPlugin,
     ModelIOTracePlugin,
     ProjectContextPlugin,
     ConfirmationFormUiPlugin,
@@ -1160,6 +1161,12 @@ _app_kwargs = dict(
                 os.environ.get("ADK_CC_QUOTA_PER_MINUTE", "120")
             )
         ),
+        # Undo net for in-place desktop edits: snapshots the project's working
+        # tree into a shadow git repo before the first mutating tool of each
+        # turn. AFTER Permission/AuthZ/Quota so denied/throttled calls (whose
+        # before_tool chain is short-circuited) never snapshot; AFTER Tenancy so
+        # the workspace is seeded. Inert in web mode / ADK_CC_CHECKPOINT=0.
+        CheckpointPlugin(),
         # Reminders run on before_model_callback, lifecycle independent of
         # the before_tool chain — order relative to others doesn't matter.
         # Pass the env-set default to every plugin that reads

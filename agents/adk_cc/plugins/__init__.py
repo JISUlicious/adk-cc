@@ -2,6 +2,7 @@ from .ask_pause import AskPausePlugin
 from .ask_user_question_ui import AskUserQuestionUiHintPlugin
 from .audit import AuditPlugin
 from .authz import AuthzPlugin
+from .checkpoint import CheckpointPlugin
 from .confirmation_form_ui import ConfirmationFormUiPlugin
 from .context_guard import ContextGuardPlugin
 from .mcp_export_artifact import McpExportArtifactPlugin
@@ -30,6 +31,7 @@ __all__ = [
     "AskUserQuestionUiHintPlugin",
     "AuditPlugin",
     "AuthzPlugin",
+    "CheckpointPlugin",
     "ConfirmationFormUiPlugin",
     "ContextGuardPlugin",
     "McpExportArtifactPlugin",
