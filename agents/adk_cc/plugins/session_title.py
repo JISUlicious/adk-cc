@@ -11,7 +11,7 @@ remembering to call it (compliance lottery). Out-of-band titling is
 guaranteed-by-construction, invisible to the agent loop, and uses a prompt we
 fully control.
 
-Latency design — spawn early, persist late:
+Latency design — spawn early, NEVER block the run:
   - `before_run_callback` (pipeline Step 1, once per invocation — unlike
     before_agent, which fires per agent in the tree) SPAWNS the titling call
     as an asyncio task, so it runs CONCURRENTLY with the agent's turn. The
@@ -19,10 +19,16 @@ Latency design — spawn early, persist late:
     exist yet, and chat products title from the first message for the same
     reason.
   - `after_run_callback` (Step 4, after events drain, before the run
-    completes) awaits the task — long finished by then under any real agent
-    turn — and persists the title. Net added latency: ~zero, and the title is
-    in state before the frontend's post-turn rail refresh.
-  - Persisting at after_run (not mid-turn) also avoids concurrent
+    completes) persists the title — but ONLY inline when the task has already
+    finished during the turn (the common case). If the title call outlived a
+    short turn, after_run does NOT await it: it detaches the persist so the run
+    (and the SSE stream, and the UI's "agent is working…" indicator) completes
+    immediately. Awaiting here would hold the stream open for the title call's
+    full latency, which on a slow model shows as a multi-second phantom
+    "working" tail after the reply is already done — visible only on a session's
+    first, untitled turns. Detached, the title lands a moment later and the rail
+    picks it up on its next refresh.
+  - Persisting only after the turn's events have drained avoids concurrent
     append_event races with the running turn.
 
 The title is persisted the same way the frontend's PATCH route mutates state:
@@ -92,6 +98,9 @@ class SessionTitlePlugin(BasePlugin):
         # invocation_id -> in-flight title generation, spawned at before_run,
         # consumed at after_run.
         self._pending: dict[str, asyncio.Task] = {}
+        # Detached persist tasks (title call outlived the turn) — held so the
+        # event loop doesn't GC them mid-flight; self-discard on completion.
+        self._detached: set[asyncio.Task] = set()
 
     # ---- spawn (Step 1: runs once, before the agent starts) --------------
 
@@ -132,17 +141,31 @@ class SessionTitlePlugin(BasePlugin):
         task = self._pending.pop(ictx.invocation_id, None)
         if task is None:
             return
+        if task.done():
+            # Finished during the turn → persist inline (no added latency).
+            await self._persist(ictx.session, ictx.session_service, ictx.invocation_id, task)
+        else:
+            # Still running: do NOT await it here — that would hold the SSE stream
+            # (and the "agent is working…" indicator) open for the rest of the
+            # title call. Persist in a detached task so the run completes now.
+            t = asyncio.create_task(
+                self._persist(ictx.session, ictx.session_service, ictx.invocation_id, task)
+            )
+            self._detached.add(t)
+            t.add_done_callback(self._detached.discard)
+
+    async def _persist(self, session, session_service, invocation_id: str, task: asyncio.Task) -> None:
+        """Await the title task and write it to session state (once)."""
         try:
-            title = await task  # overlapped the turn; usually already done
+            title = await task
             if not title:
                 return
-            session = ictx.session
             if (getattr(session, "state", None) or {}).get(_STATE_KEY):
                 return  # raced by a concurrent invocation — keep the first
-            await ictx.session_service.append_event(
+            await session_service.append_event(
                 session,
                 Event(
-                    invocation_id=ictx.invocation_id,
+                    invocation_id=invocation_id,
                     author=self.name,
                     actions=EventActions(state_delta={_STATE_KEY: title}),
                 ),
