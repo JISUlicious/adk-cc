@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Plus, X, Settings as SettingsIcon, ChevronRight, FolderPlus, Trash2 } from "lucide-react"
 import {
   createSession, deleteSession, listApps, listSessions, type Session,
@@ -36,6 +36,8 @@ export function ProjectRail({
   const [error, setError] = useState<string | null>(null)
   const [pathPrompt, setPathPrompt] = useState(false)
   const [pathInput, setPathInput] = useState("")
+  // Projects mid auto-create, so a double-expand can't spawn two empty sessions.
+  const autoCreating = useRef<Set<string>>(new Set())
 
   useEffect(() => {
     let cancelled = false
@@ -51,29 +53,50 @@ export function ProjectRail({
   }, [])
   useEffect(reloadProjects, [reloadProjects])
 
-  const loadSessions = useCallback((projectId: string) => {
-    if (!appName) return
-    listSessions(appName, projectId)
-      .then((xs) => {
-        xs.sort((a, b) => (b.lastUpdateTime || 0) - (a.lastUpdateTime || 0))
-        setSessionsByProject((m) => ({ ...m, [projectId]: xs }))
-      })
-      .catch((e) => setError(`Failed to load sessions: ${e.message}`))
+  const loadSessions = useCallback(async (projectId: string): Promise<Session[]> => {
+    if (!appName) return []
+    try {
+      const xs = await listSessions(appName, projectId)
+      xs.sort((a, b) => (b.lastUpdateTime || 0) - (a.lastUpdateTime || 0))
+      setSessionsByProject((m) => ({ ...m, [projectId]: xs }))
+      return xs
+    } catch (e) {
+      setError(`Failed to load sessions: ${(e as Error).message}`)
+      return []
+    }
   }, [appName])
 
+  // Select a project: load its sessions and, if it has NO history, drop the user
+  // straight into a fresh session (rather than an empty "click +" list). Plain
+  // function (not memoized) so it always closes over the current newSession.
+  async function openProject(projectId: string) {
+    const xs = await loadSessions(projectId)
+    if (xs.length === 0 && !autoCreating.current.has(projectId)) {
+      autoCreating.current.add(projectId)
+      try {
+        await newSession(projectId)
+      } finally {
+        autoCreating.current.delete(projectId)
+      }
+    }
+  }
+
   // Reload the active project's sessions when a turn lands (refreshTick) or app loads.
+  // Deferred to a microtask so the setState isn't synchronous in the effect body.
   useEffect(() => {
-    if (userId && expanded.has(userId)) loadSessions(userId)
+    if (userId && expanded.has(userId)) void Promise.resolve().then(() => loadSessions(userId))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appName, refreshTick])
 
   function toggle(projectId: string) {
+    const wasOpen = expanded.has(projectId)
     setExpanded((prev) => {
       const next = new Set(prev)
-      if (next.has(projectId)) next.delete(projectId)
-      else { next.add(projectId); loadSessions(projectId) }
+      if (wasOpen) next.delete(projectId)
+      else next.add(projectId)
       return next
     })
+    if (!wasOpen) void openProject(projectId) // expanding = selecting → auto-open
   }
 
   async function doAddProject(path: string) {
@@ -81,7 +104,8 @@ export function ProjectRail({
       const { project } = await addProject(path)
       reloadProjects()
       setExpanded((prev) => new Set(prev).add(project.id))
-      loadSessions(project.id)
+      // A new project has no history → openProject drops the user into a fresh session.
+      await openProject(project.id)
     } catch (e) {
       setError(`Failed to add project: ${(e as Error).message}`)
     }
