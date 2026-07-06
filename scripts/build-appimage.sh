@@ -10,10 +10,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 IMG=adk-cc-appimage
+# Target arch of the Linux machine that will run the AppImage. Default x86_64;
+# on an Apple-Silicon host this builds under emulation (slower but correct).
+# Override for an ARM Linux target: ADK_CC_APPIMAGE_PLATFORM=linux/arm64
+PLATFORM="${ADK_CC_APPIMAGE_PLATFORM:-linux/amd64}"
 mkdir -p dist
 
-echo ">> docker build (toolchain layers cache after the first run)…"
-docker build -t "$IMG" -f packaging/appimage/Dockerfile .
+echo ">> docker build for $PLATFORM (toolchain layers cache after the first run)…"
+docker build --platform "$PLATFORM" -t "$IMG" -f packaging/appimage/Dockerfile .
 
 echo ">> extracting the AppImage from the image…"
 cid=$(docker create "$IMG")

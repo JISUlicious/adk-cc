@@ -19,7 +19,7 @@ ENV APPIMAGE_EXTRACT_AND_RUN=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl wget ca-certificates file xz-utils build-essential pkg-config git \
       libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
-      libssl-dev patchelf desktop-file-utils zsync \
+      libssl-dev patchelf desktop-file-utils zsync squashfs-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Node 20 (frontend build).
@@ -34,16 +34,37 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
 
-# AppImage tooling: appimagetool + linuxdeploy + the GTK plugin.
-RUN wget -q -O /usr/local/bin/appimagetool \
-      https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage \
- && wget -q -O /usr/local/bin/linuxdeploy \
-      https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage \
- && wget -q -O /usr/local/bin/linuxdeploy-plugin-gtk \
-      https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh \
- && chmod +x /usr/local/bin/appimagetool /usr/local/bin/linuxdeploy /usr/local/bin/linuxdeploy-plugin-gtk
+# AppImage tooling. The tool AppImages can't self-mount under Docker's x86_64
+# emulation ("Exec format error"), while regular ELFs run fine. So:
+#   - extract linuxdeploy with unsquashfs (try each `hsqs` offset until the
+#     squashfs superblock is found) and run its AppRun for GTK/WebKit bundling;
+#   - grab the plain type-2 runtime binary to prepend when packing manually
+#     (mksquashfs + cat) — no appimagetool needed.
+RUN set -eux; cd /opt; \
+    wget -q -O linuxdeploy.AppImage \
+      https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage; \
+    ok=0; \
+    for off in $(grep -aob hsqs linuxdeploy.AppImage | cut -d: -f1); do \
+      rm -rf /opt/linuxdeploy; \
+      if unsquashfs -q -o "$off" -d /opt/linuxdeploy linuxdeploy.AppImage >/dev/null 2>&1; then ok=1; echo "linuxdeploy @ $off"; break; fi; \
+    done; \
+    [ "$ok" = 1 ] || { echo "linuxdeploy extract failed"; exit 1; }; \
+    rm -f linuxdeploy.AppImage; \
+    printf '#!/bin/sh\nexec "/opt/linuxdeploy/AppRun" "$@"\n' > /usr/local/bin/linuxdeploy; \
+    chmod +x /usr/local/bin/linuxdeploy; \
+    wget -q -O /usr/local/bin/linuxdeploy-plugin-gtk \
+      https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh; \
+    chmod +x /usr/local/bin/linuxdeploy-plugin-gtk; \
+    wget -q -O /opt/runtime-x86_64 \
+      https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64; \
+    chmod +x /opt/runtime-x86_64
 
 WORKDIR /src
 COPY . /src
 
-RUN bash packaging/appimage/build-in-container.sh
+# Cache mounts so cargo/pip/npm don't redo everything each rebuild.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/src/src-tauri/target \
+    --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.npm \
+    bash packaging/appimage/build-in-container.sh
