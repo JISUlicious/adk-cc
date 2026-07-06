@@ -86,6 +86,14 @@ def build_fastapi_app(
     # lifespan), so startup/shutdown both fire.
     from .memory_scheduler import make_consolidation_lifespan
 
+    # Desktop file-based session store: register the `adkccfiles://` scheme so a
+    # session_service_uri of that scheme resolves (via ADK's service registry) to
+    # per-project JSONL files instead of sqlite. Cheap + idempotent; the scheme is
+    # only USED when the resolved DSN selects it (desktop mode), so this is inert
+    # for web deployments.
+    from .file_session_service import register_file_session_scheme
+    register_file_session_scheme()
+
     fastapi_app = get_fast_api_app(
         agents_dir=agents_dir,
         session_service_uri=session_service_uri,
@@ -396,11 +404,24 @@ def make_app():
     # build_fastapi_app mounts the admin panel (when enabled) before the UI.
     return build_fastapi_app(
         agents_dir=agents_dir,
-        session_service_uri=os.environ.get("ADK_CC_SESSION_DSN"),
+        session_service_uri=_resolve_session_dsn(),
         auth_extractor=extractor,
         identity=identity,
         ui_dist_dir=ui_dist_dir,
     )
+
+
+def _resolve_session_dsn() -> Optional[str]:
+    """The session-service URI. Desktop mode uses the per-project JSONL file store
+    (`adkccfiles://<data-dir>`, see file_session_service) rather than the
+    monolithic sqlite — the profile carries the policy, so the sqlite DSN main.rs
+    still sets in ADK_CC_SESSION_DSN is intentionally overridden. Web mode uses
+    ADK_CC_SESSION_DSN as-is (postgres/sqlite/…)."""
+    from .. import deployment
+
+    if deployment.is_desktop():
+        return f"adkccfiles://{deployment.desktop_data_dir()}"
+    return os.environ.get("ADK_CC_SESSION_DSN")
 
 
 # --- Admin panel wiring ---------------------------------------------------
