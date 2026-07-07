@@ -49,14 +49,14 @@ export function RewindDialog({
 
   if (!open) return null
 
-  async function restore(sha: string, label: string) {
+  async function restore(id: string, label: string) {
     if (busy) return
     if (!window.confirm(`Rewind to "${label}"? Files AND the conversation roll back to this point; later turns are removed.`)) {
       return
     }
     setBusy(true)
     try {
-      await restoreCheckpoint(projectId, sessionId, sha)
+      await restoreCheckpoint(projectId, sessionId, id)
       onRestored()
       onClose()
     } finally {
@@ -99,10 +99,10 @@ export function RewindDialog({
               const label = i === 0 ? "the last turn" : checkpointReason(cp.reason)
               return (
                 <button
-                  key={cp.sha}
+                  key={cp.id}
                   type="button"
                   disabled={busy}
-                  onClick={() => void restore(cp.sha, label)}
+                  onClick={() => void restore(cp.id, label)}
                   title={`Restore to ${cp.sha.slice(0, 8)}`}
                   className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm hover:bg-accent disabled:opacity-50"
                 >

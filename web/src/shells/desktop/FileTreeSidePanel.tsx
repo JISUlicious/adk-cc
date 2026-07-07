@@ -112,16 +112,16 @@ export function FileTreeSidePanel({
     }
   }, [projectId, sessionId])
 
-  // Restore the project to a checkpoint. `sha` omitted → undo the last turn.
-  async function performRestore(sha?: string) {
+  // Restore the project to a checkpoint. `id` omitted → undo the last turn.
+  async function performRestore(id?: string) {
     if (undoing || !projectId || !sessionId) return
-    const msg = sha
+    const msg = id
       ? "Rewind to this checkpoint? Files AND the conversation roll back to this point; later turns are removed."
       : "Undo the last turn? Files and the conversation roll back to before the last turn; the turn's messages are removed."
     if (!window.confirm(msg)) return
     setUndoing(true)
     try {
-      const res = await restoreCheckpoint(projectId, sessionId, sha)
+      const res = await restoreCheckpoint(projectId, sessionId, id)
       if (res.status === "error") setError(res.error || "restore failed")
       await reload()
       await loadCheckpoints()
@@ -300,9 +300,9 @@ export function FileTreeSidePanel({
               ) : (
                 checkpoints.map((cp) => (
                   <button
-                    key={cp.sha}
+                    key={cp.id}
                     type="button"
-                    onClick={() => void performRestore(cp.sha)}
+                    onClick={() => void performRestore(cp.id)}
                     disabled={undoing}
                     title={`Restore to ${cp.sha.slice(0, 8)}`}
                     className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-accent disabled:opacity-50"

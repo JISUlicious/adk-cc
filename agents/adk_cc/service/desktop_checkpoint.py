@@ -31,6 +31,7 @@ import logging
 import os
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -136,6 +137,14 @@ def _write_log(git_dir: Path, entries: list[dict[str, Any]]) -> None:
         pass
 
 
+def _entry_id(e: dict[str, Any]) -> str:
+    """Stable unique id for a checkpoint entry. New entries carry `id`; older ones
+    (pre-`id`) fall back to their invocation_id, else sha+ts — so a checkpoint is
+    addressable independent of its git sha (which is NOT unique: a turn that
+    changes no files reuses the previous commit)."""
+    return e.get("id") or e.get("invocation_id") or f"{e.get('sha', '')}-{e.get('ts', '')}"
+
+
 def _append_checkpoint(
     git_dir: Path, sha: str, reason: str, invocation_id: Optional[str]
 ) -> None:
@@ -149,7 +158,15 @@ def _append_checkpoint(
         and entries[-1].get("invocation_id") == invocation_id
     ):
         return
-    entries.append({"sha": sha, "reason": reason, "ts": time.time(), "invocation_id": invocation_id})
+    entries.append(
+        {
+            "id": uuid.uuid4().hex[:12],
+            "sha": sha,
+            "reason": reason,
+            "ts": time.time(),
+            "invocation_id": invocation_id,
+        }
+    )
     _write_log(git_dir, entries[-MAX_CHECKPOINTS:])
 
 
@@ -212,9 +229,14 @@ def snapshot(
 
 
 def list_checkpoints(project_id: str, session_id: str) -> list[dict[str, Any]]:
-    """Most-recent-first checkpoints for the restore menu."""
+    """Most-recent-first checkpoints for the restore menu. Each carries a unique
+    `id` (the git sha is NOT unique — a no-file-change turn reuses a commit), which
+    callers pass back to restore()."""
     gd = _shadow_dir(project_id, session_id)
-    return list(reversed(_read_log(gd)))
+    out = []
+    for e in reversed(_read_log(gd)):
+        out.append({**e, "id": _entry_id(e)})
+    return out
 
 
 def restore(
@@ -222,11 +244,12 @@ def restore(
     session_id: str,
     work_tree: str,
     *,
-    sha: Optional[str] = None,
+    checkpoint_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Restore the work tree to a checkpoint (default: the most recent one → undo
-    the last turn). Snapshots the current state first (reversible undo + removes
-    files created since the target), then hard-resets the shadow work tree."""
+    the last turn). `checkpoint_id` addresses a specific entry by its unique id
+    (NOT its git sha, which can repeat). Snapshots the current state first
+    (reversible undo + removes files created since the target), then hard-resets."""
     if not work_tree or not os.path.isdir(work_tree):
         return {"status": "error", "error": "no bound project workspace"}
     gd = _shadow_dir(project_id, session_id)
@@ -234,14 +257,14 @@ def restore(
         return {"status": "no_checkpoints"}
 
     entries = _read_log(gd)
-    if sha is None:
+    if checkpoint_id is None:
         if not entries:
             return {"status": "no_checkpoints"}
         target_entry = entries[-1]
     else:
-        target_entry = next((e for e in entries if e["sha"] == sha), None)
+        target_entry = next((e for e in entries if _entry_id(e) == checkpoint_id), None)
         if target_entry is None:
-            return {"status": "error", "error": f"unknown checkpoint: {sha}"}
+            return {"status": "error", "error": f"unknown checkpoint: {checkpoint_id}"}
     target = target_entry["sha"]
     invocation_id = target_entry.get("invocation_id")
 

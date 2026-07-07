@@ -164,13 +164,15 @@ def mount_desktop_routes(app) -> None:
         body = await request.json() or {}
         project_id = str(body.get("project_id") or "")
         session_id = str(body.get("session_id") or "")
-        sha = body.get("sha")  # optional → default: most recent (undo last turn)
+        # Unique checkpoint id (not the git sha, which can repeat). Optional →
+        # default: most recent (undo last turn). Accept legacy "sha" as a fallback.
+        checkpoint_id = body.get("id") or body.get("sha")
         if not project_id or not session_id:
             raise HTTPException(status_code=400, detail="project_id and session_id required")
         root = _project_root(project_id)
         from .desktop_checkpoint import restore
 
-        result = restore(project_id, session_id, root, sha=sha or None)
+        result = restore(project_id, session_id, root, checkpoint_id=checkpoint_id or None)
         # Roll the CONVERSATION back to that turn too (files + chat, like a real
         # rewind) — truncate the session's events from the checkpoint's invocation
         # onward. Best-effort: a hiccup here must not fail the (already-done) file

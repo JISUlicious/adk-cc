@@ -234,6 +234,17 @@ def test_no_file_change_turn_gets_its_own_checkpoint() -> None:
     # idempotent: the same invocation again does not duplicate.
     dc.snapshot("proj_ls", "s1", repo, reason="write_file", invocation_id="inv-2")
     assert len(dc.list_checkpoints("proj_ls", "s1")) == 2
+
+    # Both checkpoints share the same git sha (ls changed nothing) — restore must
+    # resolve by the unique id, landing on the RIGHT invocation, not the first
+    # entry with that sha.
+    cps = dc.list_checkpoints("proj_ls", "s1")  # most-recent-first: [edit(inv-2), ls(inv-1)]
+    assert cps[0]["sha"] == cps[1]["sha"], "precondition: shared sha"
+    assert cps[0]["id"] != cps[1]["id"], "ids must be unique"
+    res = dc.restore("proj_ls", "s1", repo, checkpoint_id=cps[0]["id"])
+    assert res["status"] == "ok" and res["invocation_id"] == "inv-2", res
+    res2 = dc.restore("proj_ls", "s1", repo, checkpoint_id=cps[1]["id"])
+    assert res2["status"] == "ok" and res2["invocation_id"] == "inv-1", res2
     print("OK test_no_file_change_turn_gets_its_own_checkpoint")
 
 

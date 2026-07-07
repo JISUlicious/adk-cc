@@ -9,6 +9,9 @@ import { apiFetch } from "./client"
  */
 
 export interface Checkpoint {
+  /** Unique id for this checkpoint — pass to restore. NOT the git sha, which can
+   * repeat across turns (a turn that changes no files reuses the previous commit). */
+  id: string
   sha: string
   reason: string
   ts: number
@@ -30,16 +33,17 @@ export function listCheckpoints(
   return apiFetch<{ checkpoints: Checkpoint[] }>(`/desktop/checkpoint/list?${q}`)
 }
 
-/** Restore the working tree to a checkpoint (omit `sha` → undo the last turn).
- * Snapshots the current state first, so the restore is itself reversible. */
+/** Restore to a checkpoint by its unique id (omit `id` → undo the last turn).
+ * Rolls back both files and conversation; snapshots current state first (the file
+ * part is reversible). */
 export function restoreCheckpoint(
   projectId: string,
   sessionId: string,
-  sha?: string,
+  id?: string,
 ): Promise<RestoreResult> {
   return apiFetch<RestoreResult>(`/desktop/checkpoint/restore`, {
     method: "POST",
-    body: JSON.stringify({ project_id: projectId, session_id: sessionId, sha }),
+    body: JSON.stringify({ project_id: projectId, session_id: sessionId, id }),
   })
 }
 
