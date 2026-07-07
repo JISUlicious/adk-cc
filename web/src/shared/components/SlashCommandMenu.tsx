@@ -3,6 +3,7 @@ import {
   ClipboardList,
   HelpCircle,
   LogOut,
+  Network,
   Plus,
   RotateCcw,
   Settings,
@@ -31,6 +32,7 @@ export type SlashAction =
   | "plan"
   | "exit-plan"
   | "rewind"
+  | "wiki"
 
 export interface SlashCommand {
   /** What the user types after `/`. Match is prefix-insensitive. */
@@ -63,6 +65,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     icon: RotateCcw,
     kind: { type: "action", action: "rewind" },
     desktopOnly: true,
+  },
+  {
+    name: "wiki",
+    description: "Open the knowledge graph — wiki pages + memory",
+    icon: Network,
+    kind: { type: "action", action: "wiki" },
   },
   {
     name: "plan",

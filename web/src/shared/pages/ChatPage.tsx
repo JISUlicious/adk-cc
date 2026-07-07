@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react"
+import { useNavigate } from "react-router-dom"
 import { Menu, PanelRight } from "lucide-react"
 import { Button } from "@/shared/components/ui/button"
 import { clearToken, getUser, getToken, decodeJwtPayload, markSignedOut } from "@/shared/api/auth"
@@ -63,6 +64,7 @@ export function ChatPage({
   Settings?: ComponentType<SettingsModalProps>
   RightPanel?: ComponentType<RightPanelProps>
 } = {}) {
+  const navigate = useNavigate()
   // Stateful so the desktop rail can switch the active user_id (= project);
   // the web rail never calls setUserId, so web keeps a fixed account id.
   const [userId, setUserId] = useState(getUser())
@@ -302,7 +304,8 @@ export function ChatPage({
         if (appName && session) {
           handleSend(
             "Available slash commands: /help, /clear (new session), " +
-              "/plan, /exit-plan, /theme, /settings, /signout" +
+              "/plan, /exit-plan, /theme, /settings, /signout, " +
+              "/wiki (open the knowledge graph — wiki pages + memory)" +
               (IS_DESKTOP ? ", /rewind (rewind to a checkpoint — roll back files + conversation)" : "") +
               ". These are UI shortcuts on the client; the agent doesn't see them.",
           )
@@ -322,6 +325,16 @@ export function ChatPage({
         return
       case "settings":
         setSettingsOpen(true)
+        return
+      case "wiki":
+        // UI shortcut to the knowledge-graph view (wiki pages + memory). Desktop
+        // scopes memory to the current project via ?user=; web omits it (the
+        // authenticated principal decides server-side).
+        navigate(
+          IS_DESKTOP && userId
+            ? `/knowledge?user=${encodeURIComponent(userId)}`
+            : "/knowledge",
+        )
         return
       case "rewind":
         // Desktop-only: open the multi-step picker to rewind to any checkpoint —
