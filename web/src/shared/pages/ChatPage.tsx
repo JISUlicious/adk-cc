@@ -29,7 +29,7 @@ import { SettingsModal } from "@/shared/components/SettingsModal"
 import { listSecrets } from "@/shared/api/account"
 import { IS_DESKTOP } from "@/shared/lib/platform"
 import { type SlashAction } from "@/shared/components/SlashCommandMenu"
-import { restoreCheckpoint } from "@/shared/api/desktop-checkpoint"
+import { RewindDialog } from "@/shared/components/RewindDialog"
 import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/shared/lib/theme"
 
 /**
@@ -79,6 +79,7 @@ export function ChatPage({
   const [refreshTick, setRefreshTick] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [rewindOpen, setRewindOpen] = useState(false)
   // Count of required skill/MCP secrets the user hasn't set → badge on the
   // Settings gear. Refreshed on mount and whenever the Settings dialog closes
   // (the user may have just set some on the Account page).
@@ -288,7 +289,7 @@ export function ChatPage({
           handleSend(
             "Available slash commands: /help, /clear (new session), " +
               "/plan, /exit-plan, /theme, /settings, /signout" +
-              (IS_DESKTOP ? ", /rewind (undo last turn — revert file changes)" : "") +
+              (IS_DESKTOP ? ", /rewind (rewind files to a checkpoint — pick how far back)" : "") +
               ". These are UI shortcuts on the client; the agent doesn't see them.",
           )
         }
@@ -308,26 +309,12 @@ export function ChatPage({
       case "settings":
         setSettingsOpen(true)
         return
-      case "rewind": {
-        // Desktop-only: revert the project files to the checkpoint taken before
-        // the last turn (same as the file panel's Undo). The conversation is
-        // untouched — only files revert.
+      case "rewind":
+        // Desktop-only: open the multi-step picker to restore the project files to
+        // any checkpoint (the conversation is untouched — only files revert).
         if (!IS_DESKTOP || !appName || !session) return
-        if (
-          !window.confirm(
-            "Undo the last turn? File changes since the previous turn will be reverted (this is itself reversible).",
-          )
-        )
-          return
-        restoreCheckpoint(userId, session.id)
-          .then((res) => {
-            if (res.status === "no_checkpoints") setError("Nothing to rewind yet — no checkpoint for this session.")
-            else if (res.status === "error") setError(res.error || "rewind failed")
-            setRefreshTick((t) => t + 1) // reload the file panel to show the revert
-          })
-          .catch((e) => setError((e as Error).message))
+        setRewindOpen(true)
         return
-      }
       case "theme": {
         // Cycle: light → dark → system → light. Persisted by setStoredTheme.
         const cur = getStoredTheme()
@@ -491,6 +478,15 @@ export function ChatPage({
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
       />
+      {IS_DESKTOP && session && (
+        <RewindDialog
+          projectId={userId}
+          sessionId={session.id}
+          open={rewindOpen}
+          onClose={() => setRewindOpen(false)}
+          onRestored={() => setRefreshTick((t) => t + 1)}
+        />
+      )}
     </div>
   )
 }

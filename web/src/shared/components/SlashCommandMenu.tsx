@@ -59,7 +59,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   },
   {
     name: "rewind",
-    description: "Undo the last turn — revert file changes (desktop)",
+    description: "Rewind files to a checkpoint — pick how far back (desktop)",
     icon: RotateCcw,
     kind: { type: "action", action: "rewind" },
     desktopOnly: true,

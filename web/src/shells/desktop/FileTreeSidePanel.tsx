@@ -20,6 +20,8 @@ import {
 import {
   listCheckpoints,
   restoreCheckpoint,
+  checkpointAgo,
+  checkpointReason,
   type Checkpoint,
 } from "@/shared/api/desktop-checkpoint"
 import { RightPanelShell, type RightPanelProps } from "@/shared/components/RightPanelShell"
@@ -40,25 +42,6 @@ function join(parent: string, name: string): string {
   return parent ? `${parent}/${name}` : name
 }
 
-/** Relative time for a checkpoint (ts is epoch seconds, from the backend). */
-function ago(ts: number): string {
-  const s = Math.max(0, Math.floor(Date.now() / 1000 - ts))
-  if (s < 45) return "just now"
-  if (s < 3600) return `${Math.round(s / 60)}m ago`
-  if (s < 86400) return `${Math.round(s / 3600)}h ago`
-  return `${Math.round(s / 86400)}d ago`
-}
-
-// A checkpoint is the snapshot taken BEFORE the mutating tool that triggered it.
-const REASON_LABEL: Record<string, string> = {
-  run_bash: "before a command",
-  write_file: "before a file write",
-  edit_file: "before an edit",
-  "pre-restore": "before an undo",
-}
-function reasonLabel(r: string): string {
-  return REASON_LABEL[r] ?? (r ? `before ${r}` : "checkpoint")
-}
 
 export function FileTreeSidePanel({
   userId: projectId,
@@ -324,8 +307,8 @@ export function FileTreeSidePanel({
                   >
                     <RotateCcw className="h-3 w-3 shrink-0 text-muted-foreground" />
                     <span className="min-w-0 flex-1 truncate">
-                      <span className="font-medium">{reasonLabel(cp.reason)}</span>
-                      <span className="ml-1 text-muted-foreground">· {ago(cp.ts)}</span>
+                      <span className="font-medium">{checkpointReason(cp.reason)}</span>
+                      <span className="ml-1 text-muted-foreground">· {checkpointAgo(cp.ts)}</span>
                     </span>
                   </button>
                 ))

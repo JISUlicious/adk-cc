@@ -42,3 +42,24 @@ export function restoreCheckpoint(
     body: JSON.stringify({ project_id: projectId, session_id: sessionId, sha }),
   })
 }
+
+/** Relative time for a checkpoint (`ts` is epoch seconds, from the backend). */
+export function checkpointAgo(ts: number): string {
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - ts))
+  if (s < 45) return "just now"
+  if (s < 3600) return `${Math.round(s / 60)}m ago`
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`
+  return `${Math.round(s / 86400)}d ago`
+}
+
+// A checkpoint is the snapshot taken BEFORE the tool that triggered it.
+const REASON_LABEL: Record<string, string> = {
+  run_bash: "before a command",
+  write_file: "before a file write",
+  edit_file: "before an edit",
+  "pre-restore": "before an undo",
+}
+/** Friendly label for a checkpoint's trigger. */
+export function checkpointReason(r: string): string {
+  return REASON_LABEL[r] ?? (r ? `before ${r}` : "checkpoint")
+}
