@@ -170,8 +170,34 @@ async def test_already_exists_and_path_safety(base: str) -> None:
     print("OK test_already_exists_and_path_safety")
 
 
+async def test_truncate_before_invocation(base: str) -> None:
+    # Rewind the conversation: drop all events from a given invocation onward.
+    svc = FileSessionService(base)
+    s = await svc.create_session(app_name=APP, user_id="projT", state={}, session_id="s1")
+    await svc.append_event(s, Event(author="user", actions=EventActions(state_delta={}), invocation_id="inv-1", timestamp=1.0))
+    await svc.append_event(s, Event(author="agent", actions=EventActions(state_delta={"a": 1}), invocation_id="inv-1", timestamp=2.0))
+    await svc.append_event(s, Event(author="user", actions=EventActions(state_delta={}), invocation_id="inv-2", timestamp=3.0))
+    await svc.append_event(s, Event(author="agent", actions=EventActions(state_delta={"b": 2}), invocation_id="inv-2", timestamp=4.0))
+
+    kept = await svc.truncate_before_invocation(user_id="projT", session_id="s1", invocation_id="inv-2")
+    assert kept == 2, kept
+    got = await svc.get_session(app_name=APP, user_id="projT", session_id="s1")
+    assert len(got.events) == 2 and all(e.invocation_id == "inv-1" for e in got.events), got.events
+    assert got.state.get("a") == 1 and "b" not in got.state, "inv-2's session state should be gone"
+
+    # Unknown invocation → no-op (returns current count, changes nothing).
+    kept2 = await svc.truncate_before_invocation(user_id="projT", session_id="s1", invocation_id="nope")
+    assert kept2 == 2, kept2
+    # Truncating the FIRST invocation empties the conversation.
+    kept3 = await svc.truncate_before_invocation(user_id="projT", session_id="s1", invocation_id="inv-1")
+    assert kept3 == 0, kept3
+    assert len((await svc.get_session(app_name=APP, user_id="projT", session_id="s1")).events) == 0
+    print("OK test_truncate_before_invocation")
+
+
 async def _run_all() -> None:
     tests = [
+        test_truncate_before_invocation,
         test_create_get_roundtrip_and_layout,
         test_events_persist_in_order,
         test_user_state_shared_across_sessions,

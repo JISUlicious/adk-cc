@@ -16,6 +16,9 @@ export type RightPanelProps = {
   /** Bumped by ChatPage after every turn — panels reload to pick up
    * artifacts/files the agent just produced, without a manual refresh. */
   refreshKey?: number
+  /** Called after the panel restores a checkpoint, so ChatPage can reload the
+   * thread (a rewind rolls back the conversation too, not just files). */
+  onRestored?: () => void
 }
 
 const COLLAPSE_KEY = "adk_cc.rightPanel.collapsed"

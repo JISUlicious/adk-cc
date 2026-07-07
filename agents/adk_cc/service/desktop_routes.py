@@ -170,4 +170,21 @@ def mount_desktop_routes(app) -> None:
         root = _project_root(project_id)
         from .desktop_checkpoint import restore
 
-        return restore(project_id, session_id, root, sha=sha or None)
+        result = restore(project_id, session_id, root, sha=sha or None)
+        # Roll the CONVERSATION back to that turn too (files + chat, like a real
+        # rewind) — truncate the session's events from the checkpoint's invocation
+        # onward. Best-effort: a hiccup here must not fail the (already-done) file
+        # restore.
+        inv = result.get("invocation_id") if isinstance(result, dict) else None
+        if isinstance(result, dict) and result.get("status") == "ok" and inv:
+            try:
+                from .. import deployment
+                from .file_session_service import FileSessionService
+
+                fss = FileSessionService(deployment.desktop_data_dir())
+                result["events_kept"] = await fss.truncate_before_invocation(
+                    user_id=project_id, session_id=session_id, invocation_id=inv
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return result

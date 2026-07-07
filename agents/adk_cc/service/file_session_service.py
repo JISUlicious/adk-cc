@@ -298,6 +298,39 @@ class FileSessionService(BaseSessionService):
         except (OSError, ValueError):
             pass
 
+    async def truncate_before_invocation(
+        self, *, user_id: str, session_id: str, invocation_id: str
+    ) -> int:
+        """Drop all events from `invocation_id` onward (the turn a checkpoint
+        preceded, plus everything after) — rewinding the CONVERSATION to before
+        that turn, to match a file rewind. Returns the number of events kept, or
+        -1 if the session/file wasn't found. Best-effort + atomic (tmp + replace)."""
+        if not invocation_id:
+            return -1
+        try:
+            path = self._session_file(user_id, session_id)
+        except ValueError:
+            return -1
+        if not path.exists():
+            return -1
+        header, events = self._read_file(path)
+        cut = next(
+            (i for i, ev in enumerate(events) if getattr(ev, "invocation_id", None) == invocation_id),
+            None,
+        )
+        if cut is None:
+            return len(events)  # that invocation isn't here → nothing to truncate
+        kept = events[:cut]
+        async with self._lock_for(session_id):
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                if header:
+                    f.write(json.dumps(header) + "\n")
+                for ev in kept:
+                    f.write(json.dumps({"kind": "event", "event": ev.model_dump(mode="json")}) + "\n")
+            os.replace(tmp, path)
+        return len(kept)
+
     async def append_event(self, session: Session, event: Event) -> Event:
         if event.partial:
             return event

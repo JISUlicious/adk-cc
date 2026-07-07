@@ -223,6 +223,20 @@ export function ChatPage({
     titlePollRef.current = setTimeout(() => setRefreshTick((t) => t + 1), 2500)
   }
 
+  // Reload the thread from the server — used after a rewind, which truncates the
+  // session's events (conversation) to match the file restore. Without this the
+  // chat would keep showing the messages from the reverted turn(s).
+  function reloadSession() {
+    if (!appName || !session) return
+    getSession(appName, userId, session.id)
+      .then((s) => {
+        setEvents(s.events)
+        setSession(s)
+      })
+      .catch(() => {})
+    setRefreshTick((t) => t + 1)
+  }
+
   function handleSend(text: string) {
     if (!appName || !session) return
     setError(null)
@@ -289,7 +303,7 @@ export function ChatPage({
           handleSend(
             "Available slash commands: /help, /clear (new session), " +
               "/plan, /exit-plan, /theme, /settings, /signout" +
-              (IS_DESKTOP ? ", /rewind (rewind files to a checkpoint — pick how far back)" : "") +
+              (IS_DESKTOP ? ", /rewind (rewind to a checkpoint — roll back files + conversation)" : "") +
               ". These are UI shortcuts on the client; the agent doesn't see them.",
           )
         }
@@ -310,8 +324,8 @@ export function ChatPage({
         setSettingsOpen(true)
         return
       case "rewind":
-        // Desktop-only: open the multi-step picker to restore the project files to
-        // any checkpoint (the conversation is untouched — only files revert).
+        // Desktop-only: open the multi-step picker to rewind to any checkpoint —
+        // rolls back both the project files AND the conversation to that turn.
         if (!IS_DESKTOP || !appName || !session) return
         setRewindOpen(true)
         return
@@ -472,6 +486,7 @@ export function ChatPage({
           open={rightPanelOpen}
           onClose={() => setRightPanelOpen(false)}
           refreshKey={refreshTick}
+          onRestored={reloadSession}
         />
       )}
       <Settings
@@ -484,7 +499,7 @@ export function ChatPage({
           sessionId={session.id}
           open={rewindOpen}
           onClose={() => setRewindOpen(false)}
-          onRestored={() => setRefreshTick((t) => t + 1)}
+          onRestored={reloadSession}
         />
       )}
     </div>

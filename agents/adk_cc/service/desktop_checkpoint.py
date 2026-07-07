@@ -142,6 +142,7 @@ def snapshot(
     work_tree: str,
     *,
     reason: str = "",
+    invocation_id: Optional[str] = None,
 ) -> Optional[str]:
     """Snapshot the work tree into the shadow repo; return the commit sha (or the
     existing HEAD when nothing changed). Returns None and swallows on any failure
@@ -179,7 +180,9 @@ def snapshot(
             return None
 
         entries = _read_log(gd)
-        entries.append({"sha": sha, "reason": reason, "ts": time.time()})
+        entries.append(
+            {"sha": sha, "reason": reason, "ts": time.time(), "invocation_id": invocation_id}
+        )
         _write_log(gd, entries[-MAX_CHECKPOINTS:])
         return sha
     except subprocess.TimeoutExpired:
@@ -216,11 +219,13 @@ def restore(
     if sha is None:
         if not entries:
             return {"status": "no_checkpoints"}
-        target = entries[-1]["sha"]
+        target_entry = entries[-1]
     else:
-        if not any(e["sha"] == sha for e in entries):
+        target_entry = next((e for e in entries if e["sha"] == sha), None)
+        if target_entry is None:
             return {"status": "error", "error": f"unknown checkpoint: {sha}"}
-        target = sha
+    target = target_entry["sha"]
+    invocation_id = target_entry.get("invocation_id")
 
     try:
         # Capture the pre-restore state so (a) undo is itself reversible and
@@ -234,7 +239,8 @@ def restore(
         )
         if reset.returncode != 0:
             return {"status": "error", "error": reset.stderr.strip()[:300]}
-        return {"status": "ok", "restored_to": target, "pre_restore": pre}
+        # invocation_id lets the caller also roll the conversation back to this turn.
+        return {"status": "ok", "restored_to": target, "pre_restore": pre, "invocation_id": invocation_id}
     except subprocess.TimeoutExpired:
         return {"status": "error", "error": "restore timed out"}
     except Exception as e:  # noqa: BLE001

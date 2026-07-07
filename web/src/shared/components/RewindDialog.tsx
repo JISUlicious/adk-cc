@@ -11,9 +11,10 @@ import {
 /**
  * Multi-step rewind picker opened by the `/rewind` slash command (desktop). Lists
  * the session's checkpoints (most recent first) and restores the project files to
- * whichever the user picks — the conversation is untouched. Self-contained (works
- * regardless of the file panel's open/collapsed state); shares the same backend
- * routes + labels as the panel's History popover.
+ * whichever the user picks — rolling back the FILES and the CONVERSATION to that
+ * point (later turns are removed). Self-contained (works regardless of the file
+ * panel's open/collapsed state); shares the same routes/labels as the panel's
+ * History popover.
  */
 export function RewindDialog({
   projectId,
@@ -50,7 +51,7 @@ export function RewindDialog({
 
   async function restore(sha: string, label: string) {
     if (busy) return
-    if (!window.confirm(`Rewind to "${label}"? Changes made after this point will be reverted (itself reversible).`)) {
+    if (!window.confirm(`Rewind to "${label}"? Files AND the conversation roll back to this point; later turns are removed.`)) {
       return
     }
     setBusy(true)
@@ -90,8 +91,8 @@ export function RewindDialog({
             <p className="px-4 py-4 text-xs text-muted-foreground">Loading checkpoints…</p>
           ) : checkpoints.length === 0 ? (
             <p className="px-4 py-4 text-xs text-muted-foreground">
-              No checkpoints yet — nothing to rewind. Checkpoints are taken before the agent
-              changes files.
+              No checkpoints yet — nothing to rewind. A checkpoint is taken before the agent
+              changes files; rewinding rolls back both the files and the conversation.
             </p>
           ) : (
             checkpoints.map((cp, i) => {

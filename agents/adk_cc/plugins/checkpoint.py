@@ -94,4 +94,7 @@ class CheckpointPlugin(BasePlugin):
             return
         state[guard] = True
 
-        snapshot(project_id, session_id, root, reason=tool.name)
+        # Record the invocation id so a restore can also roll the CONVERSATION
+        # back to this turn (truncate events from this invocation onward), not
+        # just the files.
+        snapshot(project_id, session_id, root, reason=tool.name, invocation_id=inv)

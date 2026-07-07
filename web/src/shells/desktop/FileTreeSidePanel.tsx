@@ -49,6 +49,7 @@ export function FileTreeSidePanel({
   open,
   onClose,
   refreshKey,
+  onRestored,
 }: RightPanelProps) {
   // Loaded directory listings, keyed by relative path ("" = root).
   const [dirs, setDirs] = useState<Record<string, DirEntry[]>>({})
@@ -115,8 +116,8 @@ export function FileTreeSidePanel({
   async function performRestore(sha?: string) {
     if (undoing || !projectId || !sessionId) return
     const msg = sha
-      ? "Restore the project to this checkpoint? Changes made after it will be reverted (this is itself reversible)."
-      : "Undo the last turn? Files changed since the previous turn will be reverted (this is itself reversible)."
+      ? "Rewind to this checkpoint? Files AND the conversation roll back to this point; later turns are removed."
+      : "Undo the last turn? Files and the conversation roll back to before the last turn; the turn's messages are removed."
     if (!window.confirm(msg)) return
     setUndoing(true)
     try {
@@ -125,6 +126,7 @@ export function FileTreeSidePanel({
       await reload()
       await loadCheckpoints()
       setHistoryOpen(false)
+      onRestored?.() // reload the thread — a rewind rolls back the conversation too
     } catch (e) {
       setError((e as Error).message)
     } finally {
