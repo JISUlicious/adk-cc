@@ -248,10 +248,35 @@ def test_no_file_change_turn_gets_its_own_checkpoint() -> None:
     print("OK test_no_file_change_turn_gets_its_own_checkpoint")
 
 
+def test_rewind_drops_rewound_checkpoints_from_history() -> None:
+    # After rewinding, the checkpoints for the undone turns must leave the history
+    # (so the menu only lists surviving turns + repeated undo steps back).
+    repo = _make_repo("proj_hist")
+    _register("proj_hist", repo)
+    # 3 file-changing turns (snapshot is taken BEFORE each turn's change).
+    dc.snapshot("proj_hist", "s1", repo, reason="write_file", invocation_id="inv-1")
+    Path(repo, "a.txt").write_text("a")
+    dc.snapshot("proj_hist", "s1", repo, reason="write_file", invocation_id="inv-2")
+    Path(repo, "b.txt").write_text("b")
+    dc.snapshot("proj_hist", "s1", repo, reason="write_file", invocation_id="inv-3")
+    Path(repo, "c.txt").write_text("c")
+    assert [c["invocation_id"] for c in dc.list_checkpoints("proj_hist", "s1")] == ["inv-3", "inv-2", "inv-1"]
+
+    # Rewind to inv-2's checkpoint (undo turns 2 & 3) → history keeps only inv-1.
+    c2 = next(c for c in dc.list_checkpoints("proj_hist", "s1") if c["invocation_id"] == "inv-2")
+    assert dc.restore("proj_hist", "s1", repo, checkpoint_id=c2["id"])["status"] == "ok"
+    assert [c["invocation_id"] for c in dc.list_checkpoints("proj_hist", "s1")] == ["inv-1"]
+    # Files created in the undone turns are gone; the earlier one stays.
+    assert Path(repo, "a.txt").exists()
+    assert not Path(repo, "b.txt").exists() and not Path(repo, "c.txt").exists()
+    print("OK test_rewind_drops_rewound_checkpoints_from_history")
+
+
 def main() -> None:
     test_snapshot_once_per_turn()
     test_new_turn_snapshots_again()
     test_no_file_change_turn_gets_its_own_checkpoint()
+    test_rewind_drops_rewound_checkpoints_from_history()
     test_no_snapshot_in_web_mode()
     test_no_snapshot_for_scratch()
     test_disabled_by_env()

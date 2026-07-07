@@ -269,8 +269,8 @@ def restore(
     invocation_id = target_entry.get("invocation_id")
 
     try:
-        # Capture the pre-restore state so (a) undo is itself reversible and
-        # (b) files created since `target` become tracked → removed by the reset.
+        # Capture the pre-restore state so files created since `target` become
+        # tracked → removed by the reset. (Its log entry is dropped just below.)
         pre = snapshot(project_id, session_id, work_tree, reason="pre-restore")
         reset = _run_git(
             _GIT_CONF + ["reset", "--hard", target],
@@ -280,6 +280,15 @@ def restore(
         )
         if reset.returncode != 0:
             return {"status": "error", "error": reset.stderr.strip()[:300]}
+        # Drop the rewound checkpoints from the history: the target and everything
+        # after it (including the pre-restore snapshot) correspond to turns we just
+        # undid, so the menu shouldn't list them. Repeated undo then steps back turn
+        # by turn, and the history reflects only the surviving conversation.
+        log = _read_log(gd)
+        tid = _entry_id(target_entry)
+        idx = next((i for i, e in enumerate(log) if _entry_id(e) == tid), None)
+        if idx is not None:
+            _write_log(gd, log[:idx])
         # invocation_id lets the caller also roll the conversation back to this turn.
         return {"status": "ok", "restored_to": target, "pre_restore": pre, "invocation_id": invocation_id}
     except subprocess.TimeoutExpired:
