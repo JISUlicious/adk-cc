@@ -85,6 +85,36 @@ export function addDesktopSkillFromDir(
   })
 }
 
+// ---- working directories (persistent granted dirs, per project) ----
+// Directories the desktop agent may read/write in besides the bound project
+// (Claude Code's additionalDirectories). Always project-scoped; folded into the
+// sandbox scope for every session of the project.
+export interface WorkingDirs {
+  project_root: string | null
+  dirs: string[]
+}
+export function listWorkingDirs(projectId: string): Promise<WorkingDirs> {
+  return apiFetch(`/desktop/working-dirs?${qs("project", projectId)}`)
+}
+export function addWorkingDir(
+  path: string,
+  projectId: string,
+): Promise<{ status: string; dirs: string[] }> {
+  return apiFetch(`/desktop/working-dirs?${qs("project", projectId)}`, {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  })
+}
+export function removeWorkingDir(
+  path: string,
+  projectId: string,
+): Promise<{ status: string; dirs: string[] }> {
+  return apiFetch(`/desktop/working-dirs?${qs("project", projectId)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ path }),
+  })
+}
+
 // ---- model endpoints (global only) ----
 export interface DesktopModel {
   name: string

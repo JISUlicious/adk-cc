@@ -10,6 +10,7 @@ import {
   listDesktopSecrets, setDesktopSecret, deleteDesktopSecret,
   listDesktopMcp, setDesktopMcp, deleteDesktopMcp, type DesktopMcpServer,
   listDesktopSkills, uploadDesktopSkill, deleteDesktopSkill, addDesktopSkillFromDir,
+  listWorkingDirs, addWorkingDir, removeWorkingDir,
 } from "@/shared/api/desktop-settings"
 
 function errMsg(e: unknown): string {
@@ -231,6 +232,91 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
             onChange={(e) => setPathInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") void submitPath(); else if (e.key === "Escape") setPathPrompt(false) }}
             placeholder="/absolute/path/to/skill-folder"
+            className="h-8 flex-1 font-mono text-xs"
+          />
+          <Button size="sm" variant="outline" onClick={submitPath}>Add</Button>
+        </div>
+      )}
+      {err && <p className="text-xs text-destructive">{err}</p>}
+    </div>
+  )
+}
+
+// ---- Working directories (per project; persistent granted scope) ----
+export function WorkingDirsScope({ scope, projectId }: { scope: Scope; projectId?: string }) {
+  const [projectRoot, setProjectRoot] = useState<string | null>(null)
+  const [dirs, setDirs] = useState<string[]>([])
+  const [err, setErr] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [pathPrompt, setPathPrompt] = useState(false)
+  const [pathInput, setPathInput] = useState("")
+  const reload = useCallback(() => {
+    if (scope !== "project" || !projectId) return
+    listWorkingDirs(projectId)
+      .then((r) => { setProjectRoot(r.project_root); setDirs(r.dirs) })
+      .catch((e) => setErr(errMsg(e)))
+  }, [scope, projectId])
+  useEffect(reload, [reload])
+
+  // Working directories are per-project only — nothing to show at global scope.
+  if (scope !== "project" || !projectId) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Working directories are per-project — open a project below to grant one.
+      </p>
+    )
+  }
+
+  async function addDir(path: string) {
+    setErr(null); setBusy(true)
+    try { await addWorkingDir(path, projectId!); reload() }
+    catch (e) { setErr(errMsg(e)) } finally { setBusy(false) }
+  }
+  async function onAddFolder() {
+    setErr(null)
+    try {
+      const picked = await pickDirectory()      // native folder picker (Tauri)
+      if (picked) await addDir(picked)
+      else { setPathInput(""); setPathPrompt((v) => !v) }  // no IPC → typed path
+    } catch (e) { setErr(errMsg(e)) }
+  }
+  async function submitPath() {
+    const p = pathInput.trim()
+    setPathPrompt(false)
+    if (p) await addDir(p)
+  }
+  async function del(path: string) {
+    setErr(null)
+    try { await removeWorkingDir(path, projectId!); reload() } catch (e) { setErr(errMsg(e)) }
+  }
+  return (
+    <div className="space-y-1.5">
+      {projectRoot && (
+        <div className="flex items-center gap-2 text-sm">
+          <span className="font-mono text-muted-foreground">{projectRoot}</span>
+          <span className="ml-auto text-xs text-muted-foreground">project (always)</span>
+        </div>
+      )}
+      {dirs.length === 0 && <p className="text-xs text-muted-foreground">No extra directories granted.</p>}
+      {dirs.map((d) => (
+        <div key={d} className="flex items-center gap-2 text-sm">
+          <span className="font-mono">{d}</span>
+          <button onClick={() => del(d)} className="ml-auto text-muted-foreground hover:text-destructive" title="Revoke"><Trash2 className="h-3.5 w-3.5" /></button>
+        </div>
+      ))}
+      <div className="pt-1">
+        <Button size="sm" variant="outline" disabled={busy} onClick={onAddFolder} title="Grant a directory outside the project">
+          <FolderPlus className="h-3.5 w-3.5" /> {busy ? "Adding…" : "Add directory"}
+        </Button>
+      </div>
+      {pathPrompt && (
+        <div className="flex gap-1">
+          <Input
+            autoFocus
+            value={pathInput}
+            onChange={(e) => setPathInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") void submitPath(); else if (e.key === "Escape") setPathPrompt(false) }}
+            placeholder="/absolute/path/to/directory"
             className="h-8 flex-1 font-mono text-xs"
           />
           <Button size="sm" variant="outline" onClick={submitPath}>Add</Button>

@@ -190,15 +190,16 @@ def allow_once_always_deny_prompt(
     so an operator faced with three pending `write_file` confirmations
     can tell which file each one is gating.
 
-    Pass `allow_always_preview` (e.g. `"pip install *"`) to make the
-    Allow always description show the broadened pattern explicitly —
-    the operator sees the exact rule scope at click time, not a vague
-    "this exact operation" claim that no longer matches the storage
-    behavior since adk-cc started broadening run_bash commands.
+    Pass `allow_always_preview` (e.g. `"pip install *"` for a command, or
+    `"/path/to/project/*"` for a file tool) to make the Allow always
+    description show the broadened pattern explicitly — the operator sees
+    the exact rule scope at click time, not a vague "this exact operation"
+    claim that no longer matches the storage behavior since adk-cc started
+    broadening run_bash commands and workspace-anchoring path tools.
     """
     always_desc = (
-        f"Allow `{allow_always_preview}` (this command + any args) "
-        "for the rest of the session."
+        f"Allow `{allow_always_preview}` for the rest of the session "
+        "(covers similar calls, not just this exact one)."
         if allow_always_preview
         else "Run, and stop asking about this exact operation for the rest of the session."
     )
@@ -231,4 +232,67 @@ def allow_once_always_deny_prompt(
         # one careless click away from a denial. A future designated
         # admin UI is expected to set `with_persist_toggle=True` for
         # its own deliberate-promotion flow.
+    )
+
+
+def grant_scope_prompt(
+    tool_name: str,
+    resolved_path: str,
+    parent_dir: str,
+    *,
+    allow_folder: bool = True,
+) -> ConfirmPrompt:
+    """Scope-expansion prompt: a desktop path tool is targeting a path OUTSIDE
+    the bound project (and outside any already-granted directory).
+
+    Distinct `chose_id`s from the destructive gate so the plugin can tell the two
+    HITL flows apart on resume (`grant_folder` / `grant_once` / `grant_deny`):
+
+      - `grant_folder` → widen scope to `parent_dir` for the session (+ a
+        `<dir>/*` allow rule so writes there don't re-prompt). Suppressed for
+        protected paths (`allow_folder=False`) so a single sensitive file can't
+        drag its whole parent (e.g. `$HOME`) into scope.
+      - `grant_once` → allow just this one operation on `resolved_path`.
+      - `grant_deny` → cancel.
+
+    `with_persist_toggle=allow_folder` surfaces an optional "remember across
+    sessions" box that promotes a folder grant to the persistent "Working
+    directories" set (`user:` scope), mirroring the destructive gate's
+    session-vs-user split.
+    """
+    options = []
+    if allow_folder:
+        options.append(
+            ConfirmOption(
+                id="grant_folder",
+                label="Allow this folder",
+                description=(
+                    f"Grant read/write access to `{parent_dir}` for this session. "
+                    "It is OUTSIDE the project — not covered by Undo/checkpoints."
+                ),
+            )
+        )
+    options.append(
+        ConfirmOption(
+            id="grant_once",
+            label="Allow once",
+            description="Allow just this one operation. Future access will ask again.",
+        )
+    )
+    options.append(
+        ConfirmOption(
+            id="grant_deny",
+            label="Deny",
+            description="Cancel; the model will see the denial and adjust.",
+        )
+    )
+    return ConfirmPrompt(
+        style="single_select",
+        title=f"Allow {tool_name} outside the project?",
+        detail=(
+            f"{tool_name} targets `{resolved_path}`, which is outside the bound "
+            "project and any granted directory. Grant access?"
+        ),
+        options=options,
+        with_persist_toggle=allow_folder,
     )

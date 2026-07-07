@@ -6,8 +6,8 @@ Covers:
   - Compound commands split on `&&`, `||`, `|`, `;`.
   - Quote-aware bailout (subshells, redirects, command substitution
     → literal-only).
-  - Path tools stay literal in this PR (workspace-scope is a
-    follow-up).
+  - Path tools are workspace-anchored: in-workspace targets broaden
+    to `<root>/*`; out-of-workspace / no-root targets stay literal.
   - Unknown tools collapse to a single empty-string entry (caller
     translates to `rule_content=None`, matches any args).
   - End-to-end: a stored broadened rule fnmatches the args-changed
@@ -216,13 +216,13 @@ def test_unbalanced_quotes_bail_to_literal() -> None:
     print("OK test_unbalanced_quotes_bail_to_literal")
 
 
-# --- Path tools (literal in this PR) -------------------------------
+# --- Path tools (workspace-anchored) -------------------------------
 
 
-def test_path_tools_stay_literal() -> None:
-    """`read_file`/`write_file`/`edit_file`/`grep`/`glob_files` return
-    only the literal path. Workspace-anchored broadening is a
-    separate follow-up PR; until then, paths are exact-match."""
+def test_path_tools_literal_without_workspace() -> None:
+    """With no workspace root there's nothing safe to anchor to, so
+    `read_file`/`write_file`/`edit_file`/`grep`/`glob_files` return
+    only the literal path (exact match)."""
     for tool, key in (
         ("read_file", "path"),
         ("write_file", "path"),
@@ -232,7 +232,69 @@ def test_path_tools_stay_literal() -> None:
     ):
         out = compute_allow_always_rule_contents(tool, {key: "/workspace/foo.py"})
         assert out == ["/workspace/foo.py"], (tool, out)
-    print("OK test_path_tools_stay_literal")
+    print("OK test_path_tools_literal_without_workspace")
+
+
+def test_path_tools_workspace_anchored() -> None:
+    """A path inside the workspace broadens to literal + `<root>/*`, so
+    one "Allow always" covers the whole project. Works for a relative
+    arg (anchored under the root) and an absolute in-root arg."""
+    root = os.path.realpath("/tmp")  # macOS: /tmp -> /private/tmp
+    # relative arg
+    out = compute_allow_always_rule_contents(
+        "write_file", {"path": "src/a.ts"}, workspace_root=root
+    )
+    assert out == ["src/a.ts", f"{root}/*"], out
+    # absolute in-root arg — literal is the raw path, plus the anchor
+    out = compute_allow_always_rule_contents(
+        "edit_file", {"path": f"{root}/pkg/b.ts"}, workspace_root=root
+    )
+    assert out == [f"{root}/pkg/b.ts", f"{root}/*"], out
+    print("OK test_path_tools_workspace_anchored")
+
+
+def test_path_tools_outside_workspace_stay_literal() -> None:
+    """A target that resolves OUTSIDE the workspace is never broadened —
+    no `<root>/*` rule that would over-grant. Both an unrelated absolute
+    path and an escaping relative path stay literal."""
+    root = os.path.realpath("/tmp")
+    out = compute_allow_always_rule_contents(
+        "write_file", {"path": "/etc/passwd"}, workspace_root=root
+    )
+    assert out == ["/etc/passwd"], out
+    out = compute_allow_always_rule_contents(
+        "write_file", {"path": "../escape.ts"}, workspace_root=root
+    )
+    assert out == ["../escape.ts"], out
+    print("OK test_path_tools_outside_workspace_stay_literal")
+
+
+def test_workspace_anchored_rule_matches_relative_and_absolute() -> None:
+    """End-to-end: the stored `<root>/*` rule matches later calls whether
+    the model passes a relative or absolute path, but not paths outside
+    the project — the whole point of the feature."""
+    from adk_cc.permissions.rules import (
+        PermissionRule,
+        RuleBehavior,
+        RuleSource,
+        rule_matches,
+    )
+
+    root = os.path.realpath("/tmp")
+    out = compute_allow_always_rule_contents(
+        "write_file", {"path": "src/a.ts"}, workspace_root=root
+    )
+    rule = PermissionRule(
+        source=RuleSource.SESSION,
+        behavior=RuleBehavior.ALLOW,
+        tool_name="write_file",
+        rule_content=out[-1],  # the `<root>/*` anchor
+    )
+    assert rule_matches(rule, "write_file", {"path": "src/b.ts"}, root)      # relative
+    assert rule_matches(rule, "write_file", {"path": f"{root}/x/y.ts"}, root)  # absolute
+    assert not rule_matches(rule, "write_file", {"path": "../out.ts"}, root)   # escapes
+    assert not rule_matches(rule, "write_file", {"path": "/other/z.ts"}, root) # elsewhere
+    print("OK test_workspace_anchored_rule_matches_relative_and_absolute")
 
 
 # --- Edge cases ----------------------------------------------------
@@ -454,7 +516,10 @@ def main() -> None:
     test_redirect_bails_to_literal()
     test_brace_or_paren_bails_to_literal()
     test_unbalanced_quotes_bail_to_literal()
-    test_path_tools_stay_literal()
+    test_path_tools_literal_without_workspace()
+    test_path_tools_workspace_anchored()
+    test_path_tools_outside_workspace_stay_literal()
+    test_workspace_anchored_rule_matches_relative_and_absolute()
     test_unknown_tool_returns_empty_string()
     test_empty_command_returns_empty()
     test_non_string_command_returns_empty()

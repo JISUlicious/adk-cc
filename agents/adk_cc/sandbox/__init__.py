@@ -30,7 +30,17 @@ from .config import (
     NetworkConfig,
     SandboxViolation,
 )
-from .workspace import WorkspaceRoot, default_workspace, get_workspace, set_workspace
+from .workspace import (
+    WorkspaceRoot,
+    add_granted_root,
+    clear_grant_once,
+    default_workspace,
+    get_workspace,
+    grant_once,
+    list_granted_roots,
+    remove_granted_root,
+    set_workspace,
+)
 
 # `temp:` prefix tells ADK's session service to skip this key in state-delta
 # extraction (`_session_util.extract_state_delta`). The backend object is a
@@ -174,6 +184,11 @@ __all__ = [
     "default_workspace",
     "get_workspace",
     "set_workspace",
+    "add_granted_root",
+    "remove_granted_root",
+    "list_granted_roots",
+    "grant_once",
+    "clear_grant_once",
     "make_default_backend",
     "get_backend",
     "set_backend",

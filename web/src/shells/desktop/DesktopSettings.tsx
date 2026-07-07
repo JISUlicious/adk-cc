@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import { Palette, KeyRound, Server, Boxes, Cpu, Check, Trash2, Plus } from "lucide-react"
+import { Palette, KeyRound, Server, Boxes, Cpu, Check, Trash2, Plus, FolderTree } from "lucide-react"
 import { SettingsFrame, type SettingsTab } from "@/shared/settings/SettingsFrame"
 import { ThemeSection } from "@/shared/settings/sections"
 import { Button } from "@/shared/components/ui/button"
@@ -8,7 +8,7 @@ import { ApiError } from "@/shared/api/client"
 import {
   listDesktopModels, setDesktopModel, activateDesktopModel, deleteDesktopModel, type DesktopModel,
 } from "@/shared/api/desktop-settings"
-import { LayeredTab, SecretsScope, McpScope, SkillsScope } from "./DesktopSettingsSections"
+import { LayeredTab, SecretsScope, McpScope, SkillsScope, WorkingDirsScope } from "./DesktopSettingsSections"
 
 function errMsg(e: unknown): string {
   if (e instanceof ApiError) return (e.body as { detail?: string } | undefined)?.detail || e.message
@@ -83,6 +83,10 @@ export function DesktopSettings({ open, onClose }: { open: boolean; onClose: () 
     {
       id: "skills", label: "Skills", icon: Boxes,
       render: () => <LayeredTab blurb="Skill bundles (a folder or .zip with a SKILL.md / manifest) the agent can load." render={(s, p) => <SkillsScope scope={s} projectId={p} />} />,
+    },
+    {
+      id: "working-dirs", label: "Working dirs", icon: FolderTree,
+      render: () => <LayeredTab blurb="Directories outside the project the agent may read/write in (like Claude Code's added directories). Secret paths stay protected." render={(s, p) => <WorkingDirsScope scope={s} projectId={p} />} />,
     },
     { id: "models", label: "Models", icon: Cpu, render: () => <ModelsSection /> },
   ]

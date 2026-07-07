@@ -1,6 +1,7 @@
 import { useMemo } from "react"
 import {
   ClipboardList,
+  FolderPlus,
   HelpCircle,
   LogOut,
   Network,
@@ -33,6 +34,7 @@ export type SlashAction =
   | "exit-plan"
   | "rewind"
   | "wiki"
+  | "add-dir"
 
 export interface SlashCommand {
   /** What the user types after `/`. Match is prefix-insensitive. */
@@ -71,6 +73,13 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "Open the knowledge graph — wiki pages + memory",
     icon: Network,
     kind: { type: "action", action: "wiki" },
+  },
+  {
+    name: "add-dir",
+    description: "Grant the agent a working directory outside the project",
+    icon: FolderPlus,
+    kind: { type: "action", action: "add-dir" },
+    desktopOnly: true,
   },
   {
     name: "plan",

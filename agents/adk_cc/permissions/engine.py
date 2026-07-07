@@ -37,7 +37,15 @@ from pydantic import BaseModel
 
 from ..tools.base import AdkCcTool
 from .modes import PermissionMode
-from .rules import PermissionRule, RuleBehavior, rule_matches
+from .protected import classify_path
+from .rules import (
+    _PATH_TOOLS,
+    _RULE_KEY_EXTRACTORS,
+    PermissionRule,
+    RuleBehavior,
+    _resolve_against_workspace,
+    rule_matches,
+)
 from .settings import SettingsHierarchy
 
 # NOTE: `..plugins.audit.emit_permission_decision` is imported lazily
@@ -62,9 +70,12 @@ def _first_match(
     behavior: RuleBehavior,
     tool_name: str,
     args: dict,
+    workspace_root: Optional[str] = None,
 ) -> Optional[PermissionRule]:
     for r in rules:
-        if r.behavior is behavior and rule_matches(r, tool_name, args):
+        if r.behavior is behavior and rule_matches(
+            r, tool_name, args, workspace_root
+        ):
             return r
     return None
 
@@ -75,8 +86,12 @@ def decide(
     args: dict,
     mode: PermissionMode,
     settings: SettingsHierarchy,
+    workspace_root: Optional[str] = None,
 ) -> PermissionDecision:
-    decision = _decide_impl(tool=tool, args=args, mode=mode, settings=settings)
+    decision = _decide_impl(
+        tool=tool, args=args, mode=mode, settings=settings,
+        workspace_root=workspace_root,
+    )
     matched_rule_dump = (
         decision.matched_rule.model_dump() if decision.matched_rule else None
     )
@@ -147,17 +162,43 @@ def _decide_impl(
     args: dict,
     mode: PermissionMode,
     settings: SettingsHierarchy,
+    workspace_root: Optional[str] = None,
 ) -> PermissionDecision:
     rules = settings.all_rules()
     tool_name = tool.meta.name
 
+    # Protected-path floor (desktop only; classify_path no-ops elsewhere): the
+    # resolved target of a path tool may be secret material (→ hard deny, wins
+    # over bypass + grants) or shell/tool config (→ always ask, never
+    # auto-approved by a grant/allow rule). Computed once, consulted in Steps 1b
+    # and 2c below.
+    protected: Optional[str] = None
+    if tool_name in _PATH_TOOLS:
+        extractor = _RULE_KEY_EXTRACTORS.get(tool_name)
+        resolved = (
+            _resolve_against_workspace(extractor(args), workspace_root)
+            if extractor
+            else None
+        )
+        if resolved:
+            protected = classify_path(resolved)
+
     # Step 1: deny rules always win.
-    deny = _first_match(rules, RuleBehavior.DENY, tool_name, args)
+    deny = _first_match(rules, RuleBehavior.DENY, tool_name, args, workspace_root)
     if deny is not None:
         return PermissionDecision(
             behavior="deny",
             matched_rule=deny,
             reason=f"denied by {deny.source.value} rule",
+        )
+
+    # Step 1b: protected secret/credential material — hard deny, before the
+    # bypass short-circuit, so even bypassPermissions cannot read it. Upholds
+    # the rule that secrets never enter model input/output.
+    if protected == "deny":
+        return PermissionDecision(
+            behavior="deny",
+            reason="protected path (secret/credential material) is never accessible",
         )
 
     # Step 2a: PLAN mode blocks every non-read-only tool — EXCEPT run_bash for a
@@ -180,17 +221,33 @@ def _decide_impl(
         )
 
     # Step 2b: BYPASS skips the rest (the only gate is the deny check above).
+    # Protected "ask" paths yield to bypass here, matching Claude Code (protected
+    # paths always prompt EXCEPT in bypassPermissions).
     if mode is PermissionMode.BYPASS_PERMISSIONS:
         return PermissionDecision(
             behavior="allow", reason="bypassPermissions mode"
         )
 
+    # Step 2c: protected shell/tool config — always ask, never auto-approved.
+    # After bypass (so bypass still skips), before the allow short-circuit (so a
+    # grant / Allow-always rule cannot silently cover it).
+    if protected == "ask":
+        if mode is PermissionMode.DONT_ASK:
+            return PermissionDecision(
+                behavior="deny",
+                reason="protected path blocked in dontAsk mode",
+            )
+        return PermissionDecision(
+            behavior="ask",
+            reason="protected path requires confirmation (never auto-approved)",
+        )
+
     # Pre-compute allow match — used to short-circuit the ask path and the
     # destructive-tool fallback.
-    allow = _first_match(rules, RuleBehavior.ALLOW, tool_name, args)
+    allow = _first_match(rules, RuleBehavior.ALLOW, tool_name, args, workspace_root)
 
     # Step 3: ask rules (ALLOW takes precedence if present).
-    ask = _first_match(rules, RuleBehavior.ASK, tool_name, args)
+    ask = _first_match(rules, RuleBehavior.ASK, tool_name, args, workspace_root)
     if ask is not None and allow is None:
         if mode is PermissionMode.DONT_ASK:
             return PermissionDecision(

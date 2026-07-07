@@ -29,6 +29,8 @@ import { fetchContextLimits, type ContextLimits } from "@/shared/api/context"
 import { SettingsModal } from "@/shared/components/SettingsModal"
 import { listSecrets } from "@/shared/api/account"
 import { IS_DESKTOP } from "@/shared/lib/platform"
+import { pickDirectory } from "@/shared/lib/tauri"
+import { addWorkingDir } from "@/shared/api/desktop-settings"
 import { type SlashAction } from "@/shared/components/SlashCommandMenu"
 import { RewindDialog } from "@/shared/components/RewindDialog"
 import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/shared/lib/theme"
@@ -80,6 +82,9 @@ export function ChatPage({
   const [isStreaming, setIsStreaming] = useState(false)
   const [refreshTick, setRefreshTick] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  // Neutral transient confirmation channel (e.g. /add-dir), distinct from the
+  // destructive-styled `error` banner.
+  const [notice, setNotice] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [rewindOpen, setRewindOpen] = useState(false)
   // Count of required skill/MCP secrets the user hasn't set → badge on the
@@ -306,7 +311,7 @@ export function ChatPage({
             "Available slash commands: /help, /clear (new session), " +
               "/plan, /exit-plan, /theme, /settings, /signout, " +
               "/wiki (open the knowledge graph — wiki pages + memory)" +
-              (IS_DESKTOP ? ", /rewind (rewind to a checkpoint — roll back files + conversation)" : "") +
+              (IS_DESKTOP ? ", /rewind (rewind to a checkpoint — roll back files + conversation), /add-dir (grant a working directory outside the project)" : "") +
               ". These are UI shortcuts on the client; the agent doesn't see them.",
           )
         }
@@ -335,6 +340,23 @@ export function ChatPage({
             ? `/knowledge?user=${encodeURIComponent(userId)}`
             : "/knowledge",
         )
+        return
+      case "add-dir":
+        // Desktop: grant the agent a persistent working directory outside the
+        // project (native folder picker → POST). The dir is folded into the
+        // sandbox scope for this project's sessions.
+        if (!IS_DESKTOP || !userId) return
+        void (async () => {
+          const path = await pickDirectory()
+          if (!path) return // picker cancelled
+          try {
+            await addWorkingDir(path, userId)
+            setNotice(`✓ Working directory added: ${path}`)
+            setTimeout(() => setNotice(null), 6000)
+          } catch (e) {
+            setError(`Failed to add working directory: ${(e as Error).message}`)
+          }
+        })()
         return
       case "rewind":
         // Desktop-only: open the multi-step picker to rewind to any checkpoint —
@@ -453,6 +475,11 @@ export function ChatPage({
         {error && (
           <div className="border-b bg-destructive/10 px-6 py-2 text-sm text-destructive">
             {error}
+          </div>
+        )}
+        {notice && (
+          <div className="border-b bg-brand-tint px-6 py-2 text-sm text-muted-foreground">
+            {notice}
           </div>
         )}
         <div className="adk-thread relative min-h-0 flex-1">

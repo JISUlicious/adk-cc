@@ -21,7 +21,9 @@ Example rules:
 from __future__ import annotations
 
 import fnmatch
+import os
 from enum import Enum
+from pathlib import Path
 from typing import Callable, Optional
 
 from pydantic import BaseModel
@@ -59,9 +61,48 @@ _RULE_KEY_EXTRACTORS: dict[str, Callable[[dict], str]] = {
     "run_bash":    lambda args: args.get("command", ""),
 }
 
+# Tools whose rule key is a filesystem path — these are matched
+# workspace-aware (see `rule_matches`): the raw key OR its
+# workspace-resolved absolute form. That lets a `<root>/*` rule (written
+# by workspace-anchored "Allow always") match whether the model passed a
+# relative (`src/a.ts`) or absolute (`/abs/root/src/a.ts`) path. run_bash
+# is excluded — its key is a command, not a path.
+_PATH_TOOLS = frozenset(_RULE_KEY_EXTRACTORS) - {"run_bash"}
 
-def rule_matches(rule: PermissionRule, tool_name: str, args: dict) -> bool:
-    """True if the rule applies to this (tool_name, args) pair."""
+
+def _resolve_against_workspace(raw: str, workspace_root: Optional[str]) -> Optional[str]:
+    """Canonical absolute form of a path arg: absolute paths resolve as-is,
+    relatives anchor under `workspace_root` (mirroring `tools/_fs.resolve`).
+    Returns None if `raw` is empty or resolution raises — the caller then
+    falls back to raw-only matching. Uses realpath (no existence required)
+    so it lines up with the already-canonical `WorkspaceRoot.abs_path`."""
+    if not raw:
+        return None
+    try:
+        p = Path(raw).expanduser()
+        if p.is_absolute():
+            return os.path.realpath(str(p))
+        if workspace_root:
+            return os.path.realpath(str(Path(workspace_root) / p))
+        return os.path.realpath(str(p))
+    except Exception:
+        return None
+
+
+def rule_matches(
+    rule: PermissionRule,
+    tool_name: str,
+    args: dict,
+    workspace_root: Optional[str] = None,
+) -> bool:
+    """True if the rule applies to this (tool_name, args) pair.
+
+    For path tools the match is workspace-aware: the raw key OR its
+    workspace-resolved absolute form is tested against `rule_content`.
+    This is purely additive — it never drops a match the raw key already
+    produced, so existing relative/suffix patterns keep working — but it
+    lets a workspace-anchored `<root>/*` rule match a relative path arg.
+    """
     if rule.tool_name != "*" and rule.tool_name != tool_name:
         return False
     if rule.rule_content is None:
@@ -70,4 +111,11 @@ def rule_matches(rule: PermissionRule, tool_name: str, args: dict) -> bool:
     if extractor is None:
         # Unknown tool — only "*" rules with no content match it.
         return False
-    return fnmatch.fnmatch(extractor(args), rule.rule_content)
+    key = extractor(args)
+    if fnmatch.fnmatch(key, rule.rule_content):
+        return True
+    if tool_name in _PATH_TOOLS:
+        resolved = _resolve_against_workspace(key, workspace_root)
+        if resolved is not None and fnmatch.fnmatch(resolved, rule.rule_content):
+            return True
+    return False

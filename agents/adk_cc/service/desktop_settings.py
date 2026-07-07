@@ -315,6 +315,62 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
                 raise HTTPException(status_code=404, detail=str(e))
             return {"status": "ok", "active": name}
 
+    # ------------------------------------------------- working directories
+    # Persistent per-project "granted" directories (Claude Code's
+    # additionalDirectories). Stored as `adk_cc_extra_roots` in the project's
+    # shared user-state, which `get_workspace` folds into the sandbox scope for
+    # every session of that project. Added via `/add-dir` or the Settings UI.
+    def _fss():  # noqa: ANN202
+        from .. import deployment
+        from .file_session_service import FileSessionService
+
+        return FileSessionService(deployment.desktop_data_dir())
+
+    def _require_project(request: Request) -> str:
+        uid = _scope_user(request)
+        if not uid:
+            raise HTTPException(
+                status_code=400,
+                detail="working directories are per-project (scope=project&project_id=…)",
+            )
+        return uid
+
+    @app.get("/desktop/working-dirs", include_in_schema=False)
+    async def list_working_dirs(request: Request):  # noqa: ANN202
+        pid = _require_project(request)
+        from .desktop_routes import project_repo_path
+
+        roots = _fss().get_user_value(pid, "adk_cc_extra_roots", []) or []
+        return {"project_root": project_repo_path(pid), "dirs": list(roots)}
+
+    @app.post("/desktop/working-dirs", include_in_schema=False)
+    async def add_working_dir(request: Request):  # noqa: ANN202
+        pid = _require_project(request)
+        body = await request.json() or {}
+        raw = str(body.get("path") or "").strip()
+        if not raw:
+            raise HTTPException(status_code=400, detail="path required")
+        p = os.path.realpath(os.path.expanduser(raw))
+        if not os.path.isdir(p):
+            raise HTTPException(status_code=400, detail=f"not a directory: {raw}")
+        fss = _fss()
+        cur = list(fss.get_user_value(pid, "adk_cc_extra_roots", []) or [])
+        if p not in cur:
+            cur.append(p)
+            fss.set_user_value(pid, "adk_cc_extra_roots", cur)
+        return {"status": "ok", "dirs": cur}
+
+    @app.delete("/desktop/working-dirs", include_in_schema=False)
+    async def remove_working_dir(request: Request):  # noqa: ANN202
+        pid = _require_project(request)
+        body = await request.json() or {}
+        raw = str(body.get("path") or "").strip()
+        p = os.path.realpath(os.path.expanduser(raw)) if raw else raw
+        fss = _fss()
+        cur = [r for r in (fss.get_user_value(pid, "adk_cc_extra_roots", []) or []) if r != p]
+        fss.set_user_value(pid, "adk_cc_extra_roots", cur)
+        return {"status": "deleted", "dirs": cur}
+
     _log.info(
         "desktop settings routes mounted (secrets=%s mcp=%s skills=%s models=%s)",
         creds is not None, mcp_reg is not None, bool(skill_root), models is not None,

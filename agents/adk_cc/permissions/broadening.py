@@ -41,28 +41,38 @@ subshell-bailout. But `echo "$(date)"` (parameter expansion inside
 double quotes — which the shell DOES expand) still bails out, because
 double-quoted `$()` is unsafe to broaden naively.
 
-For path-based tools (`read_file`, `write_file`, etc.) we currently
-return the literal path only — workspace-anchored broadening is a
-separate design problem tracked for a follow-up PR.
+For path-based tools (`read_file`, `write_file`, `edit_file`, …) the
+broadened pattern is **workspace-anchored**: when the target resolves
+inside the session's workspace root, "Allow always" stores `<root>/*`
+so one approval covers the whole bound project (in desktop mode the
+workspace root IS the project). fnmatch's `*` spans `/`, so a single
+`<root>/*` pattern matches the entire tree, and `rules.rule_matches`
+resolves relative path args against the workspace before matching so a
+later `edit_file("src/b.ts")` is covered too. Targets OUTSIDE the
+workspace (or when no workspace root is known) stay literal — there's
+nothing safe to anchor to.
 
 Output
 ------
 
 `compute_allow_always_rule_contents` returns a list of strings to
 store as separate `PermissionRule.rule_content` values. For a
-broadenable `run_bash` command the list has TWO entries:
+broadenable `run_bash` command, or a path tool inside the workspace,
+the list has TWO entries:
 
-  1. The literal command (catches the exact re-run case — fnmatch's
+  1. The literal key (catches the exact re-run case — fnmatch's
      trailing-space-then-`*` pattern doesn't match the no-args form).
-  2. The broadened pattern (covers args-only variations).
+  2. The broadened pattern (`<binary> <subcmd> *` / `<root>/*`).
 
-For path tools and for malformed commands the list has ONE entry
-(literal only).
+For out-of-workspace path tools and for malformed commands the list
+has ONE entry (literal only).
 """
 
 from __future__ import annotations
 
+import os
 import shlex
+from pathlib import Path
 from typing import Optional
 
 # Per-binary prefix-token count for `run_bash` broadening. Easy to
@@ -173,12 +183,14 @@ _DANGER_UNQUOTED = frozenset("()$`<>{}")
 _DANGER_DOUBLE_QUOTED = frozenset("$`")
 
 
-def compute_allow_always_rule_contents(tool_name: str, args: dict) -> list[str]:
+def compute_allow_always_rule_contents(
+    tool_name: str, args: dict, workspace_root: Optional[str] = None
+) -> list[str]:
     """Return rule_content strings to store for an Allow always click.
 
-    Returns a list — usually 2 entries for `run_bash` (literal +
-    broadened), 1 entry for path tools or for malformed `run_bash`
-    commands.
+    Returns a list — 2 entries when broadening applies (`run_bash`, or a
+    path tool whose target resolves inside `workspace_root`), 1 entry
+    otherwise (out-of-workspace path, malformed command, unknown tool).
 
     Always returns at least one entry (the literal extracted key),
     so callers can write at least one rule per click without
@@ -202,15 +214,40 @@ def compute_allow_always_rule_contents(tool_name: str, args: dict) -> list[str]:
     if not literal:
         return [""]
 
-    # Path tools stay literal in this PR. Workspace-anchored
-    # broadening is its own design (Phase 2 PR).
-    if tool_name != "run_bash":
-        return [literal]
+    if tool_name == "run_bash":
+        broadened = _broaden_run_bash(literal)
+        if broadened is None or broadened == literal:
+            return [literal]
+        return [literal, broadened]
 
-    broadened = _broaden_run_bash(literal)
-    if broadened is None or broadened == literal:
-        return [literal]
-    return [literal, broadened]
+    # Path tools: anchor to the workspace root so one click covers the
+    # whole bound project. Only when the target actually resolves inside
+    # the workspace — otherwise there's nothing safe to broaden to.
+    anchored = _workspace_anchor(literal, workspace_root)
+    if anchored is not None and anchored != literal:
+        return [literal, anchored]
+    return [literal]
+
+
+def _workspace_anchor(raw_path: str, workspace_root: Optional[str]) -> Optional[str]:
+    """`<workspace_root>/*` when `raw_path` resolves inside the workspace,
+    else None. Relative paths anchor under the root (mirroring
+    `tools/_fs.resolve`); absolute paths must fall under it. Uses realpath
+    (no existence required) to line up with the canonical
+    `WorkspaceRoot.abs_path`."""
+    if not workspace_root:
+        return None
+    try:
+        root = os.path.realpath(workspace_root)
+        p = Path(raw_path).expanduser()
+        target = os.path.realpath(
+            str(p) if p.is_absolute() else str(Path(root) / p)
+        )
+        if target == root or target.startswith(root + os.sep):
+            return f"{root}/*"
+    except Exception:
+        return None
+    return None
 
 
 def _extractors_snapshot() -> dict:

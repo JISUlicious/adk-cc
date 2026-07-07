@@ -133,6 +133,17 @@ class FileSessionService(BaseSessionService):
         cur.update(delta)
         self._write_json(self._user_state_file(user_id), cur)
 
+    # --- shared user-state accessors (used by the desktop working-dirs API) ---
+
+    def get_user_value(self, user_id: str, key: str, default: Any = None) -> Any:
+        """Read a shared `user:`-scoped value (unprefixed key) for a project.
+        Overlaid onto every future session of that project via `_merge_state_view`."""
+        return self._read_json(self._user_state_file(user_id)).get(key, default)
+
+    def set_user_value(self, user_id: str, key: str, value: Any) -> None:
+        """Write a shared `user:`-scoped value (unprefixed key) for a project."""
+        self._merge_user_state(user_id, {key: value})
+
     def _merge_state_view(self, user_id: str, session: Session) -> Session:
         """Overlay current shared app/user state (prefixed) onto session.state —
         ADK's merged view. Shared values win over any session-historical copy."""

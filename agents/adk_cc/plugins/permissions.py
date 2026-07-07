@@ -36,6 +36,7 @@ Behavior:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional
 
 from google.adk.plugins.base_plugin import BasePlugin
@@ -43,20 +44,31 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
 from ..permissions.broadening import compute_allow_always_rule_contents
-from ..permissions.confirmation import allow_once_always_deny_prompt, extract_subject
+from ..permissions.confirmation import (
+    allow_once_always_deny_prompt,
+    extract_subject,
+    grant_scope_prompt,
+)
 from ..permissions.engine import decide
 from ..permissions.modes import PermissionMode
+from ..permissions.protected import classify_path
 from ..permissions.rules import (
+    _PATH_TOOLS,
     _RULE_KEY_EXTRACTORS,
     PermissionRule,
     RuleBehavior,
     RuleSource,
+    _resolve_against_workspace,
 )
 from ..permissions.settings import SettingsHierarchy
 from ..tools.base import AdkCcTool
 from .audit import emit_confirmation_resume, emit_state_mutation
 
 _log = logging.getLogger(__name__)
+
+# Sentinel: the desktop scope-expansion gate returns this to mean "not
+# applicable — fall through to the normal permission decision".
+_CONTINUE = object()
 
 
 # Session-state keys for runtime-injected ALLOW rules. The first lives
@@ -153,8 +165,23 @@ class PermissionPlugin(BasePlugin):
         # priority-bottom, so operator-declared POLICY/USER/PROJECT
         # rules still win on conflict.
         effective = self._effective_settings(tool_context)
+        # Workspace root anchors path-tool rules: `decide` resolves relative
+        # path args against it when matching, and "Allow always" broadens to
+        # `<root>/*`. In desktop in-place mode this is the bound project root.
+        workspace_root = self._workspace_root(tool_context)
+
+        # Desktop scope-expansion gate: a path tool targeting OUTSIDE the project
+        # ∪ granted directories prompts to grant (Allow folder / once / deny)
+        # instead of hitting the sandbox hard-deny. Handles both HITL calls;
+        # returns _CONTINUE when not applicable (non-desktop, non-path tool,
+        # in-scope, secret material, or a non-scope confirmation).
+        gate = self._scope_gate(tool, tool_args, tool_context)
+        if gate is not _CONTINUE:
+            return gate
+
         decision = decide(
-            tool=tool, args=tool_args, mode=mode, settings=effective
+            tool=tool, args=tool_args, mode=mode, settings=effective,
+            workspace_root=workspace_root,
         )
 
         if decision.behavior == "deny":
@@ -223,6 +250,7 @@ class PermissionPlugin(BasePlugin):
                         tool_args,
                         tool_context,
                         persist_across_sessions=persist,
+                        workspace_root=self._workspace_root(tool_context),
                     )
                     return None  # let the tool run + skip future re-asks
                 if chose_id is None and getattr(confirmation, "confirmed", False):
@@ -250,7 +278,7 @@ class PermissionPlugin(BasePlugin):
                 # broadened entry is what they'd actually be approving
                 # beyond the literal re-run.
                 contents = compute_allow_always_rule_contents(
-                    tool.meta.name, tool_args
+                    tool.meta.name, tool_args, workspace_root=workspace_root
                 )
                 preview = contents[-1] if len(contents) >= 2 else None
                 prompt = allow_once_always_deny_prompt(
@@ -288,6 +316,152 @@ class PermissionPlugin(BasePlugin):
 
         return None
 
+    async def after_tool_callback(
+        self,
+        *,
+        tool: BaseTool,
+        tool_args: dict[str, Any],
+        tool_context: ToolContext,
+        result: dict,
+    ) -> Optional[dict]:
+        """Consume any one-shot filesystem grant so "Allow once" applies to
+        exactly one operation (desktop path tools only)."""
+        if not isinstance(tool, AdkCcTool):
+            return None
+        from .. import deployment
+
+        if deployment.is_desktop() and tool.meta.name in _PATH_TOOLS:
+            from ..sandbox import clear_grant_once
+
+            clear_grant_once(tool_context)
+        return None
+
+    # --- Desktop scope-expansion gate ------------------------------------
+
+    def _resolved_target(
+        self, tool: AdkCcTool, args: dict, tool_context: ToolContext
+    ) -> Optional[str]:
+        """Resolved absolute path of a path tool's target (relative args anchored
+        at the project root), or None."""
+        extractor = _RULE_KEY_EXTRACTORS.get(tool.meta.name)
+        if extractor is None:
+            return None
+        raw = extractor(args)
+        if not raw:
+            return None
+        try:
+            from ..sandbox import get_workspace
+
+            ws = get_workspace(tool_context)
+            return _resolve_against_workspace(raw, ws.abs_path)
+        except Exception:
+            return None
+
+    def _in_scope(self, tool_context: ToolContext, resolved: str) -> bool:
+        """True if `resolved` is inside the project ∪ granted directories (i.e.
+        the sandbox fs guard would allow it)."""
+        try:
+            from ..sandbox import get_workspace
+
+            return get_workspace(tool_context).fs_read_config().allows(resolved)
+        except Exception:
+            return True  # fail open to the normal flow; gate 2 still enforces
+
+    def _scope_gate(
+        self, tool: AdkCcTool, args: dict, tool_context: ToolContext
+    ) -> Any:
+        """Desktop-only scope-expansion for path tools. Returns `_CONTINUE` to
+        fall through to the normal permission decision, or a tool-result dict /
+        None to short-circuit `before_tool_callback`."""
+        from .. import deployment
+
+        if not deployment.is_desktop() or tool.meta.name not in _PATH_TOOLS:
+            return _CONTINUE
+
+        confirmation = getattr(tool_context, "tool_confirmation", None)
+        if confirmation is not None:
+            chose = _read_choice_id(confirmation)
+            if chose == "grant_folder":
+                self._apply_folder_grant(
+                    tool, args, tool_context,
+                    persist=_read_persist_toggle(confirmation),
+                )
+                return None  # let the tool run
+            if chose == "grant_once":
+                resolved = self._resolved_target(tool, args, tool_context)
+                if resolved:
+                    from ..sandbox import grant_once
+
+                    grant_once(tool_context, resolved)
+                return None
+            if chose == "grant_deny":
+                return {
+                    "status": "permission_denied_by_user",
+                    "error": "User declined to grant access outside the project.",
+                    "reason": "User declined the scope-expansion prompt.",
+                }
+            return _CONTINUE  # a normal ask confirmation → let the main flow handle it
+
+        # First invocation.
+        resolved = self._resolved_target(tool, args, tool_context)
+        if resolved is None or self._in_scope(tool_context, resolved):
+            return _CONTINUE
+        prot = classify_path(resolved)
+        if prot == "deny":
+            return _CONTINUE  # secret material — let decide() hard-deny; never grant
+        if not tool_context.function_call_id:
+            return _CONTINUE  # no HITL channel; gate 2 will still deny
+
+        parent = os.path.dirname(resolved)
+        prompt = grant_scope_prompt(
+            tool.meta.name, resolved, parent,
+            allow_folder=(prot != "ask"),  # protected file: no broad folder grant
+        )
+        tool_context.request_confirmation(
+            hint="Access outside the project requires your approval.",
+            payload=prompt.model_dump(),
+        )
+        # See the destructive-gate note: without skip_summarization the runner
+        # re-invokes the LLM before the user answers.
+        tool_context.actions.skip_summarization = True
+        return {
+            "status": "needs_confirmation",
+            "reason": f"{tool.meta.name} targets a path outside the project scope",
+        }
+
+    def _apply_folder_grant(
+        self, tool: AdkCcTool, args: dict, tool_context: ToolContext, *, persist: bool
+    ) -> None:
+        """Grant the target's parent directory (widens the sandbox scope) plus
+        `<dir>/*` ALLOW rules for the destructive path tools, so subsequent
+        writes there don't re-prompt. `persist` → the grant + rules go to `user:`
+        scope (the persistent "Working directories" set)."""
+        resolved = self._resolved_target(tool, args, tool_context)
+        if not resolved:
+            return
+        parent = os.path.dirname(resolved)
+        from ..sandbox import add_granted_root
+
+        add_granted_root(tool_context, parent, persist=persist)
+
+        key = _USER_ALLOW_STATE_KEY if persist else _SESSION_ALLOW_STATE_KEY
+        existing = list(tool_context.state.get(key) or [])
+        for tname in ("write_file", "edit_file"):
+            rule = PermissionRule(
+                source=RuleSource.SESSION,
+                behavior=RuleBehavior.ALLOW,
+                tool_name=tname,
+                rule_content=f"{parent}/*",
+            )
+            existing.append(rule.model_dump(mode="json"))
+        tool_context.state[key] = existing
+        emit_state_mutation(
+            mutation_type="scope_granted",
+            state_key="adk_cc_extra_roots",
+            details={"directory": parent, "persist": persist},
+            ctx=tool_context,
+        )
+
     def _add_session_allow(
         self,
         tool: AdkCcTool,
@@ -295,6 +469,7 @@ class PermissionPlugin(BasePlugin):
         tool_context: ToolContext,
         *,
         persist_across_sessions: bool = False,
+        workspace_root: Optional[str] = None,
     ) -> None:
         """Inject ALLOW rule(s) for the (tool, rule key) pair.
 
@@ -308,8 +483,11 @@ class PermissionPlugin(BasePlugin):
             `cd foo && pytest` broaden each segment. See
             `adk_cc/permissions/broadening.py`.
           - Path tools (`read_file`/`write_file`/`edit_file`/`grep`/
-            `glob_files`) → ONE rule, the literal path. Workspace-
-            anchored broadening is a separate follow-up PR.
+            `glob_files`) → workspace-anchored: when the target is
+            inside `workspace_root` (the bound project in desktop mode),
+            TWO rules — the literal path plus `<root>/*`, so one click
+            covers the whole project. Out-of-workspace targets → ONE
+            rule (literal), nothing safe to anchor to.
           - Unknown tool → ONE rule with `rule_content=None`
             (matches any args for that tool).
 
@@ -326,7 +504,9 @@ class PermissionPlugin(BasePlugin):
         every `decide` call.
         """
         tool_name = tool.meta.name
-        contents = compute_allow_always_rule_contents(tool_name, args)
+        contents = compute_allow_always_rule_contents(
+            tool_name, args, workspace_root=workspace_root
+        )
 
         key = _USER_ALLOW_STATE_KEY if persist_across_sessions else _SESSION_ALLOW_STATE_KEY
         existing = list(tool_context.state.get(key) or [])
@@ -375,6 +555,18 @@ class PermissionPlugin(BasePlugin):
             },
             ctx=tool_context,
         )
+
+    def _workspace_root(self, tool_context: ToolContext) -> Optional[str]:
+        """Canonical abs path of the session's workspace root, or None if it
+        can't be resolved. In desktop in-place mode this is the bound project
+        root; path-tool rules anchor to it. Lazy import keeps the plugin's
+        module load independent of the sandbox package."""
+        try:
+            from ..sandbox import get_workspace
+
+            return get_workspace(tool_context).abs_path
+        except Exception:
+            return None
 
     def _effective_settings(self, tool_context: ToolContext) -> SettingsHierarchy:
         """Merge the static hierarchy with state-backed runtime rules.
