@@ -339,6 +339,7 @@ export function FileTreeSidePanel({
           projectId={projectId}
           sessionId={sessionId}
           path={selectedFile}
+          refreshKey={refreshKey}
           onBack={() => setSelectedFile(null)}
         />
       ) : !rootExists ? (
@@ -358,11 +359,15 @@ function FileViewer({
   projectId,
   sessionId,
   path,
+  refreshKey,
   onBack,
 }: {
   projectId: string
   sessionId: string
   path: string
+  /** Bumped after each turn (and on the final response) → re-read the open file
+   * so an agent edit to it shows without the user reselecting. */
+  refreshKey?: number
   onBack: () => void
 }) {
   const [content, setContent] = useState<FileContent | null>(null)
@@ -381,7 +386,7 @@ function FileViewer({
     return () => {
       cancelled = true
     }
-  }, [projectId, sessionId, path])
+  }, [projectId, sessionId, path, refreshKey])
 
   return (
     <div className="adk-file-viewer flex h-full flex-col">
