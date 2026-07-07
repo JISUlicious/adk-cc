@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Plus, X, Settings as SettingsIcon, ChevronRight, FolderPlus, Trash2 } from "lucide-react"
+import { Link } from "react-router-dom"
+import { Plus, X, Settings as SettingsIcon, ChevronRight, FolderPlus, Trash2, Network } from "lucide-react"
 import {
   createSession, deleteSession, listApps, listSessions, type Session,
 } from "@/shared/api/sessions"
@@ -266,8 +267,16 @@ export function ProjectRail({
           })}
         </div>
 
-        {/* Footer: Settings gear — no identity / sign-out on desktop. */}
+        {/* Footer: knowledge graph + settings — no identity / sign-out on desktop. */}
         <div className="border-t border-border/60 p-2">
+          <Link
+            to={userId ? `/knowledge?user=${encodeURIComponent(userId)}` : "/knowledge"}
+            className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-muted-foreground hover:bg-accent"
+            title="Knowledge graph — wiki + this project's memory"
+          >
+            <Network className="h-4 w-4" />
+            Knowledge
+          </Link>
           <button
             type="button" onClick={onOpenSettings}
             className="adk-rail-settings flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-muted-foreground hover:bg-accent"

@@ -176,6 +176,13 @@ fn spawn_backend(data: &PathBuf) -> std::io::Result<Child> {
         // Personal skills store: enables Settings → Skills (list / add folder /
         // upload / delete) and the agent's tenant-skill discovery reads the same dir.
         .env("ADK_CC_TENANT_SKILLS_DIR", data.join("skills"))
+        // Wiki + per-project memory + the knowledge-graph view (/knowledge). Stores
+        // live under the data dir; the graph is scoped to the current project.
+        .env("ADK_CC_WIKI", "1")
+        .env("ADK_CC_WIKI_ROOT", data.join("wiki"))
+        .env("ADK_CC_MEMORY", "1")
+        .env("ADK_CC_MEMORY_ROOT", data.join("memory"))
+        .env("ADK_CC_KNOWLEDGE_UI", "1")
         .env("ADK_CC_SANDBOX_BACKEND", "noop");
     // Packaged: adk_cc isn't pip-installed — import it from the shipped source
     // (deps live in the bundled python). Mirrors the dev editable install.

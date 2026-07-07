@@ -21,10 +21,20 @@ def knowledge_ui_enabled() -> bool:
 
 
 def _principal(request) -> tuple[str, str]:
-    """(tenant_id, user_id) from the authenticated principal; ('local','local')
-    in no-auth dev. AuthPrincipal is the (user_id, tenant_id) tuple."""
+    """(tenant_id, user_id) for scoping the graph.
+
+    Authenticated (web): from the principal — NEVER a query param, preserving the
+    per-user isolation proven in the security e2e.
+
+    No-auth DESKTOP: single-user localhost, where `user_id` selects the *project*
+    (memory/inbox are per-project). There's no cross-user boundary to breach, so
+    the current project may be passed via `?user=`. Falls back to 'local'."""
     auth = getattr(request.state, "adk_cc_auth", None)
     if auth is None:
+        from .. import deployment
+
+        if deployment.is_desktop():
+            return "local", (request.query_params.get("user") or "local")
         return "local", "local"
     try:
         user_id, tenant_id = auth[0], auth[1]

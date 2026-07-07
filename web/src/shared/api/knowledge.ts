@@ -48,9 +48,16 @@ export interface MemoryItemDetail {
   updated?: string
 }
 
-export const fetchWikiGraph = () => apiFetch<Graph>("/api/knowledge/wiki/graph")
-export const fetchWikiPage = (slug: string) =>
-  apiFetch<WikiPage>(`/api/knowledge/wiki/page/${encodeURIComponent(slug)}`)
-export const fetchMemoryGraph = () => apiFetch<Graph>("/api/knowledge/memory/graph")
-export const fetchMemoryItem = (id: string) =>
-  apiFetch<MemoryItemDetail>(`/api/knowledge/memory/item/${encodeURIComponent(id)}`)
+// `user` scopes memory/inbox to a specific project — used by the desktop shell
+// (no auth, single-user loopback) to view the CURRENT project's memory. Ignored
+// server-side when a request is authenticated (web), where the principal wins.
+const _u = (user?: string) => (user ? `?user=${encodeURIComponent(user)}` : "")
+
+export const fetchWikiGraph = (user?: string) =>
+  apiFetch<Graph>(`/api/knowledge/wiki/graph${_u(user)}`)
+export const fetchWikiPage = (slug: string, user?: string) =>
+  apiFetch<WikiPage>(`/api/knowledge/wiki/page/${encodeURIComponent(slug)}${_u(user)}`)
+export const fetchMemoryGraph = (user?: string) =>
+  apiFetch<Graph>(`/api/knowledge/memory/graph${_u(user)}`)
+export const fetchMemoryItem = (id: string, user?: string) =>
+  apiFetch<MemoryItemDetail>(`/api/knowledge/memory/item/${encodeURIComponent(id)}${_u(user)}`)

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Link } from "react-router-dom"
+import { Link, useSearchParams } from "react-router-dom"
 import { ArrowLeft, Maximize2 } from "lucide-react"
 import ForceGraph2D from "react-force-graph-2d"
 import { Button } from "@/shared/components/ui/button"
@@ -30,6 +30,10 @@ const NODE_COLOR: Record<string, string> = {
 }
 
 export function KnowledgePage() {
+  // Desktop passes the current project as ?user= so memory scopes to it; web
+  // omits it (the authenticated principal decides server-side).
+  const [params] = useSearchParams()
+  const user = params.get("user") || undefined
   const [tab, setTab] = useState<Tab>("wiki")
   const [graph, setGraph] = useState<Graph>({ nodes: [], links: [] })
   const [error, setError] = useState<string | null>(null)
@@ -48,11 +52,11 @@ export function KnowledgePage() {
     setLoading(true)
     setDetail(null)
     const load = tab === "wiki" ? fetchWikiGraph : fetchMemoryGraph
-    load()
+    load(user)
       .then((g) => setGraph(g))
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false))
-  }, [tab])
+  }, [tab, user])
 
   // size the canvas to its container
   useEffect(() => {
@@ -72,13 +76,13 @@ export function KnowledgePage() {
           setDetail({ status: "ok", title: node.label, body: "(inbox note — not yet merged into the shared wiki)" })
           return
         }
-        fetchWikiPage(node.id).then(setDetail).catch((e) => setError(String(e)))
+        fetchWikiPage(node.id, user).then(setDetail).catch((e) => setError(String(e)))
       } else {
         const id = node.id.replace(/^(sem|epi):/, "")
-        fetchMemoryItem(id).then(setDetail).catch((e) => setError(String(e)))
+        fetchMemoryItem(id, user).then(setDetail).catch((e) => setError(String(e)))
       }
     },
-    [tab],
+    [tab, user],
   )
 
   // [[wikilink]] click → focus that node + load it
@@ -90,9 +94,9 @@ export function KnowledgePage() {
       if (node && fgRef.current && typeof node.x === "number" && typeof node.y === "number") {
         fgRef.current.centerAt(node.x, node.y, 600)
       }
-      fetchWikiPage(slug).then(setDetail).catch((e) => setError(String(e)))
+      fetchWikiPage(slug, user).then(setDetail).catch((e) => setError(String(e)))
     },
-    [graph],
+    [graph, user],
   )
 
   const colorOf = (n: GraphNode) =>

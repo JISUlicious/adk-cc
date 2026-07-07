@@ -5,11 +5,13 @@ import { ProjectRail } from "./ProjectRail"
 import { DesktopSettings } from "./DesktopSettings"
 import { FileTreeSidePanel } from "./FileTreeSidePanel"
 import { ChatPage } from "@/shared/pages/ChatPage"
+import { KnowledgePage } from "@/shared/pages/KnowledgePage"
 
 /**
  * Desktop shell: single-user, no login — just the chat, composing the shared
- * ChatPage with the desktop rail + settings. Any other path redirects to "/"
- * (the web-only routes simply aren't part of this shell).
+ * ChatPage with the desktop rail + settings, plus the knowledge-graph view
+ * (/knowledge, scoped to the current project via ?user=). Any other path
+ * redirects to "/".
  */
 export function DesktopApp() {
   return (
@@ -26,6 +28,7 @@ export function DesktopApp() {
               />
             }
           />
+          <Route path="/knowledge" element={<KnowledgePage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BackendReady>
