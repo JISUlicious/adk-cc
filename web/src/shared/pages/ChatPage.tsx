@@ -183,7 +183,14 @@ export function ChatPage({
         // Final response → the reply is done (or the agent is now waiting on the
         // user). Re-arm on any later non-final event (multi-agent turns emit a
         // final response per sub-agent before control returns to the coordinator).
-        setIsStreaming(!isFinalResponse(e))
+        const final = isFinalResponse(e)
+        setIsStreaming(!final)
+        // Refresh the right panel (file tree + Undo/History availability) NOW, when
+        // the reply lands — not at socket close, which lags by the silent title
+        // tail. The turn's checkpoint was already taken mid-turn, so without this
+        // the Undo button stays disabled for the several-second gap between the
+        // reply finishing and the stream actually closing.
+        if (final) setRefreshTick((t) => t + 1)
       },
       onError: (err) => {
         if (gen !== streamGen.current) return
