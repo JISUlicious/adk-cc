@@ -136,6 +136,23 @@ def _write_log(git_dir: Path, entries: list[dict[str, Any]]) -> None:
         pass
 
 
+def _append_checkpoint(
+    git_dir: Path, sha: str, reason: str, invocation_id: Optional[str]
+) -> None:
+    """Record one checkpoint in the log — once per turn (invocation). Idempotent:
+    a repeated call for the same invocation (belt-and-suspenders vs the plugin's
+    once-per-turn guard) doesn't duplicate the entry."""
+    entries = _read_log(git_dir)
+    if (
+        invocation_id
+        and entries
+        and entries[-1].get("invocation_id") == invocation_id
+    ):
+        return
+    entries.append({"sha": sha, "reason": reason, "ts": time.time(), "invocation_id": invocation_id})
+    _write_log(git_dir, entries[-MAX_CHECKPOINTS:])
+
+
 def snapshot(
     project_id: str,
     session_id: str,
@@ -161,10 +178,15 @@ def snapshot(
         head = _run_git(
             ["rev-parse", "-q", "--verify", "HEAD"], gd, work_tree
         ).stdout.strip()
-        if head:
-            # Nothing staged differs from HEAD → reuse it, don't pile up empties.
-            if _run_git(["diff", "--cached", "--quiet"], gd, work_tree).returncode == 0:
-                return head
+        if head and _run_git(["diff", "--cached", "--quiet"], gd, work_tree).returncode == 0:
+            # No file change vs HEAD (e.g. this turn only ran `ls -la`). Don't add
+            # an empty git commit — but STILL record this turn's checkpoint (same
+            # sha, THIS invocation) so every turn maps to its own rewind point.
+            # Otherwise a no-file-change turn has no checkpoint and the NEXT turn's
+            # rewind lands at the WRONG (earlier) invocation → conversation jumps
+            # back too far.
+            _append_checkpoint(gd, head, reason, invocation_id)
+            return head
 
         commit = _run_git(
             _GIT_CONF + ["commit", "-q", "-m", f"checkpoint: {reason}"],
@@ -179,11 +201,7 @@ def snapshot(
         if not sha:
             return None
 
-        entries = _read_log(gd)
-        entries.append(
-            {"sha": sha, "reason": reason, "ts": time.time(), "invocation_id": invocation_id}
-        )
-        _write_log(gd, entries[-MAX_CHECKPOINTS:])
+        _append_checkpoint(gd, sha, reason, invocation_id)
         return sha
     except subprocess.TimeoutExpired:
         _log.warning("checkpoint snapshot timed out for %s/%s", project_id, session_id)

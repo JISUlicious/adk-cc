@@ -218,9 +218,29 @@ def test_checkpoint_routes() -> None:
     print("OK test_checkpoint_routes")
 
 
+def test_no_file_change_turn_gets_its_own_checkpoint() -> None:
+    # The reported bug: a turn that changes NO files (e.g. `ls -la`) then a
+    # file-change turn must produce TWO checkpoints — one per turn — each with its
+    # own invocation_id. Otherwise the file-change turn's checkpoint dedups into the
+    # ls turn's (same file state) and rewinding jumps back to the wrong/earlier
+    # point (the user saw it rewind to the empty start of the conversation).
+    repo = _make_repo("proj_ls")
+    _register("proj_ls", repo)
+    dc.snapshot("proj_ls", "s1", repo, reason="run_bash", invocation_id="inv-1")   # ls turn (no change)
+    dc.snapshot("proj_ls", "s1", repo, reason="write_file", invocation_id="inv-2")  # before a file change
+    cps = dc.list_checkpoints("proj_ls", "s1")
+    assert len(cps) == 2, f"expected 2 checkpoints (one per turn), got {len(cps)}"
+    assert [c["invocation_id"] for c in cps] == ["inv-2", "inv-1"], cps
+    # idempotent: the same invocation again does not duplicate.
+    dc.snapshot("proj_ls", "s1", repo, reason="write_file", invocation_id="inv-2")
+    assert len(dc.list_checkpoints("proj_ls", "s1")) == 2
+    print("OK test_no_file_change_turn_gets_its_own_checkpoint")
+
+
 def main() -> None:
     test_snapshot_once_per_turn()
     test_new_turn_snapshots_again()
+    test_no_file_change_turn_gets_its_own_checkpoint()
     test_no_snapshot_in_web_mode()
     test_no_snapshot_for_scratch()
     test_disabled_by_env()
