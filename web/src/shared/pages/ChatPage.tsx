@@ -29,6 +29,7 @@ import { SettingsModal } from "@/shared/components/SettingsModal"
 import { listSecrets } from "@/shared/api/account"
 import { IS_DESKTOP } from "@/shared/lib/platform"
 import { type SlashAction } from "@/shared/components/SlashCommandMenu"
+import { restoreCheckpoint } from "@/shared/api/desktop-checkpoint"
 import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/shared/lib/theme"
 
 /**
@@ -101,6 +102,10 @@ export function ChatPage({
   // so a stale stream's late onEvent/onClose must not disturb a newer turn.
   const streamGen = useRef(0)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // One-shot timer: re-poll the rail a beat after a turn so a late-persisted
+  // session title (generated out-of-band, detached from the turn) shows up.
+  const titlePollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (titlePollRef.current) clearTimeout(titlePollRef.current) }, [])
 
   // Context-fullness gauge (P2): server ladder fetched once; current usage =
   // the latest reported prompt_token_count across the loaded events.
@@ -205,6 +210,9 @@ export function ChatPage({
         /* keep optimistic if reload fails */
       })
     setRefreshTick((t) => t + 1)
+    // The title lands out-of-band, possibly after the stream closed → poll once more.
+    if (titlePollRef.current) clearTimeout(titlePollRef.current)
+    titlePollRef.current = setTimeout(() => setRefreshTick((t) => t + 1), 2500)
   }
 
   function handleSend(text: string) {
@@ -272,8 +280,9 @@ export function ChatPage({
         if (appName && session) {
           handleSend(
             "Available slash commands: /help, /clear (new session), " +
-              "/plan, /exit-plan, /theme, /settings, /signout. " +
-              "These are UI shortcuts on the client; the agent doesn't see them.",
+              "/plan, /exit-plan, /theme, /settings, /signout" +
+              (IS_DESKTOP ? ", /rewind (undo last turn — revert file changes)" : "") +
+              ". These are UI shortcuts on the client; the agent doesn't see them.",
           )
         }
         return
@@ -292,6 +301,26 @@ export function ChatPage({
       case "settings":
         setSettingsOpen(true)
         return
+      case "rewind": {
+        // Desktop-only: revert the project files to the checkpoint taken before
+        // the last turn (same as the file panel's Undo). The conversation is
+        // untouched — only files revert.
+        if (!IS_DESKTOP || !appName || !session) return
+        if (
+          !window.confirm(
+            "Undo the last turn? File changes since the previous turn will be reverted (this is itself reversible).",
+          )
+        )
+          return
+        restoreCheckpoint(userId, session.id)
+          .then((res) => {
+            if (res.status === "no_checkpoints") setError("Nothing to rewind yet — no checkpoint for this session.")
+            else if (res.status === "error") setError(res.error || "rewind failed")
+            setRefreshTick((t) => t + 1) // reload the file panel to show the revert
+          })
+          .catch((e) => setError((e as Error).message))
+        return
+      }
       case "theme": {
         // Cycle: light → dark → system → light. Persisted by setStoredTheme.
         const cur = getStoredTheme()

@@ -4,10 +4,12 @@ import {
   HelpCircle,
   LogOut,
   Plus,
+  RotateCcw,
   Settings,
   SunMoon,
 } from "lucide-react"
 import { cn } from "@/shared/lib/utils"
+import { IS_DESKTOP } from "@/shared/lib/platform"
 
 /**
  * Inline slash-command picker shown above the composer when the input
@@ -28,6 +30,7 @@ export type SlashAction =
   | "signout"
   | "plan"
   | "exit-plan"
+  | "rewind"
 
 export interface SlashCommand {
   /** What the user types after `/`. Match is prefix-insensitive. */
@@ -37,6 +40,8 @@ export interface SlashCommand {
   icon: typeof Plus
   /** Either action (UI-only) or message (text sent to the agent). */
   kind: { type: "action"; action: SlashAction } | { type: "message"; text: string }
+  /** Desktop-shell-only command (hidden in the web shell). */
+  desktopOnly?: boolean
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
@@ -51,6 +56,13 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "Start a fresh session in the current agent",
     icon: Plus,
     kind: { type: "action", action: "clear" },
+  },
+  {
+    name: "rewind",
+    description: "Undo the last turn — revert file changes (desktop)",
+    icon: RotateCcw,
+    kind: { type: "action", action: "rewind" },
+    desktopOnly: true,
   },
   {
     name: "plan",
@@ -136,6 +148,7 @@ export function SlashCommandMenu({
  * index. */
 export function filterSlash(query: string): SlashCommand[] {
   const q = query.trim().toLowerCase()
-  if (!q) return SLASH_COMMANDS
-  return SLASH_COMMANDS.filter((c) => c.name.toLowerCase().startsWith(q))
+  const avail = SLASH_COMMANDS.filter((c) => !c.desktopOnly || IS_DESKTOP)
+  if (!q) return avail
+  return avail.filter((c) => c.name.toLowerCase().startsWith(q))
 }

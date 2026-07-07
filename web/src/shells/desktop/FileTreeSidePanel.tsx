@@ -6,7 +6,9 @@ import {
   File as FileIcon,
   Folder,
   FolderOpen,
+  History,
   RefreshCw,
+  RotateCcw,
   Undo2,
 } from "lucide-react"
 import {
@@ -15,7 +17,11 @@ import {
   type DirEntry,
   type FileContent,
 } from "@/shared/api/desktop-files"
-import { listCheckpoints, restoreCheckpoint } from "@/shared/api/desktop-checkpoint"
+import {
+  listCheckpoints,
+  restoreCheckpoint,
+  type Checkpoint,
+} from "@/shared/api/desktop-checkpoint"
 import { RightPanelShell, type RightPanelProps } from "@/shared/components/RightPanelShell"
 import { SandboxedHtml } from "@/shared/components/SandboxedHtml"
 import { Markdown } from "@/shared/lib/markdown"
@@ -34,6 +40,26 @@ function join(parent: string, name: string): string {
   return parent ? `${parent}/${name}` : name
 }
 
+/** Relative time for a checkpoint (ts is epoch seconds, from the backend). */
+function ago(ts: number): string {
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - ts))
+  if (s < 45) return "just now"
+  if (s < 3600) return `${Math.round(s / 60)}m ago`
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`
+  return `${Math.round(s / 86400)}d ago`
+}
+
+// A checkpoint is the snapshot taken BEFORE the mutating tool that triggered it.
+const REASON_LABEL: Record<string, string> = {
+  run_bash: "before a command",
+  write_file: "before a file write",
+  edit_file: "before an edit",
+  "pre-restore": "before an undo",
+}
+function reasonLabel(r: string): string {
+  return REASON_LABEL[r] ?? (r ? `before ${r}` : "checkpoint")
+}
+
 export function FileTreeSidePanel({
   userId: projectId,
   sessionId,
@@ -50,6 +76,8 @@ export function FileTreeSidePanel({
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [canUndo, setCanUndo] = useState(false)
   const [undoing, setUndoing] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([])
 
   const loadDir = useCallback(
     async (path: string) => {
@@ -89,22 +117,44 @@ export function FileTreeSidePanel({
     }
   }, [projectId, sessionId])
 
-  async function handleUndo() {
-    if (undoing || !projectId || !sessionId) return
-    if (!window.confirm("Undo the last turn? Files changed since the previous turn will be reverted (this is itself reversible).")) {
-      return
+  const loadCheckpoints = useCallback(async () => {
+    if (!projectId || !sessionId) return
+    try {
+      const res = await listCheckpoints(projectId, sessionId)
+      setCheckpoints(res.checkpoints)
+      setCanUndo(res.checkpoints.length > 0)
+    } catch {
+      setCheckpoints([])
     }
+  }, [projectId, sessionId])
+
+  // Restore the project to a checkpoint. `sha` omitted → undo the last turn.
+  async function performRestore(sha?: string) {
+    if (undoing || !projectId || !sessionId) return
+    const msg = sha
+      ? "Restore the project to this checkpoint? Changes made after it will be reverted (this is itself reversible)."
+      : "Undo the last turn? Files changed since the previous turn will be reverted (this is itself reversible)."
+    if (!window.confirm(msg)) return
     setUndoing(true)
     try {
-      const res = await restoreCheckpoint(projectId, sessionId)
+      const res = await restoreCheckpoint(projectId, sessionId, sha)
       if (res.status === "error") setError(res.error || "restore failed")
       await reload()
-      await refreshUndo()
+      await loadCheckpoints()
+      setHistoryOpen(false)
     } catch (e) {
       setError((e as Error).message)
     } finally {
       setUndoing(false)
     }
+  }
+
+  function toggleHistory() {
+    setHistoryOpen((v) => {
+      const next = !v
+      if (next) void loadCheckpoints()
+      return next
+    })
   }
 
   // (Re)load the root whenever the session changes; clear any open file.
@@ -168,12 +218,24 @@ export function FileTreeSidePanel({
     <div className="flex items-center gap-0.5">
       <button
         type="button"
-        onClick={() => void handleUndo()}
+        onClick={() => void performRestore()}
         disabled={!canUndo || undoing}
         className="rounded-md p-1 text-muted-foreground hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
         title="Undo last turn — revert files to before the last turn"
       >
         <Undo2 className={cn("h-3.5 w-3.5", undoing && "animate-pulse")} />
+      </button>
+      <button
+        type="button"
+        onClick={toggleHistory}
+        disabled={!canUndo}
+        className={cn(
+          "rounded-md p-1 text-muted-foreground hover:bg-accent disabled:pointer-events-none disabled:opacity-40",
+          historyOpen && "bg-accent text-foreground",
+        )}
+        title="Checkpoint history — restore to an earlier turn"
+      >
+        <History className="h-3.5 w-3.5" />
       </button>
       <button
         type="button"
@@ -239,6 +301,39 @@ export function FileTreeSidePanel({
 
   return (
     <RightPanelShell title="Files" open={open} onClose={onClose} headerRight={headerRight}>
+      {historyOpen && (
+        <>
+          {/* click-away backdrop */}
+          <div className="fixed inset-0 z-20" aria-hidden onClick={() => setHistoryOpen(false)} />
+          <div className="absolute right-2 top-12 z-30 flex max-h-[65%] w-64 flex-col overflow-hidden rounded-md border border-border bg-popover shadow-lg">
+            <div className="flex items-center justify-between border-b border-border/60 px-3 py-2">
+              <span className="text-xs font-medium">Restore to a checkpoint</span>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {checkpoints.length === 0 ? (
+                <p className="px-3 py-3 text-xs text-muted-foreground">No checkpoints yet.</p>
+              ) : (
+                checkpoints.map((cp) => (
+                  <button
+                    key={cp.sha}
+                    type="button"
+                    onClick={() => void performRestore(cp.sha)}
+                    disabled={undoing}
+                    title={`Restore to ${cp.sha.slice(0, 8)}`}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-accent disabled:opacity-50"
+                  >
+                    <RotateCcw className="h-3 w-3 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1 truncate">
+                      <span className="font-medium">{reasonLabel(cp.reason)}</span>
+                      <span className="ml-1 text-muted-foreground">· {ago(cp.ts)}</span>
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </>
+      )}
       {selectedFile ? (
         <FileViewer
           projectId={projectId}
