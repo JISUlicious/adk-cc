@@ -28,6 +28,12 @@ import os
 from typing import Any, ClassVar, Optional
 
 os.environ.setdefault("ADK_CC_API_KEY", "sk-dummy-for-tests")
+# These tests pin the confirmation + "Allow always" broadening mechanics for
+# run_bash using generic commands (`ls`, `git status`, `uv run pytest`). Disable
+# the command-safety classifier here (it has its own suite,
+# test_command_safety.py) so a read-only command like `git status` still flows
+# through the destructive-ask path these tests assert on.
+os.environ["ADK_CC_CMD_SAFETY"] = "0"
 
 from pydantic import BaseModel
 

@@ -36,6 +36,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel
 
 from ..tools.base import AdkCcTool
+from .command_safety import classify_command
 from .modes import PermissionMode
 from .protected import classify_path
 from .rules import (
@@ -183,6 +184,14 @@ def _decide_impl(
         if resolved:
             protected = classify_path(resolved)
 
+    # Command safety tier (run_bash only; "mutating" otherwise). Drives the
+    # command floor below, mirroring the protected-path floor: read-only
+    # auto-allows, dangerous always asks (even under bypass), catastrophic
+    # hard-denies (even under bypass).
+    cmd_tier = "mutating"
+    if tool_name == "run_bash":
+        cmd_tier = classify_command(str((args or {}).get("command") or ""))
+
     # Step 1: deny rules always win.
     deny = _first_match(rules, RuleBehavior.DENY, tool_name, args, workspace_root)
     if deny is not None:
@@ -199,6 +208,29 @@ def _decide_impl(
         return PermissionDecision(
             behavior="deny",
             reason="protected path (secret/credential material) is never accessible",
+        )
+
+    # Pre-compute allow/ask matches — the command floor (Steps 1c/1d/1e) and the
+    # later ask/destructive steps consult them: an operator ALLOW rule overrides
+    # dangerous/catastrophic; a user ASK rule overrides the read-only auto-allow.
+    allow = _first_match(rules, RuleBehavior.ALLOW, tool_name, args, workspace_root)
+    ask = _first_match(rules, RuleBehavior.ASK, tool_name, args, workspace_root)
+
+    # Step 1c: catastrophic command — hard deny before the bypass short-circuit
+    # (rm -rf /, mkfs, dd to a disk, fork bomb, …), unless an explicit ALLOW rule
+    # deliberately permits it. Mirrors the protected-path hard deny.
+    if cmd_tier == "catastrophic" and allow is None:
+        return PermissionDecision(
+            behavior="deny",
+            reason="catastrophic command blocked (rm -rf /, mkfs, dd to disk, fork bomb, …)",
+        )
+
+    # Step 1d: read-only command — allow in every mode (incl. plan / bypass),
+    # unless a user ASK rule wants confirmation. Subsumes the plan-mode read-only
+    # allow below and ends the blanket "every run_bash asks in DEFAULT" fatigue.
+    if cmd_tier == "read_only" and ask is None:
+        return PermissionDecision(
+            behavior="allow", matched_rule=allow, reason="read-only command",
         )
 
     # Step 2a: PLAN mode blocks every non-read-only tool — EXCEPT run_bash for a
@@ -218,6 +250,22 @@ def _decide_impl(
         return PermissionDecision(
             behavior="deny",
             reason=_plan_block_reason(tool_name, args),
+        )
+
+    # Step 1e: dangerous command — always ask, EVEN under bypassPermissions.
+    # Placed after the plan block (so plan still denies it) and before the bypass
+    # short-circuit (so bypass can't skip it). An operator ALLOW rule overrides;
+    # dontAsk converts to deny. This is the command analog of "root/home deletion
+    # still prompts in bypass" — the safety net a blanket bypass must not remove.
+    if cmd_tier == "dangerous" and allow is None:
+        if mode is PermissionMode.DONT_ASK:
+            return PermissionDecision(
+                behavior="deny",
+                reason="dangerous command blocked in dontAsk mode",
+            )
+        return PermissionDecision(
+            behavior="ask",
+            reason="dangerous command requires confirmation (rm -rf, sudo, curl|sh, chmod -R, …)",
         )
 
     # Step 2b: BYPASS skips the rest (the only gate is the deny check above).
@@ -242,12 +290,8 @@ def _decide_impl(
             reason="protected path requires confirmation (never auto-approved)",
         )
 
-    # Pre-compute allow match — used to short-circuit the ask path and the
-    # destructive-tool fallback.
-    allow = _first_match(rules, RuleBehavior.ALLOW, tool_name, args, workspace_root)
-
-    # Step 3: ask rules (ALLOW takes precedence if present).
-    ask = _first_match(rules, RuleBehavior.ASK, tool_name, args, workspace_root)
+    # Step 3: ask rules (ALLOW takes precedence if present). `allow` / `ask` were
+    # pre-computed above for the command floor.
     if ask is not None and allow is None:
         if mode is PermissionMode.DONT_ASK:
             return PermissionDecision(

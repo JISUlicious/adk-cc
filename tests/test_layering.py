@@ -24,6 +24,11 @@ from typing import Any, ClassVar
 
 os.environ.setdefault("ADK_CC_SKIP_DOTENV", "1")
 os.environ.setdefault("ADK_CC_API_KEY", "stub")
+# These tests exercise the layered deny/ask/bypass mechanics using `run_bash`
+# with generic commands (`ls`, `rm -rf /`). Pin the pre-classifier behavior
+# (every run_bash is a blanket destructive-ask) so they stay orthogonal to the
+# command-safety classifier, which has its own suite (test_command_safety.py).
+os.environ["ADK_CC_CMD_SAFETY"] = "0"
 
 from pydantic import BaseModel
 
