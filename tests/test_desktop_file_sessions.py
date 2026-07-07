@@ -21,6 +21,7 @@ from google.adk.errors.already_exists_error import AlreadyExistsError
 from google.adk.events.event import Event
 from google.adk.events.event_actions import EventActions
 from google.adk.sessions.base_session_service import GetSessionConfig
+from google.genai import types
 
 from adk_cc.service.file_session_service import FileSessionService
 
@@ -195,9 +196,47 @@ async def test_truncate_before_invocation(base: str) -> None:
     print("OK test_truncate_before_invocation")
 
 
+def _user_text(text: str, inv: str, ts: float) -> Event:
+    return Event(author="user", content=types.Content(role="user", parts=[types.Part(text=text)]), invocation_id=inv, timestamp=ts)
+
+
+def _agent_text(text: str, inv: str, ts: float) -> Event:
+    return Event(author="coordinator", content=types.Content(role="model", parts=[types.Part(text=text)]), invocation_id=inv, timestamp=ts)
+
+
+async def test_truncate_hitl_turn(base: str) -> None:
+    # A turn that pauses for a HITL answer spans two invocations (request+ask, then
+    # answer+act). Rewinding the edit (tagged with the ANSWER invocation) must roll
+    # the whole logical turn back to the user's request — not stop at the answer.
+    svc = FileSessionService(base)
+    s = await svc.create_session(app_name=APP, user_id="projH", state={}, session_id="s1")
+    await svc.append_event(s, _user_text("hi", "inv-1", 1.0))       # turn 1
+    await svc.append_event(s, _agent_text("hello", "inv-1", 2.0))
+    await svc.append_event(s, _user_text("edit the file", "inv-A", 3.0))  # turn 2: request
+    await svc.append_event(s, Event(  # agent asks (long-running tool) — invocation A
+        author="coordinator",
+        content=types.Content(role="model", parts=[types.Part(function_call=types.FunctionCall(name="ask_user_question", args={}))]),
+        invocation_id="inv-A", timestamp=4.0,
+    ))
+    await svc.append_event(s, Event(  # user's ANSWER arrives as a NEW invocation B
+        author="user",
+        content=types.Content(role="user", parts=[types.Part(function_response=types.FunctionResponse(name="ask_user_question", response={}))]),
+        invocation_id="inv-B", timestamp=5.0,
+    ))
+    await svc.append_event(s, _agent_text("done", "inv-B", 6.0))    # the edit happened here (inv-B)
+
+    kept = await svc.truncate_before_invocation(user_id="projH", session_id="s1", invocation_id="inv-B")
+    assert kept == 2, kept  # only turn 1 survives — the whole ask→answer→act turn is gone
+    got = await svc.get_session(app_name=APP, user_id="projH", session_id="s1")
+    texts = [p.text for e in got.events for p in (e.content.parts or []) if getattr(p, "text", None)]
+    assert texts == ["hi", "hello"], texts
+    print("OK test_truncate_hitl_turn")
+
+
 async def _run_all() -> None:
     tests = [
         test_truncate_before_invocation,
+        test_truncate_hitl_turn,
         test_create_get_roundtrip_and_layout,
         test_events_persist_in_order,
         test_user_state_shared_across_sessions,

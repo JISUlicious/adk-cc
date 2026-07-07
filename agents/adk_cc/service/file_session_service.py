@@ -66,6 +66,19 @@ def _safe(value: str, label: str) -> str:
     return v
 
 
+def _is_user_text(event: Event) -> bool:
+    """True if `event` is a real user message (author user + a text part) — i.e. it
+    STARTS a logical turn. A user function_response (a HITL answer) is author-user
+    but carries only a functionResponse part, so it does NOT count."""
+    content = getattr(event, "content", None)
+    if getattr(event, "author", None) != "user" and getattr(content, "role", None) != "user":
+        return False
+    for p in getattr(content, "parts", None) or []:
+        if getattr(p, "text", None) and not getattr(p, "thought", None):
+            return True
+    return False
+
+
 class FileSessionService(BaseSessionService):
     """Sessions persisted as per-project JSONL files (see module docstring)."""
 
@@ -320,6 +333,16 @@ class FileSessionService(BaseSessionService):
         )
         if cut is None:
             return len(events)  # that invocation isn't here → nothing to truncate
+        # A logical turn can span several invocations: when it pauses for a HITL
+        # answer (ask_user_question / a confirmation), the answer arrives as a NEW
+        # invocation whose first event is a user function_response, not a user text
+        # message. Rewinding should undo the whole ask→answer→act sequence, so cut
+        # at the user TEXT message that started the turn — walk back from the target
+        # invocation's first event to the most recent real user message.
+        for i in range(cut, -1, -1):
+            if _is_user_text(events[i]):
+                cut = i
+                break
         kept = events[:cut]
         async with self._lock_for(session_id):
             tmp = path.with_suffix(path.suffix + ".tmp")
