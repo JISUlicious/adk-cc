@@ -173,6 +173,9 @@ fn spawn_backend(data: &PathBuf) -> std::io::Result<Child> {
         .env("ADK_CC_CREDENTIAL_PROVIDER", "encrypted_file")
         .env("ADK_CC_CREDENTIAL_STORE_DIR", data.join("secrets"))
         .env("ADK_CC_CREDENTIAL_KEY", key)
+        // Personal skills store: enables Settings → Skills (list / add folder /
+        // upload / delete) and the agent's tenant-skill discovery reads the same dir.
+        .env("ADK_CC_TENANT_SKILLS_DIR", data.join("skills"))
         .env("ADK_CC_SANDBOX_BACKEND", "noop");
     // Packaged: adk_cc isn't pip-installed — import it from the shipped source
     // (deps live in the bundled python). Mirrors the dev editable install.

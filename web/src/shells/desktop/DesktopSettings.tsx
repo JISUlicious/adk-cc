@@ -82,7 +82,7 @@ export function DesktopSettings({ open, onClose }: { open: boolean; onClose: () 
     },
     {
       id: "skills", label: "Skills", icon: Boxes,
-      render: () => <LayeredTab blurb="Skill bundles (a .zip containing a SKILL.md / manifest) the agent can load." render={(s, p) => <SkillsScope scope={s} projectId={p} />} />,
+      render: () => <LayeredTab blurb="Skill bundles (a folder or .zip with a SKILL.md / manifest) the agent can load." render={(s, p) => <SkillsScope scope={s} projectId={p} />} />,
     },
     { id: "models", label: "Models", icon: Cpu, render: () => <ModelsSection /> },
   ]

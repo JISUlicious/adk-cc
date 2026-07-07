@@ -71,6 +71,19 @@ export function deleteDesktopSkill(name: string, scope: Scope, projectId?: strin
     method: "DELETE",
   })
 }
+/** Ingest a skill from a LOCAL directory (desktop only) — the server reads the
+ * path and copies the folder into the skill store. `name` defaults to the folder. */
+export function addDesktopSkillFromDir(
+  path: string,
+  scope: Scope,
+  projectId?: string,
+  name?: string,
+): Promise<{ status: string; skill_name: string }> {
+  return apiFetch(`/desktop/settings/skills/from-dir?${qs(scope, projectId)}`, {
+    method: "POST",
+    body: JSON.stringify({ path, name }),
+  })
+}
 
 // ---- model endpoints (global only) ----
 export interface DesktopModel {

@@ -38,6 +38,9 @@ _log = logging.getLogger(__name__)
 
 _TENANT = "local"
 _MAX_SKILL_ZIP = 5 * 1024 * 1024  # 5 MiB
+_MAX_SKILL_DIR = 20 * 1024 * 1024  # 20 MiB (uncompressed folder ingest)
+# Junk never copied into the skill store (and excluded from the size budget).
+_SKILL_IGNORE = {".git", "node_modules", "__pycache__", ".venv", ".DS_Store", ".mypy_cache"}
 
 
 def _safe(value: str, label: str) -> str:
@@ -232,6 +235,45 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
                 shutil.rmtree(target)
             _invalidate_required_inputs()
             return {"status": "deleted", "skill_name": skill_name}
+
+        @app.post("/desktop/settings/skills/from-dir", include_in_schema=False)
+        async def add_skill_from_dir(request: Request):  # noqa: ANN202
+            """Ingest a skill from a LOCAL directory (desktop is single-user loopback,
+            so the server can read the picked path — same trust model as adding a
+            project folder). Copies the tree into the skill store; skips junk; must
+            contain a .md/.yaml manifest and stay under the size cap."""
+            uid = _scope_user(request)
+            body = await request.json() or {}
+            raw = str(body.get("path") or "").strip()
+            if not raw:
+                raise HTTPException(status_code=400, detail="'path' required")
+            src = Path(os.path.abspath(os.path.expanduser(raw)))
+            if not src.is_dir():
+                raise HTTPException(status_code=400, detail=f"not a directory: {src}")
+            name = _safe(str(body.get("name") or src.name), "skill_name")
+
+            def _kept(f: Path) -> bool:
+                return f.is_file() and not any(part in _SKILL_IGNORE for part in f.relative_to(src).parts)
+
+            files = [f for f in src.rglob("*") if _kept(f)]
+            if not files:
+                raise HTTPException(status_code=400, detail="folder is empty")
+            if not any(f.suffix.lower() in (".md", ".yaml", ".yml") for f in files):
+                raise HTTPException(status_code=400, detail="no skill manifest (.md/.yaml) in the folder")
+            total = sum(f.stat().st_size for f in files)
+            if total > _MAX_SKILL_DIR:
+                raise HTTPException(status_code=413, detail="skill folder too large")
+
+            target = _skill_base(uid) / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=str(target.parent)) as tmp:
+                dst = Path(tmp) / name
+                shutil.copytree(src, dst, ignore=lambda _d, names: [n for n in names if n in _SKILL_IGNORE])
+                if target.exists():
+                    shutil.rmtree(target)
+                shutil.move(str(dst), str(target))
+            _invalidate_required_inputs()
+            return {"status": "ok", "skill_name": name}
 
     # ----------------------------------------------------- models (global only)
     if models is not None:
