@@ -1,5 +1,14 @@
 @import "tailwindcss";
 
+/* Drive Tailwind's `dark:` variant off the `.dark` CLASS (toggled by theme.ts),
+ * not the OS `prefers-color-scheme`. Tailwind v4 defaults `dark:` to
+ * `@media (prefers-color-scheme: dark)`, which split from this app's class-based
+ * theme: the CSS-var overrides in `.dark {}` flip on the app toggle, but `dark:`
+ * utilities only flipped with the OS. That left two broken states — app-dark +
+ * OS-light (dark: never fired) and app-light + OS-dark (dark: fired anyway).
+ * Binding the variant to the class unifies both with the CSS-var theme. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 /* --------------------------------------------------------------------
  * kami theme tokens
  *
