@@ -45,6 +45,13 @@ class ModelEndpointConfig(BaseModel):
             "Falls back to ADK_CC_MAX_OUTPUT_TOKENS, then uncapped."
         ),
     )
+    reasoning_effort: Optional[str] = Field(
+        default=None,
+        description=(
+            "Reasoning effort for reasoning models (none/low/medium/high/xhigh). "
+            "Used by the chatgpt-codex provider; ignored by plain LiteLLM endpoints."
+        ),
+    )
 
     def masked(self) -> dict:
         """JSON-safe dict for API responses: includes whether the key env var

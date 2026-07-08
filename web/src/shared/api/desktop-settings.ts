@@ -144,3 +144,28 @@ export function activateDesktopModel(name: string) {
 export function deleteDesktopModel(name: string) {
   return apiFetch(`/desktop/settings/models/${encodeURIComponent(name)}`, { method: "DELETE" })
 }
+
+// ---- ChatGPT subscription (Codex OAuth) ----
+export interface CodexStatus {
+  connected: boolean
+  plan?: string | null
+  account_id_tail?: string | null
+  expires_at?: number | null
+  expired?: boolean
+  registered?: boolean
+  active?: boolean
+  model?: string | null
+  source?: string
+}
+export function getCodexStatus(): Promise<CodexStatus> {
+  return apiFetch("/desktop/settings/codex")
+}
+export function connectCodex(model = "gpt-5.5", reasoning_effort = "medium"): Promise<CodexStatus> {
+  return apiFetch("/desktop/settings/codex/connect", {
+    method: "POST",
+    body: JSON.stringify({ model, reasoning_effort }),
+  })
+}
+export function disconnectCodex(): Promise<{ status: string }> {
+  return apiFetch("/desktop/settings/codex/disconnect", { method: "POST" })
+}

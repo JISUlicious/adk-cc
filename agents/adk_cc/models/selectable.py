@@ -225,6 +225,17 @@ class SelectableLlm(BaseLlm):
             return delegate
 
     def _build_litellm(self, cfg) -> BaseLlm:  # noqa: ANN001
+        # ChatGPT-subscription (Codex OAuth) endpoints are not LiteLLM/OpenAI-key
+        # backends — they use a subscription Bearer token against the Codex
+        # backend. Model id `chatgpt-codex/<model>` selects this provider.
+        if str(cfg.model).startswith("chatgpt-codex/"):
+            from .chatgpt_codex import ChatGptCodexLlm
+
+            return ChatGptCodexLlm(
+                model=str(cfg.model).split("/", 1)[1],
+                effort=getattr(cfg, "reasoning_effort", None),
+            )
+
         from google.adk.models.lite_llm import LiteLlm
 
         kwargs: dict[str, Any] = {"model": cfg.model, "api_base": cfg.api_base}

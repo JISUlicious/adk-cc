@@ -293,6 +293,7 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
                     api_base=str(body.get("api_base") or ""),
                     api_key_env=str(body.get("api_key_env") or ""),
                     max_tokens=body.get("max_tokens"),
+                    reasoning_effort=body.get("reasoning_effort"),
                 )
             except Exception as e:  # noqa: BLE001
                 raise HTTPException(status_code=400, detail=f"invalid endpoint: {e}")
@@ -314,6 +315,67 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
             except Exception as e:  # noqa: BLE001
                 raise HTTPException(status_code=404, detail=str(e))
             return {"status": "ok", "active": name}
+
+        # ------------------------------------------- ChatGPT subscription (Codex)
+        # Phase 1: reuse the user's existing `codex login` (~/.codex/auth.json).
+        # Connect = register + activate a `chatgpt-codex/<model>` endpoint; the
+        # SUBSCRIPTION Bearer token (never an API key) is read at request time by
+        # the provider. No token is stored in the registry or returned over HTTP.
+        _CODEX_ENDPOINT = "chatgpt-codex"
+
+        def _codex_state() -> dict:
+            from ..models import codex_auth
+
+            status = codex_auth.connection_status()
+            ep = models.get(_CODEX_ENDPOINT)
+            status["registered"] = ep is not None
+            status["active"] = models.active_name() == _CODEX_ENDPOINT
+            status["model"] = ep.model.split("/", 1)[1] if ep else None
+            return status
+
+        @app.get("/desktop/settings/codex", include_in_schema=False)
+        async def codex_status():  # noqa: ANN202
+            return _codex_state()
+
+        @app.post("/desktop/settings/codex/connect", include_in_schema=False)
+        async def codex_connect(request: Request):  # noqa: ANN202
+            from ..models import codex_auth
+
+            status = codex_auth.connection_status()
+            if not status.get("connected"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="No ChatGPT login found. Run `codex login` first, then connect.",
+                )
+            try:
+                body = await request.json()
+            except Exception:  # noqa: BLE001 — empty/invalid body is fine
+                body = {}
+            model = str((body or {}).get("model") or "gpt-5.5")
+            effort = (body or {}).get("reasoning_effort") or "medium"
+            models.upsert(ModelEndpointConfig(
+                name=_CODEX_ENDPOINT,
+                model=f"chatgpt-codex/{model}",
+                api_base="https://chatgpt.com/backend-api/codex",
+                api_key_env="",  # subscription token, not an env key
+                reasoning_effort=str(effort),
+            ))
+            models.activate(_CODEX_ENDPOINT)
+            return _codex_state()
+
+        @app.post("/desktop/settings/codex/disconnect", include_in_schema=False)
+        async def codex_disconnect(request: Request):  # noqa: ANN202
+            # Switch active away first (can't remove the active/last endpoint),
+            # then drop our endpoint. The user's ~/.codex login is untouched.
+            if models.active_name() == _CODEX_ENDPOINT:
+                other = next((e.name for e in models.list() if e.name != _CODEX_ENDPOINT), None)
+                if other:
+                    models.activate(other)
+            try:
+                models.remove(_CODEX_ENDPOINT)
+            except Exception as e:  # noqa: BLE001 — last-endpoint guard
+                raise HTTPException(status_code=409, detail=str(e))
+            return {"status": "disconnected"}
 
     # ------------------------------------------------- working directories
     # Persistent per-project "granted" directories (Claude Code's

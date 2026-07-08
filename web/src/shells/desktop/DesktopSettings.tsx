@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import { Palette, KeyRound, Server, Boxes, Cpu, Check, Trash2, Plus, FolderTree } from "lucide-react"
+import { Palette, KeyRound, Server, Boxes, Cpu, Check, Trash2, Plus, FolderTree, Sparkles } from "lucide-react"
 import { SettingsFrame, type SettingsTab } from "@/shared/settings/SettingsFrame"
 import { ThemeSection } from "@/shared/settings/sections"
 import { Button } from "@/shared/components/ui/button"
@@ -7,12 +7,75 @@ import { Input } from "@/shared/components/ui/input"
 import { ApiError } from "@/shared/api/client"
 import {
   listDesktopModels, setDesktopModel, activateDesktopModel, deleteDesktopModel, type DesktopModel,
+  getCodexStatus, connectCodex, disconnectCodex, type CodexStatus,
 } from "@/shared/api/desktop-settings"
 import { LayeredTab, SecretsScope, McpScope, SkillsScope, WorkingDirsScope } from "./DesktopSettingsSections"
 
 function errMsg(e: unknown): string {
   if (e instanceof ApiError) return (e.body as { detail?: string } | undefined)?.detail || e.message
   return (e as Error)?.message || String(e)
+}
+
+/** Connect your ChatGPT subscription (via the Codex CLI login) as the active
+ *  model — inference runs on your Plus/Pro plan quota, not an API key. */
+function CodexConnect({ onChange }: { onChange: () => void }) {
+  const [status, setStatus] = useState<CodexStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const load = useCallback(() => {
+    getCodexStatus().then(setStatus).catch((e) => setErr(errMsg(e)))
+  }, [])
+  useEffect(load, [load])
+  async function connect() {
+    setBusy(true); setErr(null)
+    try { setStatus(await connectCodex("gpt-5.5", "medium")); onChange() }
+    catch (e) { setErr(errMsg(e)) } finally { setBusy(false) }
+  }
+  async function disconnect() {
+    setBusy(true); setErr(null)
+    try { await disconnectCodex(); load(); onChange() }
+    catch (e) { setErr(errMsg(e)) } finally { setBusy(false) }
+  }
+  if (!status) return null
+  return (
+    <div className="space-y-2 rounded-md border border-primary/40 bg-brand-tint p-3">
+      <div className="flex items-center gap-2">
+        <Sparkles className="h-4 w-4 text-primary" />
+        <span className="text-sm font-medium">ChatGPT subscription</span>
+        {status.active && (
+          <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300">active</span>
+        )}
+      </div>
+      {status.connected ? (
+        <>
+          <p className="text-xs text-muted-foreground">
+            Signed in via Codex CLI · plan <b className="uppercase">{status.plan ?? "?"}</b>
+            {status.account_id_tail && <> · account …{status.account_id_tail}</>}
+            {status.expired && <span className="text-destructive"> · token expired — run <code>codex login</code></span>}
+          </p>
+          {status.registered ? (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground">
+                Endpoint <code className="font-mono">{status.model}</code> registered{status.active ? " · active" : ""}.
+              </span>
+              <Button size="sm" variant="outline" className="ml-auto" disabled={busy} onClick={disconnect}>
+                {busy ? "…" : "Disconnect"}
+              </Button>
+            </div>
+          ) : (
+            <Button size="sm" disabled={busy} onClick={connect}>
+              {busy ? "Connecting…" : "Connect (gpt-5.5)"}
+            </Button>
+          )}
+        </>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          No ChatGPT login found. Run <code>codex login</code> in a terminal, then reopen Settings.
+        </p>
+      )}
+      {err && <p className="text-xs text-destructive">{err}</p>}
+    </div>
+  )
 }
 
 /** Model endpoints — global only (one active model serves every project; switching
@@ -38,6 +101,7 @@ function ModelsSection() {
   async function del(name: string) { setErr(null); try { await deleteDesktopModel(name); reload() } catch (e) { setErr(errMsg(e)) } }
   return (
     <div className="space-y-3 py-1">
+      <CodexConnect onChange={reload} />
       <p className="text-xs text-muted-foreground">Model endpoints are global — the active one serves every project's agent; switching takes effect on the next turn.</p>
       <div className="space-y-1.5">
         {endpoints.map((e) => (
