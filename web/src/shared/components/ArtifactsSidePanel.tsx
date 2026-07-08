@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import { ArrowLeft, Download, FileText, RefreshCw } from "lucide-react"
+import { ArrowLeft, Braces, Code2, Download, Eye, FileText, RefreshCw } from "lucide-react"
 import {
   listArtifacts,
   listArtifactVersions,
@@ -9,8 +9,9 @@ import {
 } from "@/shared/api/artifacts"
 import { HtmlArtifactPreview } from "./HtmlArtifactPreview"
 import { RightPanelShell, type RightPanelProps } from "./RightPanelShell"
+import { CodeView } from "@/shared/components/CodeView"
 import { Markdown } from "@/shared/lib/markdown"
-import { isMarkdown } from "@/shared/lib/filetypes"
+import { isMarkdown, langFromPath } from "@/shared/lib/filetypes"
 import { cn } from "@/shared/lib/utils"
 
 /**
@@ -150,6 +151,12 @@ function ArtifactViewer({
   const [text, setText] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(!html)
+  const [formatted, setFormatted] = useState(true)
+  const [showSource, setShowSource] = useState(false)
+  const canFormat = langFromPath(filename) === "json" // JSON is reformat-on-view today
+  // Markdown can be viewed rendered OR as source. (HTML uses a separate preview
+  // that doesn't fetch the raw text, so no source toggle for it here.)
+  const renderable = md
 
   useEffect(() => {
     if (html) return
@@ -185,6 +192,43 @@ function ArtifactViewer({
           <ArrowLeft className="h-4 w-4" />
         </button>
         <span className="min-w-0 flex-1 truncate text-xs font-medium">{filename}</span>
+        {renderable && !loading && !error && text != null && (
+          <button
+            type="button"
+            onClick={() => setShowSource((s) => !s)}
+            aria-pressed={!showSource}
+            className={cn(
+              "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium",
+              !showSource ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent",
+            )}
+            title={showSource ? "Show rendered" : "Show source"}
+          >
+            {showSource ? (
+              <>
+                <Code2 className="h-3.5 w-3.5" /> Code
+              </>
+            ) : (
+              <>
+                <Eye className="h-3.5 w-3.5" /> Preview
+              </>
+            )}
+          </button>
+        )}
+        {canFormat && !loading && !error && text != null && (
+          <button
+            type="button"
+            onClick={() => setFormatted((f) => !f)}
+            aria-pressed={formatted}
+            className={cn(
+              "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium",
+              formatted ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent",
+            )}
+            title={formatted ? "Show raw file" : "Pretty-print JSON"}
+          >
+            <Braces className="h-3.5 w-3.5" />
+            {formatted ? "Formatted" : "Raw"}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => void downloadArtifact(appName, userId, sessionId, filename, version ?? undefined)}
@@ -207,12 +251,17 @@ function ArtifactViewer({
           <div className="p-4 text-center text-xs text-muted-foreground">Loading…</div>
         ) : error ? (
           <div className="p-4 text-center text-xs text-muted-foreground">{error}</div>
-        ) : md ? (
+        ) : md && !showSource ? (
           <div className="adk-md p-3 text-[13px] leading-relaxed">
             <Markdown>{text ?? ""}</Markdown>
           </div>
         ) : (
-          <pre className="whitespace-pre-wrap break-words p-3 text-[11px] leading-relaxed">{text}</pre>
+          <CodeView
+            code={text ?? ""}
+            lang={langFromPath(filename)}
+            format={formatted}
+            className="whitespace-pre-wrap break-words p-3 text-[11px] leading-relaxed"
+          />
         )}
       </div>
     </div>

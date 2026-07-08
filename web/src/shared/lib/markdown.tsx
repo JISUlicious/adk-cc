@@ -3,6 +3,7 @@ import { useState } from "react"
 import { Check, Copy } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
+import { CodeView } from "@/shared/components/CodeView"
 
 /**
  * Shared GFM markdown renderer + Tailwind component map.
@@ -146,9 +147,11 @@ function CodeBlock(props: React.HTMLAttributes<HTMLPreElement>) {
           )}
         </button>
       </div>
-      <pre className="overflow-x-auto bg-background p-3 text-xs font-mono leading-relaxed">
-        {children}
-      </pre>
+      <CodeView
+        code={text}
+        lang={lang}
+        className="overflow-x-auto bg-background p-3 text-xs font-mono leading-relaxed"
+      />
     </div>
   )
 }

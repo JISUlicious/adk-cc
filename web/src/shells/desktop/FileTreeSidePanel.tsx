@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from "react"
 import {
   ArrowLeft,
+  Braces,
   ChevronDown,
   ChevronRight,
+  Code2,
+  Eye,
   File as FileIcon,
   Folder,
   FolderOpen,
@@ -26,8 +29,9 @@ import {
 } from "@/shared/api/desktop-checkpoint"
 import { RightPanelShell, type RightPanelProps } from "@/shared/components/RightPanelShell"
 import { SandboxedHtml } from "@/shared/components/SandboxedHtml"
+import { CodeView } from "@/shared/components/CodeView"
 import { Markdown } from "@/shared/lib/markdown"
-import { isHtml, isMarkdown } from "@/shared/lib/filetypes"
+import { isHtml, isMarkdown, langFromPath } from "@/shared/lib/filetypes"
 import { cn } from "@/shared/lib/utils"
 
 /**
@@ -358,7 +362,13 @@ function FileViewer({
   const [content, setContent] = useState<FileContent | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [formatted, setFormatted] = useState(true)
+  const [showSource, setShowSource] = useState(false)
   const name = path.split("/").pop() || path
+  // Only JSON is reformat-on-view today; the toggle shows for those files.
+  const canFormat = langFromPath(name) === "json"
+  // Renderable files (markdown / HTML) can be viewed rendered OR as source.
+  const renderable = isMarkdown(name, content?.mime) || isHtml(name, content?.mime)
 
   useEffect(() => {
     let cancelled = false
@@ -385,6 +395,47 @@ function FileViewer({
           <ArrowLeft className="h-4 w-4" />
         </button>
         <span className="min-w-0 flex-1 truncate text-xs font-medium">{name}</span>
+        {renderable && !loading && !content?.binary && (
+          <button
+            type="button"
+            onClick={() => setShowSource((s) => !s)}
+            aria-pressed={!showSource}
+            className={cn(
+              "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium",
+              !showSource
+                ? "bg-primary/10 text-primary"
+                : "text-muted-foreground hover:bg-accent",
+            )}
+            title={showSource ? "Show rendered" : "Show source"}
+          >
+            {showSource ? (
+              <>
+                <Code2 className="h-3.5 w-3.5" /> Code
+              </>
+            ) : (
+              <>
+                <Eye className="h-3.5 w-3.5" /> Preview
+              </>
+            )}
+          </button>
+        )}
+        {canFormat && !loading && !content?.binary && (
+          <button
+            type="button"
+            onClick={() => setFormatted((f) => !f)}
+            aria-pressed={formatted}
+            className={cn(
+              "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium",
+              formatted
+                ? "bg-primary/10 text-primary"
+                : "text-muted-foreground hover:bg-accent",
+            )}
+            title={formatted ? "Show raw file" : "Pretty-print JSON"}
+          >
+            <Braces className="h-3.5 w-3.5" />
+            {formatted ? "Formatted" : "Raw"}
+          </button>
+        )}
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         {loading ? (
@@ -395,11 +446,11 @@ function FileViewer({
           <div className="p-4 text-center text-xs text-muted-foreground">
             Binary file ({content.size.toLocaleString()} bytes) — not shown.
           </div>
-        ) : isHtml(name, content?.mime) ? (
+        ) : isHtml(name, content?.mime) && !showSource ? (
           <div className="p-2">
             <SandboxedHtml html={content?.text ?? ""} title={name} />
           </div>
-        ) : isMarkdown(name, content?.mime) ? (
+        ) : isMarkdown(name, content?.mime) && !showSource ? (
           <>
             <div className="adk-md p-3 text-[13px] leading-relaxed">
               <Markdown>{content?.text ?? ""}</Markdown>
@@ -408,9 +459,12 @@ function FileViewer({
           </>
         ) : (
           <>
-            <pre className="whitespace-pre-wrap break-words p-3 text-[11px] leading-relaxed">
-              {content?.text}
-            </pre>
+            <CodeView
+              code={content?.text ?? ""}
+              lang={langFromPath(name)}
+              format={formatted}
+              className="whitespace-pre-wrap break-words p-3 text-[11px] leading-relaxed"
+            />
             {content?.truncated && <TruncatedNote />}
           </>
         )}

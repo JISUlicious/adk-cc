@@ -233,3 +233,57 @@ em {
 .adk-task-strip-items::-webkit-scrollbar {
   display: none; /* WebKit — overrides the global 10px bar */
 }
+
+/* --------------------------------------------------------------------
+ * Syntax highlighting (highlight.js) — kami-harmonized, theme-aware.
+ *
+ * Token colors are CSS vars flipped under `.dark` (same mechanism as the rest
+ * of the theme), tuned to the warm-parchment / ink-blue palette rather than a
+ * generic shipped theme: keywords carry the ink-blue accent, strings a warm
+ * olive, numbers rust, comments warm stone. The code surface itself keeps
+ * `--foreground` on the container's background so highlighted code matches the
+ * app in both themes. `.hljs-*` classes are emitted by `lib/hljs.ts`.
+ * ------------------------------------------------------------------ */
+:root {
+  --hl-keyword:  #1b365d; /* ink blue — keywords, storage, control flow */
+  --hl-string:   #566a2e; /* warm olive */
+  --hl-number:   #9a5626; /* rust — numbers / literals */
+  --hl-comment:  #8a8776; /* warm stone */
+  --hl-class:    #0e5f6e; /* deep teal — class / type names */
+  --hl-function: #35548a; /* mid ink — function / method names */
+  --hl-builtin:  #7a4f2a; /* warm brown — built-ins */
+  --hl-variable: #4a4640; /* warm near-foreground */
+  --hl-meta:     #9a7326; /* decorators / preprocessor / meta */
+  --hl-attr:     #7a4f2a; /* attributes / properties */
+}
+.dark {
+  --hl-keyword:  #7ba3d8;
+  --hl-string:   #adc188;
+  --hl-number:   #d69a63;
+  --hl-comment:  #8f8b7d;
+  --hl-class:    #66c3d1;
+  --hl-function: #9dbdea;
+  --hl-builtin:  #d3ab82;
+  --hl-variable: #d7d3c7;
+  --hl-meta:     #d3b06a;
+  --hl-attr:     #d3ab82;
+}
+
+.hljs { color: var(--foreground); background: transparent; }
+.hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal,
+.hljs-doctag, .hljs-section, .hljs-name { color: var(--hl-keyword); }
+.hljs-string, .hljs-regexp, .hljs-addition,
+.hljs-meta .hljs-string { color: var(--hl-string); }
+.hljs-number, .hljs-symbol, .hljs-bullet,
+.hljs-link, .hljs-deletion { color: var(--hl-number); }
+.hljs-title, .hljs-title.function_ { color: var(--hl-function); }
+.hljs-title.class_, .hljs-class .hljs-title, .hljs-type { color: var(--hl-class); }
+.hljs-built_in { color: var(--hl-builtin); }
+.hljs-variable, .hljs-template-variable, .hljs-params { color: var(--hl-variable); }
+.hljs-attr, .hljs-attribute, .hljs-property,
+.hljs-selector-class, .hljs-selector-attr, .hljs-selector-pseudo { color: var(--hl-attr); }
+.hljs-meta, .hljs-meta .hljs-keyword { color: var(--hl-meta); }
+.hljs-tag { color: var(--hl-keyword); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
