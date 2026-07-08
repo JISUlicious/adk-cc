@@ -215,13 +215,15 @@ def compute_allow_always_rule_contents(
         return [""]
 
     if tool_name == "run_bash":
-        # Danger-aware: never broaden a dangerous/catastrophic command. Otherwise
-        # a benign "Allow always" on `rm -rf build` would store `rm *` and then
-        # auto-allow `rm -rf /` (the command floor's ALLOW-rule override). The
-        # literal still lets the user re-run the exact approved command.
-        from .command_safety import classify_command
+        # Danger-aware: never broaden a dangerous/catastrophic command, NOR a
+        # file-deletion command. Otherwise a benign "Allow always" on `rm -rf build`
+        # would store `rm *` and then auto-allow `rm -rf /` (the command floor's
+        # ALLOW-rule override); and "Allow always" on an out-of-project `rm ~/x`
+        # would store `rm *` and disable the out-of-project delete floor for every
+        # future `rm`. The literal still lets the user re-run the exact command.
+        from .command_safety import classify_command, command_deletes
 
-        if classify_command(literal) in ("dangerous", "catastrophic"):
+        if classify_command(literal) in ("dangerous", "catastrophic") or command_deletes(literal):
             return [literal]
         broadened = _broaden_run_bash(literal)
         if broadened is None or broadened == literal:

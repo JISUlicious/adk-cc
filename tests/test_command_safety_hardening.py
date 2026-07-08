@@ -190,6 +190,73 @@ def test_scope_gate_honors_deny_and_plan() -> None:
     print("OK test_scope_gate_honors_deny_and_plan")
 
 
+def _do(cmd: str, mode: M, oos: bool, rules=()) -> str:
+    return decide(tool=_BASH, args={"command": cmd}, mode=mode,
+                  settings=SettingsHierarchy(list(rules)), workspace_root=_ROOT,
+                  cmd_out_of_scope=oos).behavior
+
+
+def test_out_of_project_command_floor() -> None:
+    # A MUTATING command touching a path OUTSIDE the project ∪ granted dirs asks
+    # even under bypass (destructive op outside the /rewind undo net); in-project
+    # stays auto. `cmd_out_of_scope` is what the plugin computes from the granted
+    # roots — here we drive the engine directly with both values.
+    assert _do("rm /etc/x", M.BYPASS_PERMISSIONS, True) == "ask"
+    assert _do("echo x > /etc/hosts", M.BYPASS_PERMISSIONS, True) == "ask"
+    assert _do("mv a /data/outside/b", M.BYPASS_PERMISSIONS, True) == "ask"
+    assert _do("rm /etc/x", M.DONT_ASK, True) == "deny"
+    # in-scope mutating → auto under bypass (no floor)
+    assert _do("rm build", M.BYPASS_PERMISSIONS, False) == "allow"
+    # read-only out-of-scope → NOT gated (returns at the read-only step, before the
+    # floor) — narrows the prompt to writes/deletes, keeping `cat` / `grep` quiet.
+    assert _do("cat /etc/hosts", M.BYPASS_PERMISSIONS, True) == "allow"
+    # an explicit ALLOW rule for the exact command overrides the floor
+    allow = [PermissionRule(source=RuleSource.SESSION, behavior=RuleBehavior.ALLOW,
+                            tool_name="run_bash", rule_content="rm /etc/x")]
+    assert _do("rm /etc/x", M.BYPASS_PERMISSIONS, True, allow) == "allow"
+    print("OK test_out_of_project_command_floor")
+
+
+def test_deletion_broadening_is_literal_only() -> None:
+    # Deletions never broaden to `<bin> *` — else one "Allow always" on an
+    # out-of-project `rm /data/a` would store `rm *` and, via the ALLOW-rule
+    # override, silently disable the delete floor for EVERY future `rm`.
+    for cmd in ("rm build", "rm /data/a", "rmdir d", "unlink f", "shred f", "env rm /data/x"):
+        assert _caa("run_bash", {"command": cmd}) == [cmd], (cmd, _caa("run_bash", {"command": cmd}))
+    # non-deletion mutating commands still broaden (unchanged)
+    assert _caa("run_bash", {"command": "pip install x"}) == ["pip install x", "pip install *"]
+    # the literal-only rule keeps the floor effective: the exact command is now
+    # allowed, but a DIFFERENT out-of-project delete still asks.
+    rules = [PermissionRule(source=RuleSource.SESSION, behavior=RuleBehavior.ALLOW,
+                            tool_name="run_bash", rule_content=r)
+             for r in _caa("run_bash", {"command": "rm /data/a"})]
+    assert _do("rm /data/a", M.BYPASS_PERMISSIONS, True, rules) == "allow"
+    assert _do("rm /data/b", M.BYPASS_PERMISSIONS, True, rules) == "ask"
+    print("OK test_deletion_broadening_is_literal_only")
+
+
+def test_plugin_computes_out_of_scope_for_run_bash() -> None:
+    # End-to-end plugin wiring: for run_bash the plugin computes cmd_out_of_scope
+    # from the folded workspace (project ∪ granted) and feeds it to decide().
+    proj = os.path.realpath(tempfile.mkdtemp())
+    outside = os.path.realpath(tempfile.mkdtemp())
+    p = PermissionPlugin(SettingsHierarchy([]), default_mode=M.BYPASS_PERMISSIONS)
+    bypass = M.BYPASS_PERMISSIONS.value
+
+    def call(cmd, ctx):
+        return asyncio.run(p.before_tool_callback(
+            tool=_BASH, tool_args={"command": cmd}, tool_context=ctx))
+
+    # out-of-project delete under bypass → floor triggers → prompt
+    r = call(f"rm {outside}/x", _Ctx(proj, mode=bypass))
+    assert r and r["status"] == "needs_confirmation", r
+    # in-project delete under bypass → auto (no prompt)
+    assert call(f"rm {proj}/x", _Ctx(proj, mode=bypass)) is None
+    # reading an out-of-project file → auto (reads aren't gated)
+    assert call(f"cat {outside}/x", _Ctx(proj, mode=bypass)) is None
+    print("OK test_plugin_computes_out_of_scope_for_run_bash")
+
+
 def test_protected_case_and_metachar_hardening() -> None:
     from adk_cc.permissions.broadening import _workspace_anchor
     from adk_cc.permissions.protected import classify_path
@@ -217,6 +284,9 @@ def main() -> None:
     test_broadening_never_widens_a_dangerous_command()
     test_good_behavior_preserved()
     test_scope_gate_honors_deny_and_plan()
+    test_out_of_project_command_floor()
+    test_deletion_broadening_is_literal_only()
+    test_plugin_computes_out_of_scope_for_run_bash()
     print("\nall command-safety hardening tests passed")
 
 

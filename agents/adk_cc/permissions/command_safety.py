@@ -45,6 +45,13 @@ def _env_bins(var: str) -> set[str]:
     return {p.strip() for p in raw.replace(":", ",").split(",") if p.strip()}
 
 
+# File-deletion binaries. "Allow always" on one of these must store the LITERAL
+# command only — never broaden to `<bin> *` (see broadening.py). Otherwise one
+# "Allow always" on `rm ~/outside/f` would store `rm *` and, via the engine's
+# ALLOW-rule override, silently disable BOTH the dangerous-rm floor AND the
+# out-of-project write/delete floor for every future `rm`.
+_DELETION_BINS = frozenset({"rm", "rmdir", "unlink", "shred"})
+
 # Binaries dangerous regardless of args.
 _DANGEROUS_BINS = frozenset({
     "dd", "shred", "eval", "crontab", "launchctl", "systemctl",
@@ -179,6 +186,19 @@ def classify_command(command: str) -> str:
     if stmts is not None and all(is_read_only_command(s) for s, _sep in stmts):
         return "read_only"
     return "mutating"
+
+
+def command_deletes(command: str) -> bool:
+    """True if any statement's real (peeled) binary is a file-deletion command
+    (`rm`/`rmdir`/`unlink`/`shred`, incl. behind `env`/`sudo`/`nohup` wrappers).
+    Broadening consults this to keep deletions literal-only — see `_DELETION_BINS`."""
+    stmts = split_statements(command)
+    segments = [command] if stmts is None else [seg for seg, _sep in stmts]
+    for seg in segments:
+        p = parse_segment(seg)
+        if p.ok and p.binary in _DELETION_BINS:
+            return True
+    return False
 
 
 def command_paths(command: str) -> list[str]:

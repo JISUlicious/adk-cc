@@ -88,10 +88,11 @@ def decide(
     mode: PermissionMode,
     settings: SettingsHierarchy,
     workspace_root: Optional[str] = None,
+    cmd_out_of_scope: bool = False,
 ) -> PermissionDecision:
     decision = _decide_impl(
         tool=tool, args=args, mode=mode, settings=settings,
-        workspace_root=workspace_root,
+        workspace_root=workspace_root, cmd_out_of_scope=cmd_out_of_scope,
     )
     matched_rule_dump = (
         decision.matched_rule.model_dump() if decision.matched_rule else None
@@ -164,6 +165,7 @@ def _decide_impl(
     mode: PermissionMode,
     settings: SettingsHierarchy,
     workspace_root: Optional[str] = None,
+    cmd_out_of_scope: bool = False,
 ) -> PermissionDecision:
     rules = settings.all_rules()
     tool_name = tool.meta.name
@@ -282,6 +284,26 @@ def _decide_impl(
         return PermissionDecision(
             behavior="ask",
             reason="dangerous command requires confirmation (rm -rf, sudo, curl|sh, chmod -R, …)",
+        )
+
+    # Step 1f: a MUTATING run_bash command that writes or deletes a path OUTSIDE
+    # the project ∪ granted dirs — ask even under bypass. A destructive op outside
+    # the checkpoint/undo net: in-project deletes are /rewind-undoable, out-of-project
+    # ones are not (`rm ~/outside/f`, `echo x > /etc/f`, `mv a ~/b`). Placed after
+    # the plan block (plan still denies) and before the bypass short-circuit (bypass
+    # can't skip it). Reads never reach here (read-only tier returns at Step 1d);
+    # catastrophic denied at 1c, dangerous asked at 1e — this adds the plain-mutating
+    # case. `cmd_out_of_scope` is computed by the plugin (it has the granted roots
+    # the engine lacks). An explicit ALLOW rule overrides; dontAsk converts to deny.
+    if cmd_out_of_scope and cmd_tier == "mutating" and allow is None:
+        if mode is PermissionMode.DONT_ASK:
+            return PermissionDecision(
+                behavior="deny",
+                reason="command writes/deletes outside the project — blocked in dontAsk mode",
+            )
+        return PermissionDecision(
+            behavior="ask",
+            reason="command writes or deletes a path outside the project — requires confirmation",
         )
 
     # Step 2b: BYPASS skips the rest (the only gate is the deny check above).

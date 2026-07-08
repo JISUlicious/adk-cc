@@ -185,6 +185,9 @@ class PermissionPlugin(BasePlugin):
         decision = decide(
             tool=tool, args=tool_args, mode=mode, settings=effective,
             workspace_root=workspace_root,
+            cmd_out_of_scope=self._bash_out_of_scope(
+                tool, tool_args, tool_context, workspace_root
+            ),
         )
 
         if decision.behavior == "deny":
@@ -359,6 +362,31 @@ class PermissionPlugin(BasePlugin):
             return get_workspace(tool_context).fs_read_config().allows(resolved)
         except Exception:
             return True  # fail open to the normal flow; gate 2 still enforces
+
+    def _bash_out_of_scope(
+        self, tool: AdkCcTool, args: dict, tool_context: ToolContext,
+        workspace_root: Optional[str],
+    ) -> bool:
+        """True when a desktop run_bash command references a path OUTSIDE the
+        project ∪ granted dirs — drives the engine's out-of-project write/delete
+        floor (Step 1f). run_bash isn't a `_PATH_TOOL`, so the scope gate skips
+        it; this is the command analog. Only MUTATING commands actually hit the
+        floor (reads are read-only tier and return earlier), so a `cat` of an
+        out-of-scope path stays auto — this narrows the prompt to writes/deletes.
+        Best-effort: shell expansion (`$HOME`, shell globs) can hide a path; the
+        OS sandbox is the airtight boundary."""
+        from .. import deployment
+
+        if not deployment.is_desktop() or tool.meta.name != "run_bash":
+            return False
+        from ..permissions.command_safety import command_paths
+
+        command = str((args or {}).get("command") or "")
+        for raw in command_paths(command):
+            resolved = _resolve_against_workspace(raw, workspace_root)
+            if resolved and not self._in_scope(tool_context, resolved):
+                return True
+        return False
 
     def _deny_result(self, decision) -> dict:
         """The permission_denied dict. `error` carries the reason so frontends
