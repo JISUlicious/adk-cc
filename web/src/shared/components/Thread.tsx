@@ -15,6 +15,7 @@ import { CompactionDivider } from "./CompactionDivider"
 import { BashTerminalCard } from "./BashTerminalCard"
 import { FileEditCard } from "./FileEditCard"
 import { PlanCard } from "./PlanCard"
+import { ExitPlanCard } from "./ExitPlanCard"
 import { ThoughtBubble } from "./ThoughtBubble"
 import { ToolCard } from "./ToolCard"
 import { ToolCallGroup } from "./ToolCallGroup"
@@ -65,14 +66,21 @@ const ASK_QUESTION_NAME = "ask_user_question"
 // pair) to avoid a duplicate ToolResponseCard right below.
 const PAIRED_RENDERERS: Record<
   string,
-  "bash" | "edit" | "write" | "plan_read" | "plan_write"
+  "bash" | "edit" | "write" | "plan_read" | "plan_write" | "plan_exit"
 > = {
   run_bash: "bash",
   edit_file: "edit",
   write_file: "write",
   read_current_plan: "plan_read",
   write_plan: "plan_write",
+  exit_plan_mode: "plan_exit",
 }
+
+/** Plan-mode renderer keys. These cards carry the plan (or its approval
+ * hand-off) and must NEVER be folded into a ToolCallGroup — otherwise a
+ * plan collapses behind a "N tool calls" header the moment it sits next to
+ * another tool row (classically the `exit_plan_mode` call right after it). */
+const PLAN_PAIR_KINDS = new Set(["plan_read", "plan_write", "plan_exit"])
 
 /** Function-call names we intentionally drop from the thread.
  * `_handback_to_coordinator` is the synthetic control-call ADK fires
@@ -314,6 +322,10 @@ function Row({
               response={response}
             />
           )
+        case "plan_exit":
+          return (
+            <ExitPlanCard callId={callId} args={args} response={response} />
+          )
         case "generic":
           return (
             <ToolCard
@@ -367,13 +379,15 @@ function extractConfirmPayload(args: unknown): ConfirmPayload | null {
 
 /** A row eligible to be folded into a ToolCallGroup: any tool card or
  * orphan response, EXCEPT a pending interactive widget (confirmation /
- * question) — those must stay visible so the user can act on them. */
+ * question) OR a plan-mode card — both must stay visible (the widget so the
+ * user can act, the plan so it's never hidden behind a fold). */
 function isGroupableToolRow(
   row: ChatRow,
   pendingCallIds: Set<string>,
 ): boolean {
   if (row.kind === "function_response") return true
   if (row.kind === "tool_pair") {
+    if (PLAN_PAIR_KINDS.has(row.pairKind)) return false
     const interactive =
       pendingCallIds.has(row.callId) &&
       (CONFIRMATION_NAMES.has(row.name) || row.name === ASK_QUESTION_NAME)
@@ -433,6 +447,7 @@ type ChatRow =
         | "write"
         | "plan_read"
         | "plan_write"
+        | "plan_exit"
         | "generic"
       args: unknown
       /** null while the response hasn't landed yet. */
@@ -679,6 +694,16 @@ function flattenEvents(
         }
         const pairKind = PAIRED_RENDERERS[name] ?? "generic"
         const matched = callId ? responsesByCallId.get(callId) : undefined
+        // A RESOLVED confirmation/approval form is internal plumbing: while
+        // pending it renders as the interactive ConfirmationCard, and once
+        // answered the real action card (ExitPlanCard / the run_bash card / …)
+        // shows the outcome. Drop the answered row so it isn't leaked back as an
+        // "adk_cc_confirmation_form · finished" history entry. Kept while pending
+        // (no matched response) so the interactive card still renders.
+        if (CONFIRMATION_NAMES.has(name) && matched) {
+          if (callId) consumedResponseIds.add(callId)
+          continue
+        }
         rows.push({
           kind: "tool_pair",
           eventId,
