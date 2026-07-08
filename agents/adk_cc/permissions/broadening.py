@@ -70,9 +70,9 @@ has ONE entry (literal only).
 
 from __future__ import annotations
 
+import glob
 import os
 import shlex
-from pathlib import Path
 from typing import Optional
 
 # Per-binary prefix-token count for `run_bash` broadening. Easy to
@@ -215,6 +215,14 @@ def compute_allow_always_rule_contents(
         return [""]
 
     if tool_name == "run_bash":
+        # Danger-aware: never broaden a dangerous/catastrophic command. Otherwise
+        # a benign "Allow always" on `rm -rf build` would store `rm *` and then
+        # auto-allow `rm -rf /` (the command floor's ALLOW-rule override). The
+        # literal still lets the user re-run the exact approved command.
+        from .command_safety import classify_command
+
+        if classify_command(literal) in ("dangerous", "catastrophic"):
+            return [literal]
         broadened = _broaden_run_bash(literal)
         if broadened is None or broadened == literal:
             return [literal]
@@ -230,23 +238,19 @@ def compute_allow_always_rule_contents(
 
 
 def _workspace_anchor(raw_path: str, workspace_root: Optional[str]) -> Optional[str]:
-    """`<workspace_root>/*` when `raw_path` resolves inside the workspace,
-    else None. Relative paths anchor under the root (mirroring
-    `tools/_fs.resolve`); absolute paths must fall under it. Uses realpath
-    (no existence required) to line up with the canonical
-    `WorkspaceRoot.abs_path`."""
+    """`<workspace_root>/*` when `raw_path` resolves inside the workspace, else
+    None. Reuses `rules._resolve_against_workspace` so the anchor WRITER and the
+    rule MATCHER resolve paths identically, and `glob.escape`s the root so a path
+    with fnmatch metachars (`proj[1]`) matches its own files and not a sibling."""
     if not workspace_root:
         return None
-    try:
-        root = os.path.realpath(workspace_root)
-        p = Path(raw_path).expanduser()
-        target = os.path.realpath(
-            str(p) if p.is_absolute() else str(Path(root) / p)
-        )
-        if target == root or target.startswith(root + os.sep):
-            return f"{root}/*"
-    except Exception:
-        return None
+    from .rules import _resolve_against_workspace
+
+    root = os.path.realpath(workspace_root)
+    target = _resolve_against_workspace(raw_path, root)
+    if target is not None and (target == root or target.startswith(root + os.sep)):
+        return glob.escape(root) + "/*"
+    return None
     return None
 
 

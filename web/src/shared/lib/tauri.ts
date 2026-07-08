@@ -11,11 +11,14 @@ export function tauriInvoke(): ((cmd: string, args?: unknown) => Promise<unknown
   return t?.core?.invoke ?? null
 }
 
-/** Open the native folder picker; returns the chosen absolute path, or null if
- * cancelled OR there's no native IPC (caller should offer a typed-path input). */
-export async function pickDirectory(): Promise<string | null> {
+/** Open the native folder picker. Distinguishes the two "no path" cases so
+ * callers can react correctly:
+ *   - a string  → the chosen absolute path
+ *   - `null`    → the user CANCELLED the native dialog (do nothing)
+ *   - `undefined` → no native IPC (offer a typed-path input instead) */
+export async function pickDirectory(): Promise<string | null | undefined> {
   const invoke = tauriInvoke()
-  if (!invoke) return null
+  if (!invoke) return undefined
   const picked = await invoke("plugin:dialog|open", {
     options: { directory: true, multiple: false },
   })

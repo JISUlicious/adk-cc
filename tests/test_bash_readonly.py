@@ -36,7 +36,7 @@ _READ_ONLY = [
     "df -h",
     "echo hello world",
     "which python",
-    "env",
+    "printenv",
     "cut -d: -f1 /etc/passwd",
     "column -t data.txt",
     "diff a.txt b.txt",
@@ -95,6 +95,12 @@ _NOT_READ_ONLY = [
     "sudo ls",
     "unknownprog --flag",
     "npm install",
+    # `env`/wrappers run an arbitrary following command → never read-only
+    "env",
+    "env rm -rf /",
+    "env FOO=bar cat x",
+    # a newline separates statements — `ls\nrm y` is two commands
+    "ls\nrm y",
     # degenerate input
     "",
     "   ",

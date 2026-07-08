@@ -85,6 +85,13 @@ export function ChatPage({
   // Neutral transient confirmation channel (e.g. /add-dir), distinct from the
   // destructive-styled `error` banner.
   const [notice, setNotice] = useState<string | null>(null)
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (noticeTimer.current) clearTimeout(noticeTimer.current) }, [])
+  const showNotice = (msg: string) => {
+    setNotice(msg)
+    if (noticeTimer.current) clearTimeout(noticeTimer.current)
+    noticeTimer.current = setTimeout(() => setNotice(null), 6000)
+  }
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [rewindOpen, setRewindOpen] = useState(false)
   // Count of required skill/MCP secrets the user hasn't set → badge on the
@@ -348,11 +355,15 @@ export function ChatPage({
         if (!IS_DESKTOP || !userId) return
         void (async () => {
           const path = await pickDirectory()
-          if (!path) return // picker cancelled
+          if (path === undefined) {
+            // No native picker here (plain browser) — direct to the Settings tab.
+            setError("Add a working directory from Settings → Working dirs.")
+            return
+          }
+          if (!path) return // null = user cancelled the native dialog
           try {
             await addWorkingDir(path, userId)
-            setNotice(`✓ Working directory added: ${path}`)
-            setTimeout(() => setNotice(null), 6000)
+            showNotice(`✓ Working directory added: ${path}`)
           } catch (e) {
             setError(`Failed to add working directory: ${(e as Error).message}`)
           }

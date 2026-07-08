@@ -25,10 +25,12 @@ import shlex
 # once shell redirection is ruled out).
 _SAFE_PROGRAMS = frozenset({
     "ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "pwd",
-    "stat", "file", "du", "df", "echo", "which", "type", "env", "printenv",
+    "stat", "file", "du", "df", "echo", "which", "type", "printenv",
     "basename", "dirname", "realpath", "readlink", "cut", "nl", "date", "whoami",
     "id", "uname", "hostname", "diff", "cmp", "column", "tr", "man", "help",
 })
+# NOTE: `env` is deliberately NOT here — `env CMD …` runs an arbitrary command,
+# so it is not read-only (use `printenv` to list the environment).
 
 # find flags that run or delete things.
 _FIND_WRITE_FLAGS = frozenset({
@@ -42,9 +44,10 @@ _GIT_READ_ONLY = frozenset({
     "for-each-ref", "whatchanged", "name-rev", "rev-list",
 })
 
-# Chaining / redirection / subshell / command-substitution — any of these can
-# reach a mutating command, so a command containing them is never read-only here.
-_SHELL_META = re.compile(r"[;&|`<>]|\$\(")
+# Chaining / redirection / subshell / command-substitution / newline — any of
+# these can reach a mutating command, so a command containing them is never
+# read-only here. (`\n`/`\r` separate statements: `ls\nrm -rf /` is two commands.)
+_SHELL_META = re.compile(r"[;&|`<>\n\r]|\$\(")
 
 
 def is_read_only_command(command: str) -> bool:

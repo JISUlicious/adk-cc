@@ -196,18 +196,22 @@ def list_granted_roots(ctx: ToolContext) -> list[str]:
     return out
 
 
-def add_granted_root(ctx: ToolContext, path: str, *, persist: bool = False) -> None:
-    """Grant a directory. `persist=False` → session scope (this session only);
-    `persist=True` → `user:` scope (survives across the user's future sessions,
-    the "Working directories" setting). No-op for blanks."""
+def _append_root(ctx: ToolContext, key: str, path: str) -> None:
+    """Canonicalize `path` and append it to the state list at `key` if new."""
     if not path:
         return
-    key = _USER_ROOTS_KEY if persist else _SESSION_ROOTS_KEY
     existing = _read_roots(ctx, key)
     canon = os.path.realpath(path)
     if canon not in existing:
         existing.append(canon)
         ctx.state[key] = existing
+
+
+def add_granted_root(ctx: ToolContext, path: str, *, persist: bool = False) -> None:
+    """Grant a directory. `persist=False` → session scope (this session only);
+    `persist=True` → `user:` scope (survives across the user's future sessions,
+    the "Working directories" setting). No-op for blanks."""
+    _append_root(ctx, _USER_ROOTS_KEY if persist else _SESSION_ROOTS_KEY, path)
 
 
 def remove_granted_root(ctx: ToolContext, path: str, *, persist: bool = False) -> None:
@@ -218,20 +222,26 @@ def remove_granted_root(ctx: ToolContext, path: str, *, persist: bool = False) -
 
 
 def grant_once(ctx: ToolContext, path: str) -> None:
-    """One-shot grant: allow the very next matching operation, then be cleared
-    by the permission plugin's after_tool_callback. Stored as the exact target
-    path (file), not a directory."""
+    """One-shot grant: allow the very next matching operation on this exact path
+    (a file, not a directory), then be consumed by the permission plugin's
+    after_tool_callback."""
+    _append_root(ctx, _GRANT_ONCE_KEY, path)
+
+
+def discard_grant_once(ctx: ToolContext, path: str) -> None:
+    """Consume ONE one-shot grant — the path the just-finished op used — so a
+    sibling tool call's completion can't drop another call's approved grant."""
     if not path:
         return
-    existing = _read_roots(ctx, _GRANT_ONCE_KEY)
     canon = os.path.realpath(path)
-    if canon not in existing:
-        existing.append(canon)
-        ctx.state[_GRANT_ONCE_KEY] = existing
+    cur = _read_roots(ctx, _GRANT_ONCE_KEY)
+    if canon in cur:
+        ctx.state[_GRANT_ONCE_KEY] = [r for r in cur if r != canon]
 
 
 def clear_grant_once(ctx: ToolContext) -> None:
-    """Drop all one-shot grants (called after the granted operation runs)."""
+    """Drop ALL one-shot grants (used by tests / teardown; the plugin consumes
+    grants one at a time via `discard_grant_once`)."""
     try:
         if ctx.state.get(_GRANT_ONCE_KEY):
             ctx.state[_GRANT_ONCE_KEY] = []

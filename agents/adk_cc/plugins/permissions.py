@@ -35,6 +35,7 @@ Behavior:
 
 from __future__ import annotations
 
+import glob
 import logging
 import os
 from typing import Any, Optional
@@ -175,7 +176,9 @@ class PermissionPlugin(BasePlugin):
         # instead of hitting the sandbox hard-deny. Handles both HITL calls;
         # returns _CONTINUE when not applicable (non-desktop, non-path tool,
         # in-scope, secret material, or a non-scope confirmation).
-        gate = self._scope_gate(tool, tool_args, tool_context)
+        gate = self._scope_gate(
+            tool, tool_args, tool_context, mode=mode, workspace_root=workspace_root
+        )
         if gate is not _CONTINUE:
             return gate
 
@@ -185,21 +188,7 @@ class PermissionPlugin(BasePlugin):
         )
 
         if decision.behavior == "deny":
-            # `error` key carries the human-readable reason so frontends
-            # that drive their status display off key-presence (see
-            # `web/src/components/ToolCard.tsx::deriveStatus`) classify
-            # this as an error without needing to know
-            # `permission_denied` is failure semantics.
-            return {
-                "status": "permission_denied",
-                "error": decision.reason,
-                "reason": decision.reason,
-                "matched_rule": (
-                    decision.matched_rule.model_dump()
-                    if decision.matched_rule
-                    else None
-                ),
-            }
+            return self._deny_result(decision)
 
         if decision.behavior == "ask":
             # Two-call confirmation pattern (mirrors AdkCcTool.run_async):
@@ -250,7 +239,7 @@ class PermissionPlugin(BasePlugin):
                         tool_args,
                         tool_context,
                         persist_across_sessions=persist,
-                        workspace_root=self._workspace_root(tool_context),
+                        workspace_root=workspace_root,  # reuse the local (line ~172)
                     )
                     return None  # let the tool run + skip future re-asks
                 if chose_id is None and getattr(confirmation, "confirmed", False):
@@ -331,9 +320,13 @@ class PermissionPlugin(BasePlugin):
         from .. import deployment
 
         if deployment.is_desktop() and tool.meta.name in _PATH_TOOLS:
-            from ..sandbox import clear_grant_once
+            from ..sandbox import discard_grant_once
 
-            clear_grant_once(tool_context)
+            # Consume only THIS call's grant (not the whole list), so a sibling
+            # tool call finishing first can't drop another call's "Allow once".
+            resolved = self._resolved_target(tool, tool_args, tool_context)
+            if resolved:
+                discard_grant_once(tool_context, resolved)
         return None
 
     # --- Desktop scope-expansion gate ------------------------------------
@@ -367,51 +360,80 @@ class PermissionPlugin(BasePlugin):
         except Exception:
             return True  # fail open to the normal flow; gate 2 still enforces
 
+    def _deny_result(self, decision) -> dict:
+        """The permission_denied dict. `error` carries the reason so frontends
+        that key their status display off its presence classify it as an error."""
+        return {
+            "status": "permission_denied",
+            "error": decision.reason,
+            "reason": decision.reason,
+            "matched_rule": (
+                decision.matched_rule.model_dump() if decision.matched_rule else None
+            ),
+        }
+
     def _scope_gate(
-        self, tool: AdkCcTool, args: dict, tool_context: ToolContext
+        self, tool: AdkCcTool, args: dict, tool_context: ToolContext,
+        *, mode: PermissionMode, workspace_root: Optional[str],
     ) -> Any:
-        """Desktop-only scope-expansion for path tools. Returns `_CONTINUE` to
-        fall through to the normal permission decision, or a tool-result dict /
-        None to short-circuit `before_tool_callback`."""
+        """Desktop-only scope-expansion for path tools. Routes through `decide()`
+        so operator DENY rules, PLAN-mode blocking, the protected-path floor, and
+        the audit trail are NEVER bypassed by a grant. Returns `_CONTINUE` to fall
+        through to the normal flow, or a tool-result dict / None to short-circuit."""
         from .. import deployment
 
         if not deployment.is_desktop() or tool.meta.name not in _PATH_TOOLS:
             return _CONTINUE
 
+        def _decide():  # fresh settings so a just-applied grant's rule is seen
+            return decide(
+                tool=tool, args=args, mode=mode,
+                settings=self._effective_settings(tool_context),
+                workspace_root=workspace_root,
+            )
+
         confirmation = getattr(tool_context, "tool_confirmation", None)
         if confirmation is not None:
             chose = _read_choice_id(confirmation)
-            if chose == "grant_folder":
-                self._apply_folder_grant(
-                    tool, args, tool_context,
-                    persist=_read_persist_toggle(confirmation),
-                )
-                return None  # let the tool run
-            if chose == "grant_once":
-                resolved = self._resolved_target(tool, args, tool_context)
-                if resolved:
-                    from ..sandbox import grant_once
+            if chose in ("grant_folder", "grant_once"):
+                if chose == "grant_folder":
+                    self._apply_folder_grant(
+                        tool, args, tool_context,
+                        persist=_read_persist_toggle(confirmation),
+                    )
+                else:
+                    resolved = self._resolved_target(tool, args, tool_context)
+                    if resolved:
+                        from ..sandbox import grant_once
 
-                    grant_once(tool_context, resolved)
-                return None
+                        grant_once(tool_context, resolved)
+                # Grant applied → the path is now in scope. Still honor a hard DENY
+                # (operator rule / plan-mode / protected-deny); the grant is the
+                # confirmation for any ask.
+                d = _decide()
+                if d.behavior == "deny":
+                    return self._deny_result(d)
+                return None  # let the tool run
             if chose == "grant_deny":
                 return {
                     "status": "permission_denied_by_user",
                     "error": "User declined to grant access outside the project.",
                     "reason": "User declined the scope-expansion prompt.",
                 }
-            return _CONTINUE  # a normal ask confirmation → let the main flow handle it
+            return _CONTINUE  # a normal ask confirmation → main flow handles it
 
         # First invocation.
         resolved = self._resolved_target(tool, args, tool_context)
         if resolved is None or self._in_scope(tool_context, resolved):
             return _CONTINUE
-        prot = classify_path(resolved)
-        if prot == "deny":
-            return _CONTINUE  # secret material — let decide() hard-deny; never grant
+        # Never offer a grant for something the engine would hard-DENY (deny rule,
+        # plan-mode block, protected-deny) — let decide() deny it via the main flow.
+        if _decide().behavior == "deny":
+            return _CONTINUE
         if not tool_context.function_call_id:
             return _CONTINUE  # no HITL channel; gate 2 will still deny
 
+        prot = classify_path(resolved)
         parent = os.path.dirname(resolved)
         prompt = grant_scope_prompt(
             tool.meta.name, resolved, parent,
@@ -421,8 +443,8 @@ class PermissionPlugin(BasePlugin):
             hint="Access outside the project requires your approval.",
             payload=prompt.model_dump(),
         )
-        # See the destructive-gate note: without skip_summarization the runner
-        # re-invokes the LLM before the user answers.
+        # Without skip_summarization the runner re-invokes the LLM before the
+        # user answers.
         tool_context.actions.skip_summarization = True
         return {
             "status": "needs_confirmation",
@@ -446,12 +468,13 @@ class PermissionPlugin(BasePlugin):
 
         key = _USER_ALLOW_STATE_KEY if persist else _SESSION_ALLOW_STATE_KEY
         existing = list(tool_context.state.get(key) or [])
+        dir_glob = glob.escape(parent) + "/*"  # escape [ ] * ? in the dir path
         for tname in ("write_file", "edit_file"):
             rule = PermissionRule(
                 source=RuleSource.SESSION,
                 behavior=RuleBehavior.ALLOW,
                 tool_name=tname,
-                rule_content=f"{parent}/*",
+                rule_content=dir_glob,
             )
             existing.append(rule.model_dump(mode="json"))
         tool_context.state[key] = existing

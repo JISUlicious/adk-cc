@@ -90,21 +90,50 @@ def _ask_patterns() -> list[str]:
     return _expand(_ASK_DEFAULT) + _expand(_env_patterns("ADK_CC_PROTECTED_ASK"))
 
 
+def _realpath_prefix(pattern: str) -> str:
+    """Realpath the non-glob prefix of an (already expanduser'd) pattern so a
+    symlinked `$HOME` (`/home`→`/var/home`, NFS automounts) still matches the
+    realpath'd input. `~/.ssh/**` → `/var/home/user/.ssh/**`."""
+    star = next((i for i, ch in enumerate(pattern) if ch in "*?["), len(pattern))
+    prefix, glob = pattern[:star], pattern[star:]
+    if not prefix:
+        return pattern
+    try:
+        rp = os.path.realpath(prefix)
+    except OSError:
+        return pattern
+    if prefix.endswith("/") and not rp.endswith("/"):
+        rp += "/"
+    return rp + glob
+
+
+def _matches(target: str, pattern: str) -> bool:
+    """Case-folded fnmatch against both the pattern and its realpath-prefixed
+    form — so `~/.SSH` (case-insensitive FS) and a symlinked `$HOME` can't evade
+    the floor."""
+    for form in (pattern, _realpath_prefix(pattern)):
+        if fnmatch.fnmatch(target, form.lower()):
+            return True
+    return False
+
+
 def classify_path(abs_path: str) -> Optional[str]:
     """Return ``"deny"`` | ``"ask"`` | ``None`` for a resolved absolute path.
 
-    Desktop-only (returns None otherwise). Deny takes precedence over ask."""
+    Desktop-only (returns None otherwise). Deny takes precedence over ask. Match
+    is case-folded and covers a symlinked `$HOME`, since this is a hard security
+    floor and the FS may be case-insensitive (macOS)."""
     if not abs_path:
         return None
     from .. import deployment
 
     if not deployment.is_desktop():
         return None
-    ap = os.path.realpath(abs_path)
+    target = os.path.realpath(abs_path).lower()
     for pat in _deny_patterns():
-        if fnmatch.fnmatch(ap, pat):
+        if _matches(target, pat):
             return "deny"
     for pat in _ask_patterns():
-        if fnmatch.fnmatch(ap, pat):
+        if _matches(target, pat):
             return "ask"
     return None

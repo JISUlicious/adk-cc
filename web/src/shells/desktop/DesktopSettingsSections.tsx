@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type ChangeEvent } from "react"
-import { ChevronRight, Trash2, Upload, Plus, FolderPlus } from "lucide-react"
+import { ChevronRight, Trash2, Upload, Plus } from "lucide-react"
 import { Button } from "@/shared/components/ui/button"
 import { Input } from "@/shared/components/ui/input"
 import { listProjects, type Project } from "@/shared/api/projects"
 import { ApiError } from "@/shared/api/client"
-import { pickDirectory } from "@/shared/lib/tauri"
+import { FolderPickerButton } from "@/shared/components/FolderPickerButton"
 import {
   type Scope,
   listDesktopSecrets, setDesktopSecret, deleteDesktopSecret,
@@ -166,8 +166,6 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
-  const [pathPrompt, setPathPrompt] = useState(false)
-  const [pathInput, setPathInput] = useState("")
   const reload = useCallback(() => {
     listDesktopSkills(scope, projectId).then((r) => setSkills(r.skills)).catch((e) => setErr(errMsg(e)))
   }, [scope, projectId])
@@ -189,19 +187,6 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
       reload()
     } catch (e) { setErr(errMsg(e)) } finally { setBusy(false) }
   }
-  async function onAddFolder() {
-    setErr(null)
-    try {
-      const picked = await pickDirectory()      // native folder picker (Tauri)
-      if (picked) await addFromDir(picked)
-      else { setPathInput(""); setPathPrompt((v) => !v) }  // no IPC → typed path
-    } catch (e) { setErr(errMsg(e)) }
-  }
-  async function submitPath() {
-    const p = pathInput.trim()
-    setPathPrompt(false)
-    if (p) await addFromDir(p)
-  }
   async function del(name: string) {
     setErr(null)
     try { await deleteDesktopSkill(name, scope, projectId); reload() } catch (e) { setErr(errMsg(e)) }
@@ -215,28 +200,13 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
           <button onClick={() => del(s)} className="ml-auto text-muted-foreground hover:text-destructive" title="Remove"><Trash2 className="h-3.5 w-3.5" /></button>
         </div>
       ))}
-      <div className="flex flex-wrap gap-2 pt-1">
+      <div className="flex flex-wrap items-start gap-2 pt-1">
         <input ref={fileRef} type="file" accept=".zip" onChange={onFile} className="hidden" />
-        <Button size="sm" variant="outline" disabled={busy} onClick={onAddFolder} title="Add a skill from a local folder (SKILL.md + files)">
-          <FolderPlus className="h-3.5 w-3.5" /> {busy ? "Adding…" : "Add skill folder"}
-        </Button>
+        <FolderPickerButton label="Add skill folder" placeholder="/absolute/path/to/skill-folder" busy={busy} onPick={addFromDir} />
         <Button size="sm" variant="outline" disabled={busy} onClick={() => fileRef.current?.click()}>
           <Upload className="h-3.5 w-3.5" /> {busy ? "Uploading…" : "Upload .zip"}
         </Button>
       </div>
-      {pathPrompt && (
-        <div className="flex gap-1">
-          <Input
-            autoFocus
-            value={pathInput}
-            onChange={(e) => setPathInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") void submitPath(); else if (e.key === "Escape") setPathPrompt(false) }}
-            placeholder="/absolute/path/to/skill-folder"
-            className="h-8 flex-1 font-mono text-xs"
-          />
-          <Button size="sm" variant="outline" onClick={submitPath}>Add</Button>
-        </div>
-      )}
       {err && <p className="text-xs text-destructive">{err}</p>}
     </div>
   )
@@ -248,8 +218,6 @@ export function WorkingDirsScope({ scope, projectId }: { scope: Scope; projectId
   const [dirs, setDirs] = useState<string[]>([])
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [pathPrompt, setPathPrompt] = useState(false)
-  const [pathInput, setPathInput] = useState("")
   const reload = useCallback(() => {
     if (scope !== "project" || !projectId) return
     listWorkingDirs(projectId)
@@ -269,25 +237,12 @@ export function WorkingDirsScope({ scope, projectId }: { scope: Scope; projectId
 
   async function addDir(path: string) {
     setErr(null); setBusy(true)
-    try { await addWorkingDir(path, projectId!); reload() }
+    try { setDirs((await addWorkingDir(path, projectId!)).dirs) }  // use the returned list
     catch (e) { setErr(errMsg(e)) } finally { setBusy(false) }
-  }
-  async function onAddFolder() {
-    setErr(null)
-    try {
-      const picked = await pickDirectory()      // native folder picker (Tauri)
-      if (picked) await addDir(picked)
-      else { setPathInput(""); setPathPrompt((v) => !v) }  // no IPC → typed path
-    } catch (e) { setErr(errMsg(e)) }
-  }
-  async function submitPath() {
-    const p = pathInput.trim()
-    setPathPrompt(false)
-    if (p) await addDir(p)
   }
   async function del(path: string) {
     setErr(null)
-    try { await removeWorkingDir(path, projectId!); reload() } catch (e) { setErr(errMsg(e)) }
+    try { setDirs((await removeWorkingDir(path, projectId!)).dirs) } catch (e) { setErr(errMsg(e)) }
   }
   return (
     <div className="space-y-1.5">
@@ -305,23 +260,8 @@ export function WorkingDirsScope({ scope, projectId }: { scope: Scope; projectId
         </div>
       ))}
       <div className="pt-1">
-        <Button size="sm" variant="outline" disabled={busy} onClick={onAddFolder} title="Grant a directory outside the project">
-          <FolderPlus className="h-3.5 w-3.5" /> {busy ? "Adding…" : "Add directory"}
-        </Button>
+        <FolderPickerButton label="Add directory" placeholder="/absolute/path/to/directory" busy={busy} onPick={addDir} />
       </div>
-      {pathPrompt && (
-        <div className="flex gap-1">
-          <Input
-            autoFocus
-            value={pathInput}
-            onChange={(e) => setPathInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") void submitPath(); else if (e.key === "Escape") setPathPrompt(false) }}
-            placeholder="/absolute/path/to/directory"
-            className="h-8 flex-1 font-mono text-xs"
-          />
-          <Button size="sm" variant="outline" onClick={submitPath}>Add</Button>
-        </div>
-      )}
       {err && <p className="text-xs text-destructive">{err}</p>}
     </div>
   )

@@ -36,7 +36,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel
 
 from ..tools.base import AdkCcTool
-from .command_safety import classify_command
+from .command_safety import classify_command, command_paths
 from .modes import PermissionMode
 from .protected import classify_path
 from .rules import (
@@ -190,7 +190,22 @@ def _decide_impl(
     # hard-denies (even under bypass).
     cmd_tier = "mutating"
     if tool_name == "run_bash":
-        cmd_tier = classify_command(str((args or {}).get("command") or ""))
+        command = str((args or {}).get("command") or "")
+        cmd_tier = classify_command(command)
+        # The protected-path floor also applies to the PATHS a bash command reads
+        # (best-effort; the OS sandbox is the airtight boundary): `cat ~/.ssh/id_rsa`
+        # must be denied just like read_file. Worst classification wins, folded
+        # into `protected` so Steps 1b (deny, even bypass) / 2c (ask) handle it.
+        for raw in command_paths(command):
+            resolved = _resolve_against_workspace(raw, workspace_root)
+            if not resolved:
+                continue
+            pc = classify_path(resolved)
+            if pc == "deny":
+                protected = "deny"
+                break
+            if pc == "ask" and protected is None:
+                protected = "ask"
 
     # Step 1: deny rules always win.
     deny = _first_match(rules, RuleBehavior.DENY, tool_name, args, workspace_root)
@@ -226,9 +241,10 @@ def _decide_impl(
         )
 
     # Step 1d: read-only command — allow in every mode (incl. plan / bypass),
-    # unless a user ASK rule wants confirmation. Subsumes the plan-mode read-only
-    # allow below and ends the blanket "every run_bash asks in DEFAULT" fatigue.
-    if cmd_tier == "read_only" and ask is None:
+    # unless a user ASK rule wants confirmation OR the command touches a protected
+    # path (which must still route to the deny/ask floor). Subsumes the plan-mode
+    # read-only allow below and ends the blanket "every run_bash asks" fatigue.
+    if cmd_tier == "read_only" and ask is None and protected is None:
         return PermissionDecision(
             behavior="allow", matched_rule=allow, reason="read-only command",
         )
