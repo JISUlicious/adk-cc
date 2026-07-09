@@ -11,7 +11,7 @@ import { ApiError } from "@/shared/api/client"
 import {
   listDesktopModels, setDesktopModel, activateDesktopModel, deleteDesktopModel, type DesktopModel,
   getCodexStatus, connectCodex, disconnectCodex, type CodexStatus,
-  startCodexLogin, getCodexLoginStatus, codexSignout, getCodexModels, discoverModels,
+  startCodexLogin, getCodexLoginStatus, codexSignout, discoverModels,
   selectModel, refreshModels,
 } from "@/shared/api/desktop-settings"
 
@@ -27,38 +27,31 @@ function errMsg(e: unknown): string {
   return (e as Error)?.message || String(e)
 }
 
-/** Connect your ChatGPT subscription as the active model — inference runs on
- *  your Plus/Pro plan quota, not an API key. One "Connect" button authenticates
- *  (browser OAuth, or an existing Codex CLI login) and registers with the first
- *  discovered model; the model is picked afterwards from the dropdown. */
-function CodexConnect({ onChange, activeName }: { onChange: () => void; activeName?: string | null }) {
+/** ChatGPT-subscription connect card. Before connecting: a single "Connect with
+ *  ChatGPT subscription" button (browser OAuth or an existing Codex CLI login).
+ *  Once connected it collapses to a minimal status + auth actions — the provider
+ *  itself is listed and MANAGED (model / activate / remove) in the providers
+ *  list below, so it's a one-click activate like any other provider. `refreshTick`
+ *  re-fetches the card whenever that list changes (add / remove / activate). */
+function CodexConnect({ onChange, refreshTick }: { onChange: () => void; refreshTick: number }) {
   const [status, setStatus] = useState<CodexStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [signingIn, setSigningIn] = useState(false)
   const [authUrl, setAuthUrl] = useState<string | null>(null)
-  const [models, setModels] = useState<string[]>([])
   const alive = useRef(true)
   useEffect(() => () => { alive.current = false }, [])
   const load = useCallback(() => {
     getCodexStatus().then((s) => alive.current && setStatus(s)).catch((e) => alive.current && setErr(errMsg(e)))
   }, [])
-  // Re-fetch on mount AND whenever the active provider changes elsewhere (e.g. a
-  // different provider is activated below), so the "active" badge stays correct.
-  useEffect(() => { load() }, [load, activeName])
-  useEffect(() => {
-    if (!status?.registered) return
-    getCodexModels().then((r) => alive.current && setModels(r.models)).catch(() => {})
-  }, [status?.registered])
+  useEffect(() => { load() }, [load, refreshTick])
 
   async function run(fn: () => Promise<CodexStatus | null | void>) {
     setBusy(true); setErr(null)
     try { const s = await fn(); if (s && alive.current) setStatus(s); onChange() }
     catch (e) { if (alive.current) setErr(errMsg(e)) } finally { if (alive.current) setBusy(false) }
   }
-  const connectDefault = () => run(() => connectCodex())          // register with the first discovered model
-  const switchModel = (m: string) => run(() => connectCodex(m))   // m = base model name
-  const disconnect = () => run(async () => { await disconnectCodex(); load() })
+  const connectDefault = () => run(() => connectCodex()) // register with the first discovered model
   const signOut = () => run(() => codexSignout())
 
   async function signIn() {
@@ -71,7 +64,7 @@ function CodexConnect({ onChange, activeName }: { onChange: () => void; activeNa
         await new Promise((r) => setTimeout(r, 2000))
         const st = await getCodexLoginStatus()
         if (st.state === "done") {
-          const s = await connectCodex() // register with the first discovered model
+          const s = await connectCodex()
           if (alive.current) setStatus(s)
           onChange(); break
         }
@@ -80,7 +73,6 @@ function CodexConnect({ onChange, activeName }: { onChange: () => void; activeNa
     } catch (e) { if (alive.current) setErr(errMsg(e)) }
     finally { if (alive.current) { setSigningIn(false); setAuthUrl(null) } }
   }
-  // The one action: authenticate if there's no login yet, else just connect.
   const handleConnect = () => { if (status?.connected) void connectDefault(); else void signIn() }
 
   if (!status) return null
@@ -90,9 +82,6 @@ function CodexConnect({ onChange, activeName }: { onChange: () => void; activeNa
       <div className="flex items-center gap-2">
         <Sparkles className="h-4 w-4 text-primary" />
         <span className="text-sm font-medium">ChatGPT subscription</span>
-        {status.active && (
-          <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300">active</span>
-        )}
       </div>
       {signingIn ? (
         <p className="text-xs text-muted-foreground">
@@ -100,39 +89,24 @@ function CodexConnect({ onChange, activeName }: { onChange: () => void; activeNa
           {authUrl && <a href={authUrl} target="_blank" rel="noreferrer" className="text-primary underline">open the page</a>}
         </p>
       ) : status.registered ? (
-        <>
-          <p className="text-xs text-muted-foreground">
-            Connected via {via} · plan <b className="uppercase">{status.plan ?? "?"}</b>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="text-xs text-muted-foreground">
+            Connected · plan <b className="uppercase">{status.plan ?? "?"}</b>
             {status.account_id_tail && <> · account …{status.account_id_tail}</>}
             {status.expired && <span className="text-destructive"> · token expired</span>}
-          </p>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">Model</span>
-            <select
-              value={status.model || ""}
-              disabled={busy}
-              onChange={(e) => switchModel(e.target.value)}
-              className="rounded border border-input bg-background px-1.5 py-1 font-mono text-xs"
-              title="Switch the active model"
-            >
-              {(models.length ? models : status.model ? [status.model] : []).map((m) => <option key={m} value={m}>{m}</option>)}
-            </select>
-            {status.active && <span className="text-xs text-muted-foreground">· active</span>}
-            <Button size="sm" variant="outline" className="ml-auto" disabled={busy} onClick={disconnect}>Disconnect</Button>
-          </div>
-          <div className="flex items-center gap-3">
-            {status.expired ? (
-              <Button size="sm" disabled={busy} onClick={signIn}><Sparkles className="h-3.5 w-3.5" /> Re-authenticate</Button>
-            ) : (
-              <button className="text-[10px] text-primary hover:underline disabled:opacity-50" disabled={busy} onClick={signIn}>
-                {status.mode === "cli" ? "Authenticate with browser instead" : "Re-authenticate in browser"}
-              </button>
-            )}
-            {status.mode === "own" && (
-              <button className="text-[10px] text-muted-foreground hover:text-destructive disabled:opacity-50" disabled={busy} onClick={signOut}>sign out</button>
-            )}
-          </div>
-        </>
+          </span>
+          {status.expired ? (
+            <Button size="sm" disabled={busy} onClick={signIn}><Sparkles className="h-3.5 w-3.5" /> Re-authenticate</Button>
+          ) : (
+            <button className="text-[10px] text-primary hover:underline disabled:opacity-50" disabled={busy} onClick={signIn}>
+              {status.mode === "cli" ? "Authenticate with browser instead" : "Re-authenticate in browser"}
+            </button>
+          )}
+          {status.mode === "own" && (
+            <button className="text-[10px] text-muted-foreground hover:text-destructive disabled:opacity-50" disabled={busy} onClick={signOut}>sign out</button>
+          )}
+          <span className="w-full text-[10px] text-muted-foreground">Listed as a provider below — pick its model, activate, or remove it there.</span>
+        </div>
       ) : (
         <>
           {status.connected && (
@@ -143,7 +117,7 @@ function CodexConnect({ onChange, activeName }: { onChange: () => void; activeNa
           </Button>
           <p className="text-[11px] text-muted-foreground">
             {status.connected
-              ? "Uses your Plus/Pro plan (not an API key). Connects on your first model — change it below after."
+              ? "Uses your Plus/Pro plan (not an API key). Connects on your first model — pick it in the list below."
               : "Authenticates in your browser · uses your Plus/Pro plan, not an API key."}
           </p>
         </>
@@ -162,18 +136,24 @@ function ModelsSection() {
   const [busy, setBusy] = useState<string | null>(null)
   const [form, setForm] = useState<DesktopModel>({ name: "", model: "", api_base: "", api_key_env: "ADK_CC_API_KEY" })
   const [err, setErr] = useState<string | null>(null)
+  const [refreshTick, setRefreshTick] = useState(0)
   const reload = useCallback(() => {
     listDesktopModels().then((r) => { setEndpoints(r.endpoints); setActive(r.active) }).catch((e) => setErr(errMsg(e)))
   }, [])
   useEffect(reload, [reload])
+  // Re-fetch the ChatGPT card after any registry mutation (e.g. removing the
+  // ChatGPT provider must bring its "Connect" button back).
+  const bump = () => setRefreshTick((t) => t + 1)
   async function guard(name: string, fn: () => Promise<unknown>) {
     setBusy(name); setErr(null)
-    try { await fn(); reload() } catch (e) { setErr(errMsg(e)) } finally { setBusy(null) }
+    try { await fn(); reload(); bump() } catch (e) { setErr(errMsg(e)) } finally { setBusy(null) }
   }
   const pickModel = (name: string, model: string) => guard(name, () => selectModel(name, model))
   const refresh = (name: string) => guard(name, () => refreshModels(name))
   const activate = (name: string) => guard(name, () => activateDesktopModel(name))
-  const del = (name: string) => guard(name, () => deleteDesktopModel(name))
+  // Removing the ChatGPT provider = disconnect it (switches active away + drops
+  // the endpoint), so the card's "Connect" button returns.
+  const del = (name: string) => guard(name, () => (name === "chatgpt-codex" ? disconnectCodex() : deleteDesktopModel(name)))
   // Add a provider by URL only: check the connection, load its models from
   // /v1/models, and default to the first — no model typed by hand.
   async function add() {
@@ -185,19 +165,18 @@ function ModelsSection() {
       if (!r.models.length) { setErr("Provider returned no models — check the URL and key."); return }
       const full = r.models.map((m) => (m.includes("/") ? m : `openai/${m}`))
       await setDesktopModel({ name, model: full[0], api_base, api_key_env, models: full })
-      setForm({ name: "", model: "", api_base: "", api_key_env: "ADK_CC_API_KEY" }); reload()
+      setForm({ name: "", model: "", api_base: "", api_key_env: "ADK_CC_API_KEY" }); reload(); bump()
     } catch (e) { setErr(errMsg(e)) } finally { setBusy(null) }
   }
-  // The chatgpt-codex provider is managed by the card above — hide its raw entry.
-  const providers = endpoints.filter((e) => e.name !== "chatgpt-codex")
   return (
     <div className="space-y-3 py-1">
-      <CodexConnect onChange={reload} activeName={active} />
+      <CodexConnect onChange={reload} refreshTick={refreshTick} />
       <p className="text-xs text-muted-foreground">Model providers are global — the active model serves every project's agent (next turn). Click a provider to pick its model; also switchable in chat with <code>/model</code>.</p>
       <div className="space-y-1">
-        {providers.map((e) => {
+        {endpoints.map((e) => {
           const open = expanded === e.name
           const models = e.models ?? []
+          const isCodex = e.name === "chatgpt-codex"
           return (
             <div key={e.name} className="rounded-md border border-border/60">
               <div className="flex items-center gap-2 px-2 py-1.5 text-sm">
@@ -206,11 +185,12 @@ function ModelsSection() {
                 </button>
                 <button onClick={() => setExpanded(open ? null : e.name)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
                   {open ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />}
-                  <span className="font-medium">{e.name}</span>
+                  {isCodex && <Sparkles className="h-3.5 w-3.5 text-primary" />}
+                  <span className="font-medium">{isCodex ? "ChatGPT" : e.name}</span>
                   <span className="truncate font-mono text-xs text-muted-foreground">{baseName(e.model)}</span>
                 </button>
                 {!e.api_key_present && <span className="rounded bg-amber-500/15 px-1 text-[10px] text-amber-600">no key</span>}
-                <button onClick={() => del(e.name)} disabled={busy === e.name} className="text-muted-foreground hover:text-destructive" title="Remove"><Trash2 className="h-3.5 w-3.5" /></button>
+                <button onClick={() => del(e.name)} disabled={busy === e.name} className="text-muted-foreground hover:text-destructive" title={isCodex ? "Disconnect ChatGPT" : "Remove"}><Trash2 className="h-3.5 w-3.5" /></button>
               </div>
               {open && (
                 <div className="space-y-2 border-t border-border/50 px-2 py-2">
