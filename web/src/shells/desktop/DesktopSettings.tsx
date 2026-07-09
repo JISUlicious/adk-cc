@@ -31,7 +31,7 @@ function errMsg(e: unknown): string {
  *  your Plus/Pro plan quota, not an API key. One "Connect" button authenticates
  *  (browser OAuth, or an existing Codex CLI login) and registers with the first
  *  discovered model; the model is picked afterwards from the dropdown. */
-function CodexConnect({ onChange }: { onChange: () => void }) {
+function CodexConnect({ onChange, activeName }: { onChange: () => void; activeName?: string | null }) {
   const [status, setStatus] = useState<CodexStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -43,7 +43,9 @@ function CodexConnect({ onChange }: { onChange: () => void }) {
   const load = useCallback(() => {
     getCodexStatus().then((s) => alive.current && setStatus(s)).catch((e) => alive.current && setErr(errMsg(e)))
   }, [])
-  useEffect(load, [load])
+  // Re-fetch on mount AND whenever the active provider changes elsewhere (e.g. a
+  // different provider is activated below), so the "active" badge stays correct.
+  useEffect(() => { load() }, [load, activeName])
   useEffect(() => {
     if (!status?.registered) return
     getCodexModels().then((r) => alive.current && setModels(r.models)).catch(() => {})
@@ -190,7 +192,7 @@ function ModelsSection() {
   const providers = endpoints.filter((e) => e.name !== "chatgpt-codex")
   return (
     <div className="space-y-3 py-1">
-      <CodexConnect onChange={reload} />
+      <CodexConnect onChange={reload} activeName={active} />
       <p className="text-xs text-muted-foreground">Model providers are global — the active model serves every project's agent (next turn). Click a provider to pick its model; also switchable in chat with <code>/model</code>.</p>
       <div className="space-y-1">
         {providers.map((e) => {
