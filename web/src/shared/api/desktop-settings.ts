@@ -123,9 +123,22 @@ export interface DesktopModel {
   api_key_env: string
   max_tokens?: number | null
   api_key_present?: boolean
+  models?: string[] // full ids this provider offers (discovered)
+  reasoning_effort?: string | null
 }
 export function listDesktopModels(): Promise<{ endpoints: DesktopModel[]; active: string | null }> {
   return apiFetch("/desktop/settings/models")
+}
+// Set a provider's active model (a full id it offers) and activate the provider.
+export function selectModel(name: string, model: string) {
+  return apiFetch(`/desktop/settings/models/${encodeURIComponent(name)}/select-model`, {
+    method: "POST",
+    body: JSON.stringify({ model }),
+  })
+}
+// Re-discover a provider's models (GET api_base/models).
+export function refreshModels(name: string): Promise<DesktopModel> {
+  return apiFetch(`/desktop/settings/models/${encodeURIComponent(name)}/refresh-models`, { method: "POST" })
 }
 export function setDesktopModel(m: DesktopModel) {
   return apiFetch(`/desktop/settings/models/${encodeURIComponent(m.name)}`, {
@@ -135,6 +148,8 @@ export function setDesktopModel(m: DesktopModel) {
       api_base: m.api_base,
       api_key_env: m.api_key_env,
       max_tokens: m.max_tokens ?? null,
+      reasoning_effort: m.reasoning_effort ?? null,
+      models: m.models ?? [],
     }),
   })
 }
@@ -160,10 +175,11 @@ export interface CodexStatus {
 export function getCodexStatus(): Promise<CodexStatus> {
   return apiFetch("/desktop/settings/codex")
 }
-export function connectCodex(model = "gpt-5.5", reasoning_effort = "medium"): Promise<CodexStatus> {
+// Omit `model` to let the server default to the first discovered model.
+export function connectCodex(model?: string, reasoning_effort = "medium"): Promise<CodexStatus> {
   return apiFetch("/desktop/settings/codex/connect", {
     method: "POST",
-    body: JSON.stringify({ model, reasoning_effort }),
+    body: JSON.stringify({ ...(model ? { model } : {}), reasoning_effort }),
   })
 }
 export function disconnectCodex(): Promise<{ status: string }> {

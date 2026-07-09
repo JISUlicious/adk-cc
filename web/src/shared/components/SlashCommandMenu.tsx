@@ -1,6 +1,7 @@
 import { useMemo } from "react"
 import {
   ClipboardList,
+  Cpu,
   FolderPlus,
   HelpCircle,
   LogOut,
@@ -35,6 +36,7 @@ export type SlashAction =
   | "rewind"
   | "wiki"
   | "add-dir"
+  | "model"
 
 export interface SlashCommand {
   /** What the user types after `/`. Match is prefix-insensitive. */
@@ -66,6 +68,13 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "Rewind to a checkpoint — roll back files + conversation (desktop)",
     icon: RotateCcw,
     kind: { type: "action", action: "rewind" },
+    desktopOnly: true,
+  },
+  {
+    name: "model",
+    description: "Switch the active model across your providers",
+    icon: Cpu,
+    kind: { type: "action", action: "model" },
     desktopOnly: true,
   },
   {

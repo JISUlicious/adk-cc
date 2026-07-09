@@ -58,3 +58,23 @@ async def list_models(
         r = await client.get(url, headers=headers, params=params)
     r.raise_for_status()
     return _ids(r.json())
+
+
+def _is_codex(model: str) -> bool:
+    return str(model).startswith("chatgpt-codex/")
+
+
+async def list_provider_models(model: str, api_base: str, api_key: Optional[str] = None) -> list[str]:
+    """The FULL routed model ids a provider (identified by its current `model`
+    + api_base) offers — ready to store in `ModelEndpointConfig.models` and to
+    set as `model` directly. Codex uses the subscription token and prefixes
+    `chatgpt-codex/`; a generic provider keeps the current routing prefix
+    (e.g. `openai/`)."""
+    if _is_codex(model):
+        bases = await list_models(CODEX_BASE, use_codex_auth=True)
+        # Drop internal / *-codex slugs that 400 for ChatGPT accounts.
+        bases = [b for b in bases if "review" not in b and "codex" not in b] or bases
+        return [f"chatgpt-codex/{b}" for b in bases]
+    ids = await list_models(api_base, api_key=api_key)
+    prefix = str(model).rsplit("/", 1)[0] if "/" in str(model) else "openai"
+    return [i if "/" in i else f"{prefix}/{i}" for i in ids]

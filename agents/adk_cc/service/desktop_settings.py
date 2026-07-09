@@ -294,11 +294,54 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
                     api_key_env=str(body.get("api_key_env") or ""),
                     max_tokens=body.get("max_tokens"),
                     reasoning_effort=body.get("reasoning_effort"),
+                    models=list(body.get("models") or []),
                 )
             except Exception as e:  # noqa: BLE001
                 raise HTTPException(status_code=400, detail=f"invalid endpoint: {e}")
             models.upsert(cfg)
             return {"status": "ok", "name": name}
+
+        async def _discover_into(cfg):  # noqa: ANN001, ANN202
+            """Return a copy of `cfg` with its provider's models discovered and
+            `model` normalised to one of them (keeps the current model if still
+            offered, else the first). Best-effort — keeps existing on failure."""
+            from ..models import discovery
+
+            key = os.environ.get(cfg.api_key_env) if cfg.api_key_env else None
+            try:
+                found = await discovery.list_provider_models(cfg.model, cfg.api_base, api_key=key)
+            except Exception:  # noqa: BLE001 — provider unreachable / bad key
+                found = list(cfg.models)
+            model = cfg.model if cfg.model in found else (found[0] if found else cfg.model)
+            return cfg.model_copy(update={"models": found, "model": model})
+
+        @app.post("/desktop/settings/models/{name}/refresh-models", include_in_schema=False)
+        async def refresh_models(name: str):  # noqa: ANN202
+            cfg = models.get(_safe(name, "name"))
+            if cfg is None:
+                raise HTTPException(status_code=404, detail="unknown endpoint")
+            updated = await _discover_into(cfg)
+            models.upsert(updated)
+            return updated.masked()
+
+        @app.post("/desktop/settings/models/{name}/select-model", include_in_schema=False)
+        async def select_model(name: str, request: Request):  # noqa: ANN202
+            # Set a provider's active model (must be one it offers) AND activate
+            # the provider — the shared "pick a model" action for the settings
+            # dropdown and the /model command.
+            body = await request.json() or {}
+            m = str(body.get("model") or "")
+            cfg = models.get(_safe(name, "name"))
+            if cfg is None:
+                raise HTTPException(status_code=404, detail="unknown endpoint")
+            if m and cfg.models and m not in cfg.models:
+                raise HTTPException(status_code=400, detail=f"{m!r} is not one of this provider's models")
+            models.upsert(cfg.model_copy(update={"model": m or cfg.model}))
+            try:
+                models.activate(cfg.name)
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=409, detail=str(e))
+            return {"status": "ok", "active": cfg.name, "model": m or cfg.model}
 
         @app.delete("/desktop/settings/models/{name}", include_in_schema=False)
         async def delete_model(name: str):  # noqa: ANN202
@@ -349,6 +392,7 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
             status["registered"] = ep is not None
             status["active"] = models.active_name() == _CODEX_ENDPOINT
             status["model"] = ep.model.split("/", 1)[1] if ep else None
+            status["models"] = [m.split("/", 1)[-1] for m in ep.models] if ep else []
             return status
 
         @app.get("/desktop/settings/codex", include_in_schema=False)
@@ -386,15 +430,21 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
                 body = await request.json()
             except Exception:  # noqa: BLE001 — empty/invalid body is fine
                 body = {}
-            model = str((body or {}).get("model") or "gpt-5.5")
+            requested = (body or {}).get("model")
             effort = (body or {}).get("reasoning_effort") or "medium"
-            models.upsert(ModelEndpointConfig(
+            cfg = ModelEndpointConfig(
                 name=_CODEX_ENDPOINT,
-                model=f"chatgpt-codex/{model}",
+                model=f"chatgpt-codex/{requested}" if requested else "chatgpt-codex/gpt-5.5",
                 api_base="https://chatgpt.com/backend-api/codex",
                 api_key_env="",  # subscription token, not an env key
                 reasoning_effort=str(effort),
-            ))
+            )
+            # Discover the account's models; with no explicit request, default to
+            # the first (per the "sets first in entry as default" flow).
+            cfg = await _discover_into(cfg)
+            if not requested and cfg.models:
+                cfg = cfg.model_copy(update={"model": cfg.models[0]})
+            models.upsert(cfg)
             models.activate(_CODEX_ENDPOINT)
             return _codex_state()
 

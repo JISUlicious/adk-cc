@@ -52,6 +52,14 @@ class ModelEndpointConfig(BaseModel):
             "Used by the chatgpt-codex provider; ignored by plain LiteLLM endpoints."
         ),
     )
+    models: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The full model ids this provider offers (discovered from its "
+            "OpenAI-compatible /models). The active one is `model`; the UI + the "
+            "/model command pick among these. Empty until discovered."
+        ),
+    )
 
     def masked(self) -> dict:
         """JSON-safe dict for API responses: includes whether the key env var

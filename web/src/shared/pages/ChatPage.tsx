@@ -33,6 +33,7 @@ import { pickDirectory } from "@/shared/lib/tauri"
 import { addWorkingDir } from "@/shared/api/desktop-settings"
 import { type SlashAction } from "@/shared/components/SlashCommandMenu"
 import { RewindDialog } from "@/shared/components/RewindDialog"
+import { ModelPicker } from "@/shared/components/ModelPicker"
 import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/shared/lib/theme"
 
 /**
@@ -94,6 +95,7 @@ export function ChatPage({
   }
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [rewindOpen, setRewindOpen] = useState(false)
+  const [modelPickerOpen, setModelPickerOpen] = useState(false)
   // Count of required skill/MCP secrets the user hasn't set → badge on the
   // Settings gear. Refreshed on mount and whenever the Settings dialog closes
   // (the user may have just set some on the Account page).
@@ -318,7 +320,7 @@ export function ChatPage({
             "Available slash commands: /help, /clear (new session), " +
               "/plan, /exit-plan, /theme, /settings, /signout, " +
               "/wiki (open the knowledge graph — wiki pages + memory)" +
-              (IS_DESKTOP ? ", /rewind (rewind to a checkpoint — roll back files + conversation), /add-dir (grant a working directory outside the project)" : "") +
+              (IS_DESKTOP ? ", /model (switch the active model across providers), /rewind (rewind to a checkpoint — roll back files + conversation), /add-dir (grant a working directory outside the project)" : "") +
               ". These are UI shortcuts on the client; the agent doesn't see them.",
           )
         }
@@ -374,6 +376,12 @@ export function ChatPage({
         // rolls back both the project files AND the conversation to that turn.
         if (!IS_DESKTOP || !appName || !session) return
         setRewindOpen(true)
+        return
+      case "model":
+        // Desktop-only: open the model palette to switch the active model across
+        // providers (takes effect on the next turn — SelectableLlm re-reads).
+        if (!IS_DESKTOP) return
+        setModelPickerOpen(true)
         return
       case "theme": {
         // Cycle: light → dark → system → light. Persisted by setStoredTheme.
@@ -551,6 +559,12 @@ export function ChatPage({
           open={rewindOpen}
           onClose={() => setRewindOpen(false)}
           onRestored={reloadSession}
+        />
+      )}
+      {IS_DESKTOP && modelPickerOpen && (
+        <ModelPicker
+          onClose={() => setModelPickerOpen(false)}
+          onPicked={(label) => showNotice(`✓ Model switched to ${label} (next turn)`)}
         />
       )}
     </div>
