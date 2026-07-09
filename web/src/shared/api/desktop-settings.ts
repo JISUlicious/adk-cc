@@ -155,7 +155,7 @@ export interface CodexStatus {
   registered?: boolean
   active?: boolean
   model?: string | null
-  source?: string
+  mode?: string | null // "own" (our login) | "cli" (Codex CLI) | "file"
 }
 export function getCodexStatus(): Promise<CodexStatus> {
   return apiFetch("/desktop/settings/codex")
@@ -168,4 +168,23 @@ export function connectCodex(model = "gpt-5.5", reasoning_effort = "medium"): Pr
 }
 export function disconnectCodex(): Promise<{ status: string }> {
   return apiFetch("/desktop/settings/codex/disconnect", { method: "POST" })
+}
+export function startCodexLogin(): Promise<{ auth_url: string }> {
+  return apiFetch("/desktop/settings/codex/login/start", { method: "POST" })
+}
+export function getCodexLoginStatus(): Promise<{ state: string; error?: string | null }> {
+  return apiFetch("/desktop/settings/codex/login/status")
+}
+export function codexSignout(): Promise<CodexStatus> {
+  return apiFetch("/desktop/settings/codex/signout", { method: "POST" })
+}
+export function getCodexModels(): Promise<{ models: string[] }> {
+  return apiFetch("/desktop/settings/codex/models")
+}
+// Discover a provider's models via its OpenAI-compatible /models endpoint.
+export function discoverModels(api_base: string, api_key_env: string): Promise<{ models: string[] }> {
+  return apiFetch("/desktop/settings/models/discover", {
+    method: "POST",
+    body: JSON.stringify({ api_base, api_key_env }),
+  })
 }

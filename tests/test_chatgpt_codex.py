@@ -146,6 +146,71 @@ def test_auth_load_status_and_writeback() -> None:
     print("OK test_auth_load_status_and_writeback")
 
 
+def test_oauth_pkce_and_url() -> None:
+    import base64
+    import hashlib
+    import urllib.parse
+
+    from adk_cc.models import codex_oauth as ox
+
+    v, c = ox._pkce()
+    assert c == base64.urlsafe_b64encode(hashlib.sha256(v.encode()).digest()).decode().rstrip("=")
+    url = ox._authorize_url("STATE", c, "http://localhost:1455/auth/callback")
+    q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(url).query))
+    assert q["client_id"] == codex_auth.CLIENT_ID
+    assert q["redirect_uri"] == "http://localhost:1455/auth/callback"
+    assert q["code_challenge_method"] == "S256" and q["code_challenge"]
+    assert q["codex_cli_simplified_flow"] == "true" and q["originator"] == "codex_cli_rs"
+    print("OK test_oauth_pkce_and_url")
+
+
+def test_oauth_start_binds_and_cancels() -> None:
+    import time
+    import urllib.parse
+
+    from adk_cc.models import codex_oauth as ox
+
+    try:
+        url = ox.start()
+    except RuntimeError:
+        print("SKIP test_oauth_start_binds_and_cancels (callback port busy)")
+        return
+    assert ox.status()["state"] == "waiting"
+    assert urllib.parse.urlparse(url).netloc == "auth.openai.com"
+    ox.cancel()
+    time.sleep(0.2)
+    print("OK test_oauth_start_binds_and_cancels")
+
+
+def test_own_store_priority_and_clear() -> None:
+    import base64
+    import time
+
+    os.environ.pop("ADK_CC_CODEX_AUTH_FILE", None)
+    store_dir = tempfile.mkdtemp()
+    empty_codex_home = tempfile.mkdtemp()  # no auth.json -> CLI login "absent"
+    os.environ["ADK_CC_CODEX_STORE_DIR"] = store_dir
+    os.environ["CODEX_HOME"] = empty_codex_home
+    try:
+        acc = "h." + base64.urlsafe_b64encode(json.dumps(
+            {"exp": int(time.time()) + 3600,
+             "https://api.openai.com/auth": {"chatgpt_plan_type": "pro",
+                                             "chatgpt_account_id": "acc-XYZ789"}}
+        ).encode()).decode().rstrip("=") + ".s"
+        p = codex_auth.save_new_login(access_token=acc, refresh_token="rt2")
+        assert p == codex_auth.own_store_path()
+        st = codex_auth.connection_status()
+        assert st["connected"] and st["plan"] == "pro" and st["mode"] == "own"
+        assert st["account_id_tail"] == "XYZ789"
+        assert codex_auth.clear_login() is True
+        # own login gone AND no CLI login -> disconnected
+        assert codex_auth.connection_status()["connected"] is False
+    finally:
+        os.environ.pop("ADK_CC_CODEX_STORE_DIR", None)
+        os.environ.pop("CODEX_HOME", None)
+    print("OK test_own_store_priority_and_clear")
+
+
 def main() -> None:
     test_input_items_mapping()
     test_build_body_shape()
@@ -153,6 +218,9 @@ def main() -> None:
     test_instructions_default_never_empty()
     test_selectable_routes_to_codex()
     test_auth_load_status_and_writeback()
+    test_oauth_pkce_and_url()
+    test_oauth_start_binds_and_cancels()
+    test_own_store_priority_and_clear()
     print("\nall chatgpt-codex offline tests passed")
 
 

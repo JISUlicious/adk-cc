@@ -316,6 +316,24 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
                 raise HTTPException(status_code=404, detail=str(e))
             return {"status": "ok", "active": name}
 
+        @app.post("/desktop/settings/models/discover", include_in_schema=False)
+        async def discover_models(request: Request):  # noqa: ANN202
+            # List a provider's models via its OpenAI-compatible /models endpoint,
+            # so the UI can offer a picker instead of a free-text model id.
+            from ..models import discovery
+
+            body = await request.json() or {}
+            api_base = str(body.get("api_base") or "").strip()
+            if not api_base:
+                raise HTTPException(status_code=400, detail="api_base required")
+            key_env = str(body.get("api_key_env") or "")
+            api_key = os.environ.get(key_env) if key_env else None
+            try:
+                found = await discovery.list_models(api_base, api_key=api_key)
+            except Exception as e:  # noqa: BLE001 — provider unreachable / bad key
+                raise HTTPException(status_code=502, detail=f"could not list models: {e}")
+            return {"models": found}
+
         # ------------------------------------------- ChatGPT subscription (Codex)
         # Phase 1: reuse the user's existing `codex login` (~/.codex/auth.json).
         # Connect = register + activate a `chatgpt-codex/<model>` endpoint; the
@@ -336,6 +354,23 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
         @app.get("/desktop/settings/codex", include_in_schema=False)
         async def codex_status():  # noqa: ANN202
             return _codex_state()
+
+        @app.get("/desktop/settings/codex/models", include_in_schema=False)
+        async def codex_models():  # noqa: ANN202
+            from ..models import codex_auth, discovery
+
+            try:
+                found = await discovery.list_models(discovery.CODEX_BASE, use_codex_auth=True)
+            except codex_auth.CodexAuthError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=502, detail=f"could not list models: {e}")
+            # Keep the general chat models; drop internal/non-chat slugs
+            # (codex-auto-review) and *-codex variants, which 400 for ChatGPT
+            # accounts (like gpt-5.1-codex did). Fall back to the raw list if the
+            # filter would empty it (so a future naming change never hides all).
+            chat = [m for m in found if "review" not in m and "codex" not in m]
+            return {"models": chat or found}
 
         @app.post("/desktop/settings/codex/connect", include_in_schema=False)
         async def codex_connect(request: Request):  # noqa: ANN202
@@ -363,10 +398,7 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
             models.activate(_CODEX_ENDPOINT)
             return _codex_state()
 
-        @app.post("/desktop/settings/codex/disconnect", include_in_schema=False)
-        async def codex_disconnect(request: Request):  # noqa: ANN202
-            # Switch active away first (can't remove the active/last endpoint),
-            # then drop our endpoint. The user's ~/.codex login is untouched.
+        def _drop_codex_endpoint() -> None:
             if models.active_name() == _CODEX_ENDPOINT:
                 other = next((e.name for e in models.list() if e.name != _CODEX_ENDPOINT), None)
                 if other:
@@ -375,7 +407,40 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
                 models.remove(_CODEX_ENDPOINT)
             except Exception as e:  # noqa: BLE001 — last-endpoint guard
                 raise HTTPException(status_code=409, detail=str(e))
+
+        @app.post("/desktop/settings/codex/disconnect", include_in_schema=False)
+        async def codex_disconnect(request: Request):  # noqa: ANN202
+            # Stop using ChatGPT as the model. The stored login (CLI or ours) is
+            # kept so re-connecting is one click; use sign-out to clear our login.
+            _drop_codex_endpoint()
             return {"status": "disconnected"}
+
+        # -- Phase 2: our own "Sign in with ChatGPT" (browser PKCE, localhost:1455)
+        @app.post("/desktop/settings/codex/login/start", include_in_schema=False)
+        async def codex_login_start():  # noqa: ANN202
+            from ..models import codex_oauth
+
+            try:
+                return {"auth_url": codex_oauth.start()}
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=409, detail=str(e))
+
+        @app.get("/desktop/settings/codex/login/status", include_in_schema=False)
+        async def codex_login_status():  # noqa: ANN202
+            from ..models import codex_oauth
+
+            return codex_oauth.status()
+
+        @app.post("/desktop/settings/codex/signout", include_in_schema=False)
+        async def codex_signout():  # noqa: ANN202
+            # Clear OUR OWN stored login (Phase-2) and drop the endpoint. The
+            # Codex CLI login (~/.codex) is never touched.
+            from ..models import codex_auth
+
+            codex_auth.clear_login()
+            if models.get(_CODEX_ENDPOINT) is not None:
+                _drop_codex_endpoint()
+            return _codex_state()
 
     # ------------------------------------------------- working directories
     # Persistent per-project "granted" directories (Claude Code's
