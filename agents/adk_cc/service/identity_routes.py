@@ -23,6 +23,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from ..identity.provider import AccountPendingError
+from ..identity.ratelimit import FailureLockout, SlidingWindowLimiter
 
 _MAX_SKILL_ZIP = 10 * 1024 * 1024  # 10 MiB per personal skill upload
 _MAX_USER_RESOURCES = 50  # cap personal skills / MCP servers per user
@@ -73,6 +74,38 @@ def _safe_secret_key(key: str) -> str:
 def mount_identity_routes(app, identity, credentials=None) -> None:
     router = APIRouter()
 
+    # --- brute-force protection on the public auth endpoints ---------------
+    # Per-IP burst budget + per-(ip|email) lockout after repeated failures.
+    # In-memory/per-process — right for the self-hosted deployment.
+    # ADK_CC_AUTH_RATELIMIT=0 disables (dev/tests).
+    rl_enabled = os.environ.get("ADK_CC_AUTH_RATELIMIT", "1").lower() not in ("0", "false")
+    ip_limiter = SlidingWindowLimiter(
+        limit=int(os.environ.get("ADK_CC_AUTH_RATELIMIT_MAX", "30")),
+        window_s=float(os.environ.get("ADK_CC_AUTH_RATELIMIT_WINDOW_S", "60")))
+    lockout = FailureLockout(
+        threshold=int(os.environ.get("ADK_CC_AUTH_LOCKOUT_THRESHOLD", "5")),
+        lockout_s=float(os.environ.get("ADK_CC_AUTH_LOCKOUT_S", "300")))
+
+    def _client_ip(request: Request) -> str:
+        return request.client.host if request.client else "?"
+
+    def _guard_rate(request: Request) -> None:
+        if rl_enabled and not ip_limiter.allow(_client_ip(request)):
+            raise HTTPException(
+                status_code=429, detail="too many requests — slow down",
+                headers={"Retry-After": str(int(ip_limiter.window_s) or 1)})
+
+    def _guard_lockout(request: Request, email: str) -> str:
+        key = f"{_client_ip(request)}|{(email or '').strip().lower()}"
+        if rl_enabled:
+            wait = lockout.locked_for(key)
+            if wait > 0:
+                raise HTTPException(
+                    status_code=429,
+                    detail="too many failed attempts — try again later",
+                    headers={"Retry-After": str(int(wait) + 1)})
+        return key
+
     async def _token_response(ident) -> dict:
         # access token + (when a refresh store is configured) a refresh token.
         out = {
@@ -99,24 +132,30 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
 
     @router.post("/auth/login")
     async def login(request: Request):
+        _guard_rate(request)
         body = await _json(request)
         email = (body.get("email") or "").strip()
         password = body.get("password") or ""
         if not email or not password:
             raise HTTPException(status_code=400, detail="email and password required")
+        key = _guard_lockout(request, email)
         try:
             ident = await identity.provider.login_password(email, password)
         except AccountPendingError:
             # Password verified but the access request hasn't been approved yet.
+            lockout.clear(key)
             raise HTTPException(status_code=403,
                                 detail="Your access request is awaiting admin approval.")
         if ident is None:
+            lockout.record_failure(key)
             raise HTTPException(status_code=401, detail="invalid email or password")
+        lockout.clear(key)
         await identity.record(ident.tenant_id, ident.user_id, "login", actor_email=ident.email)
         return await _token_response(ident)
 
     @router.post("/auth/signup")
     async def signup(request: Request):
+        _guard_rate(request)
         if not identity.provider.supports_registration:
             raise HTTPException(status_code=403, detail="self-registration is disabled")
         body = await _json(request)
@@ -137,6 +176,7 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
         # User-initiated join (the mirror of an admin invite): creates a PENDING
         # account an org admin approves/rejects. No token is returned — the
         # account can't log in until approved.
+        _guard_rate(request)
         if not identity.provider.supports_access_requests:
             raise HTTPException(status_code=403, detail="access requests are disabled")
         body = await _json(request)
@@ -163,6 +203,7 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
 
     @router.post("/auth/reset/{token}/complete")
     async def complete_reset(token: str, request: Request):
+        _guard_rate(request)
         body = await _json(request)
         try:
             ident = await asyncio.to_thread(
@@ -251,6 +292,7 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
         # Rotate-on-use: the presented refresh token is revoked and a fresh
         # (access, refresh) pair comes back. One opaque 401 for every failure
         # mode — no oracle for probing token state.
+        _guard_rate(request)
         body = await _json(request)
         try:
             ident, new_refresh = await asyncio.to_thread(
