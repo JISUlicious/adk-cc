@@ -1,5 +1,12 @@
 # Web user-registration lifecycle — plan
 
+> **Status (2026-07-10): BUILT.** Phase 1 (request-access, d702d1a), Phase 2
+> (refresh tokens + real logout, 1c7ebcf), Phase 3 (reset links, f9975db),
+> Phase 5 (rate-limit + lockout, 6ebbb31), Phase 4 (email change / deactivate /
+> delete, c9e547d). Phase 6 folded into the others (all screens shipped with
+> their phases). Remaining ideas only: mailer-based self-serve reset/verify,
+> multi-mode join links, session-DB row purge on delete.
+
 Target: the **web (multi-tenant) deployment**. Single mode stays admin-provisioned;
 verification/reset still apply to provisioned users.
 
