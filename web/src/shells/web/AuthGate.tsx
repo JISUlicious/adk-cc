@@ -14,6 +14,7 @@ import {
   fetchAuthConfig,
   login as pwLogin,
   signup as pwSignup,
+  requestAccess,
   type AuthConfig,
 } from "@/shared/api/identity"
 
@@ -44,7 +45,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // null = not yet checked; true = verified good; false = needs login.
   const [verified, setVerified] = useState<boolean | null>(null)
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null)
-  const [mode, setMode] = useState<"login" | "signup">("login")
+  const [mode, setMode] = useState<"login" | "signup" | "request">("login")
+  // Email of a just-submitted access request → renders the "awaiting approval"
+  // confirmation instead of the login form.
+  const [requested, setRequested] = useState<string | null>(null)
   // True when the server accepts unauthenticated calls (ADK_CC_ALLOW_NO_AUTH).
   // Used so the signed-out screen offers a one-click "Continue" instead of a
   // dead-end token-paste form (you have no token to type on a no-auth server).
@@ -139,6 +143,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   const passwordMode = !!authConfig?.password
   const canSignup = !!authConfig?.registration
+  const canRequest = !!authConfig?.access_requests
 
   // --- no-auth dev: one-click re-entry after sign-out ---
   function handleContinue() {
@@ -157,6 +162,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
     const password = String(data.get("password") || "")
     const name = String(data.get("name") || "").trim()
     const org = String(data.get("org") || "").trim()
+    const note = String(data.get("note") || "").trim()
     if (!email || !password) {
       setError("Email and password are required")
       return
@@ -164,6 +170,11 @@ export function AuthGate({ children }: { children: ReactNode }) {
     setVerifying(true)
     setError(null)
     try {
+      if (mode === "request") {
+        await requestAccess({ email, password, name, note })
+        setRequested(email)
+        return
+      }
       const res =
         mode === "signup"
           ? await pwSignup({ email, password, name, org })
@@ -211,6 +222,36 @@ export function AuthGate({ children }: { children: ReactNode }) {
     }
   }
 
+  // Access request just filed → confirmation instead of the login form.
+  if (requested) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background p-6">
+        <Card className="w-full max-w-md">
+          <CardHeader>
+            <CardTitle>Request submitted</CardTitle>
+            <CardDescription>
+              Your access request for <span className="font-medium">{requested}</span> was
+              sent. An admin needs to approve it before you can sign in.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button
+              className="w-full"
+              variant="outline"
+              onClick={() => {
+                setRequested(null)
+                setMode("login")
+                setError(null)
+              }}
+            >
+              Back to sign in
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-6">
       <Card className="w-full max-w-md">
@@ -218,12 +259,18 @@ export function AuthGate({ children }: { children: ReactNode }) {
           <>
             <CardHeader>
               <CardTitle>
-                {mode === "signup" ? "Create your adk-cc account" : "Sign in to adk-cc"}
+                {mode === "signup"
+                  ? "Create your adk-cc account"
+                  : mode === "request"
+                    ? "Request access to adk-cc"
+                    : "Sign in to adk-cc"}
               </CardTitle>
               <CardDescription>
                 {mode === "signup"
                   ? "Sign up with your email and a password."
-                  : "Sign in with your email and password."}
+                  : mode === "request"
+                    ? "Choose your credentials — an admin approves your request before you can sign in."
+                    : "Sign in with your email and password."}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -243,8 +290,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
                     id="password"
                     name="password"
                     type="password"
-                    placeholder={mode === "signup" ? "at least 8 characters" : "••••••••"}
-                    autoComplete={mode === "signup" ? "new-password" : "current-password"}
+                    placeholder={mode === "login" ? "••••••••" : "at least 8 characters"}
+                    autoComplete={mode === "login" ? "current-password" : "new-password"}
                   />
                 </Field>
                 {mode === "signup" && (
@@ -261,15 +308,33 @@ export function AuthGate({ children }: { children: ReactNode }) {
                     </Field>
                   </>
                 )}
+                {mode === "request" && (
+                  <>
+                    <Field label="Name (optional)" id="name">
+                      <Input id="name" name="name" placeholder="Your name" autoComplete="name" />
+                    </Field>
+                    <Field
+                      label="Note to the admin (optional)"
+                      id="note"
+                      hint="Shown with your request — who you are, why you need access."
+                    >
+                      <Input id="note" name="note" placeholder="I'm Jane from the QA team" />
+                    </Field>
+                  </>
+                )}
                 {error && <p className="text-sm text-destructive">{error}</p>}
                 <Button type="submit" disabled={verifying} className="w-full">
                   {verifying
                     ? mode === "signup"
                       ? "Creating…"
-                      : "Signing in…"
+                      : mode === "request"
+                        ? "Requesting…"
+                        : "Signing in…"
                     : mode === "signup"
                       ? "Create account"
-                      : "Sign in"}
+                      : mode === "request"
+                        ? "Request access"
+                        : "Sign in"}
                 </Button>
                 {canSignup && (
                   <p className="text-center text-xs text-muted-foreground">
@@ -283,6 +348,21 @@ export function AuthGate({ children }: { children: ReactNode }) {
                       }}
                     >
                       {mode === "signup" ? "Sign in" : "Create one"}
+                    </button>
+                  </p>
+                )}
+                {canRequest && (
+                  <p className="text-center text-xs text-muted-foreground">
+                    {mode === "request" ? "Already have an account?" : "No account yet?"}{" "}
+                    <button
+                      type="button"
+                      className="text-primary underline underline-offset-2 hover:opacity-80"
+                      onClick={() => {
+                        setError(null)
+                        setMode(mode === "request" ? "login" : "request")
+                      }}
+                    >
+                      {mode === "request" ? "Sign in" : "Request access"}
                     </button>
                   </p>
                 )}

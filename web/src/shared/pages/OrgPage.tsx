@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { Link } from "react-router-dom"
-import { ArrowLeft, Copy, Check, Ban, RotateCcw } from "lucide-react"
+import { ArrowLeft, Copy, Check, Ban, RotateCcw, UserCheck, UserX } from "lucide-react"
 import { Button } from "@/shared/components/ui/button"
 import { Input } from "@/shared/components/ui/input"
 import { ApiError } from "@/shared/api/client"
@@ -10,11 +10,15 @@ import {
   listInvites,
   createInvite,
   revokeInvite,
+  listRequests,
+  approveRequest,
+  rejectRequest,
   setMemberRole,
   disableMember,
   enableMember,
   type Member,
   type PendingInvite,
+  type AccessRequest,
 } from "@/shared/api/org"
 
 /**
@@ -30,6 +34,7 @@ const ROLES = ["member", "admin"]
 export function TeamSection() {
   const [members, setMembers] = useState<Member[]>([])
   const [invites, setInvites] = useState<PendingInvite[]>([])
+  const [requests, setRequests] = useState<AccessRequest[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [email, setEmail] = useState("")
@@ -42,10 +47,11 @@ export function TeamSection() {
 
   const load = useCallback(() => {
     setLoading(true)
-    Promise.all([listMembers(), listInvites()])
-      .then(([m, i]) => {
+    Promise.all([listMembers(), listInvites(), listRequests()])
+      .then(([m, i, r]) => {
         setMembers(m.members)
         setInvites(i.invites)
+        setRequests(r.requests)
         setError(null)
       })
       .catch((e) => setError(msg(e)))
@@ -108,6 +114,16 @@ export function TeamSection() {
     }
   }
 
+  async function decideRequest(r: AccessRequest, approve: boolean) {
+    setError(null)
+    try {
+      await (approve ? approveRequest(r.id) : rejectRequest(r.id))
+      load()
+    } catch (err) {
+      setError(msg(err))
+    }
+  }
+
   return (
       <div className="divide-y divide-border/60">
         {error && (
@@ -149,6 +165,39 @@ export function TeamSection() {
             Share the link with the invitee — they set their own password to join.
           </p>
         </section>
+
+        {/* Access requests — user-initiated joins awaiting a decision */}
+        {requests.length > 0 && (
+          <section className="py-5">
+            <h2 className="mb-3 text-sm font-semibold">
+              Access requests ({requests.length})
+            </h2>
+            <ul className="divide-y divide-border">
+              {requests.map((r) => (
+                <li key={r.id} className="flex items-center gap-3 py-2.5">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm">
+                      {r.email}
+                      {r.name && <span className="ml-1 text-xs text-muted-foreground">· {r.name}</span>}
+                    </p>
+                    {r.note && <p className="truncate text-xs text-muted-foreground">“{r.note}”</p>}
+                  </div>
+                  <Button size="sm" onClick={() => decideRequest(r, true)} title="Approve as member">
+                    <UserCheck className="h-3.5 w-3.5" />
+                    Approve
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => decideRequest(r, false)} title="Reject and delete the request">
+                    <UserX className="h-3.5 w-3.5" />
+                    Reject
+                  </Button>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-2 text-xs text-muted-foreground">
+              Approving adds them as a member — change their role below afterwards if needed.
+            </p>
+          </section>
+        )}
 
         {/* Members */}
         <section className="py-5">

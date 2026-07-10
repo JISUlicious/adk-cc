@@ -115,6 +115,39 @@ def mount_org_routes(app, identity) -> None:
         await identity.record(auth.tenant_id, auth.user_id, "invite.revoked")
         return {"status": "revoked"}
 
+    # --- access requests: user-initiated joins awaiting approval ---------
+    @router.get("/orgs/requests")
+    async def list_requests(request: Request):
+        auth = _require_admin(request)
+        return {"requests": await asyncio.to_thread(identity.list_access_requests, auth.tenant_id)}
+
+    @router.post("/orgs/requests/{user_id}/approve")
+    async def approve_request(user_id: str, request: Request):
+        auth = _require_admin(request)
+        body = (await _json(request)) if await request.body() else {}
+        try:
+            m = await asyncio.to_thread(identity.approve_access_request,
+                auth.tenant_id, user_id, body.get("role") or "member")
+        except KeyError:
+            raise HTTPException(status_code=404, detail="request not found")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        await identity.record(auth.tenant_id, auth.user_id, "request.approved",
+                        target=m["email"], detail=", ".join(m["roles"]))
+        return m
+
+    @router.post("/orgs/requests/{user_id}/reject")
+    async def reject_request(user_id: str, request: Request):
+        auth = _require_admin(request)
+        try:
+            m = await asyncio.to_thread(identity.reject_access_request, auth.tenant_id, user_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="request not found")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        await identity.record(auth.tenant_id, auth.user_id, "request.rejected", target=m["email"])
+        return {"status": "rejected"}
+
     @router.post("/orgs/members/{user_id}/role")
     async def set_role(user_id: str, request: Request):
         auth = _require_admin(request)

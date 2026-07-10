@@ -99,7 +99,8 @@ class IdentityService:
             scopes_claim=os.environ.get("ADK_CC_JWT_SCOPES_CLAIM", "scope"),
         )
         provider = EmailPasswordProvider(
-            store, mode=mode, global_tenant_id=global_tenant, admin_role=admin_role
+            store, mode=mode, global_tenant_id=global_tenant, admin_role=admin_role,
+            access_requests=os.environ.get("ADK_CC_ACCESS_REQUESTS", "1").lower() not in ("0", "false"),
         )
         invites = JsonFileInviteStore(os.path.join(base, "invites.json"))
         api_keys = JsonFileApiKeyStore(os.path.join(base, "api_keys.json"))
@@ -194,7 +195,9 @@ class IdentityService:
         return bool(inv.expires) and time.time() > inv.expires
 
     def list_members(self, tenant_id: str) -> list[dict]:
-        return [self._member_dict(u) for u in self.store.list_by_tenant(tenant_id)]
+        # Pending access requests aren't members yet — they live in list_access_requests().
+        return [self._member_dict(u) for u in self.store.list_by_tenant(tenant_id)
+                if u.status != "pending"]
 
     def provision_member(self, tenant_id: str, *, email: str, password: str,
                         name: str = "", role: str = MEMBER_ROLE) -> dict:
@@ -258,6 +261,33 @@ class IdentityService:
         inv.status, inv.accepted_by = "accepted", ident.user_id
         self.invites.update(inv)
         return ident
+
+    # ------------------------------------------------------------------
+    # Access requests — user-initiated joins, the mirror of invites: the user
+    # files a pending account; an org admin approves (→ active member) or
+    # rejects (→ record deleted). Tenant-scoped like everything above.
+    # ------------------------------------------------------------------
+    def list_access_requests(self, tenant_id: str) -> list[dict]:
+        return [self._member_dict(u) | {"note": u.note}
+                for u in self.store.list_by_tenant(tenant_id) if u.status == "pending"]
+
+    def approve_access_request(self, tenant_id: str, user_id: str, role: str = MEMBER_ROLE) -> dict:
+        role = role or MEMBER_ROLE
+        if role not in self.allowed_roles():
+            raise ValueError(f"invalid role: {role}")
+        u = self._member_in_tenant(tenant_id, user_id)
+        if u.status != "pending":
+            raise ValueError("not a pending access request")
+        u.status, u.roles = "active", [role]
+        self.store.update(u)
+        return self._member_dict(u)
+
+    def reject_access_request(self, tenant_id: str, user_id: str) -> dict:
+        u = self._member_in_tenant(tenant_id, user_id)
+        if u.status != "pending":
+            raise ValueError("not a pending access request")
+        self.store.delete(u.user_id)
+        return self._member_dict(u)
 
     def set_member_role(self, tenant_id: str, user_id: str, role: str) -> dict:
         if role not in self.allowed_roles():
@@ -404,6 +434,8 @@ class IdentityService:
                 a["email"] = e.actor_email
         out = []
         for m in self.store.list_by_tenant(tenant_id):
+            if m.status == "pending":  # not a member yet
+                continue
             a = agg.get(m.user_id, {"events": 0, "last_active": "", "email": m.email})
             out.append({"id": m.user_id, "email": m.email or a["email"],
                         "roles": list(m.roles), "status": m.status,

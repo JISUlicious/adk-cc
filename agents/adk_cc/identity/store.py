@@ -37,6 +37,10 @@ class UserStore(ABC):
     def update(self, record: UserRecord) -> None: ...
 
     @abstractmethod
+    def delete(self, user_id: str) -> None:
+        """Remove an account permanently. No-op if absent."""
+
+    @abstractmethod
     def list_by_tenant(self, tenant_id: str) -> list[UserRecord]:
         """Every account in a tenant/org (the org's members)."""
 
@@ -94,6 +98,12 @@ class JsonFileUserStore(UserStore):
             data = self._read()
             data[record.user_id] = record.to_dict()
             self._write(data)
+
+    def delete(self, user_id: str) -> None:
+        with self._lock:
+            data = self._read()
+            if data.pop(user_id, None) is not None:
+                self._write(data)
 
     def list_by_tenant(self, tenant_id: str) -> list[UserRecord]:
         with self._lock:

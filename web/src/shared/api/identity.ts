@@ -16,6 +16,8 @@ export interface AuthConfig {
   password: boolean
   /** self-serve signup is available (multi-tenant mode) */
   registration: boolean
+  /** user-initiated "request access" is available (admin approves; single mode) */
+  access_requests: boolean
   /** SSO buttons available (future OIDC/Keycloak variant) */
   sso: boolean
   /** "single" | "multi" */
@@ -58,6 +60,21 @@ export function signup(args: {
   org?: string
 }): Promise<LoginResult> {
   return apiFetch<LoginResult>("/auth/signup", {
+    method: "POST",
+    noAuth: true,
+    body: JSON.stringify(args),
+  })
+}
+
+/** File a pending access request (the mirror of an invite): an org admin must
+ * approve it before the account can sign in. No token comes back. */
+export function requestAccess(args: {
+  email: string
+  password: string
+  name?: string
+  note?: string
+}): Promise<{ status: string }> {
+  return apiFetch<{ status: string }>("/auth/request-access", {
     method: "POST",
     noAuth: true,
     body: JSON.stringify(args),

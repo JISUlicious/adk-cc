@@ -22,6 +22,8 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, Response
 
+from ..identity.provider import AccountPendingError
+
 _MAX_SKILL_ZIP = 10 * 1024 * 1024  # 10 MiB per personal skill upload
 _MAX_USER_RESOURCES = 50  # cap personal skills / MCP servers per user
 
@@ -37,6 +39,7 @@ def _safe_id(value: str, label: str = "id") -> str:
 PUBLIC_PATHS: tuple[str, ...] = (
     "/auth/login",
     "/auth/signup",
+    "/auth/request-access",
     "/auth/config",
     "/.well-known/jwks.json",
 )
@@ -81,7 +84,12 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
         password = body.get("password") or ""
         if not email or not password:
             raise HTTPException(status_code=400, detail="email and password required")
-        ident = await identity.provider.login_password(email, password)
+        try:
+            ident = await identity.provider.login_password(email, password)
+        except AccountPendingError:
+            # Password verified but the access request hasn't been approved yet.
+            raise HTTPException(status_code=403,
+                                detail="Your access request is awaiting admin approval.")
         if ident is None:
             raise HTTPException(status_code=401, detail="invalid email or password")
         await identity.record(ident.tenant_id, ident.user_id, "login", actor_email=ident.email)
@@ -111,6 +119,27 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
             "token_type": "Bearer",
             "user": identity.user_dict(ident),
         }
+
+    @router.post("/auth/request-access")
+    async def request_access(request: Request):
+        # User-initiated join (the mirror of an admin invite): creates a PENDING
+        # account an org admin approves/rejects. No token is returned — the
+        # account can't log in until approved.
+        if not identity.provider.supports_access_requests:
+            raise HTTPException(status_code=403, detail="access requests are disabled")
+        body = await _json(request)
+        try:
+            ident = await identity.provider.request_access(
+                email=(body.get("email") or "").strip(),
+                password=body.get("password") or "",
+                name=(body.get("name") or "").strip(),
+                note=(body.get("note") or "").strip()[:500],
+            )
+        except (ValueError, PermissionError) as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        await identity.record(ident.tenant_id, ident.user_id, "access.requested",
+                              actor_email=ident.email)
+        return {"status": "pending"}
 
     def _require_auth(request: Request):
         auth = getattr(request.state, "adk_cc_auth", None)

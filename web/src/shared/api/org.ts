@@ -100,6 +100,26 @@ export function fetchAudit(): Promise<{ events: AuditEvent[] }> {
   return apiFetch("/orgs/audit")
 }
 
+// --- access requests (user-initiated joins awaiting approval) ---
+export interface AccessRequest extends Member {
+  note: string
+}
+
+export function listRequests(): Promise<{ requests: AccessRequest[] }> {
+  return apiFetch("/orgs/requests")
+}
+
+export function approveRequest(userId: string, role = "member"): Promise<Member> {
+  return apiFetch(`/orgs/requests/${encodeURIComponent(userId)}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ role }),
+  })
+}
+
+export function rejectRequest(userId: string): Promise<unknown> {
+  return apiFetch(`/orgs/requests/${encodeURIComponent(userId)}/reject`, { method: "POST" })
+}
+
 export function setMemberRole(userId: string, role: string): Promise<Member> {
   return apiFetch(`/orgs/members/${encodeURIComponent(userId)}/role`, {
     method: "POST",

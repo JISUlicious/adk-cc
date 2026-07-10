@@ -17,8 +17,9 @@ class UserRecord:
     name: str = ""
     tenant_id: str = "local"
     roles: list[str] = field(default_factory=list)
-    status: str = "active"  # active | disabled
+    status: str = "active"  # active | disabled | pending (access request awaiting approval)
     created: str = ""
+    note: str = ""  # requester's message on an access request (shown to the approving admin)
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -26,6 +26,10 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _MIN_PASSWORD = 8
 
 
+class AccountPendingError(Exception):
+    """Login refused because the account's access request awaits admin approval."""
+
+
 @dataclass
 class Identity:
     """The authenticated result a provider returns — maps 1:1 onto the JWT
@@ -47,6 +51,7 @@ class IdentityProvider(ABC):
     id: ClassVar[str] = "base"
     supports_password_login: ClassVar[bool] = False
     supports_registration: ClassVar[bool] = False
+    supports_access_requests: ClassVar[bool] = False
     supports_sso: ClassVar[bool] = False
 
     async def login_password(self, email: str, password: str) -> "Identity | None":
@@ -54,6 +59,9 @@ class IdentityProvider(ABC):
 
     async def register(self, *, email: str, password: str, name: str = "", org: str = "") -> "Identity":
         raise NotImplementedError(f"{self.id}: no self-registration")
+
+    async def request_access(self, *, email: str, password: str, name: str = "", note: str = "") -> "Identity":
+        raise NotImplementedError(f"{self.id}: no access requests")
 
     # --- SSO redirect seams (future OIDC / SAML / Keycloak providers) -------
     def sso_authorization_url(self, *, redirect_uri: str, state: str) -> str:
@@ -67,6 +75,7 @@ class IdentityProvider(ABC):
             "id": self.id,
             "password": self.supports_password_login,
             "registration": self.supports_registration,
+            "access_requests": self.supports_access_requests,
             "sso": self.supports_sso,
         }
 
@@ -92,24 +101,39 @@ class EmailPasswordProvider(IdentityProvider):
         global_tenant_id: str = "local",
         admin_role: str = "admin",
         owner_role: str = "owner",
+        access_requests: bool = True,
     ) -> None:
         self.store = store
         self.mode = mode
         self.global_tenant_id = global_tenant_id
         self.admin_role = admin_role
         self.owner_role = owner_role
+        self._access_requests = access_requests
 
     @property
     def supports_registration(self) -> bool:  # type: ignore[override]
         return self.mode == "multi"
 
+    @property
+    def supports_access_requests(self) -> bool:  # type: ignore[override]
+        # User-initiated "request to join" (an admin approves) — the mirror of
+        # invites. Single mode only: a request needs an org above it to approve;
+        # multi-mode new-org signup already self-serves via register().
+        return self._access_requests and self.mode == "single"
+
     async def login_password(self, email: str, password: str) -> "Identity | None":
         rec = await asyncio.to_thread(self.store.get_by_email, email)
-        if rec is None or rec.status != "active":
+        if rec is None:
             return None
         # scrypt is CPU-bound (~16 MiB, tens of ms) — offload it so a login
         # (unauthenticated, hot) never blocks the event loop / health checks.
         if not await asyncio.to_thread(verify_password, password, rec.password_hash):
+            return None
+        if rec.status == "pending":
+            # Password verified, so this IS the requester — telling them their
+            # request is still pending leaks nothing to wrong-password probes.
+            raise AccountPendingError()
+        if rec.status != "active":
             return None
         return Identity(rec.user_id, rec.tenant_id, tuple(rec.roles), (), rec.email, rec.name)
 
@@ -117,6 +141,14 @@ class EmailPasswordProvider(IdentityProvider):
         if self.mode != "multi":
             raise PermissionError("self-registration is disabled (single-org mode)")
         return await asyncio.to_thread(self._create, email, password, name, org, None, None)
+
+    async def request_access(self, *, email: str, password: str, name: str = "", note: str = "") -> "Identity":
+        """Create a PENDING account on the global tenant (no roles, can't log
+        in) for an org admin to approve or reject."""
+        if not self.supports_access_requests:
+            raise PermissionError("access requests are disabled")
+        return await asyncio.to_thread(
+            self._create, email, password, name, "", self.global_tenant_id, [], "pending", note)
 
     def provision(
         self,
@@ -131,7 +163,8 @@ class EmailPasswordProvider(IdentityProvider):
         at startup or from an admin route, not on the login hot path)."""
         return self._create(email, password, name, "", tenant_id, roles)
 
-    def _create(self, email, password, name, org, tenant_id, roles) -> "Identity":
+    def _create(self, email, password, name, org, tenant_id, roles,
+                status="active", note="") -> "Identity":
         email = normalize_email(email)
         if not _EMAIL_RE.match(email):
             raise ValueError("invalid email address")
@@ -153,8 +186,9 @@ class EmailPasswordProvider(IdentityProvider):
             name=name or "",
             tenant_id=tenant_id,
             roles=list(roles or []),
-            status="active",
+            status=status,
             created=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            note=note or "",
         )
         self.store.create(rec)
         return Identity(uid, tenant_id, tuple(rec.roles), (), email, rec.name)
