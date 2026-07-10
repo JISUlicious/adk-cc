@@ -1,8 +1,9 @@
 """E2E: account danger zone through the UI (real browser).
 
-A member changes their email from the Account page, then deletes their account
-via the password-confirmed danger-zone flow: they land back on the login form,
-and both old credentials and the account itself are gone server-side.
+A member changes their email from the Account page, DEACTIVATES via the
+password-confirmed danger zone (bounced to login, admin re-enables), signs
+back in, then DELETES the same way: they land back on the login form, and
+both old credentials and the account itself are gone server-side.
 
 Model-free — no chat messages are sent, so no LLM calls.
 Run: .venv/bin/python tests/e2e_account_lifecycle_ui.py
@@ -100,6 +101,33 @@ def main() -> int:
                   and requests.post(BASE + "/auth/login",
                                     json={"email": "m2@local.io", "password": "password123"},
                                     timeout=5).ok)
+
+            # --- deactivate via the danger zone (reversible leg) -------------
+            page.wait_for_selector("text=Danger zone", timeout=10000)
+            page.get_by_role("button", name="Deactivate account").click()
+            page.wait_for_selector('input[placeholder="Confirm with your password"]', timeout=5000)
+            page.fill('input[placeholder="Confirm with your password"]', "password123")
+            page.get_by_role("button", name="Deactivate", exact=True).click()
+            page.wait_for_selector("#email", timeout=20000)
+            check("deactivation bounces to the login form", True)
+            check("deactivated account can't log in (API)",
+                  requests.post(BASE + "/auth/login",
+                                json={"email": "m2@local.io", "password": "password123"},
+                                timeout=5).status_code == 401)
+            members = requests.get(BASE + "/orgs/members",
+                                   headers={"Authorization": f"Bearer {at}"},
+                                   timeout=5).json()["members"]
+            mid = [m for m in members if m["email"] == "m2@local.io"][0]["id"]
+            requests.post(BASE + f"/orgs/members/{mid}/enable",
+                          headers={"Authorization": f"Bearer {at}"}, timeout=5)
+
+            # sign back in through the form after the admin re-enable
+            page.fill("#email", "m2@local.io")
+            page.fill("#password", "password123")
+            page.get_by_role("button", name="Sign in").click()
+            page.wait_for_selector('button[title="Settings"]', timeout=20000)
+            check("re-enabled member signs back in via the form", True)
+            page.goto(BASE + "/account", wait_until="networkidle")
 
             # --- delete via the danger zone ---------------------------------
             page.wait_for_selector("text=Danger zone", timeout=10000)
