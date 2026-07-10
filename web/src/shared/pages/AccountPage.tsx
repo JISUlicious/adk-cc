@@ -5,10 +5,14 @@ import { Button } from "@/shared/components/ui/button"
 import { Input } from "@/shared/components/ui/input"
 import { ApiError } from "@/shared/api/client"
 import { cn } from "@/shared/lib/utils"
+import { clearToken, markSignedOut } from "@/shared/api/auth"
 import {
   getMe,
   updateProfile,
   changePassword,
+  changeEmail,
+  deactivateAccount,
+  deleteAccount,
   listApiKeys,
   createApiKey,
   revokeApiKey,
@@ -57,11 +61,13 @@ export function AccountPage() {
           <p className="mt-4 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>
         )}
         <ProfileSection me={me} onSaved={setMe} />
+        <EmailSection me={me} onSaved={setMe} />
         <PasswordSection />
         <UserMcpSection />
         <UserSkillsSection />
         <CustomVariablesSection />
         <ApiKeysSection />
+        <DangerZoneSection />
       </div>
     </div>
   )
@@ -84,8 +90,111 @@ export function AccountInfoSections() {
   return (
     <>
       <ProfileSection me={me} onSaved={setMe} />
+      <EmailSection me={me} onSaved={setMe} />
       <PasswordSection />
+      <DangerZoneSection />
     </>
+  )
+}
+
+function EmailSection({ me, onSaved }: { me: Me | null; onSaved: (m: Me) => void }) {
+  const [email, setEmail] = useState("")
+  const [pw, setPw] = useState("")
+  const [status, setStatus] = useState<string | null>(null)
+  const [ok, setOk] = useState(false)
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault()
+    setStatus(null)
+    setOk(false)
+    try {
+      const m = await changeEmail(email.trim(), pw)
+      onSaved(m)
+      setOk(true)
+      setStatus("Email changed.")
+      setEmail("")
+      setPw("")
+    } catch (err) {
+      setStatus(msg(err))
+    }
+  }
+
+  return (
+    <Section title="Change email">
+      <form onSubmit={save} className="space-y-3">
+        <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+               placeholder={me?.email ? `new address (current: ${me.email})` : "new address"}
+               autoComplete="email" />
+        <Input type="password" value={pw} onChange={(e) => setPw(e.target.value)}
+               placeholder="Current password" autoComplete="current-password" />
+        <div className="flex items-center gap-3">
+          <Button type="submit" disabled={!email.trim() || !pw}>Update email</Button>
+          {status && (
+            <span className={`text-xs ${ok ? "text-muted-foreground" : "text-destructive"}`}>{status}</span>
+          )}
+        </div>
+      </form>
+    </Section>
+  )
+}
+
+/** Deactivate (reversible, admin re-enables) and delete (permanent). Both are
+ * password-gated server-side; owners / the last admin are refused there too. */
+function DangerZoneSection() {
+  const [mode, setMode] = useState<"none" | "deactivate" | "delete">("none")
+  const [pw, setPw] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState<string | null>(null)
+
+  async function confirm() {
+    setBusy(true)
+    setStatus(null)
+    try {
+      await (mode === "delete" ? deleteAccount(pw) : deactivateAccount(pw))
+      // The account is gone/disabled — drop tokens and land on the login form.
+      markSignedOut()
+      clearToken()
+      location.assign("/")
+    } catch (err) {
+      setStatus(msg(err))
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Section title="Danger zone">
+      {mode === "none" ? (
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={() => { setMode("deactivate"); setStatus(null) }}>
+            Deactivate account
+          </Button>
+          <Button variant="outline" className="text-destructive"
+                  onClick={() => { setMode("delete"); setStatus(null) }}>
+            Delete account
+          </Button>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <p className="text-sm text-muted-foreground">
+            {mode === "delete"
+              ? "This permanently deletes your account, personal settings, and workspace files. It cannot be undone."
+              : "This blocks sign-in and ends your sessions. An org admin can re-enable your account."}
+          </p>
+          <Input type="password" value={pw} onChange={(e) => setPw(e.target.value)}
+                 placeholder="Confirm with your password" autoComplete="current-password" autoFocus />
+          <div className="flex items-center gap-2">
+            <Button variant={mode === "delete" ? "destructive" : "default"}
+                    disabled={!pw || busy} onClick={confirm}>
+              {busy ? "Working…" : mode === "delete" ? "Delete permanently" : "Deactivate"}
+            </Button>
+            <Button variant="ghost" onClick={() => { setMode("none"); setPw(""); setStatus(null) }}>
+              Cancel
+            </Button>
+            {status && <span className="text-xs text-destructive">{status}</span>}
+          </div>
+        </div>
+      )}
+    </Section>
   )
 }
 

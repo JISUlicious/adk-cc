@@ -495,6 +495,63 @@ class IdentityService:
         self.store.update(u)
         self.revoke_all_refresh(user_id)  # a changed password invalidates other sessions
 
+    def _verify_own_password(self, user_id: str, password: str):
+        """Shared gate for the sensitive self-service actions below."""
+        u = self.store.get(user_id)
+        if u is None:
+            raise KeyError("user not found")
+        if not verify_password(password, u.password_hash):
+            raise ValueError("password is incorrect")
+        return u
+
+    def change_email(self, user_id: str, *, new_email: str, password: str) -> dict:
+        """Immediate swap, gated on the current password. (With no mailer
+        there's nothing to verify against; the audit log keeps old → new.)"""
+        from .provider import _EMAIL_RE
+
+        u = self._verify_own_password(user_id, password)
+        e = normalize_email(new_email)
+        if not _EMAIL_RE.match(e):
+            raise ValueError("invalid email address")
+        existing = self.store.get_by_email(e)
+        if existing is not None and existing.user_id != user_id:
+            raise ValueError("that email is already in use")
+        u.email = e
+        self.store.update(u)
+        return self.profile(user_id)
+
+    def _guard_removable(self, u) -> None:
+        """An owner (or the last active admin) can't remove themself — the
+        org would be orphaned. Transfer/promote first."""
+        if OWNER_ROLE in u.roles:
+            raise ValueError("the team owner can't remove their account — transfer ownership first")
+        if self.admin_role in u.roles:
+            self._guard_last_admin(u.tenant_id, u.user_id)
+
+    def deactivate_account(self, user_id: str, *, password: str) -> None:
+        """Self-service, reversible: blocks login + ends sessions. An admin
+        re-enables via the members list."""
+        u = self._verify_own_password(user_id, password)
+        self._guard_removable(u)
+        u.status = "disabled"
+        self.store.update(u)
+        self.revoke_all_refresh(user_id)
+
+    def delete_account(self, user_id: str, *, password: str) -> dict:
+        """Self-service, permanent: revokes every credential (refresh tokens,
+        PATs) and deletes the record. Returns the removed member dict so the
+        caller can clean up per-user resources."""
+        u = self._verify_own_password(user_id, password)
+        self._guard_removable(u)
+        if self.api_keys is not None:
+            for k in self.api_keys.list_by_user(user_id):
+                if not k.revoked:
+                    k.revoked = True
+                    self.api_keys.update(k)
+        self.revoke_all_refresh(user_id)
+        self.store.delete(user_id)
+        return self._member_dict(u)
+
     def create_api_key(self, user_id: str, *, name: str) -> tuple[ApiKeyRecord, str]:
         """Mint a long-lived PAT (JWT). Returns (record, token); the token is
         shown ONCE and never stored — only its revocable handle is."""

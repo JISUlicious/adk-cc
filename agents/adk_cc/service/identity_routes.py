@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import os
 import shutil
 import tempfile
@@ -257,6 +258,111 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
             raise HTTPException(status_code=400, detail=str(e))
         await identity.record(auth.tenant_id, auth.user_id, "password.changed")
         return {"status": "ok"}
+
+    @router.post("/auth/email")
+    async def change_email(request: Request):
+        # Immediate swap gated on the current password (no mailer → nothing to
+        # verify against). The audit log keeps old → new.
+        auth = _require_auth(request)
+        body = await _json(request)
+        old = (await asyncio.to_thread(identity.profile, auth.user_id)).get("email", "")
+        try:
+            prof = await asyncio.to_thread(identity.change_email,
+                auth.user_id,
+                new_email=body.get("new_email") or "",
+                password=body.get("password") or "",
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="user not found")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        await identity.record(auth.tenant_id, auth.user_id, "email.changed",
+                              target=prof.get("email", ""), detail=f"was {old}")
+        return prof
+
+    async def _purge_user_resources(auth) -> None:
+        """Best-effort removal of everything personal to a deleted account:
+        secrets, MCP servers, skills, and the workspace directory. Each leg is
+        independent — a failure in one never blocks the others."""
+        log = logging.getLogger(__name__)
+        if credentials is not None:
+            try:
+                for key in await credentials.list_keys(
+                        tenant_id=auth.tenant_id, user_id=auth.user_id):
+                    await credentials.delete(
+                        tenant_id=auth.tenant_id, key=key, user_id=auth.user_id)
+            except Exception as e:  # noqa: BLE001
+                log.warning("account purge: secrets failed (%s)", e)
+        reg_dir = os.environ.get("ADK_CC_TENANT_REGISTRY_DIR")
+        if reg_dir:
+            try:
+                from ..service.registry import JsonFileTenantResourceRegistry
+                from ..tools.mcp_tenant import McpServerConfig
+
+                reg = JsonFileTenantResourceRegistry(
+                    root=reg_dir, kind="mcp", model=McpServerConfig, id_attr="server_name")
+                for cfg in await reg.list_for_tenant(auth.tenant_id, auth.user_id):
+                    await reg.remove(tenant_id=auth.tenant_id,
+                                     resource_id=cfg.server_name, user_id=auth.user_id)
+            except Exception as e:  # noqa: BLE001
+                log.warning("account purge: mcp servers failed (%s)", e)
+        skill_root = os.environ.get("ADK_CC_TENANT_SKILLS_DIR")
+        if skill_root:
+            try:
+                d = (Path(skill_root) / _safe_id(auth.tenant_id, "tenant_id")
+                     / "_users" / _safe_id(auth.user_id, "user_id"))
+                if d.is_dir():
+                    await asyncio.to_thread(shutil.rmtree, d, True)
+            except Exception as e:  # noqa: BLE001
+                log.warning("account purge: skills failed (%s)", e)
+        ws_root = os.environ.get("ADK_CC_WORKSPACE_ROOT")
+        if ws_root:
+            try:
+                root = Path(ws_root).resolve()
+                d = (root / _safe_id(auth.tenant_id, "tenant_id")
+                     / _safe_id(auth.user_id, "user_id")).resolve()
+                # containment: only ever delete <root>/<tenant>/<user>
+                if d.is_dir() and root in d.parents and d != root:
+                    await asyncio.to_thread(shutil.rmtree, d, True)
+            except Exception as e:  # noqa: BLE001
+                log.warning("account purge: workspace failed (%s)", e)
+
+    @router.post("/auth/account/deactivate")
+    async def deactivate_account(request: Request):
+        # Self-service, reversible: blocks login + ends sessions; an admin
+        # re-enables from the members list.
+        auth = _require_auth(request)
+        body = await _json(request)
+        try:
+            await asyncio.to_thread(identity.deactivate_account,
+                auth.user_id, password=body.get("password") or "")
+        except KeyError:
+            raise HTTPException(status_code=404, detail="user not found")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        await identity.record(auth.tenant_id, auth.user_id, "account.deactivated")
+        return {"status": "disabled"}
+
+    @router.delete("/auth/account")
+    async def delete_account(request: Request):
+        # Self-service, permanent: identity record + credentials go first,
+        # then a best-effort purge of personal resources. Sessions rows in the
+        # session DB are retained but inert (nothing can read them once the
+        # tenant/user scope is gone).
+        auth = _require_auth(request)
+        body = await _json(request)
+        try:
+            m = await asyncio.to_thread(identity.delete_account,
+                auth.user_id, password=body.get("password") or "")
+        except KeyError:
+            raise HTTPException(status_code=404, detail="user not found")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # actor_email passed explicitly — the record is already gone.
+        await identity.record(auth.tenant_id, auth.user_id, "account.deleted",
+                              target=m["email"], actor_email=m["email"])
+        await _purge_user_resources(auth)
+        return {"status": "deleted"}
 
     @router.get("/auth/api-keys")
     async def list_api_keys(request: Request):

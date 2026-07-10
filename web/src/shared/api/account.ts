@@ -44,6 +44,30 @@ export function changePassword(current_password: string, new_password: string): 
   })
 }
 
+/** Swap the account email (gated on the current password; immediate). */
+export function changeEmail(new_email: string, password: string): Promise<Me> {
+  return apiFetch("/auth/email", {
+    method: "POST",
+    body: JSON.stringify({ new_email, password }),
+  })
+}
+
+/** Reversible self-deactivation: blocks login + ends sessions; an admin re-enables. */
+export function deactivateAccount(password: string): Promise<{ status: string }> {
+  return apiFetch("/auth/account/deactivate", {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  })
+}
+
+/** Permanent self-deletion: record, credentials, and personal resources removed. */
+export function deleteAccount(password: string): Promise<{ status: string }> {
+  return apiFetch("/auth/account", {
+    method: "DELETE",
+    body: JSON.stringify({ password }),
+  })
+}
+
 export function listApiKeys(): Promise<{ keys: ApiKey[] }> {
   return apiFetch("/auth/api-keys")
 }
