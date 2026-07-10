@@ -82,6 +82,21 @@ export function revokeSession(): void {
   }).catch(() => {})
 }
 
+// --- password reset (public one-time link minted by an admin) ---
+export function getReset(token: string): Promise<{ email: string; name: string }> {
+  return apiFetch(`/auth/reset/${encodeURIComponent(token)}`, { noAuth: true })
+}
+
+/** Consume the reset link: set a new password. Signs the holder in (returns
+ * a full token pair) — possession of the link is the proof. */
+export function completeReset(token: string, password: string): Promise<LoginResult> {
+  return apiFetch<LoginResult>(`/auth/reset/${encodeURIComponent(token)}/complete`, {
+    method: "POST",
+    noAuth: true,
+    body: JSON.stringify({ password }),
+  })
+}
+
 /** File a pending access request (the mirror of an invite): an org admin must
  * approve it before the account can sign in. No token comes back. */
 export function requestAccess(args: {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react"
 import { Link } from "react-router-dom"
-import { ArrowLeft, Copy, Check, Ban, RotateCcw, UserCheck, UserX } from "lucide-react"
+import { ArrowLeft, Copy, Check, Ban, RotateCcw, UserCheck, UserX, KeyRound } from "lucide-react"
 import { Button } from "@/shared/components/ui/button"
 import { Input } from "@/shared/components/ui/input"
 import { ApiError } from "@/shared/api/client"
@@ -13,6 +13,7 @@ import {
   listRequests,
   approveRequest,
   rejectRequest,
+  resetMemberPassword,
   setMemberRole,
   disableMember,
   enableMember,
@@ -40,6 +41,8 @@ export function TeamSection() {
   const [email, setEmail] = useState("")
   const [role, setRole] = useState("member")
   const [inviteLink, setInviteLink] = useState<string | null>(null)
+  // One-time reset link just minted for a member (shown until dismissed/replaced).
+  const [resetLink, setResetLink] = useState<{ email: string; url: string } | null>(null)
   const [copied, setCopied] = useState<string | null>(null)
 
   const payload = decodeJwtPayload(getToken() ?? "")
@@ -119,6 +122,15 @@ export function TeamSection() {
     try {
       await (approve ? approveRequest(r.id) : rejectRequest(r.id))
       load()
+    } catch (err) {
+      setError(msg(err))
+    }
+  }
+
+  async function makeResetLink(m: Member) {
+    setError(null)
+    try {
+      setResetLink(await resetMemberPassword(m.id))
     } catch (err) {
       setError(msg(err))
     }
@@ -204,6 +216,24 @@ export function TeamSection() {
           <h2 className="mb-3 text-sm font-semibold">
             Members {!loading && `(${members.length})`}
           </h2>
+          {resetLink && (
+            <div className="mb-3 flex items-center gap-2 rounded-md bg-muted/50 p-2">
+              <div className="min-w-0 flex-1">
+                <p className="text-xs text-muted-foreground">
+                  One-time password-reset link for <strong>{resetLink.email}</strong> —
+                  share it with them (valid 24h, single use):
+                </p>
+                <code className="block truncate text-xs">{resetLink.url}</code>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => copy(resetLink.url, "reset")}>
+                {copied === "reset" ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                Copy link
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setResetLink(null)}>
+                Dismiss
+              </Button>
+            </div>
+          )}
           {loading ? (
             <p className="py-3 text-sm text-muted-foreground">Loading…</p>
           ) : (
@@ -242,6 +272,14 @@ export function TeamSection() {
                         ))}
                       </select>
                     )}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => makeResetLink(m)}
+                      title="Create a one-time password-reset link"
+                    >
+                      <KeyRound className="h-3.5 w-3.5" />
+                    </Button>
                     <Button
                       variant="outline"
                       size="sm"

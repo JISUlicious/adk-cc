@@ -16,7 +16,7 @@ import secrets
 import time
 import uuid
 
-from .models import ApiKeyRecord, AuditEvent, InviteRecord, RefreshTokenRecord
+from .models import ApiKeyRecord, AuditEvent, InviteRecord, RefreshTokenRecord, ResetTokenRecord
 from .passwords import hash_password, verify_password
 from .provider import EmailPasswordProvider, Identity
 from .store import (
@@ -24,6 +24,7 @@ from .store import (
     JsonFileAuditStore,
     JsonFileInviteStore,
     JsonFileRefreshTokenStore,
+    JsonFileResetTokenStore,
     JsonFileUserStore,
     normalize_email,
 )
@@ -34,6 +35,7 @@ OWNER_ROLE = "owner"
 _INVITE_TTL_S = 7 * 24 * 3600
 _PAT_TTL_S = 365 * 24 * 3600  # personal access tokens: 1 year
 _REFRESH_TTL_S = 30 * 24 * 3600  # refresh tokens: 30 days
+_RESET_TTL_S = 24 * 3600  # password-reset links: 1 day
 
 _log = logging.getLogger(__name__)
 
@@ -63,7 +65,8 @@ def _fire_and_forget(fn, *args) -> None:
 class IdentityService:
     def __init__(self, *, provider, issuer: TokenIssuer, mode: str, invites=None,
                  api_keys=None, audit=None, refresh=None,
-                 refresh_ttl_s: int = _REFRESH_TTL_S) -> None:
+                 refresh_ttl_s: int = _REFRESH_TTL_S, resets=None,
+                 reset_ttl_s: int = _RESET_TTL_S) -> None:
         self.provider = provider
         self.issuer = issuer
         self.mode = mode
@@ -72,6 +75,8 @@ class IdentityService:
         self.audit = audit
         self.refresh = refresh
         self.refresh_ttl_s = refresh_ttl_s
+        self.resets = resets
+        self.reset_ttl_s = reset_ttl_s
 
     @property
     def store(self):
@@ -114,10 +119,14 @@ class IdentityService:
         api_keys = JsonFileApiKeyStore(os.path.join(base, "api_keys.json"))
         audit = JsonFileAuditStore(os.path.join(base, "audit.json"))
         refresh = JsonFileRefreshTokenStore(os.path.join(base, "refresh_tokens.json"))
+        resets = JsonFileResetTokenStore(os.path.join(base, "reset_tokens.json"))
         svc = cls(provider=provider, issuer=issuer, mode=mode, invites=invites,
                   api_keys=api_keys, audit=audit, refresh=refresh,
                   refresh_ttl_s=int(os.environ.get("ADK_CC_AUTH_REFRESH_TTL_S",
-                                                   str(_REFRESH_TTL_S))))
+                                                   str(_REFRESH_TTL_S))),
+                  resets=resets,
+                  reset_ttl_s=int(os.environ.get("ADK_CC_AUTH_RESET_TTL_S",
+                                                 str(_RESET_TTL_S))))
         svc._maybe_bootstrap_admin(global_tenant, admin_role)
         return svc
 
@@ -369,6 +378,53 @@ class IdentityService:
             raise ValueError("not a pending access request")
         self.store.delete(u.user_id)
         return self._member_dict(u)
+
+    # ------------------------------------------------------------------
+    # Password reset — admin-mediated one-time links (the invite pattern):
+    # an admin mints a link for a member of their org and delivers it
+    # out-of-band; the holder sets a new password ONCE. No email needed.
+    # ------------------------------------------------------------------
+    def create_password_reset(self, tenant_id: str, user_id: str) -> str:
+        if self.resets is None:
+            raise ValueError("password resets are not configured")
+        u = self._member_in_tenant(tenant_id, user_id)
+        if u.status == "pending":
+            raise ValueError("account is awaiting approval — approve or reject it instead")
+        raw = secrets.token_urlsafe(32)
+        self.resets.create(ResetTokenRecord(
+            id=self._refresh_hash(raw), user_id=u.user_id,
+            expires=time.time() + self.reset_ttl_s,
+            created=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        ))
+        return raw
+
+    def reset_public(self, raw: str) -> dict | None:
+        """Non-secret info for the reset page. None if the token is unusable."""
+        rec = self.resets.get(self._refresh_hash(raw)) if (raw and self.resets) else None
+        if rec is None or rec.used or time.time() > rec.expires:
+            return None
+        u = self.store.get(rec.user_id)
+        if u is None or u.status == "pending":
+            return None
+        return {"email": u.email, "name": u.name}
+
+    def complete_password_reset(self, raw: str, new_password: str) -> Identity:
+        """Consume the token: set the new password, revoke every live session.
+        One opaque error for all invalid-token shapes."""
+        rec = self.resets.get(self._refresh_hash(raw)) if (raw and self.resets) else None
+        if rec is None or rec.used or time.time() > rec.expires:
+            raise ValueError("this reset link is invalid or has expired")
+        u = self.store.get(rec.user_id)
+        if u is None or u.status == "pending":
+            raise ValueError("this reset link is invalid or has expired")
+        if len(new_password or "") < 8:
+            raise ValueError("password must be at least 8 characters")
+        u.password_hash = hash_password(new_password)
+        self.store.update(u)
+        rec.used = True
+        self.resets.update(rec)
+        self.revoke_all_refresh(u.user_id)  # a reset invalidates every session
+        return Identity(u.user_id, u.tenant_id, tuple(u.roles), (), u.email, u.name)
 
     def set_member_role(self, tenant_id: str, user_id: str, role: str) -> dict:
         if role not in self.allowed_roles():

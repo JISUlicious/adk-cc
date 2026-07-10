@@ -148,6 +148,24 @@ def mount_org_routes(app, identity) -> None:
         await identity.record(auth.tenant_id, auth.user_id, "request.rejected", target=m["email"])
         return {"status": "rejected"}
 
+    @router.post("/orgs/members/{user_id}/reset-password")
+    async def reset_password(user_id: str, request: Request):
+        # Mint a one-time reset link (the invite pattern) the admin delivers
+        # out-of-band. The raw token appears only in this response.
+        auth = _require_admin(request)
+        try:
+            raw = await asyncio.to_thread(identity.create_password_reset,
+                                          auth.tenant_id, user_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="member not found")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        m = await asyncio.to_thread(identity._member_in_tenant, auth.tenant_id, user_id)
+        await identity.record(auth.tenant_id, auth.user_id, "password.reset_link",
+                        target=m.email)
+        base = str(request.base_url).rstrip("/")
+        return {"url": f"{base}/reset-password/{raw}", "email": m.email}
+
     @router.post("/orgs/members/{user_id}/role")
     async def set_role(user_id: str, request: Request):
         auth = _require_admin(request)

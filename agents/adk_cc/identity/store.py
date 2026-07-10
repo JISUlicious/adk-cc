@@ -16,7 +16,14 @@ from pathlib import Path
 
 from filelock import FileLock
 
-from .models import ApiKeyRecord, AuditEvent, InviteRecord, RefreshTokenRecord, UserRecord
+from .models import (
+    ApiKeyRecord,
+    AuditEvent,
+    InviteRecord,
+    RefreshTokenRecord,
+    ResetTokenRecord,
+    UserRecord,
+)
 
 
 def normalize_email(email: str) -> str:
@@ -306,6 +313,58 @@ class JsonFileRefreshTokenStore(RefreshTokenStore):
                     changed = True
             if changed:
                 self._write(data)
+
+
+class ResetTokenStore(ABC):
+    @abstractmethod
+    def create(self, rec: ResetTokenRecord) -> None: ...
+
+    @abstractmethod
+    def get(self, token_hash: str) -> ResetTokenRecord | None: ...
+
+    @abstractmethod
+    def update(self, rec: ResetTokenRecord) -> None: ...
+
+
+class JsonFileResetTokenStore(ResetTokenStore):
+    """Reset tokens in one JSON object {token_hash: record}, filelock-
+    protected. Expired records are pruned on every write."""
+
+    def __init__(self, path: str) -> None:
+        self._path = Path(path)
+        self._lock = FileLock(str(self._path) + ".lock")
+
+    def _read(self) -> dict:
+        if not self._path.exists():
+            return {}
+        with self._path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _write(self, data: dict) -> None:
+        now = time.time()
+        data = {k: v for k, v in data.items() if v.get("expires", 0) > now}
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        tmp.replace(self._path)
+
+    def create(self, rec: ResetTokenRecord) -> None:
+        with self._lock:
+            data = self._read()
+            data[rec.id] = rec.to_dict()
+            self._write(data)
+
+    def get(self, token_hash: str) -> ResetTokenRecord | None:
+        with self._lock:
+            d = self._read().get(token_hash)
+        return ResetTokenRecord.from_dict(d) if d else None
+
+    def update(self, rec: ResetTokenRecord) -> None:
+        with self._lock:
+            data = self._read()
+            data[rec.id] = rec.to_dict()
+            self._write(data)
 
 
 class AuditStore(ABC):

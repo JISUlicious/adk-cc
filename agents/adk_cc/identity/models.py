@@ -73,6 +73,25 @@ class RefreshTokenRecord:
 
 
 @dataclass
+class ResetTokenRecord:
+    """A single-use password-reset token, stored by HASH (the raw token lives
+    only in the one-time link the admin hands out). Consumed on use."""
+
+    id: str  # sha256 hex of the raw token
+    user_id: str
+    expires: float  # epoch seconds
+    used: bool = False
+    created: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ResetTokenRecord":
+        return cls(**{k: d[k] for k in cls.__dataclass_fields__ if k in d})
+
+
+@dataclass
 class AuditEvent:
     """One identity/org/account action — who did what, when, in which org.
     Powers the audit log + the usage summary (aggregated per actor)."""

@@ -48,6 +48,10 @@ PUBLIC_PATHS: tuple[str, ...] = (
     "/.well-known/jwks.json",
 )
 
+# Public (auth-exempt) reset endpoints live under this prefix — the one-time
+# token in the path is the credential, and the holder has no account access yet.
+PUBLIC_PREFIXES: tuple[str, ...] = ("/auth/reset/",)
+
 
 async def _json(request: Request) -> dict:
     try:
@@ -148,6 +152,27 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
         await identity.record(ident.tenant_id, ident.user_id, "access.requested",
                               actor_email=ident.email)
         return {"status": "pending"}
+
+    # --- public: complete a password reset (one-time link from an admin) ---
+    @router.get("/auth/reset/{token}")
+    async def get_reset(token: str):
+        info = await asyncio.to_thread(identity.reset_public, token)
+        if info is None:
+            raise HTTPException(status_code=404, detail="reset link invalid or expired")
+        return info
+
+    @router.post("/auth/reset/{token}/complete")
+    async def complete_reset(token: str, request: Request):
+        body = await _json(request)
+        try:
+            ident = await asyncio.to_thread(
+                identity.complete_password_reset, token, body.get("password") or "")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        await identity.record(ident.tenant_id, ident.user_id, "password.reset",
+                              actor_email=ident.email)
+        # Completing the reset proves possession — sign them straight in.
+        return await _token_response(ident)
 
     def _require_auth(request: Request):
         auth = getattr(request.state, "adk_cc_auth", None)

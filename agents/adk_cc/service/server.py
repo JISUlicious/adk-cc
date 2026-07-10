@@ -143,15 +143,18 @@ def build_fastapi_app(
             exempt_prefixes = ()
         # The in-house identity endpoints that MUST be reachable without a
         # token (login/signup/config + the JWKS the SPA & external verifiers
-        # read). /auth/me and /auth/logout stay gated.
+        # read). /auth/me stays gated.
         if identity is not None:
             from .identity_routes import PUBLIC_PATHS
+            from .identity_routes import PUBLIC_PREFIXES as RESET_PREFIXES
             from .org_routes import PUBLIC_PREFIXES as INVITE_PREFIXES
 
             exempt_exact = exempt_exact + PUBLIC_PATHS
-            # /auth/invite/* (the public invite API) + the /invite/<token>
-            # SPA page shell, so an invitee can land + accept before signing in.
-            exempt_prefixes = exempt_prefixes + INVITE_PREFIXES + ("/invite/",)
+            # /auth/invite/* + /auth/reset/* (the public token APIs) and the
+            # /invite/<token> + /reset-password/<token> SPA page shells, so
+            # the link holder can land + act before signing in.
+            exempt_prefixes = (exempt_prefixes + INVITE_PREFIXES + RESET_PREFIXES
+                               + ("/invite/", "/reset-password/"))
         # REST authZ gate (closes trust-the-path). Added BEFORE the auth
         # middleware so it ends up INNER: Starlette runs the last-added
         # middleware outermost, so auth (added next) runs first and sets
@@ -278,9 +281,14 @@ def _mount_ui(app, dist_dir: str) -> None:
             include_in_schema=False,
         )
 
-    # Parameterized SPA route: the public accept-invite page /invite/<token>.
+    # Parameterized SPA routes: the public accept-invite page /invite/<token>
+    # and the one-time password-reset page /reset-password/<token>.
     @app.get("/invite/{token}", include_in_schema=False)
     def _spa_invite(token: str) -> FileResponse:
+        return FileResponse(index_html)
+
+    @app.get("/reset-password/{token}", include_in_schema=False)
+    def _spa_reset(token: str) -> FileResponse:
         return FileResponse(index_html)
 
     app.mount("/", StaticFiles(directory=str(dist), html=False), name="ui")

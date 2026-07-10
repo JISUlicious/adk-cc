@@ -7,6 +7,7 @@ import { KnowledgePage } from "@/shared/pages/KnowledgePage"
 import { OrgPage } from "@/shared/pages/OrgPage"
 import { AccountPage } from "@/shared/pages/AccountPage"
 import { AcceptInvitePage } from "@/shared/pages/AcceptInvitePage"
+import { ResetPasswordPage } from "@/shared/pages/ResetPasswordPage"
 
 /**
  * Web shell: full multi-user app — login + every route, composing the shared
@@ -16,9 +17,10 @@ export function WebApp() {
   return (
     <BrowserRouter>
       <Routes>
-        {/* Public — you accept an invite BEFORE you have an account, so this
-            route lives OUTSIDE the AuthGate. */}
+        {/* Public — you accept an invite / reset a password BEFORE you can
+            sign in, so these routes live OUTSIDE the AuthGate. */}
         <Route path="/invite/:token" element={<AcceptInvitePage />} />
+        <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
         <Route
           path="*"
           element={

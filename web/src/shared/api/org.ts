@@ -121,6 +121,14 @@ export function rejectRequest(userId: string): Promise<unknown> {
   return apiFetch(`/orgs/requests/${encodeURIComponent(userId)}/reject`, { method: "POST" })
 }
 
+/** Mint a one-time password-reset link for a member (delivered out-of-band,
+ * like an invite). The raw token appears only in this response. */
+export function resetMemberPassword(userId: string): Promise<{ url: string; email: string }> {
+  return apiFetch(`/orgs/members/${encodeURIComponent(userId)}/reset-password`, {
+    method: "POST",
+  })
+}
+
 export function setMemberRole(userId: string, role: string): Promise<Member> {
   return apiFetch(`/orgs/members/${encodeURIComponent(userId)}/role`, {
     method: "POST",
