@@ -179,7 +179,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
         mode === "signup"
           ? await pwSignup({ email, password, name, org })
           : await pwLogin(email, password)
-      setToken(res.access_token, res.user.id)
+      setToken(res.access_token, res.user.id, res.refresh_token)
       setLocalUser(res.user.id)
       clearSignedOut()
       setVerified(true)

@@ -54,7 +54,7 @@ export function AcceptInvitePage() {
     setError(null)
     try {
       const res = await acceptInvite(token, password, name)
-      setToken(res.access_token, res.user.id)
+      setToken(res.access_token, res.user.id, res.refresh_token)
       // Hard navigation so the app boots fresh with the new token.
       window.location.assign("/")
     } catch (err) {

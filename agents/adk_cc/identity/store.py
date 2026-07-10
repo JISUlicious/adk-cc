@@ -10,12 +10,13 @@ Fine for a self-hosted single deployment; swap the ABC for serious scale.
 from __future__ import annotations
 
 import json
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 
 from filelock import FileLock
 
-from .models import ApiKeyRecord, AuditEvent, InviteRecord, UserRecord
+from .models import ApiKeyRecord, AuditEvent, InviteRecord, RefreshTokenRecord, UserRecord
 
 
 def normalize_email(email: str) -> str:
@@ -237,6 +238,74 @@ class JsonFileApiKeyStore(ApiKeyStore):
                 for d in self._read().values()
                 if d.get("user_id") == user_id
             ]
+
+
+class RefreshTokenStore(ABC):
+    @abstractmethod
+    def create(self, rec: RefreshTokenRecord) -> None: ...
+
+    @abstractmethod
+    def get(self, token_hash: str) -> RefreshTokenRecord | None: ...
+
+    @abstractmethod
+    def update(self, rec: RefreshTokenRecord) -> None: ...
+
+    @abstractmethod
+    def revoke_all_for_user(self, user_id: str) -> None:
+        """Kill every live refresh token of a user (password change, disable)."""
+
+
+class JsonFileRefreshTokenStore(RefreshTokenStore):
+    """Refresh tokens in one JSON object {token_hash: record}, filelock-
+    protected. Expired records are pruned on every write so the file stays
+    bounded by the number of live sessions."""
+
+    def __init__(self, path: str) -> None:
+        self._path = Path(path)
+        self._lock = FileLock(str(self._path) + ".lock")
+
+    def _read(self) -> dict:
+        if not self._path.exists():
+            return {}
+        with self._path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _write(self, data: dict) -> None:
+        now = time.time()
+        data = {k: v for k, v in data.items() if v.get("expires", 0) > now}
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        tmp.replace(self._path)
+
+    def create(self, rec: RefreshTokenRecord) -> None:
+        with self._lock:
+            data = self._read()
+            data[rec.id] = rec.to_dict()
+            self._write(data)
+
+    def get(self, token_hash: str) -> RefreshTokenRecord | None:
+        with self._lock:
+            d = self._read().get(token_hash)
+        return RefreshTokenRecord.from_dict(d) if d else None
+
+    def update(self, rec: RefreshTokenRecord) -> None:
+        with self._lock:
+            data = self._read()
+            data[rec.id] = rec.to_dict()
+            self._write(data)
+
+    def revoke_all_for_user(self, user_id: str) -> None:
+        with self._lock:
+            data = self._read()
+            changed = False
+            for d in data.values():
+                if d.get("user_id") == user_id and not d.get("revoked"):
+                    d["revoked"] = True
+                    changed = True
+            if changed:
+                self._write(data)
 
 
 class AuditStore(ABC):

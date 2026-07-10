@@ -40,6 +40,10 @@ PUBLIC_PATHS: tuple[str, ...] = (
     "/auth/login",
     "/auth/signup",
     "/auth/request-access",
+    # Public: possession of the refresh token IS the credential, and both must
+    # work with an expired access token (that's their whole point).
+    "/auth/refresh",
+    "/auth/logout",
     "/auth/config",
     "/.well-known/jwks.json",
 )
@@ -64,6 +68,18 @@ def _safe_secret_key(key: str) -> str:
 
 def mount_identity_routes(app, identity, credentials=None) -> None:
     router = APIRouter()
+
+    async def _token_response(ident) -> dict:
+        # access token + (when a refresh store is configured) a refresh token.
+        out = {
+            "access_token": identity.token_for(ident),
+            "token_type": "Bearer",
+            "user": identity.user_dict(ident),
+        }
+        rt = await asyncio.to_thread(identity.issue_refresh_token, ident.user_id)
+        if rt:
+            out["refresh_token"] = rt
+        return out
 
     @router.get("/auth/config")
     async def auth_config():
@@ -93,11 +109,7 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
         if ident is None:
             raise HTTPException(status_code=401, detail="invalid email or password")
         await identity.record(ident.tenant_id, ident.user_id, "login", actor_email=ident.email)
-        return {
-            "access_token": identity.token_for(ident),
-            "token_type": "Bearer",
-            "user": identity.user_dict(ident),
-        }
+        return await _token_response(ident)
 
     @router.post("/auth/signup")
     async def signup(request: Request):
@@ -114,11 +126,7 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
         except (ValueError, PermissionError) as e:
             raise HTTPException(status_code=400, detail=str(e))
         await identity.record(ident.tenant_id, ident.user_id, "signup", actor_email=ident.email)
-        return {
-            "access_token": identity.token_for(ident),
-            "token_type": "Bearer",
-            "user": identity.user_dict(ident),
-        }
+        return await _token_response(ident)
 
     @router.post("/auth/request-access")
     async def request_access(request: Request):
@@ -213,10 +221,34 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
         await identity.record(auth.tenant_id, auth.user_id, "apikey.revoked", target=key_id)
         return {"status": "revoked"}
 
+    @router.post("/auth/refresh")
+    async def refresh(request: Request):
+        # Rotate-on-use: the presented refresh token is revoked and a fresh
+        # (access, refresh) pair comes back. One opaque 401 for every failure
+        # mode — no oracle for probing token state.
+        body = await _json(request)
+        try:
+            ident, new_refresh = await asyncio.to_thread(
+                identity.rotate_refresh_token, body.get("refresh_token") or "")
+        except ValueError:
+            raise HTTPException(status_code=401, detail="invalid or expired refresh token")
+        return {
+            "access_token": identity.token_for(ident),
+            "refresh_token": new_refresh,
+            "token_type": "Bearer",
+            "user": identity.user_dict(ident),
+        }
+
     @router.post("/auth/logout")
-    async def logout():
-        # Stateless JWT: the client drops the token. Endpoint exists for a
-        # consistent client API and as the future home for session revocation.
+    async def logout(request: Request):
+        # Real logout: revoke the presented refresh token (the access token
+        # simply ages out — it's short-lived). Public + best-effort so an
+        # expired access token can't block sign-out.
+        if await request.body():
+            body = await _json(request)
+            rt = body.get("refresh_token") or ""
+            if rt:
+                await asyncio.to_thread(identity.revoke_refresh_token, rt)
         return Response(status_code=204)
 
     # ---- per-user secrets (Settings → Secrets) ---------------------------

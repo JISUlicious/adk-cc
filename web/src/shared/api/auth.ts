@@ -9,14 +9,20 @@
 
 const TOKEN_KEY = "adk_cc.token"
 const TOKEN_USER_KEY = "adk_cc.user"
+const REFRESH_KEY = "adk_cc.refresh"
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY)
 }
 
-export function setToken(token: string, user?: string): void {
+export function getRefresh(): string | null {
+  return localStorage.getItem(REFRESH_KEY)
+}
+
+export function setToken(token: string, user?: string, refresh?: string): void {
   localStorage.setItem(TOKEN_KEY, token)
   if (user) localStorage.setItem(TOKEN_USER_KEY, user)
+  if (refresh) localStorage.setItem(REFRESH_KEY, refresh)
 }
 
 // Subscribers notified when the token is cleared (e.g. a 401 mid-session),
@@ -32,6 +38,7 @@ export function onAuthCleared(fn: () => void): () => void {
 export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY)
   localStorage.removeItem(TOKEN_USER_KEY)
+  localStorage.removeItem(REFRESH_KEY)
   for (const fn of _authClearedSubs) {
     try {
       fn()

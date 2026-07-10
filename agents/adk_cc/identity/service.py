@@ -9,19 +9,21 @@ Keycloak) is the single swap point for a future login variant.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import secrets
 import time
 import uuid
 
-from .models import ApiKeyRecord, AuditEvent, InviteRecord
+from .models import ApiKeyRecord, AuditEvent, InviteRecord, RefreshTokenRecord
 from .passwords import hash_password, verify_password
 from .provider import EmailPasswordProvider, Identity
 from .store import (
     JsonFileApiKeyStore,
     JsonFileAuditStore,
     JsonFileInviteStore,
+    JsonFileRefreshTokenStore,
     JsonFileUserStore,
     normalize_email,
 )
@@ -31,6 +33,7 @@ MEMBER_ROLE = "member"
 OWNER_ROLE = "owner"
 _INVITE_TTL_S = 7 * 24 * 3600
 _PAT_TTL_S = 365 * 24 * 3600  # personal access tokens: 1 year
+_REFRESH_TTL_S = 30 * 24 * 3600  # refresh tokens: 30 days
 
 _log = logging.getLogger(__name__)
 
@@ -59,13 +62,16 @@ def _fire_and_forget(fn, *args) -> None:
 
 class IdentityService:
     def __init__(self, *, provider, issuer: TokenIssuer, mode: str, invites=None,
-                 api_keys=None, audit=None) -> None:
+                 api_keys=None, audit=None, refresh=None,
+                 refresh_ttl_s: int = _REFRESH_TTL_S) -> None:
         self.provider = provider
         self.issuer = issuer
         self.mode = mode
         self.invites = invites
         self.api_keys = api_keys
         self.audit = audit
+        self.refresh = refresh
+        self.refresh_ttl_s = refresh_ttl_s
 
     @property
     def store(self):
@@ -92,7 +98,9 @@ class IdentityService:
             key_path=os.path.join(base, "jwt_key.json"),
             issuer=os.environ.get("ADK_CC_AUTH_ISSUER", "adk-cc"),
             audience=os.environ.get("ADK_CC_AUTH_AUDIENCE") or None,
-            ttl_s=int(os.environ.get("ADK_CC_AUTH_TOKEN_TTL_S", "43200")),
+            # Short-lived access + long-lived revocable refresh: the SPA
+            # silently refreshes, so a stolen access token ages out fast.
+            ttl_s=int(os.environ.get("ADK_CC_AUTH_TOKEN_TTL_S", "1800")),
             user_claim=os.environ.get("ADK_CC_JWT_USER_CLAIM", "sub"),
             tenant_claim=os.environ.get("ADK_CC_JWT_TENANT_CLAIM", "tenant"),
             roles_claim=os.environ.get("ADK_CC_JWT_ROLES_CLAIM", "roles"),
@@ -105,8 +113,11 @@ class IdentityService:
         invites = JsonFileInviteStore(os.path.join(base, "invites.json"))
         api_keys = JsonFileApiKeyStore(os.path.join(base, "api_keys.json"))
         audit = JsonFileAuditStore(os.path.join(base, "audit.json"))
+        refresh = JsonFileRefreshTokenStore(os.path.join(base, "refresh_tokens.json"))
         svc = cls(provider=provider, issuer=issuer, mode=mode, invites=invites,
-                  api_keys=api_keys, audit=audit)
+                  api_keys=api_keys, audit=audit, refresh=refresh,
+                  refresh_ttl_s=int(os.environ.get("ADK_CC_AUTH_REFRESH_TTL_S",
+                                                   str(_REFRESH_TTL_S))))
         svc._maybe_bootstrap_admin(global_tenant, admin_role)
         return svc
 
@@ -157,6 +168,76 @@ class IdentityService:
         # revocation read above stays inline: it's a small read and it gates auth.)
         rec.last_used = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         _fire_and_forget(self.api_keys.update, rec)
+
+    # ------------------------------------------------------------------
+    # Refresh tokens. Opaque random secrets (not JWTs) stored by hash;
+    # rotate-on-use with reuse detection: presenting an already-rotated
+    # token looks like theft, so the whole chain is revoked.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _refresh_hash(raw: str) -> str:
+        return hashlib.sha256((raw or "").encode("utf-8")).hexdigest()
+
+    def issue_refresh_token(self, user_id: str) -> str:
+        """Mint a refresh token for a user. Returns "" when no refresh store
+        is configured (tokens then stay access-only)."""
+        if self.refresh is None:
+            return ""
+        raw = secrets.token_urlsafe(32)
+        self.refresh.create(RefreshTokenRecord(
+            id=self._refresh_hash(raw), user_id=user_id,
+            expires=time.time() + self.refresh_ttl_s,
+            created=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        ))
+        return raw
+
+    def rotate_refresh_token(self, raw: str) -> tuple[Identity, str]:
+        """Swap a live refresh token for (identity, new refresh token). The
+        old token is revoked and linked forward. Raises ValueError on any
+        invalid/expired/revoked/reused token — one opaque error, no oracle."""
+        rec = self.refresh.get(self._refresh_hash(raw)) if (raw and self.refresh) else None
+        if rec is None or time.time() > rec.expires:
+            raise ValueError("invalid or expired refresh token")
+        if rec.revoked:
+            if rec.rotated_to:
+                self._revoke_chain(rec)  # reuse of a rotated token = theft signal
+            raise ValueError("invalid or expired refresh token")
+        u = self.store.get(rec.user_id)
+        if u is None or u.status != "active":
+            rec.revoked = True
+            self.refresh.update(rec)
+            raise ValueError("invalid or expired refresh token")
+        new_raw = self.issue_refresh_token(u.user_id)
+        rec.revoked, rec.rotated_to = True, self._refresh_hash(new_raw)
+        self.refresh.update(rec)
+        return (
+            Identity(u.user_id, u.tenant_id, tuple(u.roles), (), u.email, u.name),
+            new_raw,
+        )
+
+    def _revoke_chain(self, rec: RefreshTokenRecord) -> None:
+        seen = {rec.id}
+        cur = rec
+        while cur.rotated_to and cur.rotated_to not in seen:
+            seen.add(cur.rotated_to)
+            nxt = self.refresh.get(cur.rotated_to)
+            if nxt is None:
+                return
+            if not nxt.revoked:
+                nxt.revoked = True
+                self.refresh.update(nxt)
+            cur = nxt
+
+    def revoke_refresh_token(self, raw: str) -> None:
+        """Logout: kill the presented refresh token. Best-effort, silent."""
+        rec = self.refresh.get(self._refresh_hash(raw)) if (raw and self.refresh) else None
+        if rec is not None and not rec.revoked:
+            rec.revoked = True
+            self.refresh.update(rec)
+
+    def revoke_all_refresh(self, user_id: str) -> None:
+        if self.refresh is not None:
+            self.refresh.revoke_all_for_user(user_id)
 
     def token_for(self, ident: Identity) -> str:
         return self.issuer.issue(
@@ -311,6 +392,8 @@ class IdentityService:
             self._guard_last_admin(tenant_id, user_id)
         u.status = status
         self.store.update(u)
+        if status == "disabled":
+            self.revoke_all_refresh(user_id)  # disable ends their sessions too
         return self._member_dict(u)
 
     def _member_in_tenant(self, tenant_id: str, user_id: str):
@@ -354,6 +437,7 @@ class IdentityService:
             raise ValueError("new password must be at least 8 characters")
         u.password_hash = hash_password(new)
         self.store.update(u)
+        self.revoke_all_refresh(user_id)  # a changed password invalidates other sessions
 
     def create_api_key(self, user_id: str, *, name: str) -> tuple[ApiKeyRecord, str]:
         """Mint a long-lived PAT (JWT). Returns (record, token); the token is

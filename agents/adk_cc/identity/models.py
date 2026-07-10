@@ -51,6 +51,28 @@ class ApiKeyRecord:
 
 
 @dataclass
+class RefreshTokenRecord:
+    """One refresh token, stored by HASH (the raw token never touches disk).
+    Rotation revokes the old record and links it forward via `rotated_to`;
+    presenting an already-rotated token is treated as theft and kills the
+    whole chain."""
+
+    id: str  # sha256 hex of the raw token
+    user_id: str
+    expires: float  # epoch seconds
+    revoked: bool = False
+    rotated_to: str = ""  # hash of the successor, once rotated
+    created: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RefreshTokenRecord":
+        return cls(**{k: d[k] for k in cls.__dataclass_fields__ if k in d})
+
+
+@dataclass
 class AuditEvent:
     """One identity/org/account action — who did what, when, in which org.
     Powers the audit log + the usage summary (aggregated per actor)."""

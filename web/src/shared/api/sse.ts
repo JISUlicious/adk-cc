@@ -13,6 +13,7 @@
  */
 
 import { getToken } from "./auth"
+import { ensureFreshAccess } from "./client"
 
 /** An Event from ADK's session machinery. Loose typing — the actual
  * shape comes from google.adk.events.Event; we only inspect a few
@@ -151,6 +152,9 @@ async function _runStreamLoop(
     "Content-Type": "application/json",
     Accept: "text/event-stream",
   }
+  // This path bypasses apiFetch (streams can't be replayed after a 401), so
+  // refresh proactively when the access token is at/near expiry.
+  await ensureFreshAccess()
   const token = getToken()
   if (token) headers["Authorization"] = `Bearer ${token}`
 

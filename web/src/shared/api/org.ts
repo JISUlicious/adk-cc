@@ -44,6 +44,7 @@ export interface AcceptResult {
   access_token: string
   token_type: string
   user: { id: string; email: string; name: string; tenant: string; roles: string[] }
+  refresh_token?: string
 }
 
 export function listMembers(): Promise<{ members: Member[] }> {

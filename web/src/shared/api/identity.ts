@@ -8,6 +8,7 @@
  */
 
 import { apiFetch } from "./client"
+import { getRefresh } from "./auth"
 
 export interface AuthConfig {
   /** provider id, e.g. "password" */
@@ -36,6 +37,9 @@ export interface LoginResult {
   access_token: string
   token_type: string
   user: AuthUser
+  /** Long-lived rotating token for POST /auth/refresh (absent on deployments
+   * without a refresh store). */
+  refresh_token?: string
 }
 
 /** Ask the server which login methods are live (so the UI renders the right
@@ -64,6 +68,18 @@ export function signup(args: {
     noAuth: true,
     body: JSON.stringify(args),
   })
+}
+
+/** Real logout: revoke the stored refresh token server-side. Best-effort and
+ * fire-and-forget — sign-out must never hang on the network. */
+export function revokeSession(): void {
+  const rt = getRefresh()
+  if (!rt) return
+  void apiFetch("/auth/logout", {
+    method: "POST",
+    noAuth: true,
+    body: JSON.stringify({ refresh_token: rt }),
+  }).catch(() => {})
 }
 
 /** File a pending access request (the mirror of an invite): an org admin must

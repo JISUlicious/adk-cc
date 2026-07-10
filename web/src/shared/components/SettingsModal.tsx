@@ -6,6 +6,7 @@ import {
 import { Button } from "./ui/button"
 import { Input } from "./ui/input"
 import { clearToken, maybeAdmin, markSignedOut } from "@/shared/api/auth"
+import { revokeSession } from "@/shared/api/identity"
 import { ApiError } from "@/shared/api/client"
 import {
   AccountInfoSections, CustomVariablesSection, UserMcpSection, UserSkillsSection, ApiKeysSection,
@@ -52,7 +53,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
   const footer = (
     <Button
       variant="ghost" size="sm" className="w-full justify-start text-muted-foreground"
-      onClick={() => { markSignedOut(); clearToken(); location.assign("/") }}
+      onClick={() => { revokeSession(); markSignedOut(); clearToken(); location.assign("/") }}
     >
       <LogOut className="h-3.5 w-3.5" /> Sign out
     </Button>

@@ -204,10 +204,14 @@ def mount_org_routes(app, identity) -> None:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         await identity.record(ident.tenant_id, ident.user_id, "invite.accepted", actor_email=ident.email)
-        return {
+        out = {
             "access_token": identity.token_for(ident),
             "token_type": "Bearer",
             "user": identity.user_dict(ident),
         }
+        rt = await asyncio.to_thread(identity.issue_refresh_token, ident.user_id)
+        if rt:
+            out["refresh_token"] = rt
+        return out
 
     app.include_router(router)

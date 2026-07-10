@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom"
 import { Menu, PanelRight } from "lucide-react"
 import { Button } from "@/shared/components/ui/button"
 import { clearToken, getUser, getToken, decodeJwtPayload, markSignedOut } from "@/shared/api/auth"
+import { revokeSession } from "@/shared/api/identity"
 import {
   createSession,
   getSession,
@@ -392,6 +393,7 @@ export function ChatPage({
         return
       }
       case "signout":
+        revokeSession()
         markSignedOut()
         clearToken()
         location.assign("/")
