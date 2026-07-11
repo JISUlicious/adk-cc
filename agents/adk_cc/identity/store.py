@@ -49,6 +49,12 @@ class UserStore(ABC):
         """Remove an account permanently. No-op if absent."""
 
     @abstractmethod
+    def set_email(self, user_id: str, new_email: str) -> None:
+        """Atomically change a user's email under ONE lock, enforcing global
+        uniqueness. Raises ValueError if the address is taken (by anyone else)
+        or KeyError if the user is gone — closes the check-then-write TOCTOU."""
+
+    @abstractmethod
     def list_by_tenant(self, tenant_id: str) -> list[UserRecord]:
         """Every account in a tenant/org (the org's members)."""
 
@@ -112,6 +118,17 @@ class JsonFileUserStore(UserStore):
             data = self._read()
             if data.pop(user_id, None) is not None:
                 self._write(data)
+
+    def set_email(self, user_id: str, new_email: str) -> None:
+        e = normalize_email(new_email)
+        with self._lock:
+            data = self._read()
+            if user_id not in data:
+                raise KeyError("user not found")
+            if any(uid != user_id and d.get("email") == e for uid, d in data.items()):
+                raise ValueError("that email is already in use")
+            data[user_id]["email"] = e
+            self._write(data)
 
     def list_by_tenant(self, tenant_id: str) -> list[UserRecord]:
         with self._lock:

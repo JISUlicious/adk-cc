@@ -118,15 +118,47 @@ def test_disabled_requests_and_multi_mode_refused():
             pass
 
 
-def test_duplicate_email_refused():
+def test_duplicate_email_does_not_leak_existence():
+    # A request for an already-registered email returns None (the route still
+    # answers "pending") — the endpoint must never reveal that an account exists.
     svc = _svc()
     svc.provider.provision(email="jane@example.com", password="password123",
-                           tenant_id="local", roles=[])
-    try:
-        _request(svc)
-        assert False, "duplicate email must be refused"
-    except ValueError:
-        pass
+                           tenant_id="local", roles=["member"])
+    assert asyncio.run(svc.provider.request_access(
+        email="jane@example.com", password="password123")) is None
+    # no second record was created; the existing member is untouched
+    assert len([u for u in svc.store.list_by_tenant("local")
+                if u.email == "jane@example.com"]) == 1
+    # but format/length errors DO still surface (they leak nothing)
+    for bad in (dict(email="nope", password="password123"),
+                dict(email="ok@x.io", password="short")):
+        try:
+            asyncio.run(svc.provider.request_access(**bad))
+            assert False, "invalid input must still raise"
+        except ValueError:
+            pass
+
+
+def test_invite_and_provision_supersede_a_squatted_request():
+    # A pending request must not permanently block an admin inviting/provisioning
+    # that same email — the direct add supersedes (deletes) the request.
+    svc = _svc()
+    _admin = svc.provider.provision(email="admin@local.io", password="password123",
+                                    tenant_id="local", roles=["admin"])
+    squat = asyncio.run(svc.provider.request_access(
+        email="hire@local.io", password="password123"))
+    assert squat is not None and len(svc.list_access_requests("local")) == 1
+    # provisioning the same email works and clears the request
+    svc.provision_member("local", email="hire@local.io", password="password123")
+    assert svc.list_access_requests("local") == []
+    assert svc.store.get(squat.user_id) is None
+    # and the invite path likewise supersedes a fresh squat
+    squat2 = asyncio.run(svc.provider.request_access(
+        email="hire2@local.io", password="password123"))
+    inv = svc.create_invite("local", "hire2@local.io")
+    assert svc.list_access_requests("local") == []
+    ident = svc.accept_invite(inv.token, password="password123")
+    assert ident.roles == ("member",) and svc.store.get(squat2.user_id) is None
 
 
 def test_approve_reject_only_touch_pending():

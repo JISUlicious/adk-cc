@@ -18,7 +18,6 @@
  */
 
 import { apiFetch } from "./client"
-import { getToken } from "./auth"
 
 function artifactsBase(
   appName: string,
@@ -77,16 +76,10 @@ export async function fetchArtifact(
       ? base
       : `${base}/versions/${encodeURIComponent(String(version))}`
 
-  const headers: Record<string, string> = {}
-  const tok = getToken()
-  if (tok) headers["Authorization"] = `Bearer ${tok}`
-
-  const resp = await fetch(url, { headers })
-  if (!resp.ok) {
-    throw new Error(`${resp.status} ${resp.statusText}`)
-  }
-
-  const payload = (await resp.json()) as Record<string, unknown>
+  // Via apiFetch so an expired access token is silently refreshed + retried —
+  // otherwise a preview/download after the short access TTL just 401s. (This
+  // is a JSON response; apiFetch attaches the Bearer and parses it.)
+  const payload = await apiFetch<Record<string, unknown>>(url)
   const inline = (payload.inline_data ?? payload.inlineData) as
     | { data?: string; mime_type?: string; mimeType?: string }
     | undefined

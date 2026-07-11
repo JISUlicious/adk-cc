@@ -142,13 +142,26 @@ class EmailPasswordProvider(IdentityProvider):
             raise PermissionError("self-registration is disabled (single-org mode)")
         return await asyncio.to_thread(self._create, email, password, name, org, None, None)
 
-    async def request_access(self, *, email: str, password: str, name: str = "", note: str = "") -> "Identity":
+    async def request_access(self, *, email: str, password: str, name: str = "", note: str = "") -> "Identity | None":
         """Create a PENDING account on the global tenant (no roles, can't log
-        in) for an org admin to approve or reject."""
+        in) for an org admin to approve or reject. Returns None when the email
+        already has an account/request — the caller still answers "pending", so
+        this endpoint never reveals whether an address is registered. Format /
+        length errors DO surface (they leak nothing)."""
         if not self.supports_access_requests:
             raise PermissionError("access requests are disabled")
-        return await asyncio.to_thread(
-            self._create, email, password, name, "", self.global_tenant_id, [], "pending", note)
+        e = normalize_email(email)
+        if not _EMAIL_RE.match(e):
+            raise ValueError("invalid email address")
+        if len(password or "") < _MIN_PASSWORD:
+            raise ValueError(f"password must be at least {_MIN_PASSWORD} characters")
+        if await asyncio.to_thread(self.store.get_by_email, e) is not None:
+            return None  # taken — don't leak; the route still returns "pending"
+        try:
+            return await asyncio.to_thread(
+                self._create, email, password, name, "", self.global_tenant_id, [], "pending", note)
+        except ValueError:
+            return None  # lost a create race for the same new email — same non-leaking result
 
     def provision(
         self,

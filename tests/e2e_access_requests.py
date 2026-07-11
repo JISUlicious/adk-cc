@@ -92,9 +92,13 @@ def main() -> int:
                           json={"email": "jane@example.com", "password": "wrong-pass!"}, timeout=5)
         check("pending + wrong password → plain 401 (no status leak)", r.status_code == 401)
 
+        # A request for an already-registered email must look identical to a new
+        # one (200 pending) — no account-enumeration oracle. And it creates no
+        # second record (the queue still holds exactly one).
         r = requests.post(BASE + "/auth/request-access",
                           json={"email": "jane@example.com", "password": "janepass123"}, timeout=5)
-        check("duplicate request → 400", r.status_code == 400)
+        check("duplicate request → 200 pending (no enumeration leak)",
+              r.status_code == 200 and r.json().get("status") == "pending")
 
         check("unauthenticated queue read → 401",
               requests.get(BASE + "/orgs/requests", timeout=5).status_code == 401)

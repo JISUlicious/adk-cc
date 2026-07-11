@@ -169,6 +169,14 @@ def _proxy_and_pending(base):
     check("victim's correct login from a DIFFERENT IP still works",
           login("adminpass123", "5.6.7.8").status_code == 200)
 
+    # #11 the public reset-token LOOKUP is now rate-limited too (was the one
+    # unguarded public auth endpoint — free token probing + email disclosure).
+    probe_ip = "7.7.7.7"
+    codes = [requests.get(base + "/auth/reset/probe-token",
+                          headers={"X-Forwarded-For": probe_ip}, timeout=5).status_code
+             for _ in range(40)]
+    check("hammering the reset lookup eventually 429s", 429 in codes)
+
 
 def main() -> int:
     # multi-mode server for the reset-hierarchy / password / pending checks

@@ -73,6 +73,24 @@ def test_change_email_swaps_and_validates():
     assert _login(svc, "m@local.io", "password123") is None
 
 
+def test_store_set_email_is_atomic_and_unique():
+    # The #13 fix: uniqueness + write are one locked op in the store, so a
+    # check-then-set race can't commit a duplicate. Assert the store enforces it.
+    svc = _svc()
+    a = _member(svc, email="a@local.io")
+    _member(svc, email="b@local.io")
+    _expect_value_error(
+        lambda: svc.store.set_email(a.user_id, "B@local.io"),  # normalized collision
+        "the store must reject a taken email")
+    try:
+        svc.store.set_email("ghost", "c@local.io")
+        assert False, "missing user must raise KeyError"
+    except KeyError:
+        pass
+    svc.store.set_email(a.user_id, "c@local.io")
+    assert svc.store.get(a.user_id).email == "c@local.io"
+
+
 def test_deactivate_blocks_login_revokes_sessions_admin_reenables():
     svc = _svc()
     svc.provider.provision(email="a@local.io", password="password123",

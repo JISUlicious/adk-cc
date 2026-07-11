@@ -302,6 +302,15 @@ class IdentityService:
         return [self._member_dict(u) for u in self.store.list_by_tenant(tenant_id)
                 if u.status != "pending"]
 
+    def _supersede_pending(self, tenant_id: str, email: str) -> None:
+        """An admin inviting/provisioning an email that only has a PENDING
+        access request supersedes it: delete the request so the direct add can
+        proceed and it drops out of the approval queue. (Also stops a squatted
+        request from permanently blocking the invite path for that address.)"""
+        rec = self.store.get_by_email(email)
+        if rec is not None and rec.tenant_id == tenant_id and rec.status == "pending":
+            self.store.delete(rec.user_id)
+
     def provision_member(self, tenant_id: str, *, email: str, password: str,
                         name: str = "", role: str = MEMBER_ROLE) -> dict:
         """Admin path: create a user directly in the org with a password (no
@@ -309,6 +318,7 @@ class IdentityService:
         role = role or MEMBER_ROLE
         if role not in self.allowed_roles():
             raise ValueError(f"invalid role: {role}")
+        self._supersede_pending(tenant_id, normalize_email(email))
         ident = self.provider.provision(
             email=email, password=password, name=name, tenant_id=tenant_id, roles=[role])
         u = self.store.get(ident.user_id)
@@ -323,8 +333,9 @@ class IdentityService:
         if not email:
             raise ValueError("email is required")
         existing = self.store.get_by_email(email)
-        if existing and existing.tenant_id == tenant_id:
+        if existing and existing.tenant_id == tenant_id and existing.status != "pending":
             raise ValueError("that email is already a member")
+        self._supersede_pending(tenant_id, email)  # a pending request → superseded by the invite
         inv = InviteRecord(
             token=secrets.token_urlsafe(24), email=email, tenant_id=tenant_id, role=role,
             created=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -355,6 +366,9 @@ class IdentityService:
         inv = self.invites.get(token)
         if inv is None or inv.status != "pending" or self._expired(inv):
             raise ValueError("this invite is invalid or has expired")
+        # A pending access request for this email (filed after the invite) is
+        # superseded by accepting the invite, so it can't block the join.
+        self._supersede_pending(inv.tenant_id, inv.email)
         if self.store.get_by_email(inv.email) is not None:
             raise ValueError("an account already exists for this email")
         ident = self.provider.provision(
@@ -547,15 +561,13 @@ class IdentityService:
         there's nothing to verify against; the audit log keeps old → new.)"""
         from .provider import _EMAIL_RE
 
-        u = self._verify_own_password(user_id, password)
+        self._verify_own_password(user_id, password)
         e = normalize_email(new_email)
         if not _EMAIL_RE.match(e):
             raise ValueError("invalid email address")
-        existing = self.store.get_by_email(e)
-        if existing is not None and existing.user_id != user_id:
-            raise ValueError("that email is already in use")
-        u.email = e
-        self.store.update(u)
+        # The uniqueness check + write are ONE atomic store op — a check-then-set
+        # here would let two concurrent changes commit the same address.
+        self.store.set_email(user_id, e)
         return self.profile(user_id)
 
     def _guard_removable(self, u) -> None:

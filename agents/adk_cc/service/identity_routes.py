@@ -200,13 +200,17 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
             )
         except (ValueError, PermissionError) as e:
             raise HTTPException(status_code=400, detail=str(e))
-        await identity.record(ident.tenant_id, ident.user_id, "access.requested",
-                              actor_email=ident.email)
+        # ident is None when the email was already taken — respond identically
+        # ("pending") either way so the endpoint can't be used to enumerate accounts.
+        if ident is not None:
+            await identity.record(ident.tenant_id, ident.user_id, "access.requested",
+                                  actor_email=ident.email)
         return {"status": "pending"}
 
     # --- public: complete a password reset (one-time link from an admin) ---
     @router.get("/auth/reset/{token}")
-    async def get_reset(token: str):
+    async def get_reset(token: str, request: Request):
+        _guard_rate(request)  # unmetered lookups let a bot probe tokens + read emails
         info = await asyncio.to_thread(identity.reset_public, token)
         if info is None:
             raise HTTPException(status_code=404, detail="reset link invalid or expired")
@@ -278,8 +282,9 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
         # verify against). The audit log keeps old → new.
         auth = _require_auth(request)
         body = await _json(request)
-        old = (await asyncio.to_thread(identity.profile, auth.user_id)).get("email", "")
         try:
+            # Old email read inside the try so a deleted-user race → 404, not 500.
+            old = (await asyncio.to_thread(identity.profile, auth.user_id)).get("email", "")
             prof = await asyncio.to_thread(identity.change_email,
                 auth.user_id,
                 new_email=body.get("new_email") or "",
