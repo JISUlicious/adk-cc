@@ -43,6 +43,20 @@ def _member(svc, email="m@local.io"):
                                   tenant_id="local", roles=["member"])
 
 
+def _admin(svc, email="admin@local.io"):
+    existing = svc.store.get_by_email(email)  # idempotent — one admin per email
+    if existing is not None:
+        return existing
+    return svc.provider.provision(email=email, password="password123",
+                                  tenant_id="local", roles=["admin"])
+
+
+def _mint(svc, target_id, tenant="local", actor=None):
+    """Mint a reset link as an admin actor (the new hierarchy-guarded API)."""
+    a = actor or _admin(svc)
+    return svc.create_password_reset(tenant, a.user_id, target_id)
+
+
 def _login(svc, email, password):
     return asyncio.run(svc.provider.login_password(email, password))
 
@@ -50,7 +64,7 @@ def _login(svc, email, password):
 def test_create_complete_and_login_with_new_password():
     svc = _svc()
     u = _member(svc)
-    raw = svc.create_password_reset("local", u.user_id)
+    raw = _mint(svc, u.user_id)
     assert svc.reset_public(raw) == {"email": "m@local.io", "name": ""}
     ident = svc.complete_password_reset(raw, "newpassword1")
     assert ident.user_id == u.user_id
@@ -61,7 +75,7 @@ def test_create_complete_and_login_with_new_password():
 def test_single_use():
     svc = _svc()
     u = _member(svc)
-    raw = svc.create_password_reset("local", u.user_id)
+    raw = _mint(svc, u.user_id)
     svc.complete_password_reset(raw, "newpassword1")
     assert svc.reset_public(raw) is None
     try:
@@ -74,7 +88,7 @@ def test_single_use():
 def test_short_password_rejected_without_consuming_token():
     svc = _svc()
     u = _member(svc)
-    raw = svc.create_password_reset("local", u.user_id)
+    raw = _mint(svc, u.user_id)
     try:
         svc.complete_password_reset(raw, "short")
         assert False, "short password must be rejected"
@@ -88,7 +102,7 @@ def test_short_password_rejected_without_consuming_token():
 def test_expired_link_rejected():
     svc = _svc(reset_ttl_s=-1)
     u = _member(svc)
-    raw = svc.create_password_reset("local", u.user_id)
+    raw = _mint(svc, u.user_id)
     assert svc.reset_public(raw) is None
     try:
         svc.complete_password_reset(raw, "newpassword1")
@@ -101,14 +115,14 @@ def test_tenant_scoping_and_pending_refused():
     svc = _svc()
     u = _member(svc)
     try:
-        svc.create_password_reset("beta", u.user_id)
+        _mint(svc, u.user_id, tenant="beta")
         assert False, "cross-tenant reset must 404"
     except KeyError:
         pass
     pending = asyncio.run(svc.provider.request_access(
         email="p@local.io", password="password123"))
     try:
-        svc.create_password_reset("local", pending.user_id)
+        _mint(svc, pending.user_id)
         assert False, "pending accounts have no reset flow"
     except ValueError:
         pass
@@ -118,11 +132,53 @@ def test_reset_revokes_refresh_sessions():
     svc = _svc()
     u = _member(svc)
     rt = svc.issue_refresh_token(u.user_id)
-    raw = svc.create_password_reset("local", u.user_id)
+    raw = _mint(svc, u.user_id)
     svc.complete_password_reset(raw, "newpassword1")
     try:
         svc.rotate_refresh_token(rt)
         assert False, "reset must revoke existing sessions"
+    except ValueError:
+        pass
+
+
+def test_admin_cannot_reset_owner_or_peer_admin():
+    # Reset = login-as (impersonation), so an admin may only reset accounts
+    # STRICTLY below their privilege — never the owner or a peer admin.
+    svc = _svc()
+    owner = svc.provider.provision(email="owner@local.io", password="password123",
+                                   tenant_id="local", roles=["owner", "admin"])
+    admin = _admin(svc)
+    admin2 = _admin(svc, email="admin2@local.io")
+    member = _member(svc)
+    for target, label in ((owner, "owner"), (admin2, "peer admin")):
+        try:
+            svc.create_password_reset("local", admin.user_id, target.user_id)
+            assert False, f"admin must not reset the {label}"
+        except ValueError:
+            pass
+    # admin → member is allowed; owner → admin is allowed
+    assert svc.create_password_reset("local", admin.user_id, member.user_id)
+    assert svc.create_password_reset("local", owner.user_id, admin.user_id)
+
+
+def test_disabled_account_cannot_reset_in():
+    # A reset link must never re-open a disabled account (that would defeat
+    # deactivation, which the token middleware never re-checks).
+    svc = _svc()
+    admin = _admin(svc)
+    u = _member(svc)
+    raw = _mint(svc, u.user_id, actor=admin)
+    svc.set_member_status("local", u.user_id, "disabled")
+    assert svc.reset_public(raw) is None
+    try:
+        svc.complete_password_reset(raw, "newpassword1")
+        assert False, "disabled account must not reset in"
+    except ValueError:
+        pass
+    # minting a NEW reset for a disabled account is also refused
+    try:
+        svc.create_password_reset("local", admin.user_id, u.user_id)
+        assert False, "can't mint a reset for a non-active account"
     except ValueError:
         pass
 
@@ -132,7 +188,7 @@ def test_no_reset_store_refuses():
     bare = IdentityService(provider=svc.provider, issuer=svc.issuer, mode="single")
     u = _member(svc)
     try:
-        bare.create_password_reset("local", u.user_id)
+        bare.create_password_reset("local", _admin(bare).user_id, u.user_id)
         assert False, "no store → resets unavailable"
     except ValueError:
         pass

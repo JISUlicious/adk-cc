@@ -187,24 +187,32 @@ class IdentityService:
     def _refresh_hash(raw: str) -> str:
         return hashlib.sha256((raw or "").encode("utf-8")).hexdigest()
 
+    def _new_refresh_record(self, user_id: str) -> tuple[str, RefreshTokenRecord]:
+        """Build (raw token, record) WITHOUT storing it."""
+        raw = secrets.token_urlsafe(32)
+        return raw, RefreshTokenRecord(
+            id=self._refresh_hash(raw), user_id=user_id,
+            expires=time.time() + self.refresh_ttl_s,
+            created=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        )
+
     def issue_refresh_token(self, user_id: str) -> str:
         """Mint a refresh token for a user. Returns "" when no refresh store
         is configured (tokens then stay access-only)."""
         if self.refresh is None:
             return ""
-        raw = secrets.token_urlsafe(32)
-        self.refresh.create(RefreshTokenRecord(
-            id=self._refresh_hash(raw), user_id=user_id,
-            expires=time.time() + self.refresh_ttl_s,
-            created=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        ))
+        raw, rec = self._new_refresh_record(user_id)
+        self.refresh.create(rec)
         return raw
 
     def rotate_refresh_token(self, raw: str) -> tuple[Identity, str]:
-        """Swap a live refresh token for (identity, new refresh token). The
-        old token is revoked and linked forward. Raises ValueError on any
-        invalid/expired/revoked/reused token — one opaque error, no oracle."""
-        rec = self.refresh.get(self._refresh_hash(raw)) if (raw and self.refresh) else None
+        """Swap a live refresh token for (identity, new refresh token). Raises
+        ValueError on any invalid/expired/revoked/reused token — one opaque
+        error, no oracle. The revoke-old + insert-new step is a SINGLE atomic
+        compare-and-swap in the store, so two concurrent presentations of the
+        same token can't both mint a live successor (no orphan tokens)."""
+        old_hash = self._refresh_hash(raw)
+        rec = self.refresh.get(old_hash) if (raw and self.refresh) else None
         if rec is None or time.time() > rec.expires:
             raise ValueError("invalid or expired refresh token")
         if rec.revoked:
@@ -216,9 +224,14 @@ class IdentityService:
             rec.revoked = True
             self.refresh.update(rec)
             raise ValueError("invalid or expired refresh token")
-        new_raw = self.issue_refresh_token(u.user_id)
-        rec.revoked, rec.rotated_to = True, self._refresh_hash(new_raw)
-        self.refresh.update(rec)
+        new_raw, new_rec = self._new_refresh_record(u.user_id)
+        outcome = self.refresh.rotate(old_hash, new_rec)
+        if outcome != "ok":
+            # Lost the race: another rotation already consumed this token. Treat
+            # a "reuse" verdict as the theft signal (kill the whole chain).
+            if outcome == "reuse":
+                self._revoke_chain(rec)
+            raise ValueError("invalid or expired refresh token")
         return (
             Identity(u.user_id, u.tenant_id, tuple(u.roles), (), u.email, u.name),
             new_raw,
@@ -384,12 +397,27 @@ class IdentityService:
     # an admin mints a link for a member of their org and delivers it
     # out-of-band; the holder sets a new password ONCE. No email needed.
     # ------------------------------------------------------------------
-    def create_password_reset(self, tenant_id: str, user_id: str) -> str:
+    def _rank(self, roles) -> int:
+        """Privilege rank for the reset hierarchy: owner > admin > member."""
+        if OWNER_ROLE in roles:
+            return 3
+        if self.admin_role in roles:
+            return 2
+        return 1
+
+    def create_password_reset(self, tenant_id: str, actor_id: str, user_id: str) -> str:
+        """Mint a one-time reset link for a member. `actor_id` is the admin
+        doing it: an admin may only reset an account STRICTLY below their own
+        privilege, so an admin can't seize an owner or a peer admin (a reset
+        link is login-as, i.e. impersonation — stronger than disable)."""
         if self.resets is None:
             raise ValueError("password resets are not configured")
         u = self._member_in_tenant(tenant_id, user_id)
-        if u.status == "pending":
-            raise ValueError("account is awaiting approval — approve or reject it instead")
+        if u.status != "active":
+            raise ValueError("account is not active")
+        actor = self.store.get(actor_id)
+        if actor is None or self._rank(actor.roles) <= self._rank(u.roles):
+            raise ValueError("you can't reset the password of an equal or higher-privileged account")
         raw = secrets.token_urlsafe(32)
         self.resets.create(ResetTokenRecord(
             id=self._refresh_hash(raw), user_id=u.user_id,
@@ -404,7 +432,7 @@ class IdentityService:
         if rec is None or rec.used or time.time() > rec.expires:
             return None
         u = self.store.get(rec.user_id)
-        if u is None or u.status == "pending":
+        if u is None or u.status != "active":  # disabled/pending accounts can't reset in
             return None
         return {"email": u.email, "name": u.name}
 
@@ -415,7 +443,9 @@ class IdentityService:
         if rec is None or rec.used or time.time() > rec.expires:
             raise ValueError("this reset link is invalid or has expired")
         u = self.store.get(rec.user_id)
-        if u is None or u.status == "pending":
+        # A reset link must never re-open a disabled (or still-pending) account —
+        # that would defeat deactivation, which the middleware never re-checks.
+        if u is None or u.status != "active":
             raise ValueError("this reset link is invalid or has expired")
         if len(new_password or "") < 8:
             raise ValueError("password must be at least 8 characters")
@@ -442,6 +472,10 @@ class IdentityService:
         if status not in ("active", "disabled"):
             raise ValueError("status must be 'active' or 'disabled'")
         u = self._member_in_tenant(tenant_id, user_id)
+        if u.status == "pending":
+            # A pending access request is approved/rejected, not enabled/disabled —
+            # enabling it here would skip role assignment and the approval audit.
+            raise ValueError("this is a pending access request — approve or reject it instead")
         if status == "disabled" and OWNER_ROLE in u.roles:
             raise ValueError("the team owner can't be disabled")
         if status == "disabled" and self.admin_role in u.roles:
@@ -483,7 +517,7 @@ class IdentityService:
         self.store.update(u)
         return self.profile(user_id)
 
-    def change_password(self, user_id: str, *, current: str, new: str) -> None:
+    def change_password(self, user_id: str, *, current: str, new: str) -> Identity:
         u = self.store.get(user_id)
         if u is None:
             raise KeyError("user not found")
@@ -493,7 +527,11 @@ class IdentityService:
             raise ValueError("new password must be at least 8 characters")
         u.password_hash = hash_password(new)
         self.store.update(u)
-        self.revoke_all_refresh(user_id)  # a changed password invalidates other sessions
+        # Invalidate OTHER sessions, but return an Identity so the route can mint
+        # this caller a fresh token pair — otherwise the session that just
+        # changed the password gets logged out on its next refresh.
+        self.revoke_all_refresh(user_id)
+        return Identity(u.user_id, u.tenant_id, tuple(u.roles), (), u.email, u.name)
 
     def _verify_own_password(self, user_id: str, password: str):
         """Shared gate for the sensitive self-service actions below."""

@@ -5,7 +5,7 @@ import { Button } from "@/shared/components/ui/button"
 import { Input } from "@/shared/components/ui/input"
 import { ApiError } from "@/shared/api/client"
 import { cn } from "@/shared/lib/utils"
-import { clearToken, markSignedOut } from "@/shared/api/auth"
+import { clearToken, markSignedOut, setToken } from "@/shared/api/auth"
 import {
   getMe,
   updateProfile,
@@ -250,7 +250,10 @@ function PasswordSection() {
     setStatus(null)
     setOk(false)
     try {
-      await changePassword(cur, next)
+      const res = await changePassword(cur, next)
+      // Adopt the fresh token pair so THIS session survives (the server just
+      // revoked every refresh token, including the one we were holding).
+      setToken(res.access_token, res.user.id, res.refresh_token)
       setOk(true)
       setStatus("Password changed.")
       setCur("")

@@ -70,16 +70,23 @@ export function signup(args: {
   })
 }
 
-/** Real logout: revoke the stored refresh token server-side. Best-effort and
- * fire-and-forget — sign-out must never hang on the network. */
+/** Real logout: revoke the stored refresh token server-side. Uses a raw fetch
+ * with `keepalive` (NOT apiFetch) because every caller navigates away
+ * (location.assign) on the next line — without keepalive the browser aborts the
+ * in-flight request on unload and the token is never actually revoked. */
 export function revokeSession(): void {
   const rt = getRefresh()
   if (!rt) return
-  void apiFetch("/auth/logout", {
-    method: "POST",
-    noAuth: true,
-    body: JSON.stringify({ refresh_token: rt }),
-  }).catch(() => {})
+  try {
+    void fetch("/auth/logout", {
+      method: "POST",
+      keepalive: true,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: rt }),
+    }).catch(() => {})
+  } catch {
+    /* fetch threw synchronously (very old browsers) — nothing we can do */
+  }
 }
 
 // --- password reset (public one-time link minted by an admin) ---

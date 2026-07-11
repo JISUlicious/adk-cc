@@ -66,6 +66,29 @@ def test_reuse_of_rotated_token_kills_the_chain():
     _expect_invalid(svc, t3, "chain tip must be revoked after reuse")
 
 
+def test_store_rotate_is_atomic_compare_and_swap():
+    # The #3 fix: the store's rotate() is a single-lock CAS, so one token can
+    # never yield two live successors. First swap wins ("ok"); a second swap of
+    # the same old token is rejected ("reuse") and inserts NOTHING — no orphan
+    # successor the theft-detection chain could miss.
+    from adk_cc.identity.models import RefreshTokenRecord
+
+    svc = _svc()
+    u = _user(svc)
+    old = svc.issue_refresh_token(u.user_id)
+    old_hash = svc._refresh_hash(old)
+    _, rec_a = svc._new_refresh_record(u.user_id)
+    _, rec_b = svc._new_refresh_record(u.user_id)
+
+    assert svc.refresh.rotate(old_hash, rec_a) == "ok"
+    assert svc.refresh.rotate(old_hash, rec_b) == "reuse"  # loser gets nothing
+    assert svc.refresh.get(rec_a.id) is not None            # winner inserted
+    assert svc.refresh.get(rec_b.id) is None                # loser NOT inserted
+    # a brand-new/unknown token → "invalid", never "ok"
+    _, rec_c = svc._new_refresh_record(u.user_id)
+    assert svc.refresh.rotate(RefreshTokenRecord(id="nope", user_id="x", expires=0).id, rec_c) == "invalid"
+
+
 def test_logout_revokes_and_no_token_store_is_noop():
     svc = _svc()
     u = _user(svc)

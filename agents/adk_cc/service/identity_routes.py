@@ -87,7 +87,17 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
         threshold=int(os.environ.get("ADK_CC_AUTH_LOCKOUT_THRESHOLD", "5")),
         lockout_s=float(os.environ.get("ADK_CC_AUTH_LOCKOUT_S", "300")))
 
+    # Only trust X-Forwarded-For when explicitly deployed behind a proxy that
+    # sets it — otherwise a client could spoof the header to dodge the lockout.
+    # Without this, every request behind a reverse proxy shares the proxy's IP,
+    # collapsing the per-(ip,email) lockout to email-only (a victim-lockout DoS).
+    _trust_proxy = os.environ.get("ADK_CC_TRUST_PROXY", "").lower() in ("1", "true")
+
     def _client_ip(request: Request) -> str:
+        if _trust_proxy:
+            xff = request.headers.get("x-forwarded-for")
+            if xff:
+                return xff.split(",")[0].strip()  # left-most = original client
         return request.client.host if request.client else "?"
 
     def _guard_rate(request: Request) -> None:
@@ -247,7 +257,7 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
         auth = _require_auth(request)
         body = await _json(request)
         try:
-            await asyncio.to_thread(identity.change_password, 
+            ident = await asyncio.to_thread(identity.change_password,
                 auth.user_id,
                 current=body.get("current_password") or "",
                 new=body.get("new_password") or "",
@@ -257,7 +267,10 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         await identity.record(auth.tenant_id, auth.user_id, "password.changed")
-        return {"status": "ok"}
+        # change_password revoked ALL of the user's refresh tokens (including
+        # this session's); hand back a fresh pair so the caller stays signed in
+        # while every OTHER session is logged out.
+        return await _token_response(ident)
 
     @router.post("/auth/email")
     async def change_email(request: Request):

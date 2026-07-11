@@ -142,6 +142,23 @@ def test_approve_reject_only_touch_pending():
     assert svc.store.get(active.user_id) is not None
 
 
+def test_enable_disable_cannot_activate_a_pending_request():
+    # A pending request must go through approve (which assigns a role + audits),
+    # not the enable/disable status endpoint — else it activates with roles=[].
+    svc = _svc()
+    ident = _request(svc)
+    for status in ("active", "disabled"):
+        try:
+            svc.set_member_status("local", ident.user_id, status)
+            assert False, "set_member_status must refuse a pending request"
+        except ValueError:
+            pass
+    # still pending, still roleless, still in the queue
+    rec = svc.store.get(ident.user_id)
+    assert rec.status == "pending" and rec.roles == []
+    assert [r["id"] for r in svc.list_access_requests("local")] == [ident.user_id]
+
+
 def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

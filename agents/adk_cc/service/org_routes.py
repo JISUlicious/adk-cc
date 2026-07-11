@@ -155,7 +155,7 @@ def mount_org_routes(app, identity) -> None:
         auth = _require_admin(request)
         try:
             raw = await asyncio.to_thread(identity.create_password_reset,
-                                          auth.tenant_id, user_id)
+                                          auth.tenant_id, auth.user_id, user_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="member not found")
         except ValueError as e:

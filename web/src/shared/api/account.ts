@@ -37,7 +37,12 @@ export function updateProfile(name: string): Promise<Me> {
   return apiFetch("/auth/profile", { method: "PATCH", body: JSON.stringify({ name }) })
 }
 
-export function changePassword(current_password: string, new_password: string): Promise<{ status: string }> {
+/** Change password. The server revokes all OTHER sessions and returns a fresh
+ * token pair for THIS session (so the caller isn't logged out on next refresh). */
+export function changePassword(
+  current_password: string,
+  new_password: string,
+): Promise<{ access_token: string; refresh_token?: string; user: { id: string } }> {
   return apiFetch("/auth/password", {
     method: "POST",
     body: JSON.stringify({ current_password, new_password }),

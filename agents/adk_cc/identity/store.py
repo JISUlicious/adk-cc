@@ -258,6 +258,15 @@ class RefreshTokenStore(ABC):
     def update(self, rec: RefreshTokenRecord) -> None: ...
 
     @abstractmethod
+    def rotate(self, old_hash: str, new_rec: RefreshTokenRecord) -> str:
+        """Atomic compare-and-swap under a SINGLE lock. If `old_hash` is a live
+        (present, unexpired, unrevoked) token: revoke it, link it to `new_rec`,
+        insert `new_rec`, and return "ok". If it is already revoked (reuse):
+        return "reuse" and insert nothing. Otherwise return "invalid". This is
+        what makes rotation safe against two concurrent presentations of the
+        same token — exactly one can win the swap."""
+
+    @abstractmethod
     def revoke_all_for_user(self, user_id: str) -> None:
         """Kill every live refresh token of a user (password change, disable)."""
 
@@ -302,6 +311,20 @@ class JsonFileRefreshTokenStore(RefreshTokenStore):
             data = self._read()
             data[rec.id] = rec.to_dict()
             self._write(data)
+
+    def rotate(self, old_hash: str, new_rec: RefreshTokenRecord) -> str:
+        with self._lock:
+            data = self._read()
+            d = data.get(old_hash)
+            if d is None or d.get("expires", 0) <= time.time():
+                return "invalid"
+            if d.get("revoked"):
+                return "reuse"  # someone already rotated this token — theft signal
+            d["revoked"] = True
+            d["rotated_to"] = new_rec.id
+            data[new_rec.id] = new_rec.to_dict()
+            self._write(data)
+            return "ok"
 
     def revoke_all_for_user(self, user_id: str) -> None:
         with self._lock:
