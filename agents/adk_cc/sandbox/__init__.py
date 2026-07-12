@@ -19,6 +19,7 @@ from .backends import (
     DaytonaBackend,
     DockerBackend,
     E2BBackend,
+    LocalContainerBackend,
     NoopBackend,
     SandboxBackend,
     SandboxServiceBackend,
@@ -79,6 +80,22 @@ def make_default_backend(
     name = deployment.sandbox_backend_name()
     if name == "noop":
         backend: SandboxBackend = NoopBackend()
+    elif name == "container":
+        # Desktop-local Docker/Podman: shell isolated, project mounted in-place.
+        # Falls back to noop if a runtime vanished between selection and construction.
+        from .backends.container_runtime import detect_runtime
+
+        rt = detect_runtime()
+        if rt is None:
+            backend = NoopBackend()
+        else:
+            backend = LocalContainerBackend(
+                session_id=session_id,
+                tenant_id=tenant_id,
+                runtime=rt,
+                network_enabled=os.environ.get("ADK_CC_SANDBOX_NETWORK", "1").lower()
+                not in ("0", "false"),
+            )
     elif name == "docker":
         backend = DockerBackend(session_id=session_id, tenant_id=tenant_id)
     elif name == "e2b":
@@ -173,6 +190,7 @@ __all__ = [
     "SandboxBackend",
     "NoopBackend",
     "DockerBackend",
+    "LocalContainerBackend",
     "E2BBackend",
     "SandboxServiceBackend",
     "DaytonaBackend",

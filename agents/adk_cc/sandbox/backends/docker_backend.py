@@ -336,6 +336,10 @@ class DockerBackend(SandboxBackend):
     ) -> ExecResult:
         container = await self._ensure_container()
         cwd_in_container = self._to_container_path(cwd) if cwd else CONTAINER_WORKSPACE
+        # On-demand secret/env injection (user secrets + operator SandboxEnvSpec),
+        # resolved fresh per exec. Without this, API keys never reach the remote
+        # container's commands.
+        runtime_env = await self._runtime_env()
 
         def _run() -> ExecResult:
             try:
@@ -343,6 +347,7 @@ class DockerBackend(SandboxBackend):
                     cmd=["bash", "-lc", cmd],
                     workdir=cwd_in_container,
                     user=CONTAINER_USER,
+                    environment=runtime_env or None,
                     demux=True,
                 )
             except Exception as e:

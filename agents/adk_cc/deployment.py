@@ -35,10 +35,40 @@ def desktop_data_dir() -> Path:
     return p
 
 
+def sandbox_mode() -> str:
+    """Desktop sandbox preference: `host` (run on the host, today's default) or
+    `container` (run the shell inside a local Docker/Podman container). Opt-in —
+    read from `ADK_CC_SANDBOX_MODE`; the Settings UI writes this. Only consulted
+    in desktop mode; ignored (host) elsewhere."""
+    return (os.environ.get("ADK_CC_SANDBOX_MODE") or "host").strip().lower()
+
+
+def container_runtime_available() -> bool:
+    """True if a local container runtime (Docker/Podman) is detected. Cached
+    inside the detector; safe to call repeatedly. Never raises."""
+    try:
+        from .sandbox.backends.container_runtime import detect_runtime
+
+        return detect_runtime() is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def sandbox_backend_name() -> str:
-    """The configured sandbox backend name (noop/docker/e2b/sandbox_service/
-    daytona); default `noop`. The single reader of `ADK_CC_SANDBOX_BACKEND`."""
-    return os.environ.get("ADK_CC_SANDBOX_BACKEND", "noop").lower()
+    """The configured sandbox backend name (noop/container/docker/e2b/
+    sandbox_service/daytona); default `noop`. The single reader of
+    `ADK_CC_SANDBOX_BACKEND`.
+
+    Precedence: an explicit `ADK_CC_SANDBOX_BACKEND` always wins. Otherwise, in
+    desktop mode with the Sandbox setting on AND a runtime present, resolve to
+    `container`; else `noop`. So the host default is unchanged until the user
+    opts in and a runtime is actually available."""
+    explicit = os.environ.get("ADK_CC_SANDBOX_BACKEND")
+    if explicit:
+        return explicit.lower()
+    if is_desktop() and sandbox_mode() == "container" and container_runtime_available():
+        return "container"
+    return "noop"
 
 
 def noop_ack_host_exec() -> bool:
