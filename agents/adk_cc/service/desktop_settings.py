@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import io
 import logging
+import asyncio
 import os
 import shutil
 import tempfile
@@ -547,6 +548,57 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
         cur = [r for r in (fss.get_user_value(pid, "adk_cc_extra_roots", []) or []) if r != p]
         fss.set_user_value(pid, "adk_cc_extra_roots", cur)
         return {"status": "deleted", "dirs": cur}
+
+    # ---- container sandbox (desktop-local Docker/Podman) ------------------
+    from .. import deployment
+    from ..sandbox.backends import container_runtime as _cr
+
+    def _sandbox_status() -> dict:
+        # Re-probe fresh so starting Docker/Podman AFTER the app boots is picked
+        # up (detection is otherwise cached for the process lifetime).
+        _cr.reset_cache()
+        rt = _cr.detect_runtime()
+        image = deployment.sandbox_image()
+        return {
+            "mode": deployment.sandbox_mode(),
+            "network": deployment.sandbox_network_enabled(),
+            "image": image,
+            "available": rt is not None,
+            "runtime": ({"name": rt.name, "version": rt.version} if rt else None),
+            "image_present": (_cr.image_present(rt, image) if rt else False),
+        }
+
+    @app.get("/desktop/settings/sandbox", include_in_schema=False)
+    async def get_sandbox():  # noqa: ANN202
+        return await asyncio.to_thread(_sandbox_status)
+
+    @app.put("/desktop/settings/sandbox", include_in_schema=False)
+    async def put_sandbox(request: Request):  # noqa: ANN202
+        body = await request.json() or {}
+        cur = deployment.read_sandbox_settings()
+        if "mode" in body:
+            mode = str(body.get("mode") or "host").strip().lower()
+            if mode not in ("host", "container"):
+                raise HTTPException(status_code=400, detail="mode must be 'host' or 'container'")
+            cur["mode"] = mode
+        if "network" in body:
+            cur["network"] = bool(body.get("network"))
+        if "image" in body:
+            img = str(body.get("image") or "").strip()
+            if img:
+                cur["image"] = img
+        await asyncio.to_thread(deployment.write_sandbox_settings, cur)
+        return await asyncio.to_thread(_sandbox_status)
+
+    @app.post("/desktop/settings/sandbox/pull", include_in_schema=False)
+    async def pull_sandbox_image():  # noqa: ANN202
+        rt = await asyncio.to_thread(lambda: (_cr.reset_cache(), _cr.detect_runtime())[1])
+        if rt is None:
+            raise HTTPException(status_code=400, detail="no container runtime available")
+        ok, msg = await asyncio.to_thread(_cr.pull_image, rt, deployment.sandbox_image())
+        if not ok:
+            raise HTTPException(status_code=502, detail=f"pull failed: {msg}")
+        return await asyncio.to_thread(_sandbox_status)
 
     _log.info(
         "desktop settings routes mounted (secrets=%s mcp=%s skills=%s models=%s)",

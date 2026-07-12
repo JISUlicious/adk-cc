@@ -35,12 +35,67 @@ def desktop_data_dir() -> Path:
     return p
 
 
+# --- desktop sandbox setting (live JSON, no restart) ------------------------
+# Persisted in <desktop-data>/sandbox.json so the Settings toggle takes effect
+# for new sessions without an app restart. An explicit env var always overrides
+# the stored value (operator / test escape hatch).
+
+def _sandbox_settings_path() -> Path:
+    return desktop_data_dir() / "sandbox.json"
+
+
+def read_sandbox_settings() -> dict:
+    """The stored desktop sandbox settings ({mode, network, image}); {} if none
+    or unreadable. Never raises."""
+    try:
+        import json
+
+        p = _sandbox_settings_path()
+        if not p.exists():
+            return {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def write_sandbox_settings(settings: dict) -> None:
+    """Persist {mode, network, image}. Atomic temp-swap."""
+    import json
+
+    p = _sandbox_settings_path()
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    tmp.replace(p)
+
+
 def sandbox_mode() -> str:
     """Desktop sandbox preference: `host` (run on the host, today's default) or
-    `container` (run the shell inside a local Docker/Podman container). Opt-in —
-    read from `ADK_CC_SANDBOX_MODE`; the Settings UI writes this. Only consulted
-    in desktop mode; ignored (host) elsewhere."""
-    return (os.environ.get("ADK_CC_SANDBOX_MODE") or "host").strip().lower()
+    `container` (run the shell inside a local Docker/Podman container). Opt-in.
+    Precedence: `ADK_CC_SANDBOX_MODE` env → stored setting → `host`. Only
+    consulted in desktop mode; ignored (host) elsewhere."""
+    env = os.environ.get("ADK_CC_SANDBOX_MODE")
+    if env:
+        return env.strip().lower()
+    return str(read_sandbox_settings().get("mode") or "host").strip().lower()
+
+
+def sandbox_network_enabled() -> bool:
+    """Whether the container sandbox gets network. `ADK_CC_SANDBOX_NETWORK` env →
+    stored setting → True (dev-friendly default)."""
+    env = os.environ.get("ADK_CC_SANDBOX_NETWORK")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false")
+    val = read_sandbox_settings().get("network")
+    return True if val is None else bool(val)
+
+
+def sandbox_image() -> str:
+    """The container image for the desktop sandbox. `ADK_CC_SANDBOX_IMAGE` env →
+    stored setting → python:3.12-slim."""
+    return (os.environ.get("ADK_CC_SANDBOX_IMAGE")
+            or read_sandbox_settings().get("image")
+            or "python:3.12-slim")
 
 
 def container_runtime_available() -> bool:

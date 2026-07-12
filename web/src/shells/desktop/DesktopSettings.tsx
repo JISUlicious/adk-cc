@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
   Palette, KeyRound, Server, Boxes, Cpu, Check, Trash2, Plus, FolderTree, Sparkles,
-  ChevronDown, ChevronRight, RefreshCw,
+  ChevronDown, ChevronRight, RefreshCw, ShieldCheck, Download,
 } from "lucide-react"
 import { SettingsFrame, type SettingsTab } from "@/shared/settings/SettingsFrame"
 import { ThemeSection } from "@/shared/settings/sections"
@@ -13,6 +13,7 @@ import {
   getCodexStatus, connectCodex, disconnectCodex, type CodexStatus,
   startCodexLogin, getCodexLoginStatus, codexSignout, discoverModels,
   selectModel, refreshModels,
+  getSandbox, setSandbox, pullSandboxImage, type SandboxStatus,
 } from "@/shared/api/desktop-settings"
 
 /** Base model name for display (strip the provider routing prefix). */
@@ -232,6 +233,128 @@ function ModelsSection() {
 }
 
 /**
+ * Container sandbox (desktop-local Docker/Podman). Opt-in: run the agent's shell
+ * inside a container that mounts the project in-place but isolates the host. Host
+ * execution stays the default; the toggle applies to NEW chats.
+ */
+function SandboxSection() {
+  const [s, setS] = useState<SandboxStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [pulling, setPulling] = useState(false)
+
+  const load = useCallback(() => {
+    getSandbox().then(setS).catch((e) => setErr(errMsg(e)))
+  }, [])
+  useEffect(load, [load])
+
+  async function patch(p: Partial<Pick<SandboxStatus, "mode" | "network">>) {
+    setBusy(true); setErr(null)
+    try { setS(await setSandbox(p)) } catch (e) { setErr(errMsg(e)) } finally { setBusy(false) }
+  }
+  async function pull() {
+    setPulling(true); setErr(null)
+    try { setS(await pullSandboxImage()) } catch (e) { setErr(errMsg(e)) } finally { setPulling(false) }
+  }
+
+  if (!s) return <div className="text-xs text-muted-foreground">Loading…</div>
+  const on = s.mode === "container"
+  return (
+    <div className="space-y-5">
+      <p className="text-xs text-muted-foreground">
+        Run the agent's shell commands inside a local container. The project is mounted
+        in-place (edits still land in your real files), but a bad command can't escape to
+        the rest of your machine, the network (when locked), or past the resource limits.
+        Applies to new chats.
+      </p>
+
+      {/* runtime status */}
+      <div className="rounded-md border border-border/60 px-3 py-2 text-sm">
+        {s.available ? (
+          <span className="flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4 text-green-600" />
+            {s.runtime?.name === "podman" ? "Podman" : "Docker"} {s.runtime?.version} detected
+          </span>
+        ) : (
+          <span className="text-muted-foreground">
+            No container runtime found — install/start Docker or Podman. Commands run on the host.
+          </span>
+        )}
+      </div>
+
+      {/* mode toggle */}
+      <label className="flex items-center justify-between gap-3">
+        <span className="text-sm">
+          <span className="font-medium">Container sandbox</span>
+          <span className="block text-xs text-muted-foreground">
+            {on ? "Shell runs in a container." : "Shell runs directly on the host (default)."}
+          </span>
+        </span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={on}
+          disabled={busy || !s.available}
+          onClick={() => patch({ mode: on ? "host" : "container" })}
+          className={
+            "relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-40 " +
+            (on ? "bg-primary" : "bg-input")
+          }
+        >
+          <span className={"absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all " + (on ? "left-[22px]" : "left-0.5")} />
+        </button>
+      </label>
+
+      {/* network toggle — only meaningful when sandboxed */}
+      {on && (
+        <label className="flex items-center justify-between gap-3">
+          <span className="text-sm">
+            <span className="font-medium">Allow network</span>
+            <span className="block text-xs text-muted-foreground">
+              {s.network ? "pip/npm/git/curl work." : "Locked down (no egress)."}
+            </span>
+          </span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={s.network}
+            disabled={busy}
+            onClick={() => patch({ network: !s.network })}
+            className={
+              "relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-40 " +
+              (s.network ? "bg-primary" : "bg-input")
+            }
+          >
+            <span className={"absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all " + (s.network ? "left-[22px]" : "left-0.5")} />
+          </button>
+        </label>
+      )}
+
+      {/* image */}
+      {on && (
+        <div className="flex items-center justify-between gap-3">
+          <span className="min-w-0 text-sm">
+            <span className="font-medium">Image</span>
+            <code className="ml-2 truncate text-xs text-muted-foreground">{s.image}</code>
+            <span className={"ml-2 text-xs " + (s.image_present ? "text-green-600" : "text-amber-600")}>
+              {s.image_present ? "· present" : "· not pulled"}
+            </span>
+          </span>
+          {!s.image_present && s.available && (
+            <Button variant="outline" size="sm" disabled={pulling} onClick={pull}>
+              <Download className="h-3.5 w-3.5" />
+              {pulling ? "Pulling…" : "Pull"}
+            </Button>
+          )}
+        </div>
+      )}
+
+      {err && <p className="text-xs text-destructive">{err}</p>}
+    </div>
+  )
+}
+
+/**
  * Desktop settings — single-user / no-login. Appearance + layered global +
  * per-project MCP / Skills / Secrets (backed by /desktop/settings/*, mapped onto
  * the agent's tenant∪user credential union), plus global-only model endpoints.
@@ -256,6 +379,7 @@ export function DesktopSettings({ open, onClose }: { open: boolean; onClose: () 
       render: () => <LayeredTab blurb="Directories outside the project the agent may read/write in (like Claude Code's added directories). Secret paths stay protected." render={(s, p) => <WorkingDirsScope scope={s} projectId={p} />} />,
     },
     { id: "models", label: "Models", icon: Cpu, render: () => <ModelsSection /> },
+    { id: "sandbox", label: "Sandbox", icon: ShieldCheck, render: () => <SandboxSection /> },
   ]
   return <SettingsFrame open={open} onClose={onClose} tabs={tabs} />
 }

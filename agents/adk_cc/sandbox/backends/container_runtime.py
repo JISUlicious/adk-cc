@@ -93,3 +93,31 @@ def reset_cache() -> None:
     or starts Docker Desktop). The next detect_runtime() re-probes."""
     global _cache
     _cache = _UNSET
+
+
+def image_present(rt: Runtime, image: str) -> bool:
+    """True if `image` is already available locally (no pull needed)."""
+    try:
+        proc = subprocess.run(
+            [rt.cli_path, "image", "inspect", image],
+            capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
+        )
+        return proc.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def pull_image(rt: Runtime, image: str, *, timeout_s: float = 600.0) -> tuple[bool, str]:
+    """Pull `image`. Returns (ok, message). Blocking — run off the event loop."""
+    try:
+        proc = subprocess.run(
+            [rt.cli_path, "pull", image],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"pull timed out after {int(timeout_s)}s"
+    except OSError as e:
+        return False, f"{type(e).__name__}: {e}"
+    if proc.returncode != 0:
+        return False, (proc.stderr or proc.stdout or "pull failed").strip()
+    return True, "ok"

@@ -93,8 +93,8 @@ def make_default_backend(
                 session_id=session_id,
                 tenant_id=tenant_id,
                 runtime=rt,
-                network_enabled=os.environ.get("ADK_CC_SANDBOX_NETWORK", "1").lower()
-                not in ("0", "false"),
+                image=deployment.sandbox_image(),
+                network_enabled=deployment.sandbox_network_enabled(),
             )
     elif name == "docker":
         backend = DockerBackend(session_id=session_id, tenant_id=tenant_id)

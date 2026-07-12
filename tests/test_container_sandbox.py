@@ -184,6 +184,44 @@ def test_spawn_args_identical_path_mount_and_ownership():
     assert "no-new-privileges" in limits and "--cap-drop" in limits and "--pids-limit" in limits
 
 
+def test_sandbox_settings_persistence_and_precedence():
+    import tempfile
+    from adk_cc import deployment
+
+    d = tempfile.mkdtemp(prefix="sbx-set-")
+    saved_env = {k: os.environ.get(k) for k in
+                 ("ADK_CC_DESKTOP_DATA", "ADK_CC_SANDBOX_MODE",
+                  "ADK_CC_SANDBOX_NETWORK", "ADK_CC_SANDBOX_IMAGE")}
+    try:
+        os.environ["ADK_CC_DESKTOP_DATA"] = d
+        for k in ("ADK_CC_SANDBOX_MODE", "ADK_CC_SANDBOX_NETWORK", "ADK_CC_SANDBOX_IMAGE"):
+            os.environ.pop(k, None)
+
+        # defaults with no file
+        assert deployment.sandbox_mode() == "host"
+        assert deployment.sandbox_network_enabled() is True
+        assert deployment.sandbox_image() == "python:3.12-slim"
+
+        # persisted values are read back
+        deployment.write_sandbox_settings({"mode": "container", "network": False, "image": "custom:1"})
+        assert deployment.read_sandbox_settings()["mode"] == "container"
+        assert deployment.sandbox_mode() == "container"
+        assert deployment.sandbox_network_enabled() is False
+        assert deployment.sandbox_image() == "custom:1"
+
+        # env overrides the stored value
+        os.environ["ADK_CC_SANDBOX_MODE"] = "host"
+        os.environ["ADK_CC_SANDBOX_NETWORK"] = "1"
+        assert deployment.sandbox_mode() == "host"
+        assert deployment.sandbox_network_enabled() is True
+    finally:
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def test_exec_forwards_env_by_name_not_value():
     # Secret VALUES must ride the CLI subprocess env (referenced by `-e NAME`),
     # never appear as literal argv (which would leak into `ps`/shell history).

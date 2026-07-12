@@ -204,3 +204,24 @@ export function discoverModels(api_base: string, api_key_env: string): Promise<{
     body: JSON.stringify({ api_base, api_key_env }),
   })
 }
+
+// ---- container sandbox (desktop-local Docker/Podman) ----
+export interface SandboxStatus {
+  mode: "host" | "container"
+  network: boolean
+  image: string
+  available: boolean
+  runtime: { name: string; version: string } | null
+  image_present: boolean
+}
+export function getSandbox(): Promise<SandboxStatus> {
+  return apiFetch("/desktop/settings/sandbox")
+}
+export function setSandbox(
+  patch: Partial<Pick<SandboxStatus, "mode" | "network" | "image">>,
+): Promise<SandboxStatus> {
+  return apiFetch("/desktop/settings/sandbox", { method: "PUT", body: JSON.stringify(patch) })
+}
+export function pullSandboxImage(): Promise<SandboxStatus> {
+  return apiFetch("/desktop/settings/sandbox/pull", { method: "POST" })
+}
