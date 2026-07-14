@@ -127,11 +127,19 @@ async def run(rt) -> None:
     finally:
         await b2.close()
 
-    # 12. close() removed the container
+    # 12. close() is per-turn and must LEAVE the container (per-session survival);
+    # remove() is the explicit teardown that reaps it.
     import subprocess
-    ls = subprocess.run([rt.cli_path, "ps", "-aq", "--filter", "name=adk-cc-e2e-sbx"],
-                        capture_output=True, text=True, timeout=15)
-    check("close() removed the session container", ls.stdout.strip() == "")
+
+    def _exists(name: str) -> str:
+        # anchored so 'adk-cc-e2e-sbx' doesn't also match 'adk-cc-e2e-sbx-nonet'
+        return subprocess.run([rt.cli_path, "ps", "-aq", "--filter", f"name=^{name}$"],
+                              capture_output=True, text=True, timeout=15).stdout.strip()
+
+    check("close() LEAVES the session container (per-session, not per-turn)",
+          bool(_exists("adk-cc-e2e-sbx")))
+    await b.remove()
+    check("remove() reaps the session container", not _exists("adk-cc-e2e-sbx"))
 
 
 def main() -> int:

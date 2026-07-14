@@ -9,8 +9,11 @@ attached to session state by the runner; tools resolve it via
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 from google.adk.tools.tool_context import ToolContext
 
@@ -82,13 +85,16 @@ def make_default_backend(
         backend: SandboxBackend = NoopBackend()
     elif name == "container":
         # Desktop-local Docker/Podman: shell isolated, project mounted in-place.
-        # Falls back to noop if a runtime vanished between selection and construction.
-        from .backends.container_runtime import detect_runtime
+        from .backends.container_runtime import detect_runtime, reset_cache
+        from .backends.local_container_backend import UnavailableSandboxBackend
 
         rt = detect_runtime()
         if rt is None:
-            backend = NoopBackend()
-        else:
+            # Re-probe ONCE (uncached) — the process-wide cache may have pinned
+            # None if the app booted before Docker Desktop finished starting.
+            reset_cache()
+            rt = detect_runtime()
+        if rt is not None:
             backend = LocalContainerBackend(
                 session_id=session_id,
                 tenant_id=tenant_id,
@@ -96,6 +102,16 @@ def make_default_backend(
                 image=deployment.sandbox_image(),
                 network_enabled=deployment.sandbox_network_enabled(),
             )
+        elif deployment.sandbox_require():
+            # Fail CLOSED — the user demanded isolation; don't silently run on host.
+            _log.warning("sandbox: container required but no runtime available — "
+                         "run_bash will error (ADK_CC_SANDBOX_REQUIRE)")
+            backend = UnavailableSandboxBackend()
+        else:
+            # Fail open to host exec, but LOUDLY — never silent (review #2).
+            _log.warning("sandbox: 'container' requested but no Docker/Podman runtime "
+                         "was found — falling back to HOST execution")
+            backend = NoopBackend()
     elif name == "docker":
         backend = DockerBackend(session_id=session_id, tenant_id=tenant_id)
     elif name == "e2b":

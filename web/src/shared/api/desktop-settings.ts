@@ -210,9 +210,13 @@ export interface SandboxStatus {
   mode: "host" | "container"
   network: boolean
   image: string
+  require: boolean
   available: boolean
   runtime: { name: string; version: string } | null
   image_present: boolean
+  pulling: boolean
+  /** Which fields are pinned by an env var (can't be changed from the UI). */
+  env_pinned: { mode: boolean; network: boolean; image: boolean; require: boolean }
 }
 export function getSandbox(): Promise<SandboxStatus> {
   return apiFetch("/desktop/settings/sandbox")

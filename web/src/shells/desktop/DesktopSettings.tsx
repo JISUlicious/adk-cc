@@ -237,28 +237,47 @@ function ModelsSection() {
  * inside a container that mounts the project in-place but isolates the host. Host
  * execution stays the default; the toggle applies to NEW chats.
  */
+function Toggle({ on, disabled, onClick }: { on: boolean; disabled: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button" role="switch" aria-checked={on} disabled={disabled} onClick={onClick}
+      className={"relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-40 " +
+        (on ? "bg-primary" : "bg-input")}
+    >
+      <span className={"absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all " + (on ? "left-[22px]" : "left-0.5")} />
+    </button>
+  )
+}
+
 function SandboxSection() {
   const [s, setS] = useState<SandboxStatus | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [pulling, setPulling] = useState(false)
+  const alive = useRef(true)
+  useEffect(() => () => { alive.current = false }, [])
 
   const load = useCallback(() => {
-    getSandbox().then(setS).catch((e) => setErr(errMsg(e)))
+    getSandbox().then((v) => alive.current && setS(v)).catch((e) => alive.current && setErr(errMsg(e)))
   }, [])
   useEffect(load, [load])
 
   async function patch(p: Partial<Pick<SandboxStatus, "mode" | "network">>) {
     setBusy(true); setErr(null)
-    try { setS(await setSandbox(p)) } catch (e) { setErr(errMsg(e)) } finally { setBusy(false) }
+    try { const v = await setSandbox(p); if (alive.current) setS(v) }
+    catch (e) { if (alive.current) setErr(errMsg(e)) }
+    finally { if (alive.current) setBusy(false) }
   }
   async function pull() {
     setPulling(true); setErr(null)
-    try { setS(await pullSandboxImage()) } catch (e) { setErr(errMsg(e)) } finally { setPulling(false) }
+    try { const v = await pullSandboxImage(); if (alive.current) setS(v) }
+    catch (e) { if (alive.current) setErr(errMsg(e)) }
+    finally { if (alive.current) setPulling(false) }
   }
 
   if (!s) return <div className="text-xs text-muted-foreground">Loading…</div>
   const on = s.mode === "container"
+  const p = s.env_pinned
   return (
     <div className="space-y-5">
       <p className="text-xs text-muted-foreground">
@@ -282,27 +301,27 @@ function SandboxSection() {
         )}
       </div>
 
-      {/* mode toggle */}
+      {/* opted-in but the runtime isn't available → honest fallback warning */}
+      {on && !s.available && (
+        <p className="rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+          Sandbox is enabled but no runtime is available — commands currently run on the
+          host. Start Docker/Podman{s.require ? "" : ", or turn this off"} to fix it.
+        </p>
+      )}
+
+      {/* mode toggle — only gate turning ON (turning OFF never needs a runtime) */}
       <label className="flex items-center justify-between gap-3">
         <span className="text-sm">
           <span className="font-medium">Container sandbox</span>
           <span className="block text-xs text-muted-foreground">
-            {on ? "Shell runs in a container." : "Shell runs directly on the host (default)."}
+            {on
+              ? (s.available ? "Shell runs in a container." : "Requested — waiting on a runtime.")
+              : "Shell runs directly on the host (default)."}
+            {p.mode && " · pinned by ADK_CC_SANDBOX_MODE"}
           </span>
         </span>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={on}
-          disabled={busy || !s.available}
-          onClick={() => patch({ mode: on ? "host" : "container" })}
-          className={
-            "relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-40 " +
-            (on ? "bg-primary" : "bg-input")
-          }
-        >
-          <span className={"absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all " + (on ? "left-[22px]" : "left-0.5")} />
-        </button>
+        <Toggle on={on} disabled={busy || p.mode || (!s.available && !on)}
+                onClick={() => patch({ mode: on ? "host" : "container" })} />
       </label>
 
       {/* network toggle — only meaningful when sandboxed */}
@@ -312,21 +331,11 @@ function SandboxSection() {
             <span className="font-medium">Allow network</span>
             <span className="block text-xs text-muted-foreground">
               {s.network ? "pip/npm/git/curl work." : "Locked down (no egress)."}
+              {p.network && " · pinned by ADK_CC_SANDBOX_NETWORK"}
             </span>
           </span>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={s.network}
-            disabled={busy}
-            onClick={() => patch({ network: !s.network })}
-            className={
-              "relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-40 " +
-              (s.network ? "bg-primary" : "bg-input")
-            }
-          >
-            <span className={"absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all " + (s.network ? "left-[22px]" : "left-0.5")} />
-          </button>
+          <Toggle on={s.network} disabled={busy || p.network}
+                  onClick={() => patch({ network: !s.network })} />
         </label>
       )}
 
@@ -341,9 +350,9 @@ function SandboxSection() {
             </span>
           </span>
           {!s.image_present && s.available && (
-            <Button variant="outline" size="sm" disabled={pulling} onClick={pull}>
+            <Button variant="outline" size="sm" disabled={pulling || s.pulling} onClick={pull}>
               <Download className="h-3.5 w-3.5" />
-              {pulling ? "Pulling…" : "Pull"}
+              {pulling || s.pulling ? "Pulling…" : "Pull"}
             </Button>
           )}
         </div>

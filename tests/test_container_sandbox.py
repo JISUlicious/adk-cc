@@ -127,14 +127,13 @@ def test_selection_precedence():
         assert deployment.sandbox_backend_name() == "daytona"
         del os.environ["ADK_CC_SANDBOX_BACKEND"]
 
-        # desktop + container-mode + runtime available → container
+        # desktop + container-mode → container (reflects INTENT; availability +
+        # the warn/fallback are decided at make_default_backend, not here — #2)
         os.environ["ADK_CC_DESKTOP"] = "1"
         os.environ["ADK_CC_SANDBOX_MODE"] = "container"
         assert deployment.sandbox_backend_name() == "container"
-
-        # ...but noop if no runtime
         deployment.container_runtime_available = lambda: False
-        assert deployment.sandbox_backend_name() == "noop"
+        assert deployment.sandbox_backend_name() == "container"  # intent stands even if down
         deployment.container_runtime_available = lambda: True
 
         # desktop + host-mode → noop

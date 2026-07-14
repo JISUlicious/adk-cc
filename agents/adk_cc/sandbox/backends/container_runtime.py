@@ -50,25 +50,45 @@ def _candidates() -> list[str]:
     return ["docker", "podman"]  # auto: prefer docker, then podman
 
 
+def _version(cli: str, fmt: str) -> str:
+    """`<cli> version --format <fmt>` → stripped stdout, or "" on failure /
+    empty / a Go '<no value>' render (a nil field)."""
+    try:
+        p = subprocess.run([cli, "version", "--format", fmt],
+                           capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S)
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    v = (p.stdout or "").strip()
+    if p.returncode != 0 or not v or "no value" in v:
+        return ""
+    return v
+
+
 def _probe(name: str) -> "Runtime | None":
-    """Return a Runtime if `name` is on PATH AND its daemon/VM answers."""
+    """Return a Runtime if `name` is on PATH AND its runtime actually answers.
+
+    Two-tier so it works for Docker, Podman-machine (macOS/Windows), AND
+    daemonless Podman on native Linux:
+      1. `{{.Server.Version}}` — populated for Docker + a Podman machine; a fast
+         liveness probe (empty/error when the daemon/VM is down).
+      2. If that's empty (native-Linux Podman has no .Server), confirm the
+         runtime is usable via `info` and report `{{.Client.Version}}`.
+    """
     cli = shutil.which(name)
     if not cli:
         return None
+    ver = _version(cli, "{{.Server.Version}}")
+    if ver:
+        return Runtime(name=name, version=ver, cli_path=cli)
+    # Tier 2: no server field — is the runtime nonetheless usable locally?
     try:
-        # `version --format {{.Server.Version}}` hits the daemon and exits
-        # non-zero (with an empty/blank stdout) when it's not reachable — a
-        # fast, side-effect-free liveness probe.
-        proc = subprocess.run(
-            [cli, "version", "--format", "{{.Server.Version}}"],
-            capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
-        )
+        info = subprocess.run([cli, "info"], capture_output=True, text=True,
+                              timeout=_PROBE_TIMEOUT_S)
     except (subprocess.TimeoutExpired, OSError):
         return None
-    ver = (proc.stdout or "").strip()
-    if proc.returncode != 0 or not ver:
-        return None
-    return Runtime(name=name, version=ver, cli_path=cli)
+    if info.returncode != 0:
+        return None  # runtime genuinely down (e.g. Docker daemon not running)
+    return Runtime(name=name, version=_version(cli, "{{.Client.Version}}") or "unknown", cli_path=cli)
 
 
 def detect_runtime() -> "Runtime | None":

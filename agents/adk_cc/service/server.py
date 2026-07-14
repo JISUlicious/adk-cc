@@ -199,6 +199,24 @@ def build_fastapi_app(
     if desktop_enabled():
         from .desktop_config import ensure_settings_template
         ensure_settings_template()
+        # Reap any container-sandbox containers left by a previous (crashed /
+        # force-killed) run of THIS single-instance desktop app, before any
+        # session is live. Best-effort; no-op without a runtime. See
+        # sweep_orphans' contract (startup-only, single-instance).
+        try:
+            import logging as _logging
+
+            from .. import deployment as _dep
+
+            if _dep.sandbox_mode() == "container":
+                from ..sandbox.backends.local_container_backend import sweep_orphans
+
+                n = sweep_orphans()
+                if n:
+                    _logging.getLogger(__name__).info(
+                        "sandbox: reaped %d orphan container(s) at startup", n)
+        except Exception:  # noqa: BLE001 — never block startup
+            pass
     mount_desktop_routes(fastapi_app)
     # Desktop layered settings (global + per-project MCP/skills/secrets, global
     # models) over the same stores the agent reads — no-auth, scope-keyed.

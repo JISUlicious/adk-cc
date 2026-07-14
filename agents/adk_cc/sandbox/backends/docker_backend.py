@@ -338,7 +338,11 @@ class DockerBackend(SandboxBackend):
         cwd_in_container = self._to_container_path(cwd) if cwd else CONTAINER_WORKSPACE
         # On-demand secret/env injection (user secrets + operator SandboxEnvSpec),
         # resolved fresh per exec. Without this, API keys never reach the remote
-        # container's commands.
+        # container's commands. NOTE: docker-py puts these in the ExecCreate API
+        # payload (readable via `docker inspect <exec-id>` on the daemon for the
+        # container's life) — a hygiene step below LocalContainerBackend's
+        # name-only `-e KEY` forwarding, but acceptable for the remote deployment
+        # where the daemon host is trusted infrastructure, not the user's laptop.
         runtime_env = await self._runtime_env()
 
         def _run() -> ExecResult:

@@ -553,20 +553,40 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
     from .. import deployment
     from ..sandbox.backends import container_runtime as _cr
 
+    _pull_state = {"running": False}  # server-side dedupe for concurrent pulls
+
     def _sandbox_status() -> dict:
         # Re-probe fresh so starting Docker/Podman AFTER the app boots is picked
         # up (detection is otherwise cached for the process lifetime).
         _cr.reset_cache()
         rt = _cr.detect_runtime()
         image = deployment.sandbox_image()
+        # Fields pinned by an env var can't be changed from the UI — report them
+        # so the client can disable + explain instead of the toggle snapping back.
+        pinned = {k: (os.environ.get(v) is not None) for k, v in (
+            ("mode", "ADK_CC_SANDBOX_MODE"),
+            ("network", "ADK_CC_SANDBOX_NETWORK"),
+            ("image", "ADK_CC_SANDBOX_IMAGE"),
+            ("require", "ADK_CC_SANDBOX_REQUIRE"),
+        )}
         return {
             "mode": deployment.sandbox_mode(),
             "network": deployment.sandbox_network_enabled(),
             "image": image,
+            "require": deployment.sandbox_require(),
             "available": rt is not None,
             "runtime": ({"name": rt.name, "version": rt.version} if rt else None),
             "image_present": (_cr.image_present(rt, image) if rt else False),
+            "pulling": _pull_state["running"],
+            "env_pinned": pinned,
         }
+
+    async def _sandbox_body(request: Request) -> dict:  # noqa: ANN202
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        return body if isinstance(body, dict) else {}
 
     @app.get("/desktop/settings/sandbox", include_in_schema=False)
     async def get_sandbox():  # noqa: ANN202
@@ -574,7 +594,7 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
 
     @app.put("/desktop/settings/sandbox", include_in_schema=False)
     async def put_sandbox(request: Request):  # noqa: ANN202
-        body = await request.json() or {}
+        body = await _sandbox_body(request)
         cur = deployment.read_sandbox_settings()
         if "mode" in body:
             mode = str(body.get("mode") or "host").strip().lower()
@@ -583,19 +603,29 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
             cur["mode"] = mode
         if "network" in body:
             cur["network"] = bool(body.get("network"))
+        if "require" in body:
+            cur["require"] = bool(body.get("require"))
         if "image" in body:
             img = str(body.get("image") or "").strip()
             if img:
                 cur["image"] = img
+            else:
+                cur.pop("image", None)  # empty → clear the override (back to default)
         await asyncio.to_thread(deployment.write_sandbox_settings, cur)
         return await asyncio.to_thread(_sandbox_status)
 
     @app.post("/desktop/settings/sandbox/pull", include_in_schema=False)
     async def pull_sandbox_image():  # noqa: ANN202
+        if _pull_state["running"]:
+            raise HTTPException(status_code=409, detail="a pull is already in progress")
         rt = await asyncio.to_thread(lambda: (_cr.reset_cache(), _cr.detect_runtime())[1])
         if rt is None:
             raise HTTPException(status_code=400, detail="no container runtime available")
-        ok, msg = await asyncio.to_thread(_cr.pull_image, rt, deployment.sandbox_image())
+        _pull_state["running"] = True
+        try:
+            ok, msg = await asyncio.to_thread(_cr.pull_image, rt, deployment.sandbox_image())
+        finally:
+            _pull_state["running"] = False
         if not ok:
             raise HTTPException(status_code=502, detail=f"pull failed: {msg}")
         return await asyncio.to_thread(_sandbox_status)

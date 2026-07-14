@@ -67,6 +67,10 @@ class LocalContainerBackend(NoopBackend):
         )
         self._mounts: list[str] = []  # host paths bind-mounted at identical paths
         self._started = False
+        # Signature (image + network + sorted mounts) of the container currently
+        # in use. When ensure_workspace changes the mount set mid-session, the sig
+        # changes and _ensure_container recreates the container (see #5).
+        self._active_sig: Optional[str] = None
         self._lock = asyncio.Lock()
 
     # --- config helpers --------------------------------------------------
@@ -125,38 +129,74 @@ class LocalContainerBackend(NoopBackend):
                 mounts.append(rp)
         self._mounts = mounts
 
-    def _create_container_sync(self) -> None:
+    def _mount_signature(self) -> str:
+        """Identity of the container config that requires a recreate if changed:
+        image + network + the sorted mount set. Stored as a label so a fresh
+        backend instance next turn can decide reuse-vs-recreate."""
+        import hashlib
+
+        parts = [self._image, "net=" + ("1" if self._network_enabled else "0")] + sorted(self._mounts)
+        return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()[:16]
+
+    def _ensure_container_sync(self) -> None:
+        """Attach to the session's container, reusing it across turns. Creates it
+        only when absent; recreates when the mount set changed (#5). This is what
+        makes the container per-SESSION even though a fresh backend object is built
+        each turn — the container is keyed by its deterministic name."""
         rt = self._cli()
         if self._workspace_abs is None:
             raise RuntimeError("LocalContainerBackend: ensure_workspace() not called")
-        # Remove any stale container from a previous boot with the same session.
-        subprocess.run([rt.cli_path, "rm", "-f", self._name],
-                       capture_output=True, text=True, timeout=30)
+        desired = self._mount_signature()
+
+        # Re-attach to an existing container with the same name, if its mount
+        # signature still matches. (docker inspect exits non-zero when absent.)
+        insp = subprocess.run(
+            [rt.cli_path, "inspect", self._name, "--format",
+             '{{.State.Running}}|{{index .Config.Labels "adk-cc-mounts"}}'],
+            capture_output=True, text=True, timeout=30)
+        if insp.returncode == 0:
+            running, _, sig = insp.stdout.strip().partition("|")
+            if sig == desired:
+                if running.strip() != "true":
+                    subprocess.run([rt.cli_path, "start", self._name],
+                                   capture_output=True, text=True, timeout=30)
+                self._started, self._active_sig = True, desired
+                return
+            # mount set / network / image changed → recreate with the new config
+            subprocess.run([rt.cli_path, "rm", "-f", self._name],
+                           capture_output=True, text=True, timeout=30)
+
         args = [
             rt.cli_path, "run", "-d", "--name", self._name,
+            "--pull=never",  # never block first-exec on a 10-min implicit pull (#7)
             "--workdir", self._workspace_abs,
             "--network", "bridge" if self._network_enabled else "none",
             "--tmpfs", "/tmp:size=1g,mode=1777",
             "-e", f"HOME={_CONTAINER_HOME}",
             "--label", f"adk-cc-session={self._session_id}",
             "--label", f"adk-cc-tenant={self._tenant_id}",
+            "--label", f"adk-cc-mounts={desired}",
         ]
         args += self._ownership_args(rt) + self._limit_args() + self._mount_args()
         args += [self._image, "sh", "-c", f"mkdir -p {_CONTAINER_HOME}; exec sleep infinity"]
         proc = subprocess.run(args, capture_output=True, text=True, timeout=120)
         if proc.returncode != 0:
-            raise RuntimeError(
-                f"container create failed ({rt.name}): {proc.stderr.strip() or proc.stdout.strip()}"
-            )
-        self._started = True
+            err = proc.stderr.strip() or proc.stdout.strip()
+            if "No such image" in err or "Unable to find image" in err or "manifest unknown" in err:
+                raise RuntimeError(
+                    f"sandbox image '{self._image}' is not present — pull it in Settings → Sandbox"
+                )
+            raise RuntimeError(f"container create failed ({rt.name}): {err}")
+        self._started, self._active_sig = True, desired
 
     async def _ensure_container(self) -> None:
-        if self._started:
+        desired = self._mount_signature()
+        if self._started and self._active_sig == desired:
             return
         async with self._lock:
-            if self._started:
+            if self._started and self._active_sig == desired:
                 return
-            await asyncio.to_thread(self._create_container_sync)
+            await asyncio.to_thread(self._ensure_container_sync)
 
     # --- exec ------------------------------------------------------------
 
@@ -164,12 +204,19 @@ class LocalContainerBackend(NoopBackend):
         self,
         cmd: str,
         *,
-        fs_write: FsWriteConfig,
-        network: NetworkConfig,
-        timeout_s: int,
+        fs_write: FsWriteConfig,   # enforced by the bind mounts, not per-exec
+        network: NetworkConfig,    # container network is all-or-nothing (set at create); the
+        timeout_s: int,            # per-exec allow-domains policy isn't honored here by design
         cwd: str,
     ) -> ExecResult:
-        await self._ensure_container()
+        # Bring up (or re-attach to) the container. A failure here — missing
+        # runtime, absent image, wedged daemon — becomes a clean ExecResult
+        # instead of a raw exception out of the run_bash tool (#7).
+        try:
+            await self._ensure_container()
+        except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+            msg = str(e) if isinstance(e, RuntimeError) else f"sandbox unavailable: {type(e).__name__}: {e}"
+            return ExecResult(exit_code=-1, stdout="", stderr=msg)
         rt = self._cli()
         # Resolve the session's secrets/env fresh (TTL-cached), and forward them
         # into the container BY NAME (`-e KEY`, no value) so the VALUES ride the
@@ -185,37 +232,59 @@ class LocalContainerBackend(NoopBackend):
         # chdir inside the container.
         workdir = (os.path.realpath(cwd) if cwd else None) or self._workspace_abs or "/"
         # `timeout` runs INSIDE the container so the deadline actually kills the
-        # in-container process (killing only the `<rt> exec` subprocess orphans it).
-        inner = ["timeout", "--signal=KILL", str(int(timeout_s)), "bash", "-lc", cmd]
+        # in-container process. `-k 5` = send TERM at the deadline, then KILL 5s
+        # later; GNU timeout then exits 124 on a timeout it initiated (distinct
+        # from 137, which means a real external/OOM SIGKILL — see #3).
+        n = int(timeout_s)
+        inner = ["timeout", "-k", "5", str(n), "bash", "-lc", cmd]
         args = [rt.cli_path, "exec", "-w", workdir, *env_flags, self._name, *inner]
 
         def _run() -> ExecResult:
             try:
                 proc = subprocess.run(
                     args, capture_output=True, text=True, env=subproc_env,
-                    # backstop: allow the in-container `timeout` to fire first,
-                    # then kill the exec wrapper if it somehow hangs.
-                    timeout=timeout_s + 15,
+                    # backstop: the in-container `timeout` (+5s kill grace) fires
+                    # first; this only trips if the exec wrapper itself wedges.
+                    timeout=n + 15,
                 )
-            except subprocess.TimeoutExpired:
-                return ExecResult(exit_code=-1, stdout="", stderr=f"timed out after {timeout_s}s",
-                                  timed_out=True)
+            except subprocess.TimeoutExpired as e:
+                return ExecResult(
+                    exit_code=-1, stdout=(e.stdout or b"").decode("utf-8", "replace")
+                    if isinstance(e.stdout, bytes) else (e.stdout or ""),
+                    stderr=f"timed out after {n}s", timed_out=True)
             except OSError as e:
                 return ExecResult(exit_code=-1, stdout="", stderr=f"{type(e).__name__}: {e}")
-            timed = proc.returncode == 137  # 128 + SIGKILL from `timeout --signal=KILL`
+            # 124 == the in-container `timeout` fired; 137 (OOM / external SIGKILL)
+            # is NOT a timeout and its real stderr must be preserved.
+            timed = proc.returncode == 124
+            stderr = proc.stderr or ""
+            if timed:
+                stderr = (stderr + f"\n[timed out after {n}s]").lstrip("\n")
             return ExecResult(
                 exit_code=proc.returncode if proc.returncode is not None else -1,
                 stdout=proc.stdout or "",
-                stderr=(proc.stderr or "") if not timed else f"timed out after {timeout_s}s",
+                stderr=stderr,
                 timed_out=timed,
             )
 
         return await asyncio.to_thread(_run)
 
     async def close(self) -> None:
-        if not self._started or self._runtime is None:
-            return
+        """Per-TURN no-op. TenancyPlugin.after_run_callback calls close() after
+        every message, but the container is per-SESSION: removing it here would
+        kill background processes / installs mid-session and force a slow recreate
+        each turn. The container is left running (idle `sleep infinity` is ~free),
+        reused by name next turn, and reaped by sweep_orphans() at app startup.
+        We only drop the local `_started` flag so the next turn's backend re-checks
+        (re-attaches) rather than assuming."""
         self._started = False
+
+    async def remove(self) -> None:
+        """Explicit teardown — remove this session's container. For a real
+        session-end / delete-session hook (not the per-turn close())."""
+        if self._runtime is None:
+            return
+        self._started, self._active_sig = False, None
         rt = self._runtime
 
         def _rm() -> None:
@@ -228,9 +297,29 @@ class LocalContainerBackend(NoopBackend):
         await asyncio.to_thread(_rm)
 
 
+class UnavailableSandboxBackend(NoopBackend):
+    """Fail-CLOSED stand-in: the user required the container sandbox but no
+    runtime is available, so run_bash errors instead of silently running on the
+    host. File reads/writes stay host-direct (inherited) so the UI isn't broken."""
+
+    name = "sandbox-unavailable"
+
+    def __init__(self, reason: str = "container sandbox required but no runtime is available") -> None:
+        self._reason = reason
+
+    async def exec(self, cmd, *, fs_write, network, timeout_s, cwd) -> ExecResult:  # noqa: ANN001
+        return ExecResult(exit_code=-1, stdout="", stderr=self._reason)
+
+
 def sweep_orphans(runtime: Optional[Runtime] = None) -> int:
-    """Remove leftover adk-cc-* containers from crashed sessions. Best-effort;
-    returns how many were removed. Safe to call at startup."""
+    """Remove leftover adk-cc-* containers. Best-effort; returns how many.
+
+    Call ONCE at app startup — before any session of this instance is live — so
+    it only reaps containers left by a PREVIOUS (crashed / force-killed) run.
+    Desktop is single-instance, so removing every adk-cc-* is safe there. Do NOT
+    call it mid-run or in a multi-instance deployment: the filter matches by the
+    label's presence, so it would also remove a concurrently-running instance's
+    live containers."""
     rt = runtime or detect_runtime()
     if rt is None:
         return 0

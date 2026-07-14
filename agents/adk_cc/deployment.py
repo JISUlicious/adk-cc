@@ -98,6 +98,17 @@ def sandbox_image() -> str:
             or "python:3.12-slim")
 
 
+def sandbox_require() -> bool:
+    """When True, an opted-in `container` sandbox that can't be brought up
+    (no runtime) makes run_bash ERROR rather than silently falling back to host
+    execution — a hard isolation guarantee. `ADK_CC_SANDBOX_REQUIRE` env → stored
+    setting → False (default: warn + fall back to host, which stays usable)."""
+    env = os.environ.get("ADK_CC_SANDBOX_REQUIRE")
+    if env is not None:
+        return env.strip().lower() not in ("0", "false")
+    return bool(read_sandbox_settings().get("require"))
+
+
 def container_runtime_available() -> bool:
     """True if a local container runtime (Docker/Podman) is detected. Cached
     inside the detector; safe to call repeatedly. Never raises."""
@@ -115,13 +126,15 @@ def sandbox_backend_name() -> str:
     `ADK_CC_SANDBOX_BACKEND`.
 
     Precedence: an explicit `ADK_CC_SANDBOX_BACKEND` always wins. Otherwise, in
-    desktop mode with the Sandbox setting on AND a runtime present, resolve to
-    `container`; else `noop`. So the host default is unchanged until the user
-    opts in and a runtime is actually available."""
+    desktop mode with the Sandbox setting on, resolve to `container` — reflecting
+    the user's INTENT. Whether a runtime is actually available is decided (and
+    SIGNALED) at construction (`make_default_backend`), so an opted-in-but-
+    unavailable sandbox warns/fails-closed there instead of silently reading as
+    `noop` here (review #2)."""
     explicit = os.environ.get("ADK_CC_SANDBOX_BACKEND")
     if explicit:
         return explicit.lower()
-    if is_desktop() and sandbox_mode() == "container" and container_runtime_available():
+    if is_desktop() and sandbox_mode() == "container":
         return "container"
     return "noop"
 
