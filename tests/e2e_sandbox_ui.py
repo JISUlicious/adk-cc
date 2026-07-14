@@ -114,11 +114,20 @@ def main() -> int:
                   requests.get(BASE + "/desktop/settings/sandbox", timeout=5).json()["mode"] == "container")
             page.screenshot(path=f"{SHOT_DIR}/sandbox_settings_on.png")
 
-            # flip back off → controls hide, mode reverts
-            page.get_by_role("switch").first.click()
-            page.wait_for_selector("text=Allow network", state="detached", timeout=10000)
-            check("toggling off reverts to host",
-                  requests.get(BASE + "/desktop/settings/sandbox", timeout=5).json()["mode"] == "host")
+            # composer indicator (item 2): with container mode on, a fresh chat
+            # view shows the "Sandboxed" badge (the badge fetches on mount).
+            page.keyboard.press("Escape")  # close settings
+            page.reload(wait_until="networkidle")
+            page.wait_for_selector("text=Sandboxed", timeout=10000)
+            check("composer shows the Sandboxed badge when container mode is on",
+                  page.get_by_text("Sandboxed").count() > 0)
+            page.screenshot(path=f"{SHOT_DIR}/sandbox_badge.png")
+
+            # flip back off → the badge disappears
+            requests.put(BASE + "/desktop/settings/sandbox", json={"mode": "host"}, timeout=5)
+            page.reload(wait_until="networkidle")
+            page.wait_for_timeout(1200)
+            check("badge disappears in host mode", page.get_by_text("Sandboxed").count() == 0)
             browser.close()
     finally:
         proc.terminate()

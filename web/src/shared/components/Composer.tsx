@@ -1,6 +1,7 @@
 import { useRef, useState, useMemo, type KeyboardEvent, type ReactNode } from "react"
 import { Send, Square, ClipboardList } from "lucide-react"
 import { Button } from "./ui/button"
+import { SandboxBadge } from "./SandboxBadge"
 import { cn } from "@/shared/lib/utils"
 import {
   SlashCommandMenu,
@@ -171,7 +172,10 @@ export function Composer({
                 until you exit plan mode.
               </span>
             </div>
-            {footer && <div className="adk-gauge-slot ml-auto shrink-0">{footer}</div>}
+            <div className="ml-auto flex items-center gap-2 shrink-0">
+              <SandboxBadge />
+              {footer && <div className="adk-gauge-slot">{footer}</div>}
+            </div>
           </div>
           <div className="flex items-end gap-2">
         <textarea

@@ -136,6 +136,16 @@ def mount_desktop_routes(app) -> None:
         from .desktop_workspace import remove_worktree
 
         remove_worktree(project_id, session_id)
+        # Also reap the session's sandbox container (deterministic teardown for
+        # the container backend; no-op for host exec). Off the loop; best-effort.
+        try:
+            import asyncio as _asyncio
+
+            from ..sandbox.backends.local_container_backend import remove_session_container
+
+            await _asyncio.to_thread(remove_session_container, session_id)
+        except Exception:  # noqa: BLE001 — never block a delete on cleanup
+            pass
         return {"status": "removed"}
 
     def _project_root(project_id: str) -> str:

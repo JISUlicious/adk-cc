@@ -19,10 +19,11 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from ..config import ExecResult, FsWriteConfig, NetworkConfig
+from ..config import ExecChunk, ExecResult, FsWriteConfig, NetworkConfig
 from .container_runtime import Runtime, detect_runtime
 from .noop_backend import NoopBackend
 
@@ -30,6 +31,11 @@ if TYPE_CHECKING:
     from ..workspace import WorkspaceRoot
 
 _DEFAULT_IMAGE = "python:3.12-slim"
+
+# Last-active (monotonic) per container NAME, for the opt-in idle reaper. Module
+# state so it survives the per-turn rebuild of the backend object.
+_LAST_ACTIVE: dict[str, float] = {}
+_last_reap: float = 0.0
 # HOME must be writable for an arbitrary uid (pip/npm caches, `bash -l`); /tmp is
 # a tmpfs mount so it always is. Ephemeral — gone when the container is removed.
 _CONTAINER_HOME = "/tmp/adk-home"
@@ -191,12 +197,15 @@ class LocalContainerBackend(NoopBackend):
 
     async def _ensure_container(self) -> None:
         desired = self._mount_signature()
+        _LAST_ACTIVE[self._name] = time.monotonic()  # touch: this session is active
         if self._started and self._active_sig == desired:
             return
         async with self._lock:
             if self._started and self._active_sig == desired:
                 return
             await asyncio.to_thread(self._ensure_container_sync)
+            # Opportunistically reap OTHER sessions' idle containers (opt-in).
+            await asyncio.to_thread(_maybe_reap_idle, self._runtime)
 
     # --- exec ------------------------------------------------------------
 
@@ -269,6 +278,93 @@ class LocalContainerBackend(NoopBackend):
 
         return await asyncio.to_thread(_run)
 
+    def _exec_argv(self, cmd: str, timeout_s: int, cwd: str, runtime_env: dict) -> tuple[list, dict, int]:
+        rt = self._cli()
+        env_flags: list[str] = []
+        for k in runtime_env:
+            env_flags += ["-e", k]  # forward VALUE by name via the CLI subprocess env
+        subproc_env = {**os.environ, **runtime_env}
+        workdir = (os.path.realpath(cwd) if cwd else None) or self._workspace_abs or "/"
+        n = int(timeout_s)
+        inner = ["timeout", "-k", "5", str(n), "bash", "-lc", cmd]
+        return [rt.cli_path, "exec", "-w", workdir, *env_flags, self._name, *inner], subproc_env, n
+
+    async def exec_stream(self, cmd, *, fs_write, network, timeout_s, cwd):  # noqa: ANN001
+        """Stream stdout/stderr chunks live, ending with one `result` chunk.
+        The in-container `timeout -k 5` bounds the run; an outer deadline guards a
+        wedged `<rt> exec`."""
+        try:
+            await self._ensure_container()
+        except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+            msg = str(e) if isinstance(e, RuntimeError) else f"sandbox unavailable: {type(e).__name__}: {e}"
+            yield ExecChunk(kind="result", result=ExecResult(exit_code=-1, stdout="", stderr=msg))
+            return
+
+        runtime_env = await self._runtime_env()
+        args, subproc_env, n = self._exec_argv(cmd, timeout_s, cwd, runtime_env)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args, env=subproc_env,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        except OSError as e:
+            yield ExecChunk(kind="result", result=ExecResult(exit_code=-1, stdout="",
+                            stderr=f"{type(e).__name__}: {e}"))
+            return
+
+        out_buf: list[str] = []
+        err_buf: list[str] = []
+        q: asyncio.Queue = asyncio.Queue()
+
+        async def _reader(stream, kind: str, buf: list) -> None:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                s = line.decode("utf-8", "replace")
+                buf.append(s)
+                await q.put((kind, s))
+            await q.put((kind, None))  # done sentinel
+
+        tasks = [asyncio.create_task(_reader(proc.stdout, "stdout", out_buf)),
+                 asyncio.create_task(_reader(proc.stderr, "stderr", err_buf))]
+        deadline = asyncio.get_event_loop().time() + n + 15
+        killed = False
+        done = 0
+        try:
+            while done < 2:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    killed = True
+                    break
+                try:
+                    kind, data = await asyncio.wait_for(q.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    killed = True
+                    break
+                if data is None:
+                    done += 1
+                    continue
+                yield ExecChunk(kind=kind, data=data)
+        finally:
+            for t in tasks:
+                t.cancel()
+            if killed:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+        try:
+            rc = await asyncio.wait_for(proc.wait(), timeout=5)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            rc = -1
+        timed = killed or rc == 124
+        stderr = "".join(err_buf)
+        if timed:
+            stderr = (stderr + f"\n[timed out after {n}s]").lstrip("\n")
+        yield ExecChunk(kind="result", result=ExecResult(
+            exit_code=rc if rc is not None else -1,
+            stdout="".join(out_buf), stderr=stderr, timed_out=timed))
+
     async def close(self) -> None:
         """Per-TURN no-op. TenancyPlugin.after_run_callback calls close() after
         every message, but the container is per-SESSION: removing it here would
@@ -309,6 +405,66 @@ class UnavailableSandboxBackend(NoopBackend):
 
     async def exec(self, cmd, *, fs_write, network, timeout_s, cwd) -> ExecResult:  # noqa: ANN001
         return ExecResult(exit_code=-1, stdout="", stderr=self._reason)
+
+
+def remove_session_container(session_id: str, runtime: Optional[Runtime] = None) -> None:
+    """Deterministic teardown for ONE session's container — wired into the desktop
+    delete-session hook. Best-effort; no-op without a runtime or container."""
+    rt = runtime or detect_runtime()
+    if rt is None:
+        return
+    name = _safe_name(session_id)
+    _LAST_ACTIVE.pop(name, None)
+    try:
+        subprocess.run([rt.cli_path, "rm", "-f", name], capture_output=True, text=True, timeout=30)
+    except Exception:  # noqa: BLE001 — best-effort
+        pass
+
+
+def reap_idle(ttl_s: int, runtime: Optional[Runtime] = None) -> int:
+    """Remove containers whose session hasn't run a command in `ttl_s` seconds.
+    Only touches containers this process has seen (in `_LAST_ACTIVE`), so it never
+    reaps a container mid-creation or one it can't reason about. Returns the count."""
+    rt = runtime or detect_runtime()
+    if rt is None or ttl_s <= 0:
+        return 0
+    now = time.monotonic()
+    try:
+        ls = subprocess.run(
+            [rt.cli_path, "ps", "--filter", "label=adk-cc-session", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=30)
+        names = [n for n in (ls.stdout or "").split() if n]
+    except Exception:  # noqa: BLE001
+        return 0
+    reaped = 0
+    for name in names:
+        last = _LAST_ACTIVE.get(name)
+        if last is not None and (now - last) > ttl_s:
+            try:
+                subprocess.run([rt.cli_path, "rm", "-f", name], capture_output=True, text=True, timeout=30)
+                _LAST_ACTIVE.pop(name, None)
+                reaped += 1
+            except Exception:  # noqa: BLE001
+                pass
+    return reaped
+
+
+def _maybe_reap_idle(runtime: Optional[Runtime]) -> None:
+    """Throttled (≤ once/min) idle reap. Opt-in: `ADK_CC_SANDBOX_IDLE_TTL_S` (0 =
+    off, the default — long-running bg processes are kept until the session is
+    deleted or the app restarts)."""
+    global _last_reap
+    try:
+        ttl = int(os.environ.get("ADK_CC_SANDBOX_IDLE_TTL_S", "0") or "0")
+    except ValueError:
+        ttl = 0
+    if ttl <= 0:
+        return
+    now = time.monotonic()
+    if now - _last_reap < 60:
+        return
+    _last_reap = now
+    reap_idle(ttl, runtime)
 
 
 def sweep_orphans(runtime: Optional[Runtime] = None) -> int:
