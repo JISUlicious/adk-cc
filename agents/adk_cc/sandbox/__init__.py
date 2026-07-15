@@ -32,6 +32,7 @@ from .config import (
     FsReadConfig,
     FsWriteConfig,
     NetworkConfig,
+    SandboxCapacityError,
     SandboxViolation,
 )
 from .workspace import (
@@ -215,6 +216,7 @@ __all__ = [
     "FsWriteConfig",
     "NetworkConfig",
     "SandboxViolation",
+    "SandboxCapacityError",
     "WorkspaceRoot",
     "default_workspace",
     "get_workspace",

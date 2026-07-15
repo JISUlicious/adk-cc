@@ -81,3 +81,23 @@ class SandboxViolation(Exception):
     Tools catch this and surface a structured error to the LLM rather than
     crashing.
     """
+
+
+class SandboxCapacityError(SandboxViolation):
+    """Transient backpressure from the sandbox backend — the operation
+    hit a capacity limit or rate limit and should be *retried after a
+    backoff*, not surfaced as a permanent failure.
+
+    Subclasses SandboxViolation so a handler that only knows the broad
+    type still catches it as a last resort (e.g. after a backend's own
+    bounded retry is exhausted), while a backend that knows how to wait
+    can catch this narrower type and back off.
+
+    `retry_after` is the server-suggested minimum wait in seconds
+    (parsed from a `Retry-After` / `X-RateLimit-Reset` header) when the
+    response carried one, else None.
+    """
+
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after

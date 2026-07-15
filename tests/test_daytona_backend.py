@@ -19,7 +19,10 @@ Coverage:
   - Idempotency-Key on every mutating control-plane call; absent
     on toolbox-proxy calls
   - Error normalizer: 401→SandboxViolation, 403→SandboxViolation,
-    404 on file read→FileNotFoundError, 429→SandboxViolation
+    404 on file read→FileNotFoundError; transient backpressure
+    (429, 5xx, 400 "No available runners") → SandboxCapacityError,
+    which the create path retries with bounded exponential backoff
+    (honoring Retry-After) while a permanent 400 (bad snapshot) fast-fails
   - Allow-path enforcement raises SandboxViolation BEFORE HTTP
   - exec transport / 4xx errors return ExecResult(-1, stderr=...)
     rather than raising
@@ -107,6 +110,35 @@ def _is_api(request: httpx.Request) -> bool:
 
 def _is_proxy(request: httpx.Request) -> bool:
     return request.url.host == "proxy.test"
+
+
+import contextlib
+
+
+@contextlib.contextmanager
+def _no_real_sleep():
+    """Replace `asyncio.sleep` with an instant no-op that records the
+    requested durations, so the create-backoff tests assert the backoff
+    schedule without actually waiting. Restored on exit."""
+    slept: list[float] = []
+    orig = asyncio.sleep
+
+    async def fake(delay, *a, **k):  # noqa: ANN001 - test shim
+        slept.append(delay)
+
+    asyncio.sleep = fake  # type: ignore[assignment]
+    try:
+        yield slept
+    finally:
+        asyncio.sleep = orig  # type: ignore[assignment]
+
+
+def _n_create_posts(rec: _Recorder) -> int:
+    return sum(
+        1
+        for r in rec.requests
+        if r.method == "POST" and r.url.path == "/api/sandbox"
+    )
 
 
 # === Tests ===
@@ -434,23 +466,154 @@ async def test_auth_failure_raises_sandbox_violation():
     raise AssertionError("expected SandboxViolation on 401")
 
 
-async def test_429_raises_sandbox_violation():
-    """429 → SandboxViolation('quota exhausted')."""
-    from adk_cc.sandbox.config import SandboxViolation
+async def test_429_exhausts_backoff_then_raises_capacity_error():
+    """A PERSISTENT 429 is transient backpressure: the create path retries
+    with backoff up to `create_max_attempts`, then raises
+    SandboxCapacityError (still a SandboxViolation for legacy handlers)."""
+    from adk_cc.sandbox.config import SandboxCapacityError, SandboxViolation
 
     async def respond(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, json={"message": "Too Many Requests"})
 
     rec = _Recorder(respond)
+    backend = _make_backend(rec, create_max_attempts=3)
+    ws = _make_workspace()
+    with _no_real_sleep() as slept:
+        try:
+            await backend.ensure_workspace(ws)
+        except SandboxCapacityError as e:
+            assert isinstance(e, SandboxViolation)  # legacy catch still works
+            assert "rate limited" in str(e).lower()
+            # 3 attempts → 3 POSTs, 2 backoff sleeps between them.
+            assert _n_create_posts(rec) == 3, _n_create_posts(rec)
+            assert len(slept) == 2, slept
+            print("OK 429_exhausts_backoff_then_raises_capacity_error")
+            return
+    raise AssertionError("expected SandboxCapacityError after retries on 429")
+
+
+async def test_create_backoff_on_429_then_success():
+    """429 once, then 200 → the create path backs off and succeeds; the
+    session is brought up without surfacing an error."""
+    calls = {"n": 0}
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/api/sandbox":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(429, json={"message": "slow down"})
+            return httpx.Response(200, json={"id": "sbx-001", "state": "started"})
+        if request.method == "GET" and path == "/api/sandbox/sbx-001":
+            return httpx.Response(200, json={"id": "sbx-001", "state": "started"})
+        return httpx.Response(404, json={"message": f"unexpected {path}"})
+
+    rec = _Recorder(respond)
     backend = _make_backend(rec)
     ws = _make_workspace()
-    try:
+    with _no_real_sleep() as slept:
         await backend.ensure_workspace(ws)
-    except SandboxViolation as e:
-        assert "quota" in str(e).lower()
-        print("OK 429_raises_sandbox_violation")
-        return
-    raise AssertionError("expected SandboxViolation on 429")
+    assert backend._sandbox_id == "sbx-001"
+    assert _n_create_posts(rec) == 2, _n_create_posts(rec)
+    assert len(slept) == 1, slept  # exactly one backoff before the retry
+    print("OK create_backoff_on_429_then_success")
+
+
+async def test_create_backoff_on_no_available_runners_then_success():
+    """400 'No available runners' is Daytona CAPACITY backpressure (no
+    server-side queue for snapshot creates) → retryable; a later 200
+    succeeds."""
+    calls = {"n": 0}
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/api/sandbox":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(
+                    400, json={"message": "No available runners"}
+                )
+            return httpx.Response(200, json={"id": "sbx-001", "state": "started"})
+        if request.method == "GET" and path == "/api/sandbox/sbx-001":
+            return httpx.Response(200, json={"id": "sbx-001", "state": "started"})
+        return httpx.Response(404, json={"message": f"unexpected {path}"})
+
+    rec = _Recorder(respond)
+    backend = _make_backend(rec)
+    ws = _make_workspace()
+    with _no_real_sleep() as slept:
+        await backend.ensure_workspace(ws)
+    assert backend._sandbox_id == "sbx-001"
+    assert _n_create_posts(rec) == 2, _n_create_posts(rec)
+    assert len(slept) == 1, slept
+    print("OK create_backoff_on_no_available_runners_then_success")
+
+
+async def test_create_permanent_400_fast_fails_no_retry():
+    """A permanent 400 (bad snapshot name) is NOT retried — it raises
+    SandboxViolation immediately, with no backoff sleep and a single POST.
+
+    This is the load-bearing distinction: capacity 400s retry, everything
+    else fast-fails."""
+    from adk_cc.sandbox.config import SandboxCapacityError, SandboxViolation
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/api/sandbox":
+            return httpx.Response(
+                400, json={"message": "Snapshot bad-snap:latest not found"}
+            )
+        return httpx.Response(404, json={"message": f"unexpected {path}"})
+
+    rec = _Recorder(respond)
+    backend = _make_backend(rec)
+    ws = _make_workspace()
+    with _no_real_sleep() as slept:
+        try:
+            await backend.ensure_workspace(ws)
+        except SandboxViolation as e:
+            assert not isinstance(e, SandboxCapacityError), (
+                "a bad-snapshot 400 must be permanent, not a capacity error"
+            )
+            assert "not found" in str(e).lower()
+            assert _n_create_posts(rec) == 1, _n_create_posts(rec)
+            assert slept == [], slept  # never backed off
+            print("OK create_permanent_400_fast_fails_no_retry")
+            return
+    raise AssertionError("expected immediate SandboxViolation on permanent 400")
+
+
+async def test_create_backoff_honors_retry_after_header():
+    """A 429 carrying `Retry-After` makes the backoff wait AT LEAST that
+    long (plus small jitter), rather than the shorter exponential base."""
+    calls = {"n": 0}
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/api/sandbox":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(
+                    429,
+                    json={"message": "slow down"},
+                    headers={"Retry-After": "3"},
+                )
+            return httpx.Response(200, json={"id": "sbx-001", "state": "started"})
+        if request.method == "GET" and path == "/api/sandbox/sbx-001":
+            return httpx.Response(200, json={"id": "sbx-001", "state": "started"})
+        return httpx.Response(404, json={"message": f"unexpected {path}"})
+
+    rec = _Recorder(respond)
+    # Give a generous total-wait so honoring a 3s Retry-After doesn't
+    # trip the deadline and abort the retry.
+    backend = _make_backend(rec, create_total_wait_s=60.0)
+    ws = _make_workspace()
+    with _no_real_sleep() as slept:
+        await backend.ensure_workspace(ws)
+    assert backend._sandbox_id == "sbx-001"
+    assert len(slept) == 1, slept
+    assert slept[0] >= 3.0, f"expected Retry-After (3s) honored, slept {slept[0]}"
+    print("OK create_backoff_honors_retry_after_header")
 
 
 async def test_terminal_failure_state_raises():
@@ -790,7 +953,11 @@ def main():
         test_write_text_multipart_path_query_file_form,
         test_create_body_elides_resource_fields,
         test_auth_failure_raises_sandbox_violation,
-        test_429_raises_sandbox_violation,
+        test_429_exhausts_backoff_then_raises_capacity_error,
+        test_create_backoff_on_429_then_success,
+        test_create_backoff_on_no_available_runners_then_success,
+        test_create_permanent_400_fast_fails_no_retry,
+        test_create_backoff_honors_retry_after_header,
         test_terminal_failure_state_raises,
         test_allow_path_enforced_before_http,
         test_close_posts_stop_by_default,

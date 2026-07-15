@@ -94,6 +94,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import shlex
 import threading
 import time
@@ -109,6 +110,7 @@ from ..config import (
     FsReadConfig,
     FsWriteConfig,
     NetworkConfig,
+    SandboxCapacityError,
     SandboxViolation,
 )
 from .base import SandboxBackend
@@ -131,6 +133,56 @@ _DEFAULT_PROXY_PORT = 4000
 _TERMINAL_FAILURE_STATES = frozenset(
     {"error", "build_failed", "destroyed", "deleting"}
 )
+
+# Substrings that mark a 400 as *capacity backpressure* (retryable)
+# rather than a permanent caller mistake. Daytona's control plane 400s a
+# snapshot create with `BadRequestError('No available runners')` when
+# every runner in the region is exhausted or below the availability
+# score threshold (there is no server-side queue for snapshot creates —
+# only builds queue). Kept narrow so a genuinely permanent 400 (bad
+# snapshot name, invalid request) still fast-fails.
+_CAPACITY_400_MARKERS = ("no available runners",)
+
+
+def _is_capacity_400(message: str) -> bool:
+    """True when a 400 body message denotes transient runner exhaustion."""
+    low = message.lower()
+    return any(marker in low for marker in _CAPACITY_400_MARKERS)
+
+
+def _parse_retry_after(response: httpx.Response) -> float | None:
+    """Server-suggested wait (seconds) from a rate-limit response, or None.
+
+    Honors `Retry-After` (delta-seconds form; HTTP-date form is ignored
+    — we fall back to our own backoff) and Daytona/gateway-style
+    `X-RateLimit-Reset` / `RateLimit-Reset` (interpreted as an absolute
+    epoch-seconds instant if it's in the future, otherwise as a relative
+    delta). Never returns a negative value.
+    """
+    headers = response.headers
+    retry_after = headers.get("retry-after")
+    if retry_after:
+        try:
+            return max(0.0, float(retry_after.strip()))
+        except ValueError:
+            # HTTP-date form — not worth a full date parse here; let the
+            # caller's exponential backoff take over.
+            pass
+    for key in ("x-ratelimit-reset", "ratelimit-reset"):
+        raw = headers.get(key)
+        if not raw:
+            continue
+        try:
+            reset = float(raw.strip())
+        except ValueError:
+            continue
+        # A value well above "now" is an absolute epoch instant; a small
+        # one is a relative delta. time.time() is only used to tell the
+        # two apart and to convert an absolute instant to a delta.
+        now = time.time()
+        delta = reset - now if reset > now + 1 else reset
+        return max(0.0, delta)
+    return None
 
 
 def _derive_proxy_url(api_url: str) -> str:
@@ -174,6 +226,10 @@ class DaytonaBackend(SandboxBackend):
         delete_on_close: bool = False,
         start_timeout_s: float = 120.0,
         request_timeout_s: float = 30.0,
+        create_max_attempts: int = 6,
+        create_backoff_base_s: float = 0.5,
+        create_backoff_cap_s: float = 8.0,
+        create_total_wait_s: float = 45.0,
         verify_ssl: bool = True,
         ca_bundle: Optional[str] = None,
         client: Optional[httpx.AsyncClient] = None,
@@ -198,6 +254,16 @@ class DaytonaBackend(SandboxBackend):
         self._delete_on_close = bool(delete_on_close)
         self._start_timeout_s = float(start_timeout_s)
         self._request_timeout_s = float(request_timeout_s)
+        # Backoff policy for `POST /api/sandbox` under Daytona capacity
+        # backpressure (400 "No available runners" — no server-side queue
+        # for snapshot creates) and rate limits (429) / server errors
+        # (5xx). Bounded so a session bring-up never blocks a tool call
+        # indefinitely; the tenancy plugin retries on the next tool call
+        # once these are exhausted.
+        self._create_max_attempts = max(1, int(create_max_attempts))
+        self._create_backoff_base_s = max(0.0, float(create_backoff_base_s))
+        self._create_backoff_cap_s = max(0.0, float(create_backoff_cap_s))
+        self._create_total_wait_s = max(0.0, float(create_total_wait_s))
         # TLS verify policy. `verify=True` uses certifi (production
         # default); a CA bundle path lets operators trust a private CA;
         # `verify=False` disables verification entirely (dev/test only
@@ -337,9 +403,18 @@ class DaytonaBackend(SandboxBackend):
         """Map a Daytona error response to our exception model.
 
         Daytona returns errors as `{path, timestamp, statusCode, error,
-        message}`. Caller-fixable mistakes raise SandboxViolation;
-        transport / 5xx errors re-raise httpx.HTTPStatusError so the
-        callsite can apply its own retry. No-op on 2xx.
+        message}`. Two flavors:
+
+          - **Permanent** caller mistakes (401/403/404, and most 400s
+            like a bad snapshot name) raise `SandboxViolation` — no
+            retry would help.
+          - **Transient** backpressure raises `SandboxCapacityError`
+            (a SandboxViolation subclass): 429 rate limits, 5xx server
+            errors, and the specific 400 "No available runners" capacity
+            signal. The create path backs off and retries these; other
+            callsites still see them as a SandboxViolation.
+
+        No-op on 2xx.
         """
         if response.status_code < 400:
             return
@@ -356,11 +431,20 @@ class DaytonaBackend(SandboxBackend):
         if code == 404:
             raise SandboxViolation(f"daytona not found during {op}: {msg}")
         if code == 429:
-            raise SandboxViolation(f"daytona quota exhausted during {op}: {msg}")
+            raise SandboxCapacityError(
+                f"daytona rate limited during {op}: {msg}",
+                retry_after=_parse_retry_after(response),
+            )
         if 500 <= code < 600:
-            # Bubble 5xx as a normal httpx error so callsites can retry.
-            response.raise_for_status()
-            return
+            raise SandboxCapacityError(
+                f"daytona server error {code} during {op}: {msg}",
+                retry_after=_parse_retry_after(response),
+            )
+        if code == 400 and _is_capacity_400(msg):
+            raise SandboxCapacityError(
+                f"daytona at capacity during {op}: {msg}",
+                retry_after=_parse_retry_after(response),
+            )
         raise SandboxViolation(f"daytona {code} during {op}: {msg}")
 
     def _check_allowed(
@@ -423,59 +507,136 @@ class DaytonaBackend(SandboxBackend):
                     getattr(self, "_env_user_id", ""),
                     sorted(resolved_env),  # names only
                 )
-            async with self._client() as client:
-                resp = await client.post(
-                    self._api_url("/api/sandbox"),
-                    json=payload,
-                    headers={"Idempotency-Key": self._idem_key()},
-                )
-                if resp.status_code == 409:
-                    # A sandbox with this name already exists — typical
-                    # case is a server restart where Daytona kept the
-                    # sandbox alive (autodelete hasn't fired) but our
-                    # in-process `_sandbox_id` was reset. Adopt the
-                    # existing one instead of failing the session.
-                    sandbox_id = await self._find_sandbox_id_by_name(
-                        client, payload["name"]
-                    )
-                    if not sandbox_id:
-                        # The name conflict resolved nothing — surface
-                        # the original 409 with its body.
-                        self._normalize_error(resp, op="create_sandbox")
-                    log.info(
-                        "daytona: adopted existing sandbox %s for adk-cc "
-                        "session %s (tenant=%s) after 409",
-                        sandbox_id,
-                        self._session_id,
-                        self._tenant_id,
-                    )
-                    # The sandbox might be stopped (autostop fired). Best-
-                    # effort wake it; ignore errors so an already-running
-                    # one passes through.
-                    await self._wake_if_stopped(client, sandbox_id)
+            # One idempotency key for the WHOLE logical create — reused
+            # across backoff retries. If a transient 5xx drops the
+            # response after Daytona actually created the sandbox, the
+            # next attempt's POST dedupes server-side instead of spawning
+            # a duplicate (and the 409-adopt path is the belt to that
+            # suspenders when the key path doesn't dedupe).
+            idem_key = self._idem_key()
+            self._sandbox_id = await self._create_with_backoff(payload, idem_key)
+
+    async def _create_with_backoff(
+        self, payload: dict[str, Any], idem_key: str
+    ) -> str:
+        """Run `_attempt_create` under bounded exponential backoff.
+
+        Retries ONLY `SandboxCapacityError` — Daytona capacity
+        backpressure (400 "No available runners"), rate limits (429,
+        honoring `Retry-After`/`X-RateLimit-Reset`), and 5xx. A permanent
+        `SandboxViolation` (bad snapshot, auth, terminal build state) or
+        any other error propagates immediately.
+
+        Bounded by both `_create_max_attempts` and a `_create_total_wait_s`
+        wall-clock deadline so a bring-up never blocks a tool call
+        indefinitely; the tenancy plugin retries on the next tool call
+        once we give up.
+        """
+        deadline = time.monotonic() + self._create_total_wait_s
+        for attempt in range(1, self._create_max_attempts + 1):
+            try:
+                return await self._attempt_create(payload, idem_key)
+            except SandboxCapacityError as e:
+                if e.retry_after is not None:
+                    # Honor the server's directive (small jitter to
+                    # de-synchronize a thundering herd of sessions).
+                    wait = e.retry_after + random.uniform(0.0, 0.5)
                 else:
-                    self._normalize_error(resp, op="create_sandbox")
-                    body = resp.json()
-                    sandbox_id = body.get("id")
-                    if not sandbox_id:
-                        raise RuntimeError(
-                            f"daytona: create_sandbox response missing `id`: {body!r}"
-                        )
-                    log.info(
-                        "daytona: created sandbox %s for adk-cc session %s "
-                        "(tenant=%s, snapshot=%s, state=%s)",
-                        sandbox_id,
-                        self._session_id,
-                        self._tenant_id,
-                        body.get("snapshot"),
-                        body.get("state"),
+                    peak = min(
+                        self._create_backoff_cap_s,
+                        self._create_backoff_base_s * (2 ** (attempt - 1)),
                     )
-                # Poll the same client (avoid reopening the connection).
-                await self._poll_until_started(client, sandbox_id)
-                # Best-effort: make sure the in-sandbox workspace dir
-                # exists and is writable before any file op targets it.
-                await self._ensure_workspace_dir(client, sandbox_id)
-            self._sandbox_id = sandbox_id
+                    # Equal jitter: half the peak plus a random half.
+                    wait = peak / 2 + random.uniform(0.0, peak / 2)
+                if attempt >= self._create_max_attempts or (
+                    time.monotonic() + wait > deadline
+                ):
+                    log.warning(
+                        "daytona: sandbox create for session %s still under "
+                        "backpressure after %d attempt(s) (%s) — giving up; "
+                        "tenancy retries on the next tool call",
+                        self._session_id,
+                        attempt,
+                        e,
+                    )
+                    raise
+                log.info(
+                    "daytona: sandbox create backpressure for session %s "
+                    "(attempt %d/%d): %s — backing off %.1fs",
+                    self._session_id,
+                    attempt,
+                    self._create_max_attempts,
+                    e,
+                    wait,
+                )
+                await asyncio.sleep(wait)
+        # The loop body always returns or raises; this only satisfies the
+        # type checker that the method returns a str on every path.
+        raise RuntimeError("daytona: create backoff loop exited unexpectedly")
+
+    async def _attempt_create(
+        self, payload: dict[str, Any], idem_key: str
+    ) -> str:
+        """A single create + poll-until-started attempt; returns the id.
+
+        Opens a fresh client per attempt (a 5xx/timeout may have left the
+        previous connection unusable). Raises `SandboxCapacityError` on
+        transient backpressure so `_create_with_backoff` retries; other
+        failures are permanent.
+        """
+        async with self._client() as client:
+            resp = await client.post(
+                self._api_url("/api/sandbox"),
+                json=payload,
+                headers={"Idempotency-Key": idem_key},
+            )
+            if resp.status_code == 409:
+                # A sandbox with this name already exists — typical
+                # case is a server restart where Daytona kept the
+                # sandbox alive (autodelete hasn't fired) but our
+                # in-process `_sandbox_id` was reset. Adopt the
+                # existing one instead of failing the session.
+                sandbox_id = await self._find_sandbox_id_by_name(
+                    client, payload["name"]
+                )
+                if not sandbox_id:
+                    # The name conflict resolved nothing — surface
+                    # the original 409 with its body.
+                    self._normalize_error(resp, op="create_sandbox")
+                log.info(
+                    "daytona: adopted existing sandbox %s for adk-cc "
+                    "session %s (tenant=%s) after 409",
+                    sandbox_id,
+                    self._session_id,
+                    self._tenant_id,
+                )
+                # The sandbox might be stopped (autostop fired). Best-
+                # effort wake it; ignore errors so an already-running
+                # one passes through.
+                await self._wake_if_stopped(client, sandbox_id)
+            else:
+                self._normalize_error(resp, op="create_sandbox")
+                body = resp.json()
+                sandbox_id = body.get("id")
+                if not sandbox_id:
+                    raise RuntimeError(
+                        f"daytona: create_sandbox response missing `id`: {body!r}"
+                    )
+                log.info(
+                    "daytona: created sandbox %s for adk-cc session %s "
+                    "(tenant=%s, snapshot=%s, state=%s)",
+                    sandbox_id,
+                    self._session_id,
+                    self._tenant_id,
+                    body.get("snapshot"),
+                    body.get("state"),
+                )
+            # Poll the same client (avoid reopening the connection).
+            await self._poll_until_started(client, sandbox_id)
+            # Best-effort: make sure the in-sandbox workspace dir
+            # exists and is writable before any file op targets it.
+            await self._ensure_workspace_dir(client, sandbox_id)
+        return sandbox_id
 
     async def _ensure_workspace_dir(
         self, client: httpx.AsyncClient, sandbox_id: str
@@ -870,6 +1031,14 @@ def make_daytona_backend_from_env(
       - ADK_CC_DAYTONA_DELETE_ON_CLOSE    — "1" to DELETE instead of stop.
       - ADK_CC_DAYTONA_START_TIMEOUT_S    — default 120.
       - ADK_CC_DAYTONA_REQUEST_TIMEOUT_S  — default 30.
+      - ADK_CC_DAYTONA_CREATE_MAX_ATTEMPTS   — create backoff attempt
+                                            cap under Daytona capacity /
+                                            rate-limit backpressure;
+                                            default 6.
+      - ADK_CC_DAYTONA_CREATE_BACKOFF_BASE_S — initial backoff; default 0.5.
+      - ADK_CC_DAYTONA_CREATE_BACKOFF_CAP_S  — per-sleep cap; default 8.
+      - ADK_CC_DAYTONA_CREATE_TOTAL_WAIT_S   — total wall-clock cap across
+                                            all create retries; default 45.
 
     Sandbox environment (backend-agnostic; see sandbox/sandbox_env.py).
     These bake env vars / per-tenant secrets into the sandbox at create
@@ -951,6 +1120,16 @@ def make_daytona_backend_from_env(
         delete_on_close=os.environ.get("ADK_CC_DAYTONA_DELETE_ON_CLOSE") == "1",
         start_timeout_s=_float_env("ADK_CC_DAYTONA_START_TIMEOUT_S", 120.0),
         request_timeout_s=_float_env("ADK_CC_DAYTONA_REQUEST_TIMEOUT_S", 30.0),
+        create_max_attempts=_int_env("ADK_CC_DAYTONA_CREATE_MAX_ATTEMPTS", 6),
+        create_backoff_base_s=_float_env(
+            "ADK_CC_DAYTONA_CREATE_BACKOFF_BASE_S", 0.5
+        ),
+        create_backoff_cap_s=_float_env(
+            "ADK_CC_DAYTONA_CREATE_BACKOFF_CAP_S", 8.0
+        ),
+        create_total_wait_s=_float_env(
+            "ADK_CC_DAYTONA_CREATE_TOTAL_WAIT_S", 45.0
+        ),
         # TLS: default verify=True (certifi). For a private CA, point
         # ADK_CC_DAYTONA_CA_BUNDLE at the PEM. For a self-signed
         # dev/test Daytona, ADK_CC_DAYTONA_VERIFY_SSL=0 disables verify
