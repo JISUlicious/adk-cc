@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   ArrowLeft,
   Braces,
@@ -15,10 +15,12 @@ import {
   Undo2,
 } from "lucide-react"
 import {
+  getFileStatus,
   listDir,
   readFile,
   type DirEntry,
   type FileContent,
+  type FileStatus,
 } from "@/shared/api/desktop-files"
 import {
   listCheckpoints,
@@ -46,6 +48,29 @@ function join(parent: string, name: string): string {
   return parent ? `${parent}/${name}` : name
 }
 
+// Git-style change markers: a single letter + color per status, mirroring how
+// editors annotate uncommitted files. Text color also tints the filename.
+const STATUS_META: Record<FileStatus, { letter: string; label: string; className: string }> = {
+  new: { letter: "A", label: "Created", className: "text-emerald-600 dark:text-emerald-400" },
+  modified: { letter: "M", label: "Modified", className: "text-amber-600 dark:text-amber-400" },
+  renamed: { letter: "R", label: "Renamed", className: "text-sky-600 dark:text-sky-400" },
+  deleted: { letter: "D", label: "Deleted", className: "text-rose-600 dark:text-rose-400" },
+}
+
+/** The single-letter badge shown at the right edge of a changed file row. */
+function StatusBadge({ status }: { status: FileStatus }) {
+  const m = STATUS_META[status]
+  return (
+    <span
+      className={cn("ml-1 w-3 shrink-0 text-center text-[10px] font-bold leading-none", m.className)}
+      title={m.label}
+      aria-label={m.label}
+    >
+      {m.letter}
+    </span>
+  )
+}
+
 
 export function FileTreeSidePanel({
   userId: projectId,
@@ -57,6 +82,8 @@ export function FileTreeSidePanel({
 }: RightPanelProps) {
   // Loaded directory listings, keyed by relative path ("" = root).
   const [dirs, setDirs] = useState<Record<string, DirEntry[]>>({})
+  // Git working-tree status per changed file (workspace-relative path → status).
+  const [statuses, setStatuses] = useState<Record<string, FileStatus>>({})
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [rootExists, setRootExists] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -77,6 +104,19 @@ export function FileTreeSidePanel({
     [projectId, sessionId],
   )
 
+  // Refresh the whole-workspace git status map (change markers). Best-effort:
+  // the route only exists in desktop mode and returns empty for a non-repo, so
+  // any failure just clears the markers rather than surfacing an error.
+  const loadStatus = useCallback(async () => {
+    if (!projectId || !sessionId) return
+    try {
+      const res = await getFileStatus(projectId, sessionId)
+      setStatuses(res.statuses)
+    } catch {
+      setStatuses({})
+    }
+  }, [projectId, sessionId])
+
   const reload = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -84,12 +124,13 @@ export function FileTreeSidePanel({
     setDirs({})
     try {
       await loadDir("")
+      await loadStatus()
     } catch (e) {
       setError((e as Error).message)
     } finally {
       setLoading(false)
     }
-  }, [loadDir])
+  }, [loadDir, loadStatus])
 
   // Whether an "Undo last turn" checkpoint exists for this session.
   const refreshUndo = useCallback(async () => {
@@ -162,6 +203,10 @@ export function FileTreeSidePanel({
     // A turn may have added a checkpoint → refresh Undo availability. Deferred
     // to a microtask so the setState isn't synchronous in the effect body.
     void Promise.resolve().then(refreshUndo)
+    // A turn likely changed files → refresh the git-status change markers.
+    // Deferred to a microtask (same as refreshUndo) so the effect body has no
+    // synchronous setState.
+    void Promise.resolve().then(loadStatus)
     const loaded = Object.keys(dirs)
     if (loaded.length === 0) return
     let cancelled = false
@@ -237,6 +282,21 @@ export function FileTreeSidePanel({
     </div>
   )
 
+  // Directories that contain a changed descendant, so a collapsed folder can
+  // show a change dot. Built from the status map by adding every ancestor
+  // prefix of each changed path ("a/b/c.txt" → "a", "a/b").
+  const changedDirs = useMemo(() => {
+    const set = new Set<string>()
+    for (const p of Object.keys(statuses)) {
+      let i = p.indexOf("/")
+      while (i !== -1) {
+        set.add(p.slice(0, i))
+        i = p.indexOf("/", i + 1)
+      }
+    }
+    return set
+  }, [statuses])
+
   function renderDir(path: string, depth: number) {
     const entries = dirs[path]
     if (!entries) return null
@@ -245,6 +305,9 @@ export function FileTreeSidePanel({
       const pad = { paddingLeft: `${depth * 12 + 8}px` }
       if (e.type === "dir") {
         const isOpen = expanded.has(full)
+        // Show the change dot only while collapsed — an open folder's own
+        // rows carry their markers, so a dot there would be redundant noise.
+        const dirChanged = !isOpen && changedDirs.has(full)
         return (
           <div key={full}>
             <button
@@ -264,11 +327,19 @@ export function FileTreeSidePanel({
                 <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
               )}
               <span className="min-w-0 flex-1 truncate">{e.name}</span>
+              {dirChanged && (
+                <span
+                  className="ml-1 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500/80"
+                  title="Contains changes"
+                  aria-label="Contains changes"
+                />
+              )}
             </button>
             {isOpen && renderDir(full, depth + 1)}
           </div>
         )
       }
+      const status = statuses[full]
       return (
         <button
           key={full}
@@ -282,7 +353,15 @@ export function FileTreeSidePanel({
         >
           <span className="w-3 shrink-0" />
           <FileIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1 truncate">{e.name}</span>
+          <span
+            className={cn(
+              "min-w-0 flex-1 truncate",
+              status && STATUS_META[status].className,
+            )}
+          >
+            {e.name}
+          </span>
+          {status && <StatusBadge status={status} />}
         </button>
       )
     })

@@ -30,6 +30,16 @@ export interface FileContent {
   binary: boolean
 }
 
+/** Coarse git working-tree status of a file, for the file-panel change markers. */
+export type FileStatus = "new" | "modified" | "deleted" | "renamed"
+
+export interface WorkspaceStatus {
+  /** false when the workspace root isn't a git work tree → no markers. */
+  is_repo: boolean
+  /** workspace-relative path (POSIX) → status; only changed files are present. */
+  statuses: Record<string, FileStatus>
+}
+
 function qs(projectId: string, sessionId: string, path: string): string {
   return new URLSearchParams({
     project_id: projectId,
@@ -46,6 +56,19 @@ export function listDir(
   path = "",
 ): Promise<DirListing> {
   return apiFetch<DirListing>(`/desktop/files/tree?${qs(projectId, sessionId, path)}`)
+}
+
+/** Whole-workspace git working-tree status → change markers on the file tree.
+ * One call per reload/turn (git status is repo-wide); the panel looks each
+ * entry up in the returned map. `is_repo=false` (empty map) when the workspace
+ * root isn't a git work tree. */
+export function getFileStatus(
+  projectId: string,
+  sessionId: string,
+): Promise<WorkspaceStatus> {
+  return apiFetch<WorkspaceStatus>(
+    `/desktop/files/status?${qs(projectId, sessionId, "")}`,
+  )
 }
 
 /** Read one file (capped at 1 MiB server-side; `binary`/`truncated` flag the

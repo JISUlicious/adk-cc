@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +27,7 @@ _log = logging.getLogger(__name__)
 
 _MAX_READ = 1024 * 1024  # 1 MiB — cap file reads so the panel can't pull a huge blob
 _MAX_ENTRIES = 2000       # per-directory entry cap (keeps huge dirs responsive)
+_STATUS_TIMEOUT = 10      # wall-clock cap for the `git status` behind change markers
 
 
 def _safe(value: str, label: str) -> str:
@@ -65,6 +67,87 @@ def _resolve_within(project_id: str, session_id: str, rel: str) -> Optional[Path
     if target != root and root not in target.parents:
         raise HTTPException(status_code=403, detail="path escapes workspace")
     return target
+
+
+def _coarse_status(xy: str) -> str:
+    """Collapse a git porcelain XY status pair into one coarse marker.
+
+    `new` covers untracked (`??`) and staged-add (`A`); `deleted`, `renamed`
+    (only when rename detection is on — we run with --no-renames, so a move
+    surfaces as delete + new), else `modified` (M/T/C/…). Staged and unstaged
+    are merged: a file changed vs HEAD is "changed", regardless of the index.
+    """
+    if xy == "??":
+        return "new"
+    x, y = xy[0], xy[1]
+    if x == "A" or y == "A":
+        return "new"
+    if x == "D" or y == "D":
+        return "deleted"
+    if x == "R" or y == "R":
+        return "renamed"
+    return "modified"
+
+
+def _git_working_status(root: Path) -> tuple[bool, dict[str, str]]:
+    """`(is_repo, {workspace_rel_path: status})` for the workspace subtree.
+
+    Reads the PROJECT'S OWN working-tree status (the same thing a git client
+    shows as uncommitted changes) — the checkpoint shadow git is a separate
+    GIT_DIR and is never involved. `status` ∈ {new, modified, deleted,
+    renamed}. Paths are workspace-relative with POSIX separators, matching the
+    file-tree entries. Best-effort: any failure (not a repo, git missing,
+    timeout) yields no markers rather than an error.
+    """
+    base = ["git", "-C", str(root)]
+    try:
+        # `--show-prefix` both proves this is a repo AND gives our subdir
+        # offset when the workspace root sits below the repo root (git prints
+        # status paths relative to the REPO root, so we strip the prefix to
+        # get workspace-relative paths).
+        pref = subprocess.run(
+            base + ["rev-parse", "--show-prefix"],
+            capture_output=True,
+            text=True,
+            timeout=_STATUS_TIMEOUT,
+        )
+        if pref.returncode != 0:
+            return False, {}  # not a git work tree
+        prefix = pref.stdout.strip()  # "" at repo root, else "sub/dir/"
+        # -z: NUL-delimited, no path quoting. --no-renames: a move shows as
+        # D old + ?? new, so every record is a single path (no dual-field
+        # rename entries to parse). `-- .` scopes to the workspace subtree.
+        res = subprocess.run(
+            base
+            + [
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--no-renames",
+                "--",
+                ".",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_STATUS_TIMEOUT,
+        )
+        if res.returncode != 0:
+            return True, {}  # a repo, but status failed — no markers
+        statuses: dict[str, str] = {}
+        for token in res.stdout.split("\0"):
+            # Each record is "XY<space>path"; the trailing split yields "".
+            if len(token) < 4:
+                continue
+            xy, path = token[:2], token[3:]
+            if prefix:
+                if not path.startswith(prefix):
+                    continue  # change outside the workspace subtree
+                path = path[len(prefix):]
+            statuses[path] = _coarse_status(xy)
+        return True, statuses
+    except (OSError, subprocess.SubprocessError):
+        return False, {}
 
 
 def mount_desktop_files_routes(app) -> None:  # noqa: ANN001
@@ -110,6 +193,24 @@ def mount_desktop_files_routes(app) -> None:  # noqa: ANN001
                 truncated = True
                 break
         return {"root_exists": True, "path": rel, "entries": entries, "truncated": truncated}
+
+    @app.get("/desktop/files/status", include_in_schema=False)
+    async def files_status(request: Request):  # noqa: ANN202
+        """Whole-workspace git working-tree status → change markers in the
+        file panel. One call per reload/turn (git status is a repo-wide op);
+        the client looks each tree entry up in the returned map. Empty +
+        ``is_repo=false`` when the workspace root isn't a git work tree."""
+        q = request.query_params
+        project_id = q.get("project_id") or ""
+        session_id = q.get("session_id") or ""
+        if not project_id or not session_id:
+            raise HTTPException(status_code=400, detail="project_id and session_id required")
+
+        root = _resolve_within(project_id, session_id, "")
+        if root is None or not root.is_dir():
+            return {"is_repo": False, "statuses": {}}
+        is_repo, statuses = _git_working_status(root)
+        return {"is_repo": is_repo, "statuses": statuses}
 
     @app.get("/desktop/files/read", include_in_schema=False)
     async def files_read(request: Request):  # noqa: ANN202
