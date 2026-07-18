@@ -68,12 +68,20 @@ class SshBackend(SandboxBackend):
         # Remote workspace root; (re)captured by ensure_workspace from the
         # WorkspaceRoot so the ctor arg is optional for factory use.
         self._workspace_path = workspace_path.rstrip("/") if workspace_path else None
+        # Remote $HOME, captured from the ensure_workspace probe. Consumed by
+        # the permission floor to guard the REMOTE machine's ~/.ssh etc.
+        self._remote_home: Optional[str] = None
 
     # --- helpers ----------------------------------------------------------
 
     @property
     def host(self) -> str:
         return self._t.host
+
+    @property
+    def remote_home(self) -> Optional[str]:
+        """The probed remote $HOME (None before ensure_workspace ran)."""
+        return self._remote_home
 
     def _check_allowed(
         self, path: str, fs_cfg: FsReadConfig | FsWriteConfig, *, op: str
@@ -179,6 +187,7 @@ class SshBackend(SandboxBackend):
             raise SandboxViolation("ssh: workspace has no abs_path")
         try:
             probe = await self._t.probe()
+            self._remote_home = probe.get("home") or None
             res = await self._t.run(
                 f"mkdir -p {_q(self._workspace_path)}", timeout_s=30
             )

@@ -188,6 +188,7 @@ class PermissionPlugin(BasePlugin):
             cmd_out_of_scope=self._bash_out_of_scope(
                 tool, tool_args, tool_context, workspace_root
             ),
+            remote_home=self._remote_home(tool_context),
         )
 
         if decision.behavior == "deny":
@@ -418,6 +419,7 @@ class PermissionPlugin(BasePlugin):
                 tool=tool, args=args, mode=mode,
                 settings=self._effective_settings(tool_context),
                 workspace_root=workspace_root,
+                remote_home=self._remote_home(tool_context),
             )
 
         confirmation = getattr(tool_context, "tool_confirmation", None)
@@ -616,6 +618,23 @@ class PermissionPlugin(BasePlugin):
             from ..sandbox import get_workspace
 
             return get_workspace(tool_context).abs_path
+        except Exception:
+            return None
+
+    def _remote_home(self, tool_context: ToolContext) -> Optional[str]:
+        """The REMOTE $HOME when this session's workspace lives on another
+        machine (SshBackend), else None. Non-None flips `decide()` into
+        remote path semantics: lexical resolution + the protected floor
+        matched against the REMOTE home — without this the floor would guard
+        the LOCAL ~/.ssh while the agent reads the remote's. The backend
+        probes $HOME during ensure_workspace (tenancy runs before this
+        plugin), so it's populated by the time any tool is decided."""
+        try:
+            from ..sandbox import get_backend, get_workspace
+
+            if not getattr(get_workspace(tool_context), "remote", False):
+                return None
+            return getattr(get_backend(tool_context), "remote_home", None)
         except Exception:
             return None
 

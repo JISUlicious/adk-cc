@@ -235,8 +235,14 @@ export interface SessionBackend {
   /** container config-mode only: false when no runtime → host fallback. */
   available?: boolean
 }
-export function getSessionBackend(sessionId: string): Promise<SessionBackend> {
+export function getSessionBackend(
+  sessionId: string,
+  projectId?: string | null,
+): Promise<SessionBackend> {
   const p = new URLSearchParams({ session_id: sessionId })
+  // project_id lets the config-source prediction know a REMOTE project
+  // resolves to ssh before the first turn runs.
+  if (projectId) p.set("project_id", projectId)
   return apiFetch(`/desktop/sessions/backend?${p.toString()}`)
 }
 export function setSandbox(

@@ -536,6 +536,7 @@ export function ChatPage({
           disabled={!session}
           mode={permissionMode}
           sessionId={session?.id ?? null}
+          userId={userId}
           footer={session ? <ContextGauge current={ctxTokens} limits={ctxLimits} /> : undefined}
           taskStrip={session ? <TaskStrip events={events} /> : undefined}
         />

@@ -89,10 +89,12 @@ def decide(
     settings: SettingsHierarchy,
     workspace_root: Optional[str] = None,
     cmd_out_of_scope: bool = False,
+    remote_home: Optional[str] = None,
 ) -> PermissionDecision:
     decision = _decide_impl(
         tool=tool, args=args, mode=mode, settings=settings,
         workspace_root=workspace_root, cmd_out_of_scope=cmd_out_of_scope,
+        remote_home=remote_home,
     )
     matched_rule_dump = (
         decision.matched_rule.model_dump() if decision.matched_rule else None
@@ -158,6 +160,27 @@ def _plan_block_reason(tool_name: str, args: dict) -> str:
     return f"{tool_name} is blocked in plan mode"
 
 
+def _resolve_remote_lexical(
+    raw: str, workspace_root: Optional[str], remote_home: str
+) -> Optional[str]:
+    """Remote-session analogue of `_resolve_against_workspace`: purely LEXICAL
+    (no local expanduser/realpath — both would consult the WRONG machine).
+    `~` expands against the REMOTE home; relatives anchor under the (remote)
+    workspace root; `..` collapses via normpath."""
+    if not raw:
+        return None
+    import posixpath
+
+    p = raw
+    if p == "~" or p.startswith("~/"):
+        p = remote_home.rstrip("/") + p[1:]
+    if not posixpath.isabs(p):
+        if not workspace_root:
+            return None
+        p = posixpath.join(workspace_root, p)
+    return posixpath.normpath(p)
+
+
 def _decide_impl(
     *,
     tool: AdkCcTool,
@@ -166,9 +189,22 @@ def _decide_impl(
     settings: SettingsHierarchy,
     workspace_root: Optional[str] = None,
     cmd_out_of_scope: bool = False,
+    remote_home: Optional[str] = None,
 ) -> PermissionDecision:
     rules = settings.all_rules()
     tool_name = tool.meta.name
+
+    # Remote sessions (SshBackend): every path in this function refers to the
+    # REMOTE machine — resolve lexically and classify against the remote home,
+    # or the floor would silently guard the LOCAL box's ~/.ssh while the agent
+    # reads the remote's.
+    def _resolve(raw: str) -> Optional[str]:
+        if remote_home:
+            return _resolve_remote_lexical(raw, workspace_root, remote_home)
+        return _resolve_against_workspace(raw, workspace_root)
+
+    def _classify(path: str) -> Optional[str]:
+        return classify_path(path, remote_home=remote_home)
 
     # Protected-path floor (desktop only; classify_path no-ops elsewhere): the
     # resolved target of a path tool may be secret material (→ hard deny, wins
@@ -178,13 +214,9 @@ def _decide_impl(
     protected: Optional[str] = None
     if tool_name in _PATH_TOOLS:
         extractor = _RULE_KEY_EXTRACTORS.get(tool_name)
-        resolved = (
-            _resolve_against_workspace(extractor(args), workspace_root)
-            if extractor
-            else None
-        )
+        resolved = _resolve(extractor(args)) if extractor else None
         if resolved:
-            protected = classify_path(resolved)
+            protected = _classify(resolved)
 
     # Command safety tier (run_bash only; "mutating" otherwise). Drives the
     # command floor below, mirroring the protected-path floor: read-only
@@ -199,10 +231,10 @@ def _decide_impl(
         # must be denied just like read_file. Worst classification wins, folded
         # into `protected` so Steps 1b (deny, even bypass) / 2c (ask) handle it.
         for raw in command_paths(command):
-            resolved = _resolve_against_workspace(raw, workspace_root)
+            resolved = _resolve(raw)
             if not resolved:
                 continue
-            pc = classify_path(resolved)
+            pc = _classify(resolved)
             if pc == "deny":
                 protected = "deny"
                 break

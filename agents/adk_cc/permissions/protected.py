@@ -117,17 +117,48 @@ def _matches(target: str, pattern: str) -> bool:
     return False
 
 
-def classify_path(abs_path: str) -> Optional[str]:
+def _expand_remote_home(pattern: str, home: str) -> str:
+    """`~`/`~/…` expanded against the REMOTE home (never the local one)."""
+    if pattern == "~" or pattern.startswith("~/"):
+        return home.rstrip("/") + pattern[1:]
+    return pattern
+
+
+def classify_path(abs_path: str, *, remote_home: Optional[str] = None) -> Optional[str]:
     """Return ``"deny"`` | ``"ask"`` | ``None`` for a resolved absolute path.
 
     Desktop-only (returns None otherwise). Deny takes precedence over ask. Match
     is case-folded and covers a symlinked `$HOME`, since this is a hard security
-    floor and the FS may be case-insensitive (macOS)."""
+    floor and the FS may be case-insensitive (macOS).
+
+    REMOTE sessions (SshBackend): pass ``remote_home`` (the probed remote
+    ``$HOME``). The floor then guards the REMOTE machine: ``~`` patterns expand
+    against that home, matching stays purely LEXICAL (no local realpath — the
+    local fs is the wrong machine; the input was resolved lexically too), and
+    case-folding is kept. Best-effort v1 (no remote realpath) — documented in
+    the SSH plan; the plain forms (`~/.ssh/…`, `$HOME`-anchored) are covered."""
     if not abs_path:
         return None
     from .. import deployment
 
     if not deployment.is_desktop():
+        return None
+    if remote_home:
+        target = abs_path.rstrip("/").lower() or "/"
+        deny = [_expand_remote_home(p, remote_home) for p in _DENY_DEFAULT] + [
+            _expand_remote_home(p, remote_home)
+            for p in _env_patterns("ADK_CC_PROTECTED_DENY")
+        ]
+        ask = [_expand_remote_home(p, remote_home) for p in _ASK_DEFAULT] + [
+            _expand_remote_home(p, remote_home)
+            for p in _env_patterns("ADK_CC_PROTECTED_ASK")
+        ]
+        for pat in deny:
+            if fnmatch.fnmatch(target, pat.lower()):
+                return "deny"
+        for pat in ask:
+            if fnmatch.fnmatch(target, pat.lower()):
+                return "ask"
         return None
     target = os.path.realpath(abs_path).lower()
     for pat in _deny_patterns():

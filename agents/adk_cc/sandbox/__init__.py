@@ -144,7 +144,23 @@ def make_default_backend(
     else:
         raise ValueError(f"unknown sandbox backend: {name!r}")
 
-    # Wire on-demand env injection (no-op if no provider/spec is configured).
+    wire_runtime_env(
+        backend, tenant_id=tenant_id, user_id=user_id, credentials=credentials
+    )
+    return backend
+
+
+def wire_runtime_env(
+    backend: SandboxBackend,
+    *,
+    tenant_id: str,
+    user_id: str,
+    credentials: Any = None,
+) -> None:
+    """Wire on-demand env injection onto `backend` (no-op if no provider/spec
+    is configured). Shared by `make_default_backend` and custom per-project
+    backend factories (e.g. the desktop SSH factory) so every construction
+    path gets identical secret semantics. Never raises."""
     try:
         from .sandbox_env import sandbox_env_spec_from_env
 
@@ -167,7 +183,6 @@ def make_default_backend(
         )
     except Exception:  # noqa: BLE001 — env wiring must never break backend bring-up
         pass
-    return backend
 
 
 _default_backend: SandboxBackend | None = None

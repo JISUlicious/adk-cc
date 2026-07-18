@@ -8,7 +8,10 @@ import { apiFetch } from "./client"
 export interface Project {
   id: string
   name: string
-  repo_path: string
+  /** Local project root; absent for remote (SSH) projects. */
+  repo_path?: string
+  /** Remote (SSH) binding; absent for local projects. */
+  remote?: { host: string; path: string; port?: number } | null
 }
 
 export function listProjects(): Promise<{ projects: Project[] }> {
@@ -19,6 +22,36 @@ export function addProject(path: string): Promise<{ project: Project }> {
   return apiFetch("/desktop/projects", {
     method: "POST",
     body: JSON.stringify({ path }),
+  })
+}
+
+/** Register a remote (SSH) project. `host` is anything your `ssh` accepts
+ * (alias / user@host); `path` is the ABSOLUTE workspace root on the remote.
+ * Key/agent auth only — set the host up with `ssh <host>` once first. */
+export function addRemoteProject(
+  host: string,
+  path: string,
+  port?: number,
+): Promise<{ project: Project }> {
+  return apiFetch("/desktop/projects/remote", {
+    method: "POST",
+    body: JSON.stringify({ host, path, ...(port ? { port } : {}) }),
+  })
+}
+
+export interface RemoteProbe {
+  ok: boolean
+  error?: string
+  home?: string
+  git?: boolean
+  uname?: string
+  path_exists?: boolean
+}
+/** Probe a remote host over the SAME transport the agent will use. */
+export function testRemote(host: string, path?: string, port?: number): Promise<RemoteProbe> {
+  return apiFetch("/desktop/projects/test-remote", {
+    method: "POST",
+    body: JSON.stringify({ host, ...(path ? { path } : {}), ...(port ? { port } : {}) }),
   })
 }
 

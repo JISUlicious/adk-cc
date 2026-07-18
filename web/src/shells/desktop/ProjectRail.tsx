@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
-import { Plus, X, Settings as SettingsIcon, ChevronRight, FolderPlus, Trash2, Network } from "lucide-react"
+import { Plus, X, Settings as SettingsIcon, ChevronRight, FolderPlus, Server, Trash2, Network } from "lucide-react"
 import {
   createSession, deleteSession, listApps, listSessions, type Session,
 } from "@/shared/api/sessions"
-import { listProjects, addProject, removeProject, removeSessionWorktree, type Project } from "@/shared/api/projects"
+import {
+  listProjects, addProject, addRemoteProject, removeProject, removeSessionWorktree,
+  testRemote, type Project,
+} from "@/shared/api/projects"
 import { Button } from "@/shared/components/ui/button"
 import { cn } from "@/shared/lib/utils"
 import { SessionList } from "@/shared/sessions/SessionList"
@@ -136,6 +139,54 @@ export function ProjectRail({
     if (p) await doAddProject(p)
   }
 
+  // --- remote (SSH) project add flow ------------------------------------
+  const [remotePrompt, setRemotePrompt] = useState(false)
+  const [remoteHost, setRemoteHost] = useState("")
+  const [remotePath, setRemotePath] = useState("")
+  const [remoteProbe, setRemoteProbe] = useState<string | null>(null)
+  const [probing, setProbing] = useState(false)
+
+  async function doTestRemote() {
+    const host = remoteHost.trim()
+    if (!host) return
+    setProbing(true)
+    setRemoteProbe(null)
+    try {
+      const r = await testRemote(host, remotePath.trim() || undefined)
+      setRemoteProbe(
+        r.ok
+          ? `✓ connected — ${r.uname ?? "?"}, home ${r.home ?? "?"}, git ${r.git ? "yes" : "no"}` +
+              (r.path_exists === undefined ? "" : r.path_exists ? ", path exists" : ", path will be created")
+          : `✗ ${r.error ?? "connection failed"}`,
+      )
+    } catch (e) {
+      setRemoteProbe(`✗ ${(e as Error).message}`)
+    } finally {
+      setProbing(false)
+    }
+  }
+
+  async function submitRemote() {
+    const host = remoteHost.trim()
+    const path = remotePath.trim()
+    if (!host || !path) {
+      setRemoteProbe("✗ host and absolute remote path are both required")
+      return
+    }
+    try {
+      const { project } = await addRemoteProject(host, path)
+      setRemotePrompt(false)
+      setRemoteHost("")
+      setRemotePath("")
+      setRemoteProbe(null)
+      reloadProjects()
+      setExpanded((prev) => new Set(prev).add(project.id))
+      await openProject(project.id)
+    } catch (e) {
+      setRemoteProbe(`✗ ${(e as Error).message}`)
+    }
+  }
+
   async function removeProj(p: Project) {
     if (!confirm(`Remove project "${p.name}"? (its folder is left untouched)`)) return
     try {
@@ -198,10 +249,55 @@ export function ProjectRail({
         </div>
         <div className="adk-rail-header flex items-center justify-between px-4 py-2">
           <span className="text-xs font-medium text-muted-foreground">Projects</span>
-          <Button size="sm" variant="outline" onClick={addNew} title="Add a project folder" className="adk-add-project">
-            <FolderPlus className="h-3.5 w-3.5" /> Add
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button
+              size="sm" variant="outline"
+              onClick={() => { setRemotePrompt((v) => !v); setPathPrompt(false) }}
+              title="Add a remote (SSH) project — workspace on another device"
+              className="adk-add-remote-project"
+            >
+              <Server className="h-3.5 w-3.5" /> Remote
+            </Button>
+            <Button size="sm" variant="outline" onClick={addNew} title="Add a project folder" className="adk-add-project">
+              <FolderPlus className="h-3.5 w-3.5" /> Add
+            </Button>
+          </div>
         </div>
+        {remotePrompt && (
+          <div className="space-y-1 px-4 pb-2">
+            <input
+              autoFocus
+              value={remoteHost}
+              onChange={(e) => setRemoteHost(e.target.value)}
+              placeholder="ssh host (alias or user@host)"
+              className="w-full rounded border border-input bg-background px-2 py-1 font-mono text-xs"
+            />
+            <input
+              value={remotePath}
+              onChange={(e) => setRemotePath(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Escape") setRemotePrompt(false) }}
+              placeholder="/absolute/path/on/remote"
+              className="w-full rounded border border-input bg-background px-2 py-1 font-mono text-xs"
+            />
+            <div className="flex items-center gap-1">
+              <Button size="sm" variant="outline" onClick={doTestRemote} disabled={probing || !remoteHost.trim()}>
+                {probing ? "Testing…" : "Test"}
+              </Button>
+              <Button size="sm" variant="outline" onClick={submitRemote} disabled={!remoteHost.trim() || !remotePath.trim()}>
+                Add
+              </Button>
+            </div>
+            {remoteProbe && (
+              <p className={cn("text-[11px]", remoteProbe.startsWith("✓") ? "text-muted-foreground" : "text-destructive")}>
+                {remoteProbe}
+              </p>
+            )}
+            <p className="text-[10px] leading-snug text-muted-foreground">
+              Key/agent auth only — run <span className="font-mono">ssh &lt;host&gt;</span> once in a
+              terminal first. Commands run on the remote as that account (not containerized).
+            </p>
+          </div>
+        )}
         {pathPrompt && (
           <div className="flex gap-1 px-4 pb-2">
             <input
@@ -235,7 +331,18 @@ export function ProjectRail({
                 <div className="group flex items-center gap-1 px-2 py-2 hover:bg-accent/60">
                   <button type="button" onClick={() => toggle(p.id)} className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
                     <ChevronRight className={cn("h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform", isOpen && "rotate-90")} />
-                    <span className="truncate text-sm font-medium" title={p.repo_path}>{p.name}</span>
+                    {p.remote && (
+                      <Server
+                        className="h-3 w-3 shrink-0 text-sky-600 dark:text-sky-400"
+                        aria-label="Remote (SSH) project"
+                      />
+                    )}
+                    <span
+                      className="truncate text-sm font-medium"
+                      title={p.remote ? `${p.remote.host}:${p.remote.path}` : p.repo_path}
+                    >
+                      {p.name}
+                    </span>
                   </button>
                   <button
                     type="button" onClick={() => newSession(p.id)} title="New session in this project"

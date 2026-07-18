@@ -67,8 +67,28 @@ def project_repo_path(project_id: str) -> Optional[str]:
     return None
 
 
+def project_remote(project_id: str) -> Optional[dict]:
+    """The remote (SSH) binding for a project id — `{"host", "path", "port"?}`
+    — or None for a local project. A project is EITHER local (repo_path) or
+    remote; the workspace resolver + backend factory branch on this."""
+    for it in load_projects():
+        if it.get("id") == project_id:
+            r = it.get("remote")
+            if isinstance(r, dict) and r.get("host") and r.get("path"):
+                return r
+            return None
+    return None
+
+
 def _git(args: list[str], cwd: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+
+
+def _shq_remote(s: str) -> str:
+    """POSIX single-quoting for a path embedded in a remote sh command."""
+    import shlex
+
+    return shlex.quote(s)
 
 
 def _ensure_git_repo(path: str) -> None:
@@ -109,6 +129,7 @@ def mount_desktop_routes(app) -> None:
         exactly why this exists."""
         q = request.query_params
         session_id = q.get("session_id") or ""
+        project_id = q.get("project_id") or ""
         if not session_id:
             raise HTTPException(status_code=400, detail="session_id required")
 
@@ -121,6 +142,18 @@ def mount_desktop_routes(app) -> None:
         b = resolved_session_backend(session_id)
         if b is not None:
             return {"source": "live", **backend_public_info(b)}
+        # Config prediction. A REMOTE project resolves to ssh regardless of
+        # the global backend setting — predict that so the badge is right
+        # before the first turn too.
+        if project_id:
+            r = project_remote(project_id)
+            if r:
+                return {
+                    "source": "config",
+                    "backend": "ssh",
+                    "detail": r["host"],
+                    "isolated": False,
+                }
         name = deployment.sandbox_backend_name()
         out: dict = {
             "source": "config",
@@ -132,6 +165,86 @@ def mount_desktop_routes(app) -> None:
             # The config-level nuance the old badge showed: opted in but no
             # runtime → commands would fall back to the host.
             out["available"] = deployment.container_runtime_available()
+        return out
+
+    @app.post("/desktop/projects/remote", include_in_schema=False)
+    async def add_remote_project(request: Request):  # noqa: ANN202
+        """Register a REMOTE (SSH) project: `{host, path, name?, port?}`.
+        `host` is anything the user's `ssh` accepts (alias/user@host); `path`
+        is the ABSOLUTE workspace root on the remote. Creation does NOT
+        require the host to be reachable (offline-tolerant) — use
+        /desktop/projects/test-remote for the connection check."""
+        body = await request.json() or {}
+        host = str(body.get("host") or "").strip()
+        path = str(body.get("path") or "").strip().rstrip("/")
+        if not host or not path:
+            raise HTTPException(status_code=400, detail="'host' and 'path' required")
+        if not path.startswith("/"):
+            raise HTTPException(
+                status_code=400, detail="'path' must be an absolute remote path"
+            )
+        port = body.get("port")
+        try:
+            port = int(port) if port not in (None, "") else None
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="'port' must be an int")
+
+        items = load_projects()
+        existing = next(
+            (
+                it
+                for it in items
+                if isinstance(it.get("remote"), dict)
+                and it["remote"].get("host") == host
+                and it["remote"].get("path") == path
+            ),
+            None,
+        )
+        if existing:
+            return {"project": existing}
+        remote: dict = {"host": host, "path": path}
+        if port:
+            remote["port"] = port
+        proj = {
+            "id": uuid.uuid4().hex[:12],
+            "name": str(body.get("name") or "").strip()
+            or f"{host}:{os.path.basename(path) or path}",
+            "remote": remote,
+        }
+        items.append(proj)
+        save_projects(items)
+        return {"project": proj}
+
+    @app.post("/desktop/projects/test-remote", include_in_schema=False)
+    async def test_remote_project(request: Request):  # noqa: ANN202
+        """Connection test for a remote binding: probes over the SAME transport
+        the backend will use (key/agent auth, BatchMode — never prompts).
+        Returns `{ok, home, git, uname}` or `{ok: false, error}` with the
+        transport's actionable message ("run `ssh <host>` once first…")."""
+        body = await request.json() or {}
+        host = str(body.get("host") or "").strip()
+        if not host:
+            raise HTTPException(status_code=400, detail="'host' required")
+        port = body.get("port")
+        try:
+            port = int(port) if port not in (None, "") else None
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="'port' must be an int")
+
+        from ..sandbox.ssh_transport import SshConnectionError, get_transport
+
+        t = get_transport(host, port=port)
+        try:
+            probe = await t.probe(refresh=True, timeout_s=20)
+        except SshConnectionError as e:
+            return {"ok": False, "error": str(e)}
+        except Exception as e:  # noqa: BLE001 — surface, don't 500
+            return {"ok": False, "error": f"probe failed: {e}"}
+        out = {"ok": True, **probe}
+        path = str(body.get("path") or "").strip()
+        if path:
+            res = await t.run(f"[ -d {_shq_remote(path)} ] && echo D || echo N")
+            out["path_exists"] = res.stdout.strip() == "D"
         return out
 
     @app.post("/desktop/projects", include_in_schema=False)

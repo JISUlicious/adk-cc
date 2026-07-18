@@ -36,6 +36,7 @@ export function Composer({
   disabled,
   mode,
   sessionId,
+  userId,
   footer,
   taskStrip,
 }: {
@@ -48,6 +49,8 @@ export function Composer({
   /** Active session id — lets the SandboxBadge show THIS chat's resolved
    *  backend (per-session truth) instead of the global setting. */
   sessionId?: string | null
+  /** Active project id (desktop) — pre-turn backend prediction for the badge. */
+  userId?: string | null
   /** Rendered below the input, left-aligned within the same max-width column
    *  (e.g. the context gauge) so it lines up with the input box. */
   footer?: ReactNode
@@ -177,7 +180,7 @@ export function Composer({
               </span>
             </div>
             <div className="ml-auto flex items-center gap-2 shrink-0">
-              <SandboxBadge sessionId={sessionId} />
+              <SandboxBadge sessionId={sessionId} userId={userId} />
               {footer && <div className="adk-gauge-slot">{footer}</div>}
             </div>
           </div>

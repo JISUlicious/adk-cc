@@ -1107,9 +1107,17 @@ def _make_tenancy_plugin() -> TenancyPlugin:
     a per-session worktree. Otherwise the standard single-/multi-tenant behavior
     (workspace from ADK_CC_WORKSPACE_ROOT / CWD)."""
     if deployment.is_desktop():
-        from .service.desktop_workspace import desktop_tenant_resolver
+        from .service.desktop_workspace import (
+            desktop_backend_factory,
+            desktop_tenant_resolver,
+        )
 
-        return TenancyPlugin(tenant_resolver=desktop_tenant_resolver)
+        # backend_factory: per-PROJECT backend — remote projects get an
+        # SshBackend; local projects keep the default (container/host) flow.
+        return TenancyPlugin(
+            tenant_resolver=desktop_tenant_resolver,
+            backend_factory=desktop_backend_factory,
+        )
     return TenancyPlugin(default_workspace_root=os.environ.get("ADK_CC_WORKSPACE_ROOT"))
 
 

@@ -19,7 +19,15 @@ import { getSessionBackend, type SessionBackend } from "@/shared/api/desktop-set
  * safe in the shared Composer. Refetches when `sessionId` changes; source
  * flips config→live automatically after the first turn seeds the backend.
  */
-export function SandboxBadge({ sessionId }: { sessionId?: string | null }) {
+export function SandboxBadge({
+  sessionId,
+  userId,
+}: {
+  sessionId?: string | null
+  /** Desktop project id — lets the pre-turn config prediction know a
+   *  REMOTE project resolves to ssh before the first turn runs. */
+  userId?: string | null
+}) {
   const [s, setS] = useState<SessionBackend | null>(null)
   const alive = useRef(true)
   useEffect(() => () => { alive.current = false }, [])
@@ -32,7 +40,7 @@ export function SandboxBadge({ sessionId }: { sessionId?: string | null }) {
         return
       }
       try {
-        const v = await getSessionBackend(sessionId)
+        const v = await getSessionBackend(sessionId, userId)
         if (!cancelled && alive.current) setS(v)
       } catch {
         if (!cancelled && alive.current) setS(null)
@@ -41,7 +49,7 @@ export function SandboxBadge({ sessionId }: { sessionId?: string | null }) {
     return () => {
       cancelled = true
     }
-  }, [sessionId])
+  }, [sessionId, userId])
 
   if (!IS_DESKTOP || !s) return null
 

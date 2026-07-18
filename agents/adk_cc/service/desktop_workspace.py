@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..sandbox.workspace import WorkspaceRoot
-from .desktop_routes import desktop_data_dir, project_repo_path
+from .desktop_routes import desktop_data_dir, project_remote, project_repo_path
 
 _log = logging.getLogger(__name__)
 
@@ -113,13 +113,28 @@ def remove_worktree(project_id: str, session_id: str) -> None:
 @dataclass
 class DesktopTenantContext:
     """Minimal tenant context for desktop: workspace() yields the bound project's
-    root **in-place** (or a flat scratch dir when no project is bound)."""
+    root **in-place** (or a flat scratch dir when no project is bound). REMOTE
+    projects (`remote={"host","path"}`) yield a remote-flagged WorkspaceRoot at
+    the remote path — the SshBackend from `desktop_backend_factory` carries the
+    matching transport, so paths and exec agree by construction."""
 
     tenant_id: str
     user_id: str
     repo_path: Optional[str]
+    remote: Optional[dict] = None
 
     def workspace(self, session_id: str) -> WorkspaceRoot:
+        if self.remote:
+            # Remote in-place: the workspace IS the remote project root.
+            # remote=True skips local realpath canonicalization (macOS
+            # automounts would rewrite /home/*), and the tool layer's path
+            # resolution goes lexical.
+            return WorkspaceRoot(
+                tenant_id=self.tenant_id,
+                session_id=session_id,
+                abs_path=str(self.remote["path"]).rstrip("/") or "/",
+                remote=True,
+            )
         if self.repo_path and os.path.isdir(self.repo_path):
             # In-place: the agent works directly in the project root (a git repo),
             # so edits land in the user's real files. Per-session git-worktree
@@ -140,4 +155,50 @@ class DesktopTenantContext:
 
 def desktop_tenant_resolver(user_id: Optional[str]) -> DesktopTenantContext:
     uid = user_id or "local"
-    return DesktopTenantContext(tenant_id="local", user_id=uid, repo_path=project_repo_path(uid))
+    return DesktopTenantContext(
+        tenant_id="local",
+        user_id=uid,
+        repo_path=project_repo_path(uid),
+        remote=project_remote(uid),
+    )
+
+
+def desktop_backend_factory(tenant, session_id: str):  # noqa: ANN001, ANN201
+    """Per-PROJECT backend selection (TenancyPlugin backend_factory).
+
+    Remote project → SshBackend over the shared per-host transport (one
+    ControlMaster per remote across all sessions and, later, the file
+    panel). Local project → exactly what the default factory would build
+    (`make_default_backend`), so the container/host flow is unchanged.
+
+    The backend is per-SESSION and immutable for the session's life — the
+    workspace paths, panel routing, and checkpoint store are keyed to it.
+    """
+    remote = getattr(tenant, "remote", None)
+    if remote:
+        from ..sandbox import wire_runtime_env
+        from ..sandbox.backends.ssh_backend import SshBackend
+        from ..sandbox.ssh_transport import get_transport
+
+        transport = get_transport(
+            str(remote["host"]), port=remote.get("port") or None
+        )
+        backend = SshBackend(
+            session_id=session_id,
+            tenant_id=getattr(tenant, "tenant_id", "local"),
+            transport=transport,
+            workspace_path=str(remote["path"]),
+        )
+        wire_runtime_env(
+            backend,
+            tenant_id=getattr(tenant, "tenant_id", "local"),
+            user_id=getattr(tenant, "user_id", "local"),
+        )
+        return backend
+    from ..sandbox import make_default_backend
+
+    return make_default_backend(
+        session_id=session_id,
+        tenant_id=getattr(tenant, "tenant_id", "local"),
+        user_id=getattr(tenant, "user_id", "local"),
+    )
