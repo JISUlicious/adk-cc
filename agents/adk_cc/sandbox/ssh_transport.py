@@ -89,6 +89,29 @@ class SshConnectionError(Exception):
     message; retry/backoff policy is the caller's concern."""
 
 
+# Unix sockets cap sun_path at ~104 bytes on macOS (108 on Linux), and the
+# ControlPath's `%C` token expands to a 40-char hash — so the control DIR
+# itself must stay short. macOS $TMPDIR alone (`/var/folders/…/T/…`) already
+# blows the budget. Keep headroom: dir + "/" + 40 ≤ ~100.
+_MAX_CONTROL_DIR_LEN = 59
+
+
+def _usable_control_dir(preferred: str) -> str:
+    """`preferred` if a `%C` socket fits under the unix-socket path limit,
+    else a SHORT deterministic per-config fallback (`/tmp/adk-ssh-<hash>`,
+    0700). Callers keep isolation (unique dir per configured path); ssh
+    keeps a valid socket. Pure-ish (no fs writes); unit-tested."""
+    if len(preferred) <= _MAX_CONTROL_DIR_LEN:
+        return preferred
+    import hashlib
+
+    short = f"/tmp/adk-ssh-{hashlib.sha1(preferred.encode()).hexdigest()[:8]}"
+    log.debug(
+        "ssh: control dir %r too long for a unix socket; using %s", preferred, short
+    )
+    return short
+
+
 def _shq(s: str) -> str:
     """Safe single-quoting for POSIX sh (shlex.quote, aliased for brevity)."""
     return shlex.quote(s)
@@ -140,7 +163,7 @@ class SshTransport:
         self._extra = tuple(extra_ssh_opts)
         self._connect_timeout_s = connect_timeout_s
         cd = control_dir or os.environ.get("ADK_CC_SSH_CONTROL_DIR") or _DEFAULT_CONTROL_DIR
-        self._control_dir = os.path.expanduser(cd)
+        self._control_dir = _usable_control_dir(os.path.expanduser(cd))
         # Sockets are credentials-adjacent: 0700, like ~/.ssh itself.
         os.makedirs(self._control_dir, mode=0o700, exist_ok=True)
         self._probe_cache: Optional[dict] = None
@@ -400,7 +423,15 @@ class SshTransport:
             )
         except asyncio.TimeoutError:
             proc.kill()
-            out, err = await proc.communicate()
+            # The pipes may NOT hit EOF on kill: under multiplexing the
+            # background ControlMaster still holds the channel's write end
+            # until the REMOTE command exits — a plain communicate() here
+            # would block for the rest of the remote runtime (live-e2e
+            # reproduced: 30s for a `sleep 30`). Bounded grace, then abandon.
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=5)
+            except Exception:  # noqa: BLE001 — grace expired; drop the pipes
+                out, err = b"", b""
             return None, out or b"", err or b""
         return proc.returncode, out, err
 
