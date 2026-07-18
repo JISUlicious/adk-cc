@@ -135,6 +135,12 @@ def make_default_backend(
             tenant_id=tenant_id,
             credentials=credentials,
         )
+    elif name == "ssh":
+        from .backends.ssh_backend import make_ssh_backend_from_env
+
+        backend = make_ssh_backend_from_env(
+            session_id=session_id, tenant_id=tenant_id
+        )
     else:
         raise ValueError(f"unknown sandbox backend: {name!r}")
 

@@ -48,11 +48,28 @@ def resolve(path: str, ctx: ToolContext | None = None) -> Path:
     - If `path` is absolute, expand and resolve.
     - If relative and a tool_context is given, anchor under the workspace.
     - If relative without a context, fall back to the process CWD.
+
+    REMOTE workspaces (SshBackend): resolution is purely LEXICAL — no
+    local `expanduser`/`realpath`, both of which would consult the WRONG
+    machine's filesystem (macOS rewrites `/home/*` via its automount and
+    `/tmp` → `/private/tmp`; `~` would expand to the local home). `..`
+    still collapses lexically, and the backend's allow-path check decides
+    whether the result stays in the workspace.
     """
+    ws = None
+    if ctx is not None:
+        try:
+            ws = get_workspace(ctx)
+        except Exception:
+            ws = None
+    if ws is not None and getattr(ws, "remote", False):
+        import posixpath
+
+        raw = path if posixpath.isabs(path) else posixpath.join(ws.abs_path, path)
+        return Path(posixpath.normpath(raw))
     p = Path(path).expanduser()
     if p.is_absolute():
         return p.resolve()
-    if ctx is not None:
-        ws = get_workspace(ctx)
+    if ws is not None:
         return (Path(ws.abs_path) / p).resolve()
     return p.resolve()

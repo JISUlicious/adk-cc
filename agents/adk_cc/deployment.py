@@ -122,7 +122,7 @@ def container_runtime_available() -> bool:
 
 def sandbox_backend_name() -> str:
     """The configured sandbox backend name (noop/container/docker/e2b/
-    sandbox_service/daytona); default `noop`. The single reader of
+    sandbox_service/daytona/ssh); default `noop`. The single reader of
     `ADK_CC_SANDBOX_BACKEND`.
 
     Precedence: an explicit `ADK_CC_SANDBOX_BACKEND` always wins. Otherwise, in
