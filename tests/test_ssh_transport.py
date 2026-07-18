@@ -116,13 +116,38 @@ def test_registry_reuses_by_key():
     print("OK registry_reuses_by_key")
 
 
+def test_long_control_dir_falls_back_to_short_socket_path():
+    """Unix sockets cap the path at ~104 bytes and %C adds 40 chars — a deep
+    control dir (macOS $TMPDIR!) must be swapped for a short deterministic
+    fallback, or every ssh op dies with 'ControlPath too long' (live-e2e
+    reproduced). Short dirs are kept verbatim."""
+    deep = "/var/folders/jk/ynxxgwhn2jjdzb_s20mfxl3m0000gn/T/adk-ssh-e2e-x/ctl"
+    t = SshTransport("h", control_dir=deep)
+    assert t._control_dir != deep
+    assert len(t._control_dir) + 1 + 40 <= 104, t._control_dir
+    # Deterministic per configured path (isolation preserved across instances).
+    assert t._control_dir == SshTransport("h", control_dir=deep)._control_dir
+    assert t._control_dir != SshTransport("h", control_dir=deep + "2")._control_dir
+    # NB: macOS mkdtemp paths are themselves too long — use a truly short one.
+    short = f"/tmp/ctl-{os.getpid()}"
+    assert SshTransport("h", control_dir=short)._control_dir == short
+    print("OK long_control_dir_falls_back_to_short_socket_path")
+
+
 def test_control_dir_created_private():
-    d = tempfile.mkdtemp(prefix="adk-ssh-perm-")
-    sub = os.path.join(d, "ctl")
-    SshTransport("h", control_dir=sub)
-    assert os.path.isdir(sub)
-    if os.name == "posix":
-        assert (os.stat(sub).st_mode & 0o777) == 0o700, oct(os.stat(sub).st_mode)
+    # Short path (a long one triggers the socket-length fallback by design);
+    # assert on the transport's ACTUAL control dir.
+    sub = f"/tmp/adk-ssh-perm-{os.getpid()}"
+    try:
+        t = SshTransport("h", control_dir=sub)
+        assert t._control_dir == sub
+        assert os.path.isdir(sub)
+        if os.name == "posix":
+            assert (os.stat(sub).st_mode & 0o777) == 0o700, oct(os.stat(sub).st_mode)
+    finally:
+        import shutil
+
+        shutil.rmtree(sub, ignore_errors=True)
     print("OK control_dir_created_private")
 
 
@@ -134,6 +159,7 @@ def main():
     test_build_argv_shape()
     test_transport_error_classifier()
     test_registry_reuses_by_key()
+    test_long_control_dir_falls_back_to_short_socket_path()
     test_control_dir_created_private()
     print("\nall ssh-transport unit tests passed")
 
