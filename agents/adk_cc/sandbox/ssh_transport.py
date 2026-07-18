@@ -54,7 +54,7 @@ import shlex
 import subprocess
 from typing import Optional
 
-from .config import ExecResult
+from .config import ExecChunk, ExecResult
 
 log = logging.getLogger(__name__)
 
@@ -199,6 +199,94 @@ class SshTransport:
             stdout=out.decode("utf-8", "replace"),
             stderr=err_text,
             timed_out=False,
+        )
+
+    async def run_stream(
+        self,
+        cmd: str,
+        *,
+        env: Optional[dict] = None,
+        cwd: Optional[str] = None,
+        timeout_s: float = 60.0,
+    ):
+        """Like `run()`, but yields `ExecChunk`s live as output arrives,
+        terminating with exactly one `kind="result"` chunk (the transport
+        analogue of `SandboxBackend.exec_stream`). Raises
+        SshConnectionError only for a transport-shaped failure detected at
+        exit; output seen up to that point has already been yielded."""
+        script = build_script(cmd, cwd=cwd, env=env)
+        argv = self.build_argv(["/bin/sh", "-s"])
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        assert proc.stdin is not None
+        proc.stdin.write(script.encode("utf-8"))
+        try:
+            await proc.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # remote exited before reading the whole script
+        proc.stdin.close()
+
+        queue: asyncio.Queue = asyncio.Queue()
+        out_parts: list[str] = []
+        err_parts: list[str] = []
+
+        async def pump(stream, kind: str, parts: list[str]) -> None:
+            while True:
+                block = await stream.read(4096)
+                if not block:
+                    break
+                text = block.decode("utf-8", "replace")
+                parts.append(text)
+                await queue.put(ExecChunk(kind=kind, data=text))
+            await queue.put(None)  # this pump is done
+
+        pumps = [
+            asyncio.ensure_future(pump(proc.stdout, "stdout", out_parts)),
+            asyncio.ensure_future(pump(proc.stderr, "stderr", err_parts)),
+        ]
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        timed_out = False
+        done_pumps = 0
+        try:
+            while done_pumps < 2:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    break
+                if item is None:
+                    done_pumps += 1
+                    continue
+                yield item
+        finally:
+            if timed_out:
+                proc.kill()
+            for p in pumps:
+                if not p.done():
+                    p.cancel()
+        await proc.wait()
+
+        stderr_text = "".join(err_parts)
+        if not timed_out and looks_like_transport_error(
+            proc.returncode or 0, stderr_text
+        ):
+            raise SshConnectionError(self._friendly(stderr_text))
+        yield ExecChunk(
+            kind="result",
+            result=ExecResult(
+                exit_code=-1 if timed_out else (proc.returncode or 0),
+                stdout="".join(out_parts),
+                stderr=stderr_text,
+                timed_out=timed_out,
+            ),
         )
 
     async def read_file(self, path: str, *, timeout_s: float = 60.0) -> bytes:

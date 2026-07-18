@@ -60,8 +60,17 @@ class WorkspaceRoot:
     # Folded in by `get_workspace` in desktop mode; empty everywhere else, so
     # web/multi-tenant allow_paths are byte-for-byte unchanged.
     extra_roots: tuple[str, ...] = ()
+    # True when `abs_path` lives on a REMOTE machine (SshBackend). Skips all
+    # LOCAL canonicalization: realpath'ing a remote path against this host's
+    # filesystem is wrong (macOS rewrites /home/* → /System/Volumes/Data/
+    # home/*, /tmp → /private/tmp — none of which exist on the remote).
+    remote: bool = False
 
     def __post_init__(self) -> None:
+        if self.remote:
+            # Remote paths are used verbatim (POSIX, already absolute); the
+            # remote side has no local symlink quirks to compensate for here.
+            return
         # Canonicalize so the allow_paths match what Path.resolve() returns
         # for files inside the workspace. Without this, symlinked roots
         # (e.g. macOS /var → /private/var, /tmp → /private/tmp) cause every
@@ -115,7 +124,29 @@ def default_workspace() -> WorkspaceRoot:
     Sufficient for `adk web .` on a developer laptop. In production
     multi-tenant deployments, `TenancyPlugin` seeds a per-tenant
     workspace into session state; this default isn't reached.
+
+    SSH mode (`ADK_CC_SANDBOX_BACKEND=ssh`): the workspace is a REMOTE
+    path (`ADK_CC_SSH_WORKSPACE_PATH`), returned remote-flagged and
+    untouched — no local expanduser/abspath/mkdir, all of which would
+    resolve against the WRONG machine. The backend's `ensure_workspace`
+    creates it on the remote.
     """
+    from .. import deployment
+
+    if deployment.sandbox_backend_name() == "ssh":
+        remote_path = os.environ.get("ADK_CC_SSH_WORKSPACE_PATH")
+        if not remote_path or not remote_path.startswith("/"):
+            raise RuntimeError(
+                "ADK_CC_SANDBOX_BACKEND=ssh requires ADK_CC_SSH_WORKSPACE_PATH "
+                "(an ABSOLUTE path on the remote device)"
+            )
+        return WorkspaceRoot(
+            tenant_id="local",
+            session_id="local",
+            abs_path=remote_path.rstrip("/") or "/",
+            remote=True,
+        )
+
     raw = os.environ.get("ADK_CC_WORKSPACE_ROOT")
     if raw:
         path = os.path.abspath(os.path.expanduser(raw))
