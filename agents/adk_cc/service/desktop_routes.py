@@ -313,10 +313,25 @@ def mount_desktop_routes(app) -> None:
         session_id = q.get("session_id") or ""
         if not project_id or not session_id:
             raise HTTPException(status_code=400, detail="project_id and session_id required")
-        _project_root(project_id)  # validate (ignore root here)
-        from .desktop_checkpoint import list_checkpoints
+        from .desktop_checkpoint import list_checkpoints, remote_checkpoint_supported
 
-        return {"checkpoints": list_checkpoints(project_id, session_id)}
+        remote = project_remote(project_id)
+        if remote:
+            # Remote project: the log is local (instant), the shadow git is on
+            # the remote. `supported:false` when the remote lacks git — the
+            # panel shows WHY undo is unavailable instead of silently nothing.
+            from ..sandbox.ssh_transport import get_transport
+
+            supported = await remote_checkpoint_supported(
+                get_transport(str(remote["host"]), port=remote.get("port") or None)
+            )
+            return {
+                "checkpoints": list_checkpoints(project_id, session_id),
+                "supported": supported,
+                **({} if supported else {"reason": "remote device has no git — undo is unavailable"}),
+            }
+        _project_root(project_id)  # validate (ignore root here)
+        return {"checkpoints": list_checkpoints(project_id, session_id), "supported": True}
 
     @app.post("/desktop/checkpoint/restore", include_in_schema=False)
     async def checkpoint_restore(request: Request):  # noqa: ANN202
@@ -328,10 +343,22 @@ def mount_desktop_routes(app) -> None:
         checkpoint_id = body.get("id") or body.get("sha")
         if not project_id or not session_id:
             raise HTTPException(status_code=400, detail="project_id and session_id required")
-        root = _project_root(project_id)
-        from .desktop_checkpoint import restore
+        from .desktop_checkpoint import restore, restore_remote
 
-        result = restore(project_id, session_id, root, checkpoint_id=checkpoint_id or None)
+        remote = project_remote(project_id)
+        if remote:
+            from ..sandbox.ssh_transport import get_transport
+
+            result = await restore_remote(
+                project_id,
+                session_id,
+                get_transport(str(remote["host"]), port=remote.get("port") or None),
+                str(remote["path"]).rstrip("/"),
+                checkpoint_id=checkpoint_id or None,
+            )
+        else:
+            root = _project_root(project_id)
+            result = restore(project_id, session_id, root, checkpoint_id=checkpoint_id or None)
         # Roll the CONVERSATION back to that turn too (files + chat, like a real
         # rewind) — truncate the session's events from the checkpoint's invocation
         # onward. Best-effort: a hiccup here must not fail the (already-done) file

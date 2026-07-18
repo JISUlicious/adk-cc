@@ -24,13 +24,21 @@ export interface RestoreResult {
   error?: string
 }
 
+export interface CheckpointList {
+  checkpoints: Checkpoint[]
+  /** false when checkpointing can't work for this project (remote device
+   * without git) — the panel shows `reason` instead of a silently-dead Undo. */
+  supported?: boolean
+  reason?: string
+}
+
 /** Most-recent-first checkpoints for the session. */
 export function listCheckpoints(
   projectId: string,
   sessionId: string,
-): Promise<{ checkpoints: Checkpoint[] }> {
+): Promise<CheckpointList> {
   const q = new URLSearchParams({ project_id: projectId, session_id: sessionId }).toString()
-  return apiFetch<{ checkpoints: Checkpoint[] }>(`/desktop/checkpoint/list?${q}`)
+  return apiFetch<CheckpointList>(`/desktop/checkpoint/list?${q}`)
 }
 
 /** Restore to a checkpoint by its unique id (omit `id` → undo the last turn).

@@ -83,6 +83,13 @@ class SshBackend(SandboxBackend):
         """The probed remote $HOME (None before ensure_workspace ran)."""
         return self._remote_home
 
+    @property
+    def transport(self) -> SshTransport:
+        """The shared per-host transport — consumed by the desktop services
+        (file panel, remote checkpoint) so ALL traffic to this remote rides
+        one ControlMaster."""
+        return self._t
+
     def _check_allowed(
         self, path: str, fs_cfg: FsReadConfig | FsWriteConfig, *, op: str
     ) -> None:

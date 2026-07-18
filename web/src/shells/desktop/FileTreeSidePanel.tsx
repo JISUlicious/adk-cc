@@ -90,6 +90,9 @@ export function FileTreeSidePanel({
   const [loading, setLoading] = useState(false)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [canUndo, setCanUndo] = useState(false)
+  // Non-null when checkpointing can't work for this project (remote device
+  // without git) — shown as the Undo tooltip so the dead button explains itself.
+  const [undoUnavailable, setUndoUnavailable] = useState<string | null>(null)
   const [undoing, setUndoing] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([])
@@ -141,6 +144,7 @@ export function FileTreeSidePanel({
     try {
       const res = await listCheckpoints(projectId, sessionId)
       setCanUndo(res.checkpoints.length > 0)
+      setUndoUnavailable(res.supported === false ? (res.reason ?? "undo unavailable") : null)
     } catch {
       setCanUndo(false) // route only exists in desktop mode; ignore otherwise
     }
@@ -250,15 +254,17 @@ export function FileTreeSidePanel({
 
   const headerRight = (
     <div className="flex items-center gap-0.5">
-      <button
-        type="button"
-        onClick={() => void performRestore()}
-        disabled={!canUndo || undoing}
-        className="rounded-md p-1 text-muted-foreground hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
-        title="Undo last turn — revert files to before the last turn"
-      >
-        <Undo2 className={cn("h-3.5 w-3.5", undoing && "animate-pulse")} />
-      </button>
+      {/* span carries the tooltip — a disabled button has pointer-events off */}
+      <span title={undoUnavailable ?? "Undo last turn — revert files to before the last turn"}>
+        <button
+          type="button"
+          onClick={() => void performRestore()}
+          disabled={!canUndo || undoing || undoUnavailable !== null}
+          className="rounded-md p-1 text-muted-foreground hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
+        >
+          <Undo2 className={cn("h-3.5 w-3.5", undoing && "animate-pulse")} />
+        </button>
+      </span>
       <button
         type="button"
         onClick={toggleHistory}

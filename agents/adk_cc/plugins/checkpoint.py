@@ -45,12 +45,12 @@ class CheckpointPlugin(BasePlugin):
         # Never gate the call — this is an observer. Returning None lets the tool
         # proceed regardless of whether the snapshot succeeds.
         try:
-            self._maybe_snapshot(tool, tool_context)
+            await self._maybe_snapshot(tool, tool_context)
         except Exception as e:  # noqa: BLE001 — a checkpoint must never block a tool
             _log.debug("checkpoint before_tool error: %s", e)
         return None
 
-    def _maybe_snapshot(self, tool: BaseTool, ctx: ToolContext) -> None:
+    async def _maybe_snapshot(self, tool: BaseTool, ctx: ToolContext) -> None:
         # Cheapest gates first — before_tool_callback runs on EVERY tool call, and
         # read-only tools (the majority) must bail before any import work.
         if tool.name not in _MUTATING_TOOLS:
@@ -58,8 +58,8 @@ class CheckpointPlugin(BasePlugin):
 
         # Deferred import: keeps desktop-only git plumbing out of the web path's
         # import graph, and avoids a cycle through service/*.
-        from ..service.desktop_checkpoint import enabled, snapshot
-        from ..service.desktop_routes import project_repo_path
+        from ..service.desktop_checkpoint import enabled, snapshot, snapshot_remote
+        from ..service.desktop_routes import project_remote, project_repo_path
 
         if not enabled():  # web mode, or ADK_CC_CHECKPOINT=0
             return
@@ -71,12 +71,26 @@ class CheckpointPlugin(BasePlugin):
             return
 
         # In desktop, user_id == the project id. Only snapshot a BOUND project
-        # repo (the in-place root) — never the no-project scratch dir, which has
-        # nothing project-scoped to undo.
+        # (in-place root or its remote analogue) — never the no-project scratch
+        # dir, which has nothing project-scoped to undo.
         project_id = getattr(ctx, "user_id", None) or ""
-        repo = project_repo_path(project_id)
-        if not repo or os.path.realpath(repo) != os.path.realpath(root):
-            return
+        remote_ws = bool(getattr(ws, "remote", False))
+        transport = None
+        if remote_ws:
+            # Remote project: the shadow git lives on the REMOTE (see
+            # desktop_checkpoint). Gate on the registry binding matching the
+            # session's workspace, mirroring the local realpath gate.
+            r = project_remote(project_id)
+            if not r or str(r.get("path", "")).rstrip("/") != root.rstrip("/"):
+                return
+            backend = state.get("temp:sandbox_backend")
+            transport = getattr(backend, "transport", None)
+            if transport is None:
+                return  # not an ssh-backed session (misconfig) — no net, no crash
+        else:
+            repo = project_repo_path(project_id)
+            if not repo or os.path.realpath(repo) != os.path.realpath(root):
+                return
 
         session_id = None
         sess = getattr(ctx, "session", None)
@@ -97,4 +111,10 @@ class CheckpointPlugin(BasePlugin):
         # Record the invocation id so a restore can also roll the CONVERSATION
         # back to this turn (truncate events from this invocation onward), not
         # just the files.
-        snapshot(project_id, session_id, root, reason=tool.name, invocation_id=inv)
+        if remote_ws:
+            await snapshot_remote(
+                project_id, session_id, transport, root,
+                reason=tool.name, invocation_id=inv,
+            )
+        else:
+            snapshot(project_id, session_id, root, reason=tool.name, invocation_id=inv)

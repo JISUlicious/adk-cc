@@ -228,6 +228,173 @@ def snapshot(
         return None
 
 
+# --- remote (SSH) projects -------------------------------------------------
+# Same undo-net semantics for a workspace on another device: the SHADOW git
+# lives on the REMOTE machine (objects next to the files they snapshot — a
+# restore is a remote-local `reset --hard`, no bulk transfer), driven over the
+# shared SshTransport with explicit `--git-dir/--work-tree` flags (env vars
+# don't survive ssh cleanly). The checkpoint LOG stays LOCAL (same
+# `adk_cc_checkpoints.json` as local projects) so the restore menu lists
+# instantly and survives the remote being unreachable; log and remote store
+# are reconciled by sha at restore time. The user's remote `.git` is NEVER
+# touched — same guarantee as local, asserted in the e2e.
+
+_REMOTE_GIT_CONF = (
+    "-c user.email=checkpoint@adk-cc.local "
+    "-c 'user.name=adk-cc checkpoint' "
+    "-c commit.gpgsign=false -c gc.auto=0 -c core.hooksPath=/dev/null"
+)
+
+
+def _remote_shadow_dir(home: str, project_id: str, session_id: str) -> str:
+    return f"{home.rstrip('/')}/.adk-cc/checkpoints/{project_id}/{session_id}"
+
+
+async def remote_checkpoint_supported(transport) -> bool:  # noqa: ANN001
+    """True when the remote has git (probed, cached). Never raises."""
+    try:
+        probe = await transport.probe()
+        return bool(probe.get("git"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def snapshot_remote(
+    project_id: str,
+    session_id: str,
+    transport,  # noqa: ANN001 — SshTransport (typed loosely; service layer)
+    work_tree: str,
+    *,
+    reason: str = "",
+    invocation_id: Optional[str] = None,
+) -> Optional[str]:
+    """Remote analogue of `snapshot()`: snapshot the REMOTE work tree into the
+    remote shadow repo; return the sha (or existing HEAD when unchanged).
+    Returns None and swallows on ANY failure — a checkpoint must never break
+    a tool call. No-op (None) when the remote has no git."""
+    import shlex as _sh
+
+    try:
+        if not await remote_checkpoint_supported(transport):
+            return None
+        probe = await transport.probe()
+        home = probe.get("home") or ""
+        if not home:
+            return None
+        gd = _sh.quote(_remote_shadow_dir(home, project_id, session_id))
+        wt = _sh.quote(work_tree)
+        base = f"git --git-dir {gd} --work-tree {wt}"
+
+        # One round trip: init-once (with the belt-and-suspenders /.git/
+        # exclude), stage everything.
+        res = await transport.run(
+            f"[ -f {gd}/HEAD ] || {{ mkdir -p {gd} && git --git-dir {gd} init -q "
+            f"&& mkdir -p {gd}/info && printf '/.git/\\n' > {gd}/info/exclude; }} "
+            f"&& {base} add -A",
+            timeout_s=_ADD_TIMEOUT,
+        )
+        if res.exit_code != 0:
+            _log.debug("remote checkpoint add failed: %s", res.stderr.strip()[:300])
+            return None
+
+        # Local log lives in the LOCAL shadow dir (log only, no git there).
+        local_gd = _shadow_dir(project_id, session_id)
+        local_gd.mkdir(parents=True, exist_ok=True)
+
+        head_res = await transport.run(
+            f"{base} rev-parse -q --verify HEAD", timeout_s=_QUERY_TIMEOUT
+        )
+        head = head_res.stdout.strip() if head_res.exit_code == 0 else ""
+        if head:
+            quiet = await transport.run(
+                f"{base} diff --cached --quiet", timeout_s=_QUERY_TIMEOUT
+            )
+            if quiet.exit_code == 0:
+                # No file change this turn — still log THIS invocation so every
+                # turn maps to its own rewind point (same rationale as local).
+                _append_checkpoint(local_gd, head, reason, invocation_id)
+                return head
+
+        commit = await transport.run(
+            f"{base} {_REMOTE_GIT_CONF} commit -q -m {_sh.quote('checkpoint: ' + reason)} "
+            f"&& {base} rev-parse HEAD",
+            timeout_s=_COMMIT_TIMEOUT,
+        )
+        if commit.exit_code != 0:
+            _log.debug("remote checkpoint commit failed: %s", commit.stderr.strip()[:300])
+            return None
+        sha = commit.stdout.strip().splitlines()[-1] if commit.stdout.strip() else ""
+        if not sha:
+            return None
+        _append_checkpoint(local_gd, sha, reason, invocation_id)
+        return sha
+    except Exception as e:  # noqa: BLE001 — never break the tool loop
+        _log.debug("remote checkpoint snapshot error: %s", e)
+        return None
+
+
+async def restore_remote(
+    project_id: str,
+    session_id: str,
+    transport,  # noqa: ANN001
+    work_tree: str,
+    *,
+    checkpoint_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Remote analogue of `restore()`: pre-snapshot (reversible + removes
+    files created since the target), `reset --hard` the remote work tree,
+    truncate the local log from the target onward."""
+    import shlex as _sh
+
+    local_gd = _shadow_dir(project_id, session_id)
+    entries = _read_log(local_gd)
+    if not entries:
+        return {"status": "no_checkpoints"}
+    if checkpoint_id is None:
+        target_entry = entries[-1]
+    else:
+        target_entry = next(
+            (e for e in entries if _entry_id(e) == checkpoint_id), None
+        )
+        if target_entry is None:
+            return {"status": "error", "error": f"unknown checkpoint: {checkpoint_id}"}
+    target = target_entry["sha"]
+    invocation_id = target_entry.get("invocation_id")
+
+    try:
+        if not await remote_checkpoint_supported(transport):
+            return {"status": "error", "error": "remote has no git — undo unavailable"}
+        pre = await snapshot_remote(
+            project_id, session_id, transport, work_tree, reason="pre-restore"
+        )
+        probe = await transport.probe()
+        gd = _sh.quote(
+            _remote_shadow_dir(probe.get("home") or "", project_id, session_id)
+        )
+        wt = _sh.quote(work_tree)
+        reset = await transport.run(
+            f"git --git-dir {gd} --work-tree {wt} {_REMOTE_GIT_CONF} "
+            f"reset --hard {_sh.quote(target)}",
+            timeout_s=_RESET_TIMEOUT,
+        )
+        if reset.exit_code != 0:
+            return {"status": "error", "error": reset.stderr.strip()[:300]}
+        # Drop the rewound checkpoints from the local history (same as local).
+        log = _read_log(local_gd)
+        tid = _entry_id(target_entry)
+        idx = next((i for i, e in enumerate(log) if _entry_id(e) == tid), None)
+        if idx is not None:
+            _write_log(local_gd, log[:idx])
+        return {
+            "status": "ok",
+            "restored_to": target,
+            "pre_restore": pre,
+            "invocation_id": invocation_id,
+        }
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "error": str(e)}
+
+
 def list_checkpoints(project_id: str, session_id: str) -> list[dict[str, Any]]:
     """Most-recent-first checkpoints for the restore menu. Each carries a unique
     `id` (the git sha is NOT unique — a no-file-change turn reuses a commit), which
