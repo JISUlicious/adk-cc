@@ -98,6 +98,42 @@ def mount_desktop_routes(app) -> None:
     async def list_projects():  # noqa: ANN202
         return {"projects": load_projects()}
 
+    @app.get("/desktop/sessions/backend", include_in_schema=False)
+    async def session_backend(request: Request):  # noqa: ANN202
+        """The RESOLVED sandbox backend for one session — the truth the
+        composer badge shows. `source="live"` once the session has run a
+        turn (TenancyPlugin noted the actual backend object);
+        `source="config"` before that (what a new chat WOULD get). The
+        global settings endpoint can diverge from this — per-session
+        overrides, container→host fallback, per-project SSH — which is
+        exactly why this exists."""
+        q = request.query_params
+        session_id = q.get("session_id") or ""
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id required")
+
+        from ..sandbox import (
+            backend_public_info,
+            is_isolated_backend_name,
+            resolved_session_backend,
+        )
+
+        b = resolved_session_backend(session_id)
+        if b is not None:
+            return {"source": "live", **backend_public_info(b)}
+        name = deployment.sandbox_backend_name()
+        out: dict = {
+            "source": "config",
+            "backend": name,
+            "detail": None,
+            "isolated": is_isolated_backend_name(name),
+        }
+        if name == "container":
+            # The config-level nuance the old badge showed: opted in but no
+            # runtime → commands would fall back to the host.
+            out["available"] = deployment.container_runtime_available()
+        return out
+
     @app.post("/desktop/projects", include_in_schema=False)
     async def add_project(request: Request):  # noqa: ANN202
         body = await request.json()

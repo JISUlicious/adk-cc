@@ -535,6 +535,7 @@ export function ChatPage({
           isStreaming={isStreaming}
           disabled={!session}
           mode={permissionMode}
+          sessionId={session?.id ?? null}
           footer={session ? <ContextGauge current={ctxTokens} limits={ctxLimits} /> : undefined}
           taskStrip={session ? <TaskStrip events={events} /> : undefined}
         />

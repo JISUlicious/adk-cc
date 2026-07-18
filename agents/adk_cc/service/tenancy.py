@@ -224,6 +224,14 @@ class TenancyPlugin(BasePlugin):
         shim = SimpleNamespace(state=state)
         set_workspace(shim, ws)
         set_backend(shim, backend)
+        # Observability: record the RESOLVED backend so the UI's per-session
+        # badge can show the truth (not the global setting). Best-effort.
+        try:
+            from ..sandbox import note_session_backend
+
+            note_session_backend(session_id, backend)
+        except Exception:  # noqa: BLE001 — never break seeding
+            pass
 
     async def before_run_callback(
         self,

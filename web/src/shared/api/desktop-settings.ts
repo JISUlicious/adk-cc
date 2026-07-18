@@ -221,6 +221,24 @@ export interface SandboxStatus {
 export function getSandbox(): Promise<SandboxStatus> {
   return apiFetch("/desktop/settings/sandbox")
 }
+/** Per-session RESOLVED backend — the truth the composer badge shows.
+ * `source="live"` once the session ran a turn (the actual backend object);
+ * `source="config"` before that (what a new chat would get). Distinct from
+ * getSandbox(), which reports the GLOBAL setting and can diverge from a
+ * session's reality (per-session overrides, container→host fallback,
+ * per-project SSH). */
+export interface SessionBackend {
+  source: "live" | "config"
+  backend: string // "noop" | "container" | "ssh" | "docker" | "daytona" | …
+  detail?: string | null // human hint, e.g. the ssh host
+  isolated: boolean
+  /** container config-mode only: false when no runtime → host fallback. */
+  available?: boolean
+}
+export function getSessionBackend(sessionId: string): Promise<SessionBackend> {
+  const p = new URLSearchParams({ session_id: sessionId })
+  return apiFetch(`/desktop/sessions/backend?${p.toString()}`)
+}
 export function setSandbox(
   patch: Partial<Pick<SandboxStatus, "mode" | "network" | "image">>,
 ): Promise<SandboxStatus> {

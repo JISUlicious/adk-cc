@@ -193,6 +193,56 @@ def set_backend(ctx: ToolContext, backend: SandboxBackend) -> None:
     ctx.state[_STATE_KEY] = backend
 
 
+# --- per-session backend observability -------------------------------------
+# The UI's "where do my commands actually run" badge needs the RESOLVED
+# backend for a session — not the global setting, which can diverge from it
+# (per-session/tenant factory overrides, container fallback to host, and the
+# upcoming per-project SSH binding). TenancyPlugin notes each session's
+# backend here right after constructing it; the desktop status route reads
+# it back. Keyed by session_id (unique ADK ids); FIFO-capped so a long-lived
+# server doesn't grow unbounded.
+
+_SESSION_BACKENDS: dict[str, SandboxBackend] = {}
+_SESSION_BACKENDS_CAP = 512
+
+# Backends whose exec is genuinely ISOLATED from the machine adk-cc runs on
+# (container/VM boundary). noop is host-exec by definition; ssh (later) runs
+# un-containerized on the remote account — remote ≠ isolated, and the UI
+# copy must not imply otherwise.
+_ISOLATED_BACKEND_NAMES = frozenset(
+    {"container", "docker", "e2b", "daytona", "sandbox_service"}
+)
+
+
+def note_session_backend(session_id: str, backend: SandboxBackend) -> None:
+    """Record the backend RESOLVED for `session_id` (tenancy seeding hook)."""
+    if session_id not in _SESSION_BACKENDS:
+        while len(_SESSION_BACKENDS) >= _SESSION_BACKENDS_CAP:
+            _SESSION_BACKENDS.pop(next(iter(_SESSION_BACKENDS)))
+    _SESSION_BACKENDS[session_id] = backend
+
+
+def resolved_session_backend(session_id: str) -> SandboxBackend | None:
+    """The backend a session actually got, or None if it hasn't run a turn
+    yet (callers fall back to config-level prediction)."""
+    return _SESSION_BACKENDS.get(session_id)
+
+
+def is_isolated_backend_name(name: str) -> bool:
+    return name in _ISOLATED_BACKEND_NAMES
+
+
+def backend_public_info(backend: SandboxBackend) -> dict:
+    """UI-safe summary of a backend: `{backend, detail, isolated}`. `detail`
+    is a human hint (e.g. the ssh host) — never a secret."""
+    name = getattr(backend, "name", "unknown")
+    return {
+        "backend": name,
+        "detail": getattr(backend, "host", None),
+        "isolated": name in _ISOLATED_BACKEND_NAMES,
+    }
+
+
 def is_noop_backend(backend: SandboxBackend) -> bool:
     """True if `backend` is the no-isolation host-exec NoopBackend.
 
