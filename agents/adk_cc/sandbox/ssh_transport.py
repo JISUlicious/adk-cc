@@ -312,11 +312,20 @@ class SshTransport:
             ),
         )
 
-    async def read_file(self, path: str, *, timeout_s: float = 60.0) -> bytes:
-        """Binary-safe read via `cat < path`. FileNotFoundError on a missing
-        file; SshConnectionError on transport failure."""
+    async def read_file(
+        self, path: str, *, max_bytes: Optional[int] = None, timeout_s: float = 60.0
+    ) -> bytes:
+        """Binary-safe read via `cat < path` (or `head -c N < path` when
+        `max_bytes` caps the transfer — the cap is applied REMOTELY so a huge
+        file doesn't cross the wire). FileNotFoundError on a missing file;
+        SshConnectionError on transport failure."""
+        reader = (
+            f"head -c {int(max_bytes)} < {_shq(path)}"
+            if max_bytes
+            else f"cat < {_shq(path)}"
+        )
         code, out, err = await self._spawn(
-            self.build_argv([f"cat < {_shq(path)}"]), stdin_data=None, timeout_s=timeout_s
+            self.build_argv([reader]), stdin_data=None, timeout_s=timeout_s
         )
         if code == 0:
             return out
@@ -461,6 +470,15 @@ def get_transport(
     identity_file: Optional[str] = None,
     extra_ssh_opts: tuple[str, ...] = (),
 ) -> SshTransport:
+    # Env defaults so every construction site (backend factory, file panel,
+    # checkpoint) resolves IDENTICAL transports without threading auth knobs
+    # through each caller: ~/.ssh/config remains the normal path; these are
+    # the explicit escape hatch (and the test seam).
+    if identity_file is None:
+        identity_file = os.environ.get("ADK_CC_SSH_IDENTITY_FILE") or None
+    if not extra_ssh_opts:
+        raw = os.environ.get("ADK_CC_SSH_EXTRA_OPTS") or ""
+        extra_ssh_opts = tuple(shlex.split(raw)) if raw else ()
     key = (host, port, identity_file, extra_ssh_opts)
     t = _REGISTRY.get(key)
     if t is None:

@@ -56,12 +56,15 @@ def main() -> int:
         if box is None:
             return 0
 
-        # The transport layer reads these for EVERY get_transport call — the
-        # registry entry only carries host/path, auth comes from ssh config /
-        # these test overrides.
+        # Auth comes from the user's ssh config in production; tests use the
+        # explicit env seam get_transport() honors for NEW transports — so the
+        # factory (and the file panel in PR 5) resolve a correctly-authed
+        # transport without private pokes.
         os.environ["ADK_CC_SSH_CONTROL_DIR"] = box.control_dir
+        os.environ["ADK_CC_SSH_IDENTITY_FILE"] = box.identity_file
+        os.environ["ADK_CC_SSH_EXTRA_OPTS"] = " ".join(box.extra_ssh_opts)
 
-        from adk_cc.sandbox.ssh_transport import SshTransport, get_transport
+        from adk_cc.sandbox.ssh_transport import SshTransport
         from adk_cc.service.desktop_routes import save_projects
         from adk_cc.service.desktop_workspace import (
             desktop_backend_factory,
@@ -69,20 +72,6 @@ def main() -> int:
         )
         from adk_cc.service.tenancy import TenancyPlugin
         from adk_cc.tools import BashTool, WriteFileTool
-
-        # Pre-register the transport for this host WITH the test's key/known-
-        # hosts opts, so the factory's get_transport() call (host, no port
-        # kwargs beyond registry) resolves THIS instance. The registry key
-        # includes port+identity+opts — so seed it with exactly what the
-        # factory will ask for: (host, port, None, ()).  We instead register
-        # the project WITH the port and pass identity/known-hosts via env-
-        # style extra opts on a pre-created transport under the same key.
-        factory_key_transport = get_transport(box.host, port=box.port)
-        # Point the factory-keyed transport's ssh invocation at the test key +
-        # throwaway known_hosts (fields are per-instance; same object the
-        # factory will fetch).
-        factory_key_transport._identity = box.identity_file
-        factory_key_transport._extra = box.extra_ssh_opts
 
         verify = SshTransport(
             box.host,
