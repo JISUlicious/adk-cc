@@ -61,8 +61,18 @@ os.environ["ADK_CC_DESKTOP"] = "1"
 os.environ["ADK_CC_DESKTOP_DATA"] = tempfile.mkdtemp(prefix="adk-accept-ssh-")
 os.environ["ADK_CC_SANDBOX_BACKEND"] = "noop"  # remote must come from the PROJECT
 
-_ORIGINAL = "acceptance: original readme\n"
-_EDITED = "acceptance: EDITED BY THE AGENT over real SSH\n"
+# Per-run token: the acceptance dir is deliberately LEFT IN PLACE between
+# runs, so every content/filename this run creates must differ from the last
+# run's leftovers — otherwise the seed commit sees a clean tree ("nothing to
+# commit", exit 1 with the message on stdout) and the bash artifact is already
+# tracked at baseline, so its "new" marker never appears. Re-run-safe by
+# construction.
+import uuid as _uuid
+
+_RUN = _uuid.uuid4().hex[:8]
+_ORIGINAL = f"acceptance: original readme ({_RUN})\n"
+_EDITED = f"acceptance: EDITED BY THE AGENT over real SSH ({_RUN})\n"
+_BASH_FILE = f"from-bash-{_RUN}.txt"
 _GIT_ID = "-c user.email=accept@adk-cc.local -c 'user.name=adk-cc acceptance'"
 
 
@@ -146,7 +156,7 @@ def main() -> int:
         llm = ScriptedLlm(
             responses=[
                 tool_call("c1", "write_file", {"path": "README.md", "content": _EDITED}),
-                tool_call("c2", "run_bash", {"command": "printf 'created-by-bash' > from-bash.txt"}),
+                tool_call("c2", "run_bash", {"command": f"printf 'created-by-bash' > {_BASH_FILE}"}),
                 text("done"),
             ]
         )
@@ -220,7 +230,7 @@ def main() -> int:
         await run_turn()
         turn_s = time.monotonic() - t0
         got = (await t.read_file(f"{_PATH}/README.md")).decode()
-        bash_got = (await t.read_file(f"{_PATH}/from-bash.txt")).decode()
+        bash_got = (await t.read_file(f"{_PATH}/{_BASH_FILE}")).decode()
         if got != _EDITED or bash_got != "created-by-bash":
             failures.append(f"turn artifacts wrong: {got!r} / {bash_got!r}")
             return
@@ -248,11 +258,11 @@ def main() -> int:
         if not (
             st.get("is_repo")
             and marks.get("README.md") == "modified"
-            and marks.get("from-bash.txt") == "new"
+            and marks.get(_BASH_FILE) == "new"
         ):
             failures.append(f"status markers: {st}")
         else:
-            print("  [PASS] git change markers: README modified, from-bash.txt new")
+            print(f"  [PASS] git change markers: README modified, {_BASH_FILE} new")
 
         sb = web.get(
             "/desktop/sessions/backend",
@@ -276,7 +286,7 @@ def main() -> int:
             failures.append(f"undo failed: {res}")
             return
         got = (await t.read_file(f"{_PATH}/README.md")).decode()
-        gone = (await t.run(f"[ -e {_PATH}/from-bash.txt ] && echo yes || echo no")).stdout.strip()
+        gone = (await t.run(f"[ -e {_PATH}/{_BASH_FILE} ] && echo yes || echo no")).stdout.strip()
         head_after = (await t.run("git rev-parse HEAD", cwd=_PATH)).stdout.strip()
         if got != _ORIGINAL:
             failures.append(f"undo did not revert README: {got!r}")
