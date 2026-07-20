@@ -284,29 +284,17 @@ def _make_tenant_mcp_toolset():
     if not registry_dir:
         return None
 
-    from .credentials import (
-        EncryptedFileCredentialProvider,
-        InMemoryCredentialProvider,
-    )
+    from .credentials import credential_provider_from_env
     from .service.registry import JsonFileTenantResourceRegistry
     from .tools.mcp_tenant import McpServerConfig, TenantMcpToolset
 
-    provider_kind = os.environ.get("ADK_CC_CREDENTIAL_PROVIDER", "memory").lower()
-    if provider_kind == "encrypted_file":
-        store_dir = os.environ.get("ADK_CC_CREDENTIAL_STORE_DIR")
-        if not store_dir:
-            raise RuntimeError(
-                "ADK_CC_CREDENTIAL_PROVIDER=encrypted_file requires "
-                "ADK_CC_CREDENTIAL_STORE_DIR to be set"
-            )
-        creds = EncryptedFileCredentialProvider(root=store_dir)
-    elif provider_kind == "memory":
-        creds = InMemoryCredentialProvider()
-    else:
-        raise RuntimeError(
-            f"unknown ADK_CC_CREDENTIAL_PROVIDER={provider_kind!r}; "
-            "valid: memory, encrypted_file"
-        )
+    # One canonical selector (memory | encrypted_file | none), with store-dir
+    # defaulting and consistent errors. `none` → no credential store, so
+    # per-tenant MCP secret injection can't work; skip the toolset entirely
+    # rather than crash (TenantMcpToolset requires a real provider).
+    creds = credential_provider_from_env()
+    if creds is None:
+        return None
 
     registry = JsonFileTenantResourceRegistry[McpServerConfig](
         root=registry_dir,

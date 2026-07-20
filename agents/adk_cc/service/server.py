@@ -563,27 +563,25 @@ def _seed_model_registry() -> None:
 
 
 def _build_credential_provider():
-    """Build the CredentialProvider from env (same selection as the agent's
-    tenant path: memory | encrypted_file)."""
-    from ..credentials import (
-        EncryptedFileCredentialProvider,
-        InMemoryCredentialProvider,
-    )
+    """CredentialProvider for the tenant-admin panel.
 
-    kind = os.environ.get("ADK_CC_CREDENTIAL_PROVIDER", "memory").lower()
-    if kind == "encrypted_file":
-        store_dir = os.environ.get("ADK_CC_CREDENTIAL_STORE_DIR")
-        if not store_dir:
-            raise RuntimeError(
-                "ADK_CC_CREDENTIAL_PROVIDER=encrypted_file requires "
-                "ADK_CC_CREDENTIAL_STORE_DIR"
-            )
-        return EncryptedFileCredentialProvider(root=store_dir)
-    if kind == "memory":
-        return InMemoryCredentialProvider()
-    raise RuntimeError(
-        f"unknown ADK_CC_CREDENTIAL_PROVIDER={kind!r}; valid: memory, encrypted_file"
-    )
+    Delegates to the ONE canonical factory so provider selection, store-dir
+    defaulting, and error messages are identical everywhere (previously this
+    re-implemented the selection and diverged: no `none` handling, and it
+    required CREDENTIAL_STORE_DIR instead of defaulting it under DATA_DIR).
+    The admin panel manages secrets, so `PROVIDER=none` (no store) is rejected
+    here with a specific reason rather than mounting a panel that can't persist
+    anything — or, as before, dying with a misleading 'unknown provider'."""
+    from ..credentials import credential_provider_from_env
+
+    provider = credential_provider_from_env()
+    if provider is None:  # PROVIDER=none
+        raise RuntimeError(
+            "ADK_CC_CREDENTIAL_PROVIDER=none is incompatible with the tenant "
+            "admin panel, which needs a credential store — use memory or "
+            "encrypted_file."
+        )
+    return provider
 
 
 def _make_admin_role_extractor():

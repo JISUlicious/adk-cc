@@ -81,8 +81,13 @@ def _threshold_synthesizer(model):
     captures into a distilled fact) when a model is available and
     ADK_CC_MEMORY_SYNTH != 'deterministic' — same convention as the periodic
     scheduler. Else None → deterministic latest-wins (semantic text == newest
-    episodic verbatim). Set ADK_CC_MEMORY_SYNTH=deterministic to keep the hot
-    path model-free."""
+    episodic verbatim).
+
+    NB: ADK_CC_MEMORY_SYNTH only governs THIS consolidation-synthesis step. The
+    capture path still calls the model to EXTRACT facts (unless
+    ADK_CC_MEMORY_AUTOCAPTURE=0) and to RESOLVE topics (unless
+    ADK_CC_MEMORY_RESOLVE=0); a fully model-free memory hot path needs all
+    three flags, not SYNTH alone."""
     if model is None or os.environ.get("ADK_CC_MEMORY_SYNTH") == "deterministic":
         return None
     try:
