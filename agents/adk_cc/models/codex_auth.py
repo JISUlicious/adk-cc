@@ -50,8 +50,13 @@ def _override_path() -> Optional[Path]:
 
 def own_store_path() -> Path:
     """adk-cc's own token store (Phase-2 login target)."""
-    d = os.environ.get("ADK_CC_CODEX_STORE_DIR") or os.environ.get("ADK_CC_DESKTOP_DATA")
-    base = Path(d).expanduser() if d else Path.home() / ".adk-cc"
+    d = os.environ.get("ADK_CC_CODEX_STORE_DIR")
+    if d:
+        base = Path(d).expanduser()
+    else:
+        from .. import deployment as _dep
+
+        base = _dep.data_dir()
     return base / "codex_auth.json"
 
 

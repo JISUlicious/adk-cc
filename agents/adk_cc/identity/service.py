@@ -91,7 +91,9 @@ class IdentityService:
 
     @classmethod
     def build_from_env(cls) -> "IdentityService":
-        base = os.environ.get("ADK_CC_IDENTITY_DIR") or os.path.join(".adk-cc", "identity")
+        from .. import deployment as _dep
+
+        base = os.environ.get("ADK_CC_IDENTITY_DIR") or str(_dep.data_dir() / "identity")
         mode = (os.environ.get("ADK_CC_TENANCY_MODE") or "single").strip().lower()
         if mode not in ("single", "multi"):
             mode = "single"

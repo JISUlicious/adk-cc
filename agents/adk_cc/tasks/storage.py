@@ -138,7 +138,9 @@ def _default_root() -> Path:
     raw = os.environ.get("ADK_CC_TASKS_DIR")
     if raw:
         return Path(raw).expanduser().resolve()
-    return Path.home() / ".adk-cc" / "tasks"
+    from .. import deployment as _dep
+
+    return _dep.data_dir() / "tasks"
 
 
 class JsonFileTaskStorage(TaskStorage):

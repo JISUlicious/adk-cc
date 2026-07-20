@@ -35,6 +35,28 @@ def desktop_data_dir() -> Path:
     return p
 
 
+def data_dir() -> Path:
+    """Server-side data ROOT — identity, admin/tenant registry, credential
+    store, audit log, central task store, and codex token all default UNDER
+    here.
+
+    Resolution: `$ADK_CC_DATA_DIR`, else the desktop data dir in desktop mode
+    (so `$ADK_CC_DESKTOP_DATA` is its desktop alias), else `<cwd>/.adk-cc` for
+    the web service. Returns the path WITHOUT creating it — each subsystem makes
+    its own subdir only when it activates, so a bare web deployment never
+    materializes dirs it doesn't use.
+
+    NB: the WORKSPACE root (`ADK_CC_WORKSPACE_ROOT`) and its `.memory`/`.wiki`
+    siblings are a DIFFERENT axis — that data travels with the tenant workspace,
+    not this server-data root."""
+    raw = os.environ.get("ADK_CC_DATA_DIR")
+    if raw:
+        return Path(os.path.abspath(os.path.expanduser(raw)))
+    if is_desktop():
+        return desktop_data_dir()
+    return Path(os.path.abspath(os.getcwd())) / ".adk-cc"
+
+
 # --- desktop sandbox setting (live JSON, no restart) ------------------------
 # Persisted in <desktop-data>/sandbox.json so the Settings toggle takes effect
 # for new sessions without an app restart. An explicit env var always overrides

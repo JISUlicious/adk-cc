@@ -74,12 +74,12 @@ Sink = Union[str, Path, Callable[[dict], None]]
 
 
 def _default_sink_path() -> Path:
-    return Path(
-        os.environ.get(
-            "ADK_CC_AUDIT_LOG",
-            os.path.join(os.path.expanduser("~"), ".adk-cc", "audit.jsonl"),
-        )
-    )
+    override = os.environ.get("ADK_CC_AUDIT_LOG")
+    if override:
+        return Path(override)
+    from .. import deployment as _dep
+
+    return _dep.data_dir() / "audit.jsonl"
 
 
 class AuditPlugin(BasePlugin):

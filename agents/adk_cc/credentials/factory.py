@@ -8,7 +8,7 @@ instances built the same way are interchangeable.
 
 Knobs (unchanged from the original inline construction in agent.py):
     ADK_CC_CREDENTIAL_PROVIDER   memory (default) | encrypted_file
-    ADK_CC_CREDENTIAL_STORE_DIR  root dir (required for encrypted_file)
+    ADK_CC_CREDENTIAL_STORE_DIR  root dir (defaults to <ADK_CC_DATA_DIR>/secrets)
     ADK_CC_CREDENTIAL_KEY        Fernet key (encrypted_file; see impls)
 """
 
@@ -38,10 +38,9 @@ def credential_provider_from_env() -> Optional[CredentialProvider]:
 
         store_dir = os.environ.get("ADK_CC_CREDENTIAL_STORE_DIR")
         if not store_dir:
-            raise RuntimeError(
-                "ADK_CC_CREDENTIAL_PROVIDER=encrypted_file requires "
-                "ADK_CC_CREDENTIAL_STORE_DIR to be set"
-            )
+            from .. import deployment as _dep
+
+            store_dir = str(_dep.data_dir() / "secrets")
         return EncryptedFileCredentialProvider(root=store_dir)
     raise RuntimeError(
         f"unknown ADK_CC_CREDENTIAL_PROVIDER={kind!r}; "

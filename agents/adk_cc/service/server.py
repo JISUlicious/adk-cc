@@ -481,8 +481,10 @@ def _prepare_admin_env() -> None:
     """
     if not _admin_enabled():
         return
+    from .. import deployment as _dep
+
     base = os.environ.get("ADK_CC_ADMIN_DATA_DIR") or str(
-        (Path.cwd() / _ADMIN_DEFAULT_DATA_DIR).resolve()
+        (_dep.data_dir() / "admin-data").resolve()
     )
     os.environ["ADK_CC_ADMIN_DATA_DIR"] = base
     os.environ.setdefault("ADK_CC_TENANT_REGISTRY_DIR", str(Path(base) / "registry"))
