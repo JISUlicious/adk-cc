@@ -107,10 +107,7 @@ _DEFAULT_PDF_MAX_BYTES = 10_000_000
 
 
 def _pdf_max_bytes() -> int:
-    try:
-        return max(1, int(os.environ.get("ADK_CC_WEB_FETCH_PDF_MAX_BYTES", "")))
-    except ValueError:
-        return _DEFAULT_PDF_MAX_BYTES
+    return _DEFAULT_PDF_MAX_BYTES
 
 
 def _looks_textual(content_type: str, body: bytes) -> bool:

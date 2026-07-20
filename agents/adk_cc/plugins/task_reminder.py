@@ -27,6 +27,7 @@ invocation.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from typing import Any, Iterable, Optional
@@ -57,10 +58,10 @@ _REMINDER_HEADER = (
 
 _LAST_REMINDER_KEY = "task_reminder_last_invocation_id"
 
-# Set ADK_CC_TASK_REMINDER_DEBUG=1 to log the fire decision (agent,
-# fresh_turn, turn counts, open-task count, fire/skip) to stderr. Off by
-# default; handy for confirming the reminder actually fires in a live run.
-_DEBUG = os.environ.get("ADK_CC_TASK_REMINDER_DEBUG") == "1"
+# The fire decision (agent, fresh_turn, turn counts, open-task count, fire/skip)
+# is logged at DEBUG — enable with ADK_CC_LOG_LEVEL=DEBUG to confirm the
+# reminder actually fires in a live run.
+_log = logging.getLogger(__name__)
 
 
 def _has_function_call(event: Any, names: set[str]) -> bool:
@@ -214,6 +215,10 @@ class TaskReminderPlugin(BasePlugin):
         *,
         default_mode: str = "default",
         name: str = "adk_cc_task_reminder",
+        turns_since_write: int = 10,
+        turns_between: int = 10,
+        open_turns: int = 3,
+        open_between: int = 2,
     ) -> None:
         super().__init__(name=name)
         # Fall back to the env-set default when state hasn't been
@@ -224,27 +229,14 @@ class TaskReminderPlugin(BasePlugin):
         # Master on/off. `ADK_CC_TASK_REMINDER=0` disables the periodic
         # reminder injection entirely (the task TOOLS still work).
         self._enabled = os.environ.get("ADK_CC_TASK_REMINDER", "1") != "0"
-        self._turns_since_write = int(
-            os.environ.get("ADK_CC_TASK_REMINDER_TURNS_SINCE_WRITE", "10")
-        )
-        self._turns_between = int(
-            os.environ.get("ADK_CC_TASK_REMINDER_TURNS_BETWEEN", "10")
-        )
-        # Completion-aware cadence: when an in_progress task is open, fire
-        # after this many turns instead of `_turns_since_write` — the
-        # "you left this open, close it" nudge. Set >= _turns_since_write
-        # to disable the aggressive path and keep only the old cadence.
-        self._open_turns = int(
-            os.environ.get("ADK_CC_TASK_REMINDER_OPEN_TURNS", "3")
-        )
-        # Cooldown between reminders while an in_progress task is open.
-        # Lower than `_turns_between` so the "close it out" nudge keeps
-        # firing as the agent winds down — the regular 10-turn cooldown
-        # silences it right when the agent is wrapping up with tasks
-        # still open. Set >= _turns_between to disable.
-        self._open_between = int(
-            os.environ.get("ADK_CC_TASK_REMINDER_OPEN_BETWEEN", "2")
-        )
+        # Cadence knobs — internal defaults (constructor kwargs, no longer env).
+        self._turns_since_write = turns_since_write
+        self._turns_between = turns_between
+        # Completion-aware cadence: when an in_progress task is open, fire after
+        # `open_turns` instead of `_turns_since_write` (the "close it out" nudge),
+        # with `open_between` cooldown. Set >= the regular counterparts to disable.
+        self._open_turns = open_turns
+        self._open_between = open_between
 
     async def before_model_callback(
         self,
@@ -338,15 +330,12 @@ class TaskReminderPlugin(BasePlugin):
             if turns_since >= threshold and since_reminder >= cooldown:
                 fire = True
 
-        if _DEBUG:
-            print(
-                f"[task_reminder] agent={getattr(callback_context, 'agent_name', None)} "
-                f"fresh_turn={fresh_turn} turns_since={turns_since} "
-                f"open={len(open_tasks)} in_progress={has_in_progress} "
-                f"since_reminder={since_reminder} -> fire={fire}",
-                file=sys.stderr,
-                flush=True,
-            )
+        _log.debug(
+            "[task_reminder] agent=%s fresh_turn=%s turns_since=%s open=%s "
+            "in_progress=%s since_reminder=%s -> fire=%s",
+            getattr(callback_context, "agent_name", None), fresh_turn, turns_since,
+            len(open_tasks), has_in_progress, since_reminder, fire,
+        )
 
         if not fire:
             return None

@@ -1035,8 +1035,6 @@ def make_daytona_backend_from_env(
                                             cap under Daytona capacity /
                                             rate-limit backpressure;
                                             default 6.
-      - ADK_CC_DAYTONA_CREATE_BACKOFF_BASE_S — initial backoff; default 0.5.
-      - ADK_CC_DAYTONA_CREATE_BACKOFF_CAP_S  — per-sleep cap; default 8.
       - ADK_CC_DAYTONA_CREATE_TOTAL_WAIT_S   — total wall-clock cap across
                                             all create retries; default 45.
 
@@ -1121,12 +1119,8 @@ def make_daytona_backend_from_env(
         start_timeout_s=_float_env("ADK_CC_DAYTONA_START_TIMEOUT_S", 120.0),
         request_timeout_s=_float_env("ADK_CC_DAYTONA_REQUEST_TIMEOUT_S", 30.0),
         create_max_attempts=_int_env("ADK_CC_DAYTONA_CREATE_MAX_ATTEMPTS", 6),
-        create_backoff_base_s=_float_env(
-            "ADK_CC_DAYTONA_CREATE_BACKOFF_BASE_S", 0.5
-        ),
-        create_backoff_cap_s=_float_env(
-            "ADK_CC_DAYTONA_CREATE_BACKOFF_CAP_S", 8.0
-        ),
+        # backoff base/cap use the ctor defaults (0.5 / 8.0); MAX_ATTEMPTS +
+        # TOTAL_WAIT already bound the loop, so they aren't env-tunable.
         create_total_wait_s=_float_env(
             "ADK_CC_DAYTONA_CREATE_TOTAL_WAIT_S", 45.0
         ),

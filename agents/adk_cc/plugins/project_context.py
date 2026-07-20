@@ -38,7 +38,7 @@ order (`CLAUDE.md` first) means existing CLAUDE.md projects don't
 change behavior when AGENTS.md support lands.
 
 Missing / empty files are silently skipped. Files exceeding the
-per-file byte cap (`ADK_CC_CONTEXT_MAX_BYTES`, default 50000) are
+per-file byte cap (`ADK_CC_CONTEXT_FILES_MAX_BYTES`, default 50000) are
 loaded truncated with a marker. Duplicate paths (operator extras
 matching a discovered project file) are deduplicated.
 
@@ -128,7 +128,7 @@ class ProjectContextPlugin(BasePlugin):
             os.environ.get("ADK_CC_DISABLE_PROJECT_CONTEXT", "").strip() != "1"
         )
         self._max_bytes = _parse_int(
-            os.environ.get("ADK_CC_CONTEXT_MAX_BYTES"),
+            os.environ.get("ADK_CC_CONTEXT_FILES_MAX_BYTES"),
             default=_DEFAULT_MAX_BYTES,
         )
         self._extra_paths = _parse_extra_paths(

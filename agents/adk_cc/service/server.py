@@ -316,7 +316,7 @@ def make_app():
     """Default factory consumed by `uvicorn ... --factory`.
 
     Reads everything from env so the deployment is config-driven:
-      ADK_CC_AGENTS_DIR        (required)
+      ADK_CC_AGENTS_DIR        (optional; defaults to this package's agents/ dir)
       ADK_CC_SESSION_DSN       (optional; e.g. postgresql://...)
       ADK_CC_PERMISSIONS_YAML  (optional)
       ADK_CC_PERMISSION_MODE   (optional)
@@ -364,7 +364,11 @@ def make_app():
     """
     agents_dir = os.environ.get("ADK_CC_AGENTS_DIR")
     if not agents_dir:
-        raise RuntimeError("ADK_CC_AGENTS_DIR must be set for make_app()")
+        # Default to this package's own agents/ dir — server.py lives at
+        # agents/adk_cc/service/server.py, so parents[2] is the agents/ root
+        # ADK discovers the agent package under. Operators only set
+        # ADK_CC_AGENTS_DIR to point ADK at a different agents root.
+        agents_dir = str(Path(__file__).resolve().parents[2])
 
     # Admin panel (default-OFF). When enabled, default the tenant registry /
     # skills dirs in the environment BEFORE the agent module loads (it reads
@@ -507,7 +511,7 @@ def _seed_model_registry() -> None:
         return
     ModelEndpointRegistry(path).seed_default(
         ModelEndpointConfig(
-            name=os.environ.get("ADK_CC_MODEL_DEFAULT_NAME", "default"),
+            name="default",
             model=os.environ.get("ADK_CC_MODEL", "openai/Qwen3.6-35B-A3B-UD-MLX-4bit"),
             api_base=os.environ.get("ADK_CC_API_BASE", "http://localhost:18000/v1"),
             api_key_env="ADK_CC_API_KEY",

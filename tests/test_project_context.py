@@ -405,10 +405,10 @@ def test_size_cap_truncates_with_marker() -> None:
 
 def test_max_bytes_env_applied_to_file_load() -> None:
     """End-to-end: a large file is loaded into the prompt truncated
-    when ADK_CC_CONTEXT_MAX_BYTES caps it."""
+    when ADK_CC_CONTEXT_FILES_MAX_BYTES caps it."""
     with tempfile.TemporaryDirectory() as tmp:
         (Path(tmp) / "CLAUDE.md").write_text("x" * 5000)
-        os.environ["ADK_CC_CONTEXT_MAX_BYTES"] = "500"
+        os.environ["ADK_CC_CONTEXT_FILES_MAX_BYTES"] = "500"
         old_cwd = os.getcwd()
         os.chdir(tmp)
         try:
@@ -417,7 +417,7 @@ def test_max_bytes_env_applied_to_file_load() -> None:
             _run(plugin, _FakeCallbackContext(), req)
         finally:
             os.chdir(old_cwd)
-            del os.environ["ADK_CC_CONTEXT_MAX_BYTES"]
+            del os.environ["ADK_CC_CONTEXT_FILES_MAX_BYTES"]
         si = req.config.system_instruction
         assert "truncated by ProjectContextPlugin" in si
     print("OK test_max_bytes_env_applied_to_file_load")
