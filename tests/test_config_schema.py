@@ -95,6 +95,43 @@ def test_check_required_and_conditional():
     print("OK check_required_and_conditional")
 
 
+def test_enum_choices_and_rules():
+    """Enum vars reject out-of-choice values (error); cross-var rules flag
+    dangerous/contradictory combinations."""
+    base = {"ADK_CC_API_KEY": "x", "ADK_CC_DESKTOP": "1"}
+
+    # bad enum value → error naming the var; valid value → no such error.
+    e, _ = C.check({**base, "ADK_CC_SANDBOX_BACKEND": "Docker"})  # capital D not a choice
+    assert any("ADK_CC_SANDBOX_BACKEND" in m and "Docker" in m for m in e), e
+    e2, _ = C.check({**base, "ADK_CC_SANDBOX_BACKEND": "docker"})
+    assert not any("ADK_CC_SANDBOX_BACKEND" in m for m in e2), e2
+
+    # every enum var actually carries choices (guards against forgetting one).
+    enum_names = {
+        "ADK_CC_PERMISSION_MODE", "ADK_CC_SANDBOX_BACKEND", "ADK_CC_LOG_FORMAT",
+        "ADK_CC_WEB_FETCH_MODE", "ADK_CC_CREDENTIAL_PROVIDER", "ADK_CC_TENANCY_MODE",
+        "ADK_CC_SANDBOX_MODE", "ADK_CC_SANDBOX_RUNTIME", "ADK_CC_MCP_TRANSPORT",
+    }
+    for n in enum_names:
+        assert C.BY_NAME[n].choices, f"{n} should declare choices"
+        assert C.BY_NAME[n].default in C.BY_NAME[n].choices, f"{n} default not in its own choices"
+
+    # cross-var rule: compaction threshold without retention → error.
+    e3, _ = C.check({**base, "ADK_CC_COMPACTION_TOKEN_THRESHOLD": "1000"})
+    assert any("COMPACTION" in m for m in e3), e3
+    # both set → no compaction error.
+    e4, _ = C.check({**base, "ADK_CC_COMPACTION_TOKEN_THRESHOLD": "1000",
+                     "ADK_CC_COMPACTION_EVENT_RETENTION": "20"})
+    assert not any("COMPACTION" in m for m in e4), e4
+
+    # dangerous combos → warnings (not errors).
+    _, w = C.check({**base, "ADK_CC_WEB_FETCH_ALLOW_PRIVATE": "1"})
+    assert any("SSRF" in m for m in w), w
+    _, w2 = C.check({"ADK_CC_API_KEY": "x", "ADK_CC_ALLOW_NO_AUTH": "1"})  # web (no DESKTOP)
+    assert any("NO auth" in m for m in w2), w2
+    print("OK enum_choices_and_rules")
+
+
 def test_gen_env_shape():
     text = C.render_env_example(C.Profile.ALL)
     # Required unconditional var is uncommented; advanced var is commented.
@@ -159,6 +196,7 @@ def main():
     test_defaults_mirror_current_behavior()
     test_parsing()
     test_check_required_and_conditional()
+    test_enum_choices_and_rules()
     test_gen_env_shape()
     test_effective_masks_secrets()
     print("\nall config-schema tests passed")

@@ -98,6 +98,7 @@ class Var:
     example: Optional[str] = None       # sample value shown in the generated .env
     default_display: Optional[str] = None  # override the shown default (e.g. "off", "auto")
     secret: bool = False                # mask in `print`
+    choices: Optional[tuple] = None     # allowed values (enum vars) — `check` rejects others
     # Optional conditional-requirement: given the resolved config dict, is this
     # var required? Used by `check` (e.g. DAYTONA_API_URL required iff backend=daytona).
     required_if: Optional[Callable[[dict], bool]] = field(default=None, compare=False)
@@ -170,7 +171,8 @@ FIELDS: list[Var] = [
     # --- Permissions -----------------------------------------------------
     Var("ADK_CC_PERMISSION_MODE", Tier.COMMON, "Permissions",
         "default | plan | acceptEdits | bypassPermissions | dontAsk. Dev default: bypassPermissions.",
-        default="bypassPermissions"),
+        default="bypassPermissions",
+        choices=("default","plan","acceptEdits","bypassPermissions","dontAsk")),
     Var("ADK_CC_PERMISSIONS_YAML", Tier.COMMON, "Permissions",
         "Path to a YAML of permission rules + authz policies.",
         default=None, parse=as_path),
@@ -178,7 +180,8 @@ FIELDS: list[Var] = [
     # --- Sandbox (selector + core; per-backend groups below) -------------
     Var("ADK_CC_SANDBOX_BACKEND", Tier.COMMON, "Sandbox",
         "noop | container | docker | e2b | sandbox_service | daytona | ssh. Default: noop (host exec).",
-        default="noop"),
+        default="noop",
+        choices=("noop","container","docker","e2b","sandbox_service","daytona","ssh")),
     Var("ADK_CC_SANDBOX_IMAGE", Tier.ADVANCED, "Sandbox",
         "Container image for container/docker backends.",
         default="python:3.12-slim"),
@@ -270,7 +273,7 @@ FIELDS: list[Var] = [
     Var("ADK_CC_LOG_LEVEL", Tier.COMMON, "Deployment",
         "Log verbosity (DEBUG/INFO/WARNING/…).", default="INFO"),
     Var("ADK_CC_LOG_FORMAT", Tier.COMMON, "Deployment",
-        "Log format: text | json.", default="text"),
+        "Log format: text | json.", default="text", choices=("text","json")),
 
     # --- Misc feature flags ----------------------------------------------
     Var("ADK_CC_TOLERANT_TOOL_JSON", Tier.ADVANCED, "Behavior",
@@ -280,7 +283,8 @@ FIELDS: list[Var] = [
         "Shadow-git checkpoint/undo (default-on in desktop; set 0 to disable).",
         default=True, parse=as_bool),
     Var("ADK_CC_WEB_FETCH_MODE", Tier.ADVANCED, "Behavior",
-        "web_fetch host policy: open (SSRF-guarded) | allowlist.", default="open"),
+        "web_fetch host policy: open (SSRF-guarded) | allowlist.", default="open",
+        choices=("open","allowlist")),
     Var("ADK_CC_SKIP_DOTENV", Tier.DEV, "Behavior",
         "Skip .env loading (CI/containers where env is already populated).",
         default=False, parse=as_bool),
@@ -351,9 +355,10 @@ FIELDS: list[Var] = [
     # --- Sandbox: shared + container + noop ------------------------------
     Var("ADK_CC_SANDBOX_MODE", Tier.ADVANCED, "Sandbox",
         "Desktop sandbox mode: host | container (usually set via the UI).", default="host",
-        profile=Profile.DESKTOP),
+        profile=Profile.DESKTOP, choices=("host","container")),
     Var("ADK_CC_SANDBOX_RUNTIME", Tier.ADVANCED, "Sandbox",
-        "Container runtime: auto | docker | podman.", default="auto"),
+        "Container runtime: auto | docker | podman.", default="auto",
+        choices=("auto","docker","podman")),
     Var("ADK_CC_SANDBOX_IDLE_TTL_S", Tier.ADVANCED, "Sandbox",
         "Reap idle session containers after N seconds (0 = off).", default=0, parse=as_int),
     Var("ADK_CC_SANDBOX_MEM_LIMIT", Tier.ADVANCED, "Sandbox",
@@ -479,7 +484,7 @@ FIELDS: list[Var] = [
     Var("ADK_CC_ACCESS_REQUESTS", Tier.ADVANCED, "Auth (web)", profile=Profile.WEB,
         help="Unknown-email logins become approvable access requests.", default=True, parse=as_bool),
     Var("ADK_CC_TENANCY_MODE", Tier.COMMON, "Auth (web)", profile=Profile.WEB,
-        help="single | multi org model.", default="single"),
+        help="single | multi org model.", default="single", choices=("single","multi")),
     Var("ADK_CC_GLOBAL_TENANT_ID", Tier.ADVANCED, "Auth (web)", profile=Profile.WEB,
         help="Tenant id for single mode / admin global tenant.", default="local"),
     Var("ADK_CC_TRUST_PROXY", Tier.COMMON, "Auth (web)", profile=Profile.WEB,
@@ -488,7 +493,8 @@ FIELDS: list[Var] = [
 
     # --- Credentials / identity / audit (both modes unless noted) --------
     Var("ADK_CC_CREDENTIAL_PROVIDER", Tier.COMMON, "Credentials",
-        "memory | encrypted_file | none.", default="memory"),
+        "memory | encrypted_file | none.", default="memory",
+        choices=("memory","encrypted_file","none")),
     Var("ADK_CC_CREDENTIAL_STORE_DIR", Tier.COMMON, "Credentials",
         "Secret store dir (defaults to <DATA_DIR>/secrets for encrypted_file).",
         default=None, parse=as_path, default_display="<DATA_DIR>/secrets"),
@@ -574,7 +580,8 @@ FIELDS: list[Var] = [
     Var("ADK_CC_MCP_SERVER_NAME", Tier.ADVANCED, "MCP",
         "Tool prefix for the single env server.", default="mcp"),
     Var("ADK_CC_MCP_TRANSPORT", Tier.ADVANCED, "MCP",
-        "Transport for the single env server: stdio | sse | http.", default="stdio"),
+        "Transport for the single env server: stdio | sse | http.", default="stdio",
+        choices=("stdio","sse","http")),
     Var("ADK_CC_MCP_USE_RESOURCES", Tier.ADVANCED, "MCP",
         "Expose MCP resources for the single env server.", default=False, parse=as_bool),
     Var("ADK_CC_MCP_SAVE_RESOURCES_AS_ARTIFACTS", Tier.ADVANCED, "MCP",
@@ -653,6 +660,59 @@ _validate_schema()
 BY_NAME: dict[str, Var] = {v.name: v for v in FIELDS}
 
 
+# --- cross-variable rules -------------------------------------------------
+# Robustness: catch configurations that are individually valid but jointly
+# wrong or dangerous — surfaced by `check` (and at boot) instead of failing
+# silently or deep in a runtime call. Each rule is (resolved, is_set) -> msg|None.
+
+@dataclass(frozen=True)
+class Rule:
+    level: str                                        # "error" | "warn"
+    check: "Callable[[dict, dict], Optional[str]]"    # (resolved, is_set) -> message or None
+
+
+def _truthy(resolved: dict, is_set: dict, name: str) -> bool:
+    """A boolean var that is BOTH set and resolves truthy."""
+    return bool(is_set.get(name)) and bool(resolved.get(name))
+
+
+RULES: list[Rule] = [
+    # Compaction requires both threshold + retention, or neither (ADK's
+    # EventsCompactionConfig validator raises at boot otherwise).
+    Rule("error", lambda r, s: (
+        "ADK_CC_COMPACTION_TOKEN_THRESHOLD and ADK_CC_COMPACTION_EVENT_RETENTION "
+        "must be set together (or neither)."
+        if s.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD") != s.get("ADK_CC_COMPACTION_EVENT_RETENTION")
+        else None)),
+    # External IdP without iss/aud verification is a silent security gap.
+    Rule("warn", lambda r, s: (
+        "ADK_CC_JWT_JWKS_URL is set but JWT_ISSUER/JWT_AUDIENCE are unset — "
+        "the token issuer/audience are NOT verified."
+        if s.get("ADK_CC_JWT_JWKS_URL") and not (s.get("ADK_CC_JWT_ISSUER") and s.get("ADK_CC_JWT_AUDIENCE"))
+        else None)),
+    # Two auth modes selected → only the higher-priority one runs.
+    Rule("warn", lambda r, s: (
+        "ADK_CC_AUTH_PASSWORD=1 and ADK_CC_JWT_JWKS_URL are both set — JWKS wins; "
+        "password auth is ignored."
+        if _truthy(r, s, "ADK_CC_AUTH_PASSWORD") and s.get("ADK_CC_JWT_JWKS_URL")
+        else None)),
+    # Allowlisted hosts do nothing unless the fetch mode is 'allowlist'.
+    Rule("warn", lambda r, s: (
+        "ADK_CC_WEB_FETCH_HOSTS is set but ADK_CC_WEB_FETCH_MODE is not 'allowlist' — "
+        "the extra hosts are ignored."
+        if s.get("ADK_CC_WEB_FETCH_HOSTS") and r.get("ADK_CC_WEB_FETCH_MODE") != "allowlist"
+        else None)),
+    # Security-relevant opt-outs — always worth surfacing.
+    Rule("warn", lambda r, s: (
+        "ADK_CC_WEB_FETCH_ALLOW_PRIVATE=1 — the SSRF guard is disabled "
+        "(localhost/private IPs are fetchable)."
+        if _truthy(r, s, "ADK_CC_WEB_FETCH_ALLOW_PRIVATE") else None)),
+    Rule("warn", lambda r, s: (
+        "ADK_CC_ALLOW_NO_AUTH=1 in a non-desktop deployment — the server runs with NO auth."
+        if _truthy(r, s, "ADK_CC_ALLOW_NO_AUTH") and not r.get("ADK_CC_DESKTOP") else None)),
+]
+
+
 # --- public API -----------------------------------------------------------
 
 def resolve(environ: Optional[dict] = None) -> dict[str, Any]:
@@ -665,31 +725,44 @@ def resolve(environ: Optional[dict] = None) -> dict[str, Any]:
 def check(environ: Optional[dict] = None) -> tuple[list[str], list[str]]:
     """Validate an environment. Returns (errors, warnings).
 
-    - error: an unconditionally-REQUIRED var is missing.
-    - warning: a conditionally-required var is missing given the resolved config,
-      or a set var fails to parse.
+    Errors (a boot-time misconfiguration): a REQUIRED var missing, a set value
+    that isn't an allowed choice, or a cross-var invariant violated. Warnings: a
+    conditionally-required var missing, a value that fails to parse, or a rule
+    that flags a dangerous/ineffective-but-valid combination.
     """
     env = os.environ if environ is None else environ
     resolved = resolve(env)
+    is_set: dict = {}
     errors: list[str] = []
     warnings: list[str] = []
     for v in FIELDS:
         set_raw = env.get(v.name)
-        is_set = set_raw is not None and set_raw.strip() != ""
+        setp = set_raw is not None and set_raw.strip() != ""
+        is_set[v.name] = setp
         # parse failure on a set value
-        if is_set and v.parse is not as_str:
+        if setp and v.parse is not as_str:
             try:
                 v.parse(set_raw)
             except Exception:
                 warnings.append(f"{v.name}: value {set_raw!r} failed to parse; using default")
-        if v.tier is not Tier.REQUIRED:
-            continue
-        required = True if v.required_if is None else bool(v.required_if(resolved))
-        if required and not is_set:
-            cond = "" if v.required_if is None else " (conditionally required by current config)"
-            (warnings if v.required_if is not None else errors).append(
-                f"{v.name}: required but not set{cond} — {v.help}"
+        # enum constraint
+        if setp and v.choices and resolved[v.name] not in v.choices:
+            errors.append(
+                f"{v.name}: {set_raw!r} is not one of {'|'.join(map(str, v.choices))}"
             )
+        # required (unconditional → error; conditional → warn)
+        if v.tier is Tier.REQUIRED:
+            required = True if v.required_if is None else bool(v.required_if(resolved))
+            if required and not setp:
+                cond = "" if v.required_if is None else " (conditionally required by current config)"
+                (warnings if v.required_if is not None else errors).append(
+                    f"{v.name}: required but not set{cond} — {v.help}"
+                )
+    # cross-var rules
+    for rule in RULES:
+        msg = rule.check(resolved, is_set)
+        if msg:
+            (errors if rule.level == "error" else warnings).append(msg)
     return errors, warnings
 
 
@@ -719,7 +792,8 @@ def render_env_example(profile: Profile = Profile.ALL) -> str:
         return v.profile in (Profile.ALL, profile)
 
     def line(v: Var) -> list[str]:
-        out = [f"# {v.help}"]
+        hint = f"  (one of: {'|'.join(map(str, v.choices))})" if v.choices else ""
+        out = [f"# {v.help}{hint}"]
         tag = "" if v.profile is Profile.ALL else f"  ({v.profile.value}-only)"
         if v.tier is Tier.REQUIRED and v.required_if is None:
             out.append(f"{v.name}={v.example or ''}{tag}")
