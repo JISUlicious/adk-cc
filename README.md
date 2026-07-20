@@ -24,7 +24,7 @@ Deeper docs in [`docs/`](./docs/): [specification](./docs/01-specification.md), 
 adk-cc/                           ← repo root
 ├── pyproject.toml                ← packages.find where=["agents"] → installs adk_cc
 ├── Dockerfile.sandbox            ← per-session sandbox image
-├── .env.example                  ← full config surface (~65 ADK_CC_* vars)
+├── .env.example                  ← config reference, GENERATED from adk_cc/config schema
 ├── docs/                         ← architecture, prompts, deployment runbooks
 ├── scripts/                      ← operator CLIs + skill/context/compaction demos
 ├── tests/                        ← unit tests + e2e suites (see "Tests")
@@ -36,6 +36,7 @@ adk-cc/                           ← repo root
         ├── agent.py              ← exposes `app` (preferred) and `root_agent`
         ├── prompts.py            ← per-agent instructions
         ├── logging_setup.py      ← ADK_CC_LOG_* configuration
+        ├── config/               ← typed env-var schema (single source; gen/check/print)
         ├── tools/                ← AdkCcTool subclasses (read/write/exec/task/HITL/plan/skills/MCP)
         ├── plugins/              ← ADK BasePlugin integrations
         ├── permissions/          ← rule engine + confirmation payloads
@@ -208,7 +209,21 @@ ADK_CC_API_KEY=<token>
 
 Pick a model with **function-calling support** — this loop relies on tool use. Qwen 2.5+, Llama 3.1/3.2, and Mistral families all work. Small (1B–3B) models often handle tool calls poorly.
 
-See [`.env.example`](./.env.example) for the full configuration surface.
+See [`.env.example`](./.env.example) for the full configuration surface. It is
+**generated** from the typed schema in [`agents/adk_cc/config/`](./agents/adk_cc/config/),
+the single source of truth for every `ADK_CC_*` var (tier, default, help, allowed
+values), so the docs can't drift from the code. Use the schema CLI to regenerate,
+validate, or inspect a deployment:
+
+```bash
+python -m adk_cc.config gen-env --out .env.example   # regenerate this file
+python -m adk_cc.config check                        # validate the current env
+python -m adk_cc.config print                        # effective values (secrets masked)
+```
+
+The server also runs `check` at boot (web and desktop), logging any missing-required,
+out-of-range-enum, or dangerous/contradictory combinations so misconfiguration
+surfaces loudly instead of failing silently later.
 
 ## Sandbox backends
 

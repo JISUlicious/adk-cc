@@ -24,7 +24,7 @@ Claude Code 스타일의 **gather → plan → act → verify** 에이전트 루
 adk-cc/                           ← repo 루트
 ├── pyproject.toml                ← packages.find where=["agents"] → adk_cc 설치
 ├── Dockerfile.sandbox            ← per-session sandbox 이미지
-├── .env.example                  ← 전체 설정 surface (~65개 ADK_CC_* 변수)
+├── .env.example                  ← 설정 레퍼런스, adk_cc/config 스키마에서 자동 생성
 ├── docs/                         ← 아키텍처, 프롬프트, 배포 런북
 ├── scripts/                      ← 운영자 CLI + skill/context/compaction 데모
 ├── tests/                        ← unit + e2e 테스트 ("Tests" 절 참고)
@@ -36,6 +36,7 @@ adk-cc/                           ← repo 루트
         ├── agent.py              ← `app`(권장)과 `root_agent` export
         ├── prompts.py            ← 에이전트별 instruction
         ├── logging_setup.py      ← ADK_CC_LOG_* 설정
+        ├── config/               ← 타입 지정 env-var 스키마 (단일 소스; gen/check/print)
         ├── tools/                ← AdkCcTool 서브클래스 (read/write/exec/task/HITL/plan/skills/MCP)
         ├── plugins/              ← ADK BasePlugin 통합
         ├── permissions/          ← 규칙 엔진 + 확인 페이로드
@@ -146,7 +147,20 @@ ADK_CC_API_KEY=<token>
 
 **function-calling 지원** 모델을 선택하세요 — 이 루프는 tool use에 의존합니다. Qwen 2.5+, Llama 3.1/3.2, Mistral 계열 모두 동작합니다. 소형(1B–3B) 모델은 tool call을 잘 다루지 못하는 경우가 많습니다.
 
-전체 설정 surface는 [`.env.example`](./.env.example)을 참고하세요.
+전체 설정 surface는 [`.env.example`](./.env.example)을 참고하세요. 이 파일은 모든
+`ADK_CC_*` 변수의 단일 소스인 [`agents/adk_cc/config/`](./agents/adk_cc/config/)의
+타입 스키마(tier, 기본값, 설명, 허용값)에서 **자동 생성**되므로 문서가 코드와
+어긋나지 않습니다. 스키마 CLI로 재생성·검증·조회할 수 있습니다:
+
+```bash
+python -m adk_cc.config gen-env --out .env.example   # 이 파일 재생성
+python -m adk_cc.config check                        # 현재 env 검증
+python -m adk_cc.config print                        # 유효 값 조회 (secret 마스킹)
+```
+
+서버는 부팅 시에도 `check`를 실행하여(web·desktop 공통) 필수 누락, enum 범위 위반,
+위험하거나 모순되는 조합을 로깅합니다 — 잘못된 설정이 나중에 조용히 실패하는 대신
+즉시 드러납니다.
 
 ## Sandbox 백엔드
 
