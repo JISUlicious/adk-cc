@@ -356,6 +356,11 @@ class ContextGuardPlugin(BasePlugin):
         model = getattr(llm_request, "model", None)
         if model:
             return model
+        # NB: "gpt-4" here is a TOKENIZER-encoding fallback (a name tiktoken
+        # recognizes → cl100k_base), not the agent's model default. Do NOT
+        # "unify" it with ADK_CC_MODEL's real default (openai/Qwen…): that id
+        # isn't a known tiktoken encoding, so token counting would degrade.
+        # Only reached when llm_request.model is empty AND ADK_CC_MODEL unset.
         return os.environ.get("ADK_CC_MODEL", "gpt-4")
 
     @staticmethod
