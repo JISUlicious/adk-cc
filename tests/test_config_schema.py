@@ -116,8 +116,46 @@ def test_effective_masks_secrets():
     print("OK effective_masks_secrets")
 
 
+def test_coverage_complete():
+    """Every ADK_CC_* var read anywhere in agents/ must be in the schema — this
+    is the guard that keeps the generated docs complete (a new env var forces a
+    schema row). Prefix-only artifacts (grep fragments) are excluded."""
+    import re
+    import subprocess
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = subprocess.run(
+        ["grep", "-rhoE", "--include=*.py", "ADK_CC_[A-Z0-9_]+", os.path.join(repo, "agents")],
+        capture_output=True, text=True,
+    ).stdout
+    tok = re.compile(r"^ADK_CC_[A-Z0-9_]+$")
+    used = {n for n in out.split() if tok.match(n) and not n.endswith("_")}  # drop prefix fragments
+    schema = set(C.BY_NAME)
+    missing = sorted(used - schema)
+    assert not missing, f"{len(missing)} env var(s) read but missing from the schema: {missing}"
+    print(f"OK coverage_complete ({len(schema)} vars, all read-sites covered)")
+
+
+def test_env_example_in_sync():
+    """The committed .env.example must equal the generator's output — this
+    stops the docs from ever drifting from the schema. If this fails, run
+    `python -m adk_cc.config gen-env --out .env.example`."""
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(repo, ".env.example")
+    with open(path, encoding="utf-8") as f:
+        committed = f.read()
+    generated = C.render_env_example(C.Profile.ALL)
+    assert committed == generated, (
+        ".env.example is out of sync with the schema — run "
+        "`python -m adk_cc.config gen-env --out .env.example`"
+    )
+    print("OK env_example_in_sync")
+
+
 def main():
     test_schema_wellformed()
+    test_coverage_complete()
+    test_env_example_in_sync()
     test_defaults_mirror_current_behavior()
     test_parsing()
     test_check_required_and_conditional()
