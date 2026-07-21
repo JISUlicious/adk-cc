@@ -120,9 +120,13 @@ export interface DesktopModel {
   name: string
   model: string
   api_base: string
-  api_key_env: string
+  // The ACTUAL api key ("" = keyless local server). Write-only: list
+  // responses never return it — send it only when adding/replacing a key.
+  api_key?: string
+  api_key_env?: string // legacy env-var indirection (existing endpoints)
   max_tokens?: number | null
   api_key_present?: boolean
+  key_source?: "inline" | "env" | "keyless"
   models?: string[] // full ids this provider offers (discovered)
   reasoning_effort?: string | null
 }
@@ -146,7 +150,10 @@ export function setDesktopModel(m: DesktopModel) {
     body: JSON.stringify({
       model: m.model,
       api_base: m.api_base,
-      api_key_env: m.api_key_env,
+      // Omit api_key entirely when the caller doesn't provide one — the
+      // server then KEEPS the stored key (write-only field). "" = keyless.
+      ...(m.api_key !== undefined ? { api_key: m.api_key } : {}),
+      api_key_env: m.api_key_env ?? "",
       max_tokens: m.max_tokens ?? null,
       reasoning_effort: m.reasoning_effort ?? null,
       models: m.models ?? [],
@@ -198,10 +205,11 @@ export function getCodexModels(): Promise<{ models: string[] }> {
   return apiFetch("/desktop/settings/codex/models")
 }
 // Discover a provider's models via its OpenAI-compatible /models endpoint.
-export function discoverModels(api_base: string, api_key_env: string): Promise<{ models: string[] }> {
+// Pass the actual api key ("" probes keyless — local model servers).
+export function discoverModels(api_base: string, api_key: string): Promise<{ models: string[] }> {
   return apiFetch("/desktop/settings/models/discover", {
     method: "POST",
-    body: JSON.stringify({ api_base, api_key_env }),
+    body: JSON.stringify({ api_base, api_key }),
   })
 }
 

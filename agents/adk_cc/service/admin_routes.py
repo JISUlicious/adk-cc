@@ -271,7 +271,7 @@ def mount_model_admin(
 
     Routes (under /admin/model-endpoints):
       - GET    /admin/model-endpoints              → list (secrets masked) + active
-      - PUT    /admin/model-endpoints/{name}       → upsert {model, api_base, api_key_env?}
+      - PUT    /admin/model-endpoints/{name}       → upsert {model, api_base, api_key? ("" = keyless), api_key_env? (legacy)}
       - DELETE /admin/model-endpoints/{name}       → remove (guards last/active)
       - POST   /admin/model-endpoints/{name}/activate → set active
 
@@ -296,6 +296,12 @@ def mount_model_admin(
         _ensure_safe_id(name, "endpoint name")
         body = await request.json()
         body["name"] = name  # path wins
+        # api_key is write-only (masked in every GET), so an update that omits
+        # it keeps the stored key instead of wiping it. Explicit "" = keyless.
+        if "api_key" not in body:
+            existing = registry.get(name)
+            if existing is not None and existing.api_key is not None:
+                body["api_key"] = existing.api_key
         try:
             cfg = ModelEndpointConfig.model_validate(body)
         except Exception as e:  # noqa: BLE001

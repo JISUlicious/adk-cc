@@ -16,7 +16,7 @@ const BLANK: ModelEndpoint = {
   name: "",
   model: "",
   api_base: "",
-  api_key_env: "ADK_CC_API_KEY",
+  api_key: "", // actual key; empty = keyless (local model servers)
 }
 
 export function ModelAdminTab() {
@@ -96,11 +96,13 @@ export function ModelAdminTab() {
               />
             </label>
             <label className="text-sm">
-              API key env var
+              API key
               <Input
-                value={draft.api_key_env}
-                onChange={(e) => setDraft({ ...draft, api_key_env: e.target.value })}
-                placeholder="ADK_CC_API_KEY"
+                type="password"
+                autoComplete="off"
+                value={draft.api_key ?? ""}
+                onChange={(e) => setDraft({ ...draft, api_key: e.target.value })}
+                placeholder="empty = keyless (local server)"
               />
             </label>
           </div>
@@ -160,7 +162,8 @@ export function ModelAdminTab() {
                       )}
                     </p>
                     <p className="truncate text-xs text-muted-foreground">
-                      {e.model} · {e.api_base} · key:{e.api_key_env}
+                      {e.model} · {e.api_base} · key:{" "}
+                      {e.key_source === "inline" ? "set" : e.key_source === "env" ? `env ${e.api_key_env}` : "keyless"}
                       {e.api_key_present === false ? " (missing!)" : ""}
                     </p>
                   </div>

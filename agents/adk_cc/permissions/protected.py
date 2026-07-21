@@ -61,17 +61,31 @@ def _env_patterns(var: str) -> list[str]:
 
 
 def _secret_store_patterns() -> list[str]:
-    """Absolute patterns for our own credential store + Fernet key (desktop data
-    dir). Kept dynamic because the data dir is env-configurable."""
+    """Absolute patterns for our own credential store + Fernet key + the model
+    endpoint registry (which holds inline api keys). Kept dynamic because the
+    data dirs are env-configurable."""
+    patterns: list[str] = []
     try:
         from .. import deployment
 
         # realpath so it lines up with the realpath'd input in classify_path
         # (macOS /var/folders → /private/var/folders, symlinked homes, …).
         d = os.path.realpath(str(deployment.desktop_data_dir())).rstrip("/")
+        patterns += [f"{d}/secrets", f"{d}/secrets/**", f"{d}/credential.key"]
+        # Model endpoint registry: default locations under both data roots.
+        roots = {d, os.path.realpath(str(deployment.data_dir())).rstrip("/")}
+        for r in roots:
+            patterns += [
+                f"{r}/model-endpoints.json",
+                f"{r}/admin-data/model-endpoints.json",
+            ]
     except Exception:
-        return []
-    return [f"{d}/secrets", f"{d}/secrets/**", f"{d}/credential.key"]
+        return patterns
+    # Explicitly-configured registry path wins over the derived defaults.
+    reg = os.environ.get("ADK_CC_MODEL_REGISTRY_FILE")
+    if reg:
+        patterns.append(os.path.realpath(os.path.expanduser(reg)))
+    return patterns
 
 
 def _expand(patterns) -> list[str]:

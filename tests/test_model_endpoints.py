@@ -358,6 +358,102 @@ def test_route_activate_missing_key_409():
     print("OK test_route_activate_missing_key_409")
 
 
+# --- inline api keys (actual key on the endpoint, not an env-var name) ----
+
+def test_inline_key_semantics():
+    """api_key stored inline: non-empty = the key; "" = explicitly keyless
+    (local model servers); None = legacy env-var indirection."""
+    inline = ModelEndpointConfig(name="p", model="openai/m", api_base="http://x/v1",
+                                 api_key="sk-inline")
+    assert inline.requires_key() and inline.api_key_present()
+    assert inline.resolve_api_key() == "sk-inline"
+    assert inline.key_source() == "inline"
+
+    keyless = ModelEndpointConfig(name="l", model="openai/m",
+                                  api_base="http://localhost:1234/v1", api_key="")
+    assert not keyless.requires_key() and keyless.api_key_present()
+    assert keyless.resolve_api_key() is None
+    assert keyless.key_source() == "keyless"
+
+    legacy = ModelEndpointConfig(name="e", model="openai/m", api_base="http://x/v1")
+    assert legacy.api_key is None and legacy.key_source() == "env"
+    print("OK test_inline_key_semantics")
+
+
+def test_masked_never_leaks_inline_key():
+    m = ModelEndpointConfig(name="p", model="m", api_base="u",
+                            api_key="sk-verysecret").masked()
+    assert "sk-verysecret" not in str(m)
+    assert "api_key" not in m                      # raw field stripped entirely
+    assert m["api_key_present"] is True and m["key_source"] == "inline"
+    print("OK test_masked_never_leaks_inline_key")
+
+
+def test_inline_key_activation_and_empty_key_accepted():
+    with tempfile.TemporaryDirectory() as tmp:
+        r = _reg(tmp)
+        r.upsert(_cfg("seed"))
+        # inline key → activates without ANY env var involved
+        r.upsert(ModelEndpointConfig(name="inline", model="openai/m",
+                 api_base="http://x/v1", api_key="sk-abc"))
+        r.activate("inline")
+        assert r.active_name() == "inline"
+        # EMPTY key → accepted and activatable (local personal model server)
+        r.upsert(ModelEndpointConfig(name="local", model="openai/m",
+                 api_base="http://localhost:8000/v1", api_key=""))
+        r.activate("local")
+        assert r.active_name() == "local"
+        # registry file holds keys → owner-only perms
+        import stat
+        mode = stat.S_IMODE(os.stat(os.path.join(tmp, "models.json")).st_mode)
+        assert mode == 0o600, oct(mode)
+    print("OK test_inline_key_activation_and_empty_key_accepted")
+
+
+def test_selectable_uses_inline_key_and_recaches_on_change():
+    with tempfile.TemporaryDirectory() as tmp:
+        r = _reg(tmp)
+        r.upsert(ModelEndpointConfig(name="p", model="openai/m",
+                 api_base="http://x/v1", api_key="sk-one"))
+        sel = SelectableLlm(registry=r)
+        sel._build_litellm = lambda cfg: _FakeLlmForKey(  # type: ignore
+            model=cfg.model, api_base=cfg.api_base, api_key=cfg.resolve_api_key())
+        sel._resolve_delegate()
+        assert _FakeLlmForKey.last_kwargs["api_key"] == "sk-one"
+        # replacing the inline key must REBUILD the delegate (cache keyed on it)
+        r.upsert(ModelEndpointConfig(name="p", model="openai/m",
+                 api_base="http://x/v1", api_key="sk-two"))
+        sel._resolve_delegate()
+        assert _FakeLlmForKey.last_kwargs["api_key"] == "sk-two"
+    print("OK test_selectable_uses_inline_key_and_recaches_on_change")
+
+
+def test_route_put_preserves_stored_key_when_omitted():
+    """api_key is write-only: a PUT without the field keeps the stored key; a
+    PUT with api_key="" explicitly clears it to keyless."""
+    with tempfile.TemporaryDirectory() as tmp:
+        c, _ = _client(tmp)
+        h = {"Authorization": "Bearer admintok"}
+        body = {"model": "openai/m", "api_base": "http://x/v1", "api_key": "sk-keep"}
+        assert c.put("/admin/model-endpoints/p", headers=h, json=body).status_code == 200
+        # update WITHOUT api_key → stored key survives
+        assert c.put("/admin/model-endpoints/p", headers=h, json={
+            "model": "openai/m2", "api_base": "http://x/v1"}).status_code == 200
+        listed = c.get("/admin/model-endpoints", headers=h).json()["endpoints"]
+        ep = next(e for e in listed if e["name"] == "p")
+        assert ep["model"] == "openai/m2"
+        assert ep["api_key_present"] is True and ep["key_source"] == "inline"
+        assert "sk-keep" not in str(listed)        # masked in responses
+        # explicit empty → keyless
+        assert c.put("/admin/model-endpoints/p", headers=h, json={
+            "model": "openai/m2", "api_base": "http://x/v1", "api_key": ""}).status_code == 200
+        listed = c.get("/admin/model-endpoints", headers=h).json()["endpoints"]
+        ep = next(e for e in listed if e["name"] == "p")
+        assert ep["key_source"] == "keyless" and ep["api_key_present"] is True
+    print("OK test_route_put_preserves_stored_key_when_omitted")
+
+
+
 if __name__ == "__main__":
     test_first_endpoint_becomes_active()
     test_activate_and_persist()
@@ -377,4 +473,9 @@ if __name__ == "__main__":
     test_keyless_endpoint_allowed()
     test_activate_rejects_missing_key()
     test_route_activate_missing_key_409()
+    test_inline_key_semantics()
+    test_masked_never_leaks_inline_key()
+    test_inline_key_activation_and_empty_key_accepted()
+    test_selectable_uses_inline_key_and_recaches_on_change()
+    test_route_put_preserves_stored_key_when_omitted()
     print("\nall model-endpoint tests passed")

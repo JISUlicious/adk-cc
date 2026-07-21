@@ -229,7 +229,10 @@ class SelectableLlm(BaseLlm):
                 )
             return self._escalated_default() if self._cap_floor is not None else self._default_delegate
 
-        key = (active.model, active.api_base, active.api_key_env)
+        # Cache key includes the INLINE key too — replacing an endpoint's
+        # stored api_key must rebuild the delegate, not serve the stale one.
+        key = (active.model, active.api_base, active.api_key_env,
+               getattr(active, "api_key", None))
         with self._lock:
             cached = self._cache.get(key)
             if cached is not None:
@@ -261,15 +264,18 @@ class SelectableLlm(BaseLlm):
                 # FAIL LOUD. Previously a missing key was silently omitted,
                 # so LiteLlm was built with no key and failed downstream with
                 # an opaque "litellm authentication" error against the
-                # provider. Surface the actual config problem instead.
+                # provider. Surface the actual config problem instead. (Only
+                # reachable on the legacy env path — an inline api_key that
+                # is non-empty always resolves.)
                 raise ValueError(
-                    f"model endpoint {cfg.name!r} references api_key_env "
-                    f"{cfg.api_key_env!r}, but that environment variable is "
-                    f"not set in the server process. Set it (or, for an "
-                    f"endpoint that needs no auth, clear api_key_env)."
+                    f"model endpoint {cfg.name!r} expects an api key but none "
+                    f"resolves: env var {cfg.api_key_env!r} is not set in the "
+                    f"server process. Store the key on the endpoint "
+                    f"(api_key), set the env var, or use an empty api_key "
+                    f"for a keyless local endpoint."
                 )
             kwargs["api_key"] = api_key
-        # else: intentionally keyless endpoint (api_key_env == "") — no key.
+        # else: intentionally keyless endpoint (empty api_key / api_key_env) — no key.
         base = resolve_max_output_tokens(cfg)
         # Escalation lifts only the env/default cap; an explicit per-endpoint
         # ``max_tokens`` (including 0 = uncapped) is the operator's deliberate

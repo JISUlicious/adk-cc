@@ -5,9 +5,16 @@ a model id, an api_base, and a reference to the api key. The registry holds
 a NAMED set of endpoints plus which one is ACTIVE, persisted to a single
 JSON file (`ADK_CC_MODEL_REGISTRY_FILE`) so a switch survives restart.
 
-Secret handling: the api key is NOT stored inline. `api_key_env` names an
-environment variable holding the key (matching the static-MCP convention).
-The registry/admin layer therefore never persists or returns a raw key.
+Secret handling: an endpoint carries its ACTUAL api key inline (`api_key`,
+entered once in the UI when adding a provider — operators shouldn't need to
+pre-plumb an env var per provider). `api_key=""` means intentionally keyless
+(local personal model servers). The legacy `api_key_env` indirection is still
+honored when `api_key` is None (pre-existing registries, and the seeded
+default endpoint which mirrors ADK_CC_API_KEY from the environment).
+
+The registry file is written 0600 and its path sits on the protected-path
+deny floor (permissions/protected.py), and `masked()` strips the raw key from
+every HTTP response — the key is write-only through the admin/settings API.
 """
 
 from __future__ import annotations
@@ -27,13 +34,21 @@ class ModelEndpointConfig(BaseModel):
     name: str = Field(description="Unique logical name (the registry id).")
     model: str = Field(description="LiteLLM model id, e.g. openai/Qwen3-...")
     api_base: str = Field(description="OpenAI-compatible base URL.")
+    api_key: Optional[str] = Field(
+        default=None,
+        description=(
+            "The endpoint's API key, stored inline. Empty string = "
+            "intentionally keyless (local model servers that need no auth). "
+            "None = legacy: resolve via `api_key_env` instead. Never returned "
+            "over HTTP — see masked()."
+        ),
+    )
     api_key_env: str = Field(
         default="ADK_CC_API_KEY",
         description=(
-            "Name of the env var holding the api key for this endpoint. The "
-            "key itself is never stored in the registry or returned over HTTP. "
-            "Set to an empty string for an intentionally keyless endpoint "
-            "(e.g. a local model server that needs no auth)."
+            "LEGACY key indirection: name of the env var holding the key. "
+            "Only consulted when `api_key` is None (old registries and the "
+            "env-seeded default endpoint). Empty string = keyless."
         ),
     )
     max_tokens: Optional[int] = Field(
@@ -62,25 +77,38 @@ class ModelEndpointConfig(BaseModel):
     )
 
     def masked(self) -> dict:
-        """JSON-safe dict for API responses: includes whether the key env var
-        is currently resolvable, but never the key value."""
+        """JSON-safe dict for API responses: says whether a key resolves and
+        where it comes from, but NEVER the key value."""
         d = self.model_dump(mode="json")
+        d.pop("api_key", None)  # write-only — the raw key never leaves the server
         d["api_key_present"] = self.api_key_present()
+        d["key_source"] = self.key_source()
         return d
 
+    def key_source(self) -> str:
+        """'inline' (key stored on the endpoint), 'env' (legacy env-var
+        indirection), or 'keyless' (explicitly no auth)."""
+        if self.api_key is not None:
+            return "inline" if self.api_key else "keyless"
+        return "env" if self.api_key_env else "keyless"
+
     def requires_key(self) -> bool:
-        """True when this endpoint declares an api_key_env (i.e. it expects a
-        key). An empty api_key_env means 'intentionally keyless'."""
+        """True when this endpoint expects a key. An inline `api_key=\"\"` or a
+        cleared `api_key_env` means 'intentionally keyless'."""
+        if self.api_key is not None:
+            return bool(self.api_key)
         return bool(self.api_key_env)
 
     def api_key_present(self) -> bool:
-        """True when the declared key env var actually resolves in the
-        environment. Trivially True for an intentionally-keyless endpoint."""
+        """True when a key actually resolves (inline value, or the legacy env
+        var is set). Trivially True for an intentionally-keyless endpoint."""
         if not self.requires_key():
             return True
-        return bool(os.environ.get(self.api_key_env))
+        return bool(self.resolve_api_key())
 
     def resolve_api_key(self) -> Optional[str]:
+        if self.api_key is not None:
+            return self.api_key or None
         return os.environ.get(self.api_key_env) if self.api_key_env else None
 
 
@@ -119,6 +147,8 @@ class ModelEndpointRegistry:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")
         tmp.write_text(data.model_dump_json(indent=2), encoding="utf-8")
+        # The file may hold inline api keys — owner-only, like a credential store.
+        os.chmod(tmp, 0o600)
         tmp.replace(self._path)
 
     # -- queries --------------------------------------------------------
@@ -176,10 +206,11 @@ class ModelEndpointRegistry:
     def activate(self, name: str) -> None:
         """Make `name` the active endpoint.
 
-        Raises ValueError if the endpoint is unknown, or if its api_key_env
-        is declared but unset in the server process — activating an endpoint
-        whose key is missing would only surface as an opaque provider auth
-        error on the next user message, so we reject it here at config time.
+        Raises ValueError if the endpoint is unknown, or if it expects a key
+        that doesn't resolve — activating an endpoint whose key is missing
+        would only surface as an opaque provider auth error on the next user
+        message, so we reject it here at config time. An explicitly keyless
+        endpoint (empty api key — local model servers) activates fine.
         """
         with self._lock:
             data = self._read()
@@ -188,10 +219,11 @@ class ModelEndpointRegistry:
                 raise ValueError(f"unknown endpoint: {name!r}")
             if target.requires_key() and not target.api_key_present():
                 raise ValueError(
-                    f"cannot activate {name!r}: its api_key_env "
+                    f"cannot activate {name!r}: its api key env var "
                     f"{target.api_key_env!r} is not set in the server "
-                    f"environment. Set it first (or clear api_key_env for a "
-                    f"keyless endpoint)."
+                    f"environment. Provide the endpoint's api_key directly, "
+                    f"set the env var, or leave the key empty for a keyless "
+                    f"local endpoint."
                 )
             data.active = name
             self._write(data)

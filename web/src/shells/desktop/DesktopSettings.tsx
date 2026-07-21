@@ -135,7 +135,7 @@ function ModelsSection() {
   const [active, setActive] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
-  const [form, setForm] = useState<DesktopModel>({ name: "", model: "", api_base: "", api_key_env: "ADK_CC_API_KEY" })
+  const [form, setForm] = useState<DesktopModel>({ name: "", model: "", api_base: "", api_key: "" })
   const [err, setErr] = useState<string | null>(null)
   const [refreshTick, setRefreshTick] = useState(0)
   const reload = useCallback(() => {
@@ -158,15 +158,17 @@ function ModelsSection() {
   // Add a provider by URL only: check the connection, load its models from
   // /v1/models, and default to the first — no model typed by hand.
   async function add() {
-    const name = form.name.trim(), api_base = form.api_base.trim(), api_key_env = form.api_key_env.trim()
+    // The actual api key is entered directly; blank = keyless (local model
+    // servers that need no auth) — both are valid, so only name+URL gate.
+    const name = form.name.trim(), api_base = form.api_base.trim(), api_key = (form.api_key ?? "").trim()
     if (!name || !api_base) { setErr("Enter a name and provider URL."); return }
     setBusy(name); setErr(null)
     try {
-      const r = await discoverModels(api_base, api_key_env)
+      const r = await discoverModels(api_base, api_key)
       if (!r.models.length) { setErr("Provider returned no models — check the URL and key."); return }
       const full = r.models.map((m) => (m.includes("/") ? m : `openai/${m}`))
-      await setDesktopModel({ name, model: full[0], api_base, api_key_env, models: full })
-      setForm({ name: "", model: "", api_base: "", api_key_env: "ADK_CC_API_KEY" }); reload(); bump()
+      await setDesktopModel({ name, model: full[0], api_base, api_key, models: full })
+      setForm({ name: "", model: "", api_base: "", api_key: "" }); reload(); bump()
     } catch (e) { setErr(errMsg(e)) } finally { setBusy(null) }
   }
   return (
@@ -219,7 +221,7 @@ function ModelsSection() {
       <div className="grid grid-cols-3 gap-1 border-t border-border/50 pt-2">
         <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="name" className="text-xs" />
         <Input value={form.api_base} onChange={(e) => setForm({ ...form, api_base: e.target.value })} placeholder="https://host:port/v1" className="text-xs" />
-        <Input value={form.api_key_env} onChange={(e) => setForm({ ...form, api_key_env: e.target.value })} placeholder="API_KEY env (blank = keyless)" className="font-mono text-xs" />
+        <Input type="password" autoComplete="off" value={form.api_key ?? ""} onChange={(e) => setForm({ ...form, api_key: e.target.value })} placeholder="API key (blank = keyless)" className="font-mono text-xs" />
       </div>
       <div className="flex items-center gap-2">
         <Button size="sm" variant="outline" onClick={add} disabled={busy === form.name.trim() && !!form.name.trim()}>

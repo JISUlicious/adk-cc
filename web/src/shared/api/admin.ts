@@ -96,8 +96,12 @@ export interface ModelEndpoint {
   name: string
   model: string
   api_base: string
-  api_key_env: string
+  // The ACTUAL api key ("" = keyless). Write-only: never returned by list —
+  // omit the field on updates to keep the stored key.
+  api_key?: string
+  api_key_env?: string // legacy env-var indirection
   api_key_present?: boolean
+  key_source?: "inline" | "env" | "keyless"
 }
 
 export async function listModelEndpoints(): Promise<{

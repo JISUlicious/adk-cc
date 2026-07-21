@@ -287,11 +287,23 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
         @app.put("/desktop/settings/models/{name}", include_in_schema=False)
         async def put_model(name: str, request: Request):  # noqa: ANN202
             body = await request.json() or {}
+            # The ACTUAL api key is supplied inline ("" = keyless local server).
+            # The key is write-only: GET responses mask it, so an update that
+            # OMITS the field keeps the currently stored key rather than wiping
+            # it (the UI can't echo back a value it never saw). Sending
+            # api_key explicitly (even "") replaces it.
+            if "api_key" in body:
+                api_key = body["api_key"]
+                api_key = None if api_key is None else str(api_key)
+            else:
+                existing = models.get(name)
+                api_key = existing.api_key if existing is not None else None
             try:
                 cfg = ModelEndpointConfig(
                     name=_safe(name, "name"),
                     model=str(body.get("model") or ""),
                     api_base=str(body.get("api_base") or ""),
+                    api_key=api_key,
                     api_key_env=str(body.get("api_key_env") or ""),
                     max_tokens=body.get("max_tokens"),
                     reasoning_effort=body.get("reasoning_effort"),
@@ -308,7 +320,7 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
             offered, else the first). Best-effort — keeps existing on failure."""
             from ..models import discovery
 
-            key = os.environ.get(cfg.api_key_env) if cfg.api_key_env else None
+            key = cfg.resolve_api_key()  # inline key, or legacy env fallback
             try:
                 found = await discovery.list_provider_models(cfg.model, cfg.api_base, api_key=key)
             except Exception:  # noqa: BLE001 — provider unreachable / bad key
@@ -370,8 +382,12 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
             api_base = str(body.get("api_base") or "").strip()
             if not api_base:
                 raise HTTPException(status_code=400, detail="api_base required")
-            key_env = str(body.get("api_key_env") or "")
-            api_key = os.environ.get(key_env) if key_env else None
+            # Inline key preferred ("" = keyless probe); legacy env-name fallback.
+            if "api_key" in body:
+                api_key = str(body.get("api_key") or "") or None
+            else:
+                key_env = str(body.get("api_key_env") or "")
+                api_key = os.environ.get(key_env) if key_env else None
             try:
                 found = await discovery.list_models(api_base, api_key=api_key)
             except Exception as e:  # noqa: BLE001 — provider unreachable / bad key
