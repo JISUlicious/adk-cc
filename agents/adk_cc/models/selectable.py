@@ -257,7 +257,19 @@ class SelectableLlm(BaseLlm):
 
         from google.adk.models.lite_llm import LiteLlm
 
-        kwargs: dict[str, Any] = {"model": cfg.model, "api_base": cfg.api_base}
+        # LiteLLM routes by the id's provider prefix. Registry endpoints are
+        # OpenAI-compatible by product contract (ModelEndpointConfig docstring;
+        # discovery reads {api_base}/models with the OpenAI wire format), so
+        # their ids must route as `openai/<raw-id>` — but select-model stores
+        # DISCOVERED ids verbatim (e.g. OpenRouter's
+        # `google/gemma-4-31b-it:free`), which LiteLLM can't route ("LLM
+        # Provider NOT provided", killing every call). Normalize at RESOLUTION
+        # time: heals already-broken registries with no migration and keeps
+        # discovery lists raw for display.
+        model_id = str(cfg.model)
+        if not model_id.startswith("openai/"):
+            model_id = f"openai/{model_id}"
+        kwargs: dict[str, Any] = {"model": model_id, "api_base": cfg.api_base}
         if cfg.requires_key():
             api_key = cfg.resolve_api_key()
             if not api_key:
