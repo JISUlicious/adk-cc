@@ -92,7 +92,7 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
     # sets it — otherwise a client could spoof the header to dodge the lockout.
     # Without this, every request behind a reverse proxy shares the proxy's IP,
     # collapsing the per-(ip,email) lockout to email-only (a victim-lockout DoS).
-    _trust_proxy = os.environ.get("ADK_CC_TRUST_PROXY", "").lower() in ("1", "true")
+    _trust_proxy = env_bool("ADK_CC_TRUST_PROXY")
 
     def _client_ip(request: Request) -> str:
         if _trust_proxy:

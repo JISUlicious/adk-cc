@@ -142,7 +142,7 @@ ADK_CC_WORKSPACE_ROOT=/var/lib/adk-cc/wks
 ADK_CC_SANDBOX_IMAGE=adk-cc-sandbox:latest
 ADK_CC_SANDBOX_MEM_LIMIT=4g
 ADK_CC_SANDBOX_CPU_QUOTA=100000   # 100k = 1 CPU
-ADK_CC_SANDBOX_PIDS_LIMIT=256
+ADK_CC_SANDBOX_PIDS_LIMIT=512
 ```
 
 For plain TCP: drop the three `*_CERT` / `*_KEY` vars and set

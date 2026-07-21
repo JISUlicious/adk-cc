@@ -43,7 +43,8 @@ def main() -> int:
     for k in (
         "ADK_CC_DISABLE_PROJECT_CONTEXT",
         "ADK_CC_CONTEXT_FILES",
-        "ADK_CC_CONTEXT_MAX_BYTES",
+        "ADK_CC_CONTEXT_FILES_MAX_BYTES",  # live name
+        "ADK_CC_CONTEXT_MAX_BYTES",        # deprecated old name
     ):
         env.pop(k, None)
 

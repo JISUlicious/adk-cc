@@ -290,7 +290,7 @@ client.containers.run(
     network_mode="none",                  # default deny
     mem_limit="4g",
     cpu_quota=100_000,                    # 1 CPU
-    pids_limit=256,
+    pids_limit=512,
     read_only=True,                       # rootfs immutable
     tmpfs={"/tmp": "size=1g,mode=1777"},
     volumes={ws.abs_path: {"bind": "/workspace", "mode": "rw"}},
@@ -367,10 +367,10 @@ periodic `task_reminder` attachment listing the active tasks
 adk-cc ports this as `TaskReminderPlugin.before_model_callback`. Fires
 when both:
 
-- Assistant turns since last `task_create`/`task_update` ≥
-  `ADK_CC_TASK_REMINDER_TURNS_SINCE_WRITE` (default 10)
-- Assistant turns since last reminder ≥
-  `ADK_CC_TASK_REMINDER_TURNS_BETWEEN` (default 10)
+- Assistant turns since last `task_create`/`task_update` ≥ 10
+- Assistant turns since last reminder ≥ 10
+  (3/2 while a task is `in_progress`; fixed constructor defaults —
+  `ADK_CC_TASK_REMINDER=0` disables the reminder entirely)
 
 When triggered, reads the active task list from disk and appends a
 `<system-reminder>` block to `llm_request.config.system_instruction`.

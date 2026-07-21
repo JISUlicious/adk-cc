@@ -65,6 +65,7 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 
 from .audit import emit_audit_event, is_audit_enabled
+from ..config.schema import env_bool
 
 _log = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ class ModelIOTracePlugin(BasePlugin):
         self._enabled = (
             enabled
             if enabled is not None
-            else os.environ.get(_ENV_ENABLED) == "1"
+            else env_bool(_ENV_ENABLED)
         )
         if max_bytes is not None:
             self._max_bytes = max_bytes

@@ -77,6 +77,7 @@ Plugin construction is still cheap (one env-var read).
 """
 
 from __future__ import annotations
+from ..config.schema import env_bool
 
 import logging
 import os
@@ -124,11 +125,12 @@ class ProjectContextPlugin(BasePlugin):
 
     def __init__(self, name: str = "adk_cc_project_context") -> None:
         super().__init__(name=name)
-        self._enabled = (
-            os.environ.get("ADK_CC_DISABLE_PROJECT_CONTEXT", "").strip() != "1"
-        )
+        self._enabled = not env_bool("ADK_CC_DISABLE_PROJECT_CONTEXT")
         self._max_bytes = _parse_int(
-            os.environ.get("ADK_CC_CONTEXT_FILES_MAX_BYTES"),
+            # Renamed from ADK_CC_CONTEXT_MAX_BYTES; the old spelling is
+            # honored for one release (config check warns on it — DEPRECATED).
+            os.environ.get("ADK_CC_CONTEXT_FILES_MAX_BYTES")
+            or os.environ.get("ADK_CC_CONTEXT_MAX_BYTES"),
             default=_DEFAULT_MAX_BYTES,
         )
         self._extra_paths = _parse_extra_paths(

@@ -132,7 +132,7 @@ def _resolve_skills_dirs() -> list[Path]:
         _add(Path(raw).expanduser())
 
     # 2. Project walk-up — unless opted out.
-    if os.environ.get("ADK_CC_DISABLE_PROJECT_SKILLS", "").strip() != "1":
+    if not env_bool("ADK_CC_DISABLE_PROJECT_SKILLS"):
         try:
             cwd = Path.cwd().resolve()
         except OSError:

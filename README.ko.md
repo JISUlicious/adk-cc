@@ -364,12 +364,7 @@ Plan mode는 `exit_plan_mode`와 비대칭입니다: 진입은 posture를 조이
 
 세 가지 상태: `pending`, `in_progress`, `completed`. Plan mode에서는 task 도구가 필터링됩니다 (task는 act-time 진행 체크리스트이지 planning surface가 아님).
 
-`TaskReminderPlugin`이 활성 task 목록을 모델 컨텍스트에 주기적으로 주입합니다 — 모델이 `task_create`/`task_update` 없이 너무 많은 turn(기본 10)을 보냈고 마지막 리마인더로부터 최소 그만큼의 turn이 지났을 때(기본 10) 발화:
-
-```bash
-ADK_CC_TASK_REMINDER_TURNS_SINCE_WRITE=10
-ADK_CC_TASK_REMINDER_TURNS_BETWEEN=10
-```
+`TaskReminderPlugin`이 활성 task 목록을 모델 컨텍스트에 주기적으로 주입합니다 — 모델이 `task_create`/`task_update` 없이 10 turn을 보냈고 마지막 리마인더로부터 10 turn이 지났을 때 발화합니다 (task가 `in_progress`면 3/2). 주기는 생성자 기본값으로 고정이며, `ADK_CC_TASK_REMINDER=0`으로 리마인더 자체를 끌 수 있습니다.
 
 웹 UI는 세션 이벤트 로그의 `task_*` function-response로부터 도출한 라이브 task 목록을 우측 사이드바 `TaskSidebar`로 표시합니다.
 

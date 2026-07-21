@@ -707,6 +707,40 @@ _validate_schema()
 
 BY_NAME: dict[str, Var] = {v.name: v for v in FIELDS}
 
+# --- retired vars ----------------------------------------------------------
+# Names that WERE honored and no longer are (or were renamed). `check` warns
+# when one is set, so a removal/rename can never again be a silent regression:
+# a deployment carrying the old var learns at boot, not by observing that its
+# tuning stopped working. Add every future removal here in the SAME commit.
+
+REMOVED: dict[str, str] = {
+    "ADK_CC_TASK_REMINDER_TURNS_SINCE_WRITE":
+        "removed — reminder cadence is fixed (constructor kwargs); "
+        "ADK_CC_TASK_REMINDER=0 disables reminders entirely",
+    "ADK_CC_TASK_REMINDER_TURNS_BETWEEN":
+        "removed — reminder cadence is fixed (constructor kwargs)",
+    "ADK_CC_TASK_REMINDER_OPEN_TURNS":
+        "removed — reminder cadence is fixed (constructor kwargs)",
+    "ADK_CC_TASK_REMINDER_OPEN_BETWEEN":
+        "removed — reminder cadence is fixed (constructor kwargs)",
+    "ADK_CC_WEB_FETCH_PDF_MAX_BYTES":
+        "removed — the PDF read cap is fixed at 10MB",
+    "ADK_CC_MODEL_DEFAULT_NAME":
+        "removed — the seeded model endpoint is always named 'default' "
+        "(lookups follow the active pointer, not the name)",
+    "ADK_CC_DAYTONA_CREATE_BACKOFF_BASE_S":
+        "removed — create-backoff is a constructor default",
+    "ADK_CC_DAYTONA_CREATE_BACKOFF_CAP_S":
+        "removed — create-backoff is a constructor default",
+}
+
+# Renamed vars whose OLD spelling is still honored for one release.
+DEPRECATED: dict[str, str] = {
+    "ADK_CC_CONTEXT_MAX_BYTES":
+        "renamed to ADK_CC_CONTEXT_FILES_MAX_BYTES — the old name still works "
+        "this release; migrate now",
+}
+
 
 # --- cross-variable rules -------------------------------------------------
 # Robustness: catch configurations that are individually valid but jointly
@@ -837,6 +871,13 @@ def check(environ: Optional[dict] = None) -> tuple[list[str], list[str]]:
         msg = rule.check(resolved, is_set)
         if msg:
             (errors if rule.level == "error" else warnings).append(msg)
+    # retired vars still present in the environment
+    for name, why in REMOVED.items():
+        if (env.get(name) or "").strip():
+            warnings.append(f"{name} is set but NO LONGER honored — {why}")
+    for name, why in DEPRECATED.items():
+        if (env.get(name) or "").strip():
+            warnings.append(f"{name} is deprecated — {why}")
     return errors, warnings
 
 
@@ -866,14 +907,19 @@ def render_env_example(profile: Profile = Profile.ALL) -> str:
         return v.profile in (Profile.ALL, profile)
 
     def line(v: Var) -> list[str]:
+        # ALL metadata (choices, profile scope, default) goes on the COMMENT
+        # line; the value side carries only a valid example or nothing. The
+        # previous format put the default-DISPLAY and the profile tag after
+        # `=`, so uncommenting a conditionally-required var yielded literal
+        # garbage like `ADK_CC_DAYTONA_API_URL=unset  (web-only)`.
         hint = f"  (one of: {'|'.join(map(str, v.choices))})" if v.choices else ""
-        out = [f"# {v.help}{hint}"]
         tag = "" if v.profile is Profile.ALL else f"  ({v.profile.value}-only)"
+        out = [f"# {v.help}{hint}{tag}  [default: {v.shown_default()}]"]
+        value = v.example or ""
         if v.tier is Tier.REQUIRED and v.required_if is None:
-            out.append(f"{v.name}={v.example or ''}{tag}")
+            out.append(f"{v.name}={value}")
         else:
-            shown = v.example if (v.tier is Tier.REQUIRED and v.example) else v.shown_default()
-            out.append(f"# {v.name}={shown}{tag}")
+            out.append(f"# {v.name}={value}")
         return out
 
     def section_block(title: str, vars_: list[Var]) -> list[str]:

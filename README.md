@@ -427,12 +427,7 @@ Four `task_*` tools (`task_create` / `task_get` / `task_list` / `task_update`) f
 
 Three statuses: `pending`, `in_progress`, `completed`. Task tools are filtered out in plan mode (tasks are an act-time progress checklist, not a planning surface).
 
-A `TaskReminderPlugin` injects the active task list into the model's context periodically — fires when the model has gone too many turns without using `task_create`/`task_update` (default 10) and at least that many turns have passed since the last reminder (default 10):
-
-```bash
-ADK_CC_TASK_REMINDER_TURNS_SINCE_WRITE=10
-ADK_CC_TASK_REMINDER_TURNS_BETWEEN=10
-```
+A `TaskReminderPlugin` injects the active task list into the model's context periodically — fires when the model has gone 10 turns without using `task_create`/`task_update` and at least 10 turns have passed since the last reminder (3/2 while a task is `in_progress`). The cadence is fixed (constructor defaults); `ADK_CC_TASK_REMINDER=0` disables the reminder entirely.
 
 The web UI surfaces the live task list as a right-rail `TaskSidebar` derived from `task_*` function-responses in the session event log.
 

@@ -211,7 +211,10 @@ def test_coverage_complete():
     ).stdout
     tok = re.compile(r"^ADK_CC_[A-Z0-9_]+$")
     used = {n for n in out.split() if tok.match(n) and not n.endswith("_")}  # drop prefix fragments
-    schema = set(C.BY_NAME)
+    # REMOVED/DEPRECATED registry names count as covered: they appear in the
+    # tree (registry keys; a deprecated alias read) precisely so check() can
+    # warn about them — they must not need live Var rows.
+    schema = set(C.BY_NAME) | set(C.REMOVED) | set(C.DEPRECATED)
     missing = sorted(used - schema)
     assert not missing, f"{len(missing)} env var(s) read but missing from the schema: {missing}"
     print(f"OK coverage_complete ({len(schema)} vars, all read-sites covered)")

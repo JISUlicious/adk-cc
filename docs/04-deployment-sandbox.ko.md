@@ -131,7 +131,7 @@ ADK_CC_WORKSPACE_ROOT=/var/lib/adk-cc/wks
 ADK_CC_SANDBOX_IMAGE=adk-cc-sandbox:latest
 ADK_CC_SANDBOX_MEM_LIMIT=4g
 ADK_CC_SANDBOX_CPU_QUOTA=100000   # 100k = 1 CPU
-ADK_CC_SANDBOX_PIDS_LIMIT=256
+ADK_CC_SANDBOX_PIDS_LIMIT=512
 ```
 
 Plain TCP의 경우: 세 개의 `*_CERT` / `*_KEY` var를 제거하고 `ADK_CC_DOCKER_HOST=tcp://sandbox.internal:2375` 설정.

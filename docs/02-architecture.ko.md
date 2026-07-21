@@ -282,7 +282,7 @@ client.containers.run(
     network_mode="none",                  # 기본 거부
     mem_limit="4g",
     cpu_quota=100_000,                    # 1 CPU
-    pids_limit=256,
+    pids_limit=512,
     read_only=True,                       # rootfs 불변
     tmpfs={"/tmp": "size=1g,mode=1777"},
     volumes={ws.abs_path: {"bind": "/workspace", "mode": "rw"}},
@@ -357,10 +357,10 @@ worker pool 없음).
 adk-cc는 이를 `TaskReminderPlugin.before_model_callback`으로 포트.
 두 조건 모두일 때 발사:
 
-- 마지막 `task_create`/`task_update` 이후 assistant turn 수 ≥
-  `ADK_CC_TASK_REMINDER_TURNS_SINCE_WRITE` (기본 10)
-- 마지막 reminder 이후 assistant turn 수 ≥
-  `ADK_CC_TASK_REMINDER_TURNS_BETWEEN` (기본 10)
+- 마지막 `task_create`/`task_update` 이후 assistant turn 수 ≥ 10
+- 마지막 reminder 이후 assistant turn 수 ≥ 10
+  (task가 `in_progress`면 3/2; 생성자 기본값으로 고정 —
+  `ADK_CC_TASK_REMINDER=0`으로 reminder 자체를 비활성화)
 
 트리거되면 디스크에서 활성 task 목록을 읽고
 `<system-reminder>` 블록을 `llm_request.config.system_instruction`에 append.
