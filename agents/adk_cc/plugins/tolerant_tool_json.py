@@ -118,6 +118,103 @@ def _strip_trailing_commas(s: str) -> str:
     return _TRAILING_COMMA.sub(r"\1", s)
 
 
+def _insert_missing_commas(s: str) -> str:
+    """Insert the comma models omit between members: a VALUE-ending char
+    (closing quote, digit, `}`/`]`, or the last letter of true/false/null)
+    followed — across whitespace only — by a `"` opening the next member.
+    `{"a": "x" "b": 2}` → `{"a": "x", "b": 2}`. JSON-string-aware; runs only
+    on already-broken input, and a wrong guess just fails the re-parse (the
+    original error still surfaces via the caller's fallback)."""
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    prev = ""  # last significant char OUTSIDE strings ('"' records a string close)
+    for ch in s:
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+                prev = '"'
+            continue
+        if ch == '"' and prev in '"0123456789}]el':
+            out.append(",")
+        out.append(ch)
+        if ch == '"':
+            in_string = True
+        elif not ch.isspace():
+            prev = ch
+    return "".join(out)
+
+
+def _escape_spurious_inner_quotes(s: str) -> str:
+    """Escape unescaped `"` INSIDE string values — the classic model sin when
+    inlining shell/code (`"command": "echo "hi""`, heredocs containing JSON).
+
+    A quote inside a string counts as the CLOSE only when what follows (past
+    whitespace) is valid for the string's grammatical position: a KEY string
+    closes before `:`; a VALUE string closes before `,` `}` `]` or
+    end-of-text. Tracking key-vs-value position is load-bearing — a command
+    value containing `data = {"key": 1}` has a content quote before `:`,
+    which a naive closer set would misread as a key close (field payload,
+    2026-07-22). Runs only on already-broken input; a wrong guess just fails
+    the re-parse and the caller falls through."""
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    str_kind = "value"  # position the CURRENT string opened in: 'key' | 'value'
+    stack: list[str] = []  # container context: 'obj' | 'arr'
+    pos = "value"  # expected next token position OUTSIDE strings
+    n = len(s)
+    for i, ch in enumerate(s):
+        if in_string:
+            if escaped:
+                out.append(ch)
+                escaped = False
+                continue
+            if ch == "\\":
+                out.append(ch)
+                escaped = True
+                continue
+            if ch == '"':
+                j = i + 1
+                while j < n and s[j] in " \t\r\n":
+                    j += 1
+                nxt = s[j] if j < n else ""
+                closes = (nxt == ":") if str_kind == "key" else (nxt in ",}]" or not nxt)
+                if closes:
+                    out.append(ch)
+                    in_string = False
+                else:
+                    out.append('\\"')
+                continue
+            out.append(ch)
+            continue
+        out.append(ch)
+        if ch == '"':
+            in_string = True
+            str_kind = (
+                "key" if (stack and stack[-1] == "obj" and pos == "key") else "value"
+            )
+        elif ch == "{":
+            stack.append("obj")
+            pos = "key"
+        elif ch == "[":
+            stack.append("arr")
+            pos = "value"
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+        elif ch == ":":
+            pos = "value"
+        elif ch == ",":
+            pos = "key" if (stack and stack[-1] == "obj") else "value"
+    return "".join(out)
+
+
 # A colon whose VALUE is empty — `:` then optional whitespace then a closing
 # `}`/`]` or a `,` (`{"k": }`, `{"k": , ...}`). The model emitted a key with no
 # value. Used ONLY to DETECT this case so we can route it to the retry marker;
@@ -237,6 +334,24 @@ def tolerant_loads(s, *args, **kwargs):
             applied.append(label)
             attempts.append(("+".join(applied), candidate))
 
+        # Structural repairs for "Expecting ',' delimiter" (field failure,
+        # 2026-07-22: a heredoc command with unescaped inner quotes killed the
+        # turn). Tried INDEPENDENTLY on the escape/comma-repaired base — not
+        # cumulatively — because the two heuristics read the same signal (a
+        # quote after a value) and would corrupt each other's cases if chained
+        # unconditionally. A wrong guess fails its re-parse and falls through.
+        structural_base = candidate  # escape+trailing-comma applied above
+        attempts.append(("missing-comma", _insert_missing_commas(structural_base)))
+        attempts.append(
+            ("inner-quote", _escape_spurious_inner_quotes(structural_base))
+        )
+        attempts.append(
+            (
+                "missing-comma+inner-quote",
+                _escape_spurious_inner_quotes(_insert_missing_commas(structural_base)),
+            )
+        )
+
         # Final tier: structurally COMPLETE a TRUNCATED tool call by appending
         # only the missing }/] closers — never a string value or a missing value.
         # Safe only when the text doesn't end inside a string and has unclosed
@@ -301,16 +416,21 @@ def tolerant_loads(s, *args, **kwargs):
             )
             return {TRUNCATED_TOOL_CALL_KEY: True}
 
-        # Genuinely malformed (not truncated, not a fillable empty value) —
-        # surface the ORIGINAL error so the failure type is unchanged for callers,
-        # with enough detail for operators to diagnose the model/prompt.
+        # Genuinely malformed (not truncated, not a fillable empty value, no
+        # repair parses). Re-raising here KILLS THE WHOLE TURN (field failure,
+        # 2026-07-22: "Expecting ',' delimiter" surfaced as a dead chat).
+        # Degrade to the same retry marker as truncation instead: the tool
+        # never runs with bad args, TruncatedToolCallPlugin hands the model a
+        # clean "resend valid arguments" error, and the turn survives. The
+        # WARNING keeps full operator visibility into the model's emission.
         _log.warning(
             "tolerant_tool_json: UNRECOVERABLE tool-call JSON — %s at pos %s "
-            "(not truncation, not an empty value). Surfacing the original error. "
-            "Raw args (first 200 chars): %r",
+            "(not truncation, not an empty value, no repair parsed). Degrading "
+            "to a retry marker so the turn survives. Raw args (first 200 "
+            "chars): %r",
             first_error.msg, getattr(first_error, "pos", "?"), text[:200],
         )
-        raise first_error
+        return {TRUNCATED_TOOL_CALL_KEY: True}
 
 
 def _gated_loads(s, *args, **kwargs):

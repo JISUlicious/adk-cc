@@ -200,9 +200,23 @@ export function FileTreeSidePanel({
     }
   }, [projectId, sessionId, reload, refreshUndo])
 
-  // After each turn (refreshKey), re-fetch the currently-loaded directories so
-  // agent-created files appear — preserving expansion + the open file. Skips
-  // the initial render (no dirs loaded yet; the session effect handles that).
+  // LIVE refresh: while the panel is open, tick every few seconds so file
+  // changes show as they happen (mid-turn agent writes, external edits) —
+  // not only at turn end. Each tick re-runs the same loaded-dirs refresh
+  // below and re-reads the open file; expansion and selection are preserved.
+  // Cheap: one listDir per loaded dir + one status call (remote projects
+  // ride the shared ControlMaster at ~25ms/op).
+  const [liveTick, setLiveTick] = useState(0)
+  useEffect(() => {
+    if (!open) return
+    const id = setInterval(() => setLiveTick((t) => t + 1), 4000)
+    return () => clearInterval(id)
+  }, [open])
+
+  // After each turn (refreshKey) and on every live tick, re-fetch the
+  // currently-loaded directories so agent-created files appear — preserving
+  // expansion + the open file. Skips the initial render (no dirs loaded yet;
+  // the session effect handles that).
   useEffect(() => {
     // A turn may have added a checkpoint → refresh Undo availability. Deferred
     // to a microtask so the setState isn't synchronous in the effect body.
@@ -231,9 +245,9 @@ export function FileTreeSidePanel({
     return () => {
       cancelled = true
     }
-    // Intentionally keyed on refreshKey only; reads current `dirs` at that turn.
+    // Intentionally keyed on refreshKey + liveTick only; reads current `dirs`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshKey])
+  }, [refreshKey, liveTick])
 
   async function toggleDir(path: string) {
     const next = new Set(expanded)
@@ -413,7 +427,7 @@ export function FileTreeSidePanel({
           projectId={projectId}
           sessionId={sessionId}
           path={selectedFile}
-          refreshKey={refreshKey}
+          refreshKey={(refreshKey ?? 0) + liveTick}
           onBack={() => setSelectedFile(null)}
         />
       ) : !rootExists ? (

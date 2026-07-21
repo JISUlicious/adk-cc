@@ -119,17 +119,46 @@ def test_completion_ignores_brackets_inside_strings():
 
 # --- still fails on genuinely-broken / unrecoverable input ----------------
 
-def test_unrecoverable_still_raises():
-    # genuinely malformed-but-COMPLETE (NOT truncation, NOT an empty value) →
-    # raise, never invent. ('{"a": }' is now an empty-value case → marker; see
-    # test_missing_value_degrades_to_marker.)
-    for bad in ('not json', '{"a" "b"}', '[1 2]', '{"a": 1 "b": 2}'):
-        try:
-            tolerant_loads(bad)
-            assert False, f"expected failure for {bad!r}"
-        except json.JSONDecodeError:
-            pass
-    print("OK test_unrecoverable_still_raises")
+def test_missing_comma_between_members_recovers():
+    # The model omitted the comma between members — after a string, number,
+    # or literal value. Recovered by _insert_missing_commas (field class:
+    # "Expecting ',' delimiter").
+    assert tolerant_loads('{"a": "x" "b": "y"}') == {"a": "x", "b": "y"}
+    assert tolerant_loads('{"a": 1 "b": 2}') == {"a": 1, "b": 2}
+    assert tolerant_loads('{"a": true "b": null "c": [1] "d": {"e": 2}}') == {
+        "a": True, "b": None, "c": [1], "d": {"e": 2},
+    }
+    print("OK test_missing_comma_between_members_recovers")
+
+
+def test_spurious_inner_quotes_recover():
+    # THE field failure (2026-07-22): a run_bash heredoc whose content
+    # contains unescaped double quotes — the string "closes" early and
+    # json.loads dies with "Expecting ',' delimiter". The inner-quote
+    # repair escapes quotes whose lookahead isn't valid post-string JSON.
+    raw = (
+        '{"title": "Testing backend endpoints", '
+        '"command": "cd backend && python3 - <<PY\n'
+        'print("hello, world")\n'
+        'data = {"key": 1}\n'
+        'PY"}'
+    )
+    out = tolerant_loads(raw)
+    assert out["title"] == "Testing backend endpoints"
+    assert 'print("hello, world")' in out["command"]
+    assert '{"key": 1}' in out["command"]
+    print("OK test_spurious_inner_quotes_recover")
+
+
+def test_unrecoverable_degrades_to_marker():
+    # Genuinely malformed-but-COMPLETE input that NO repair parses no longer
+    # re-raises — re-raising killed the whole turn in the field (2026-07-22).
+    # It degrades to the same retry marker as truncation, so the model gets
+    # a clean "resend valid arguments" error and the turn survives.
+    for bad in ('not json', '{"a" "b"}', '[1 2]'):
+        out = tolerant_loads(bad)
+        assert out == {TRUNCATED_TOOL_CALL_KEY: True}, (bad, out)
+    print("OK test_unrecoverable_degrades_to_marker")
 
 
 def test_missing_value_degrades_to_marker():
@@ -223,7 +252,9 @@ if __name__ == "__main__":
     test_truncation_lone_open_brace_becomes_empty()
     test_truncation_nested_and_composes_with_repairs()
     test_completion_ignores_brackets_inside_strings()
-    test_unrecoverable_still_raises()
+    test_missing_comma_between_members_recovers()
+    test_spurious_inner_quotes_recover()
+    test_unrecoverable_degrades_to_marker()
     test_truncated_midvalue_degrades_to_marker()
     test_missing_value_degrades_to_marker()
     test_non_str_input_passthrough()
