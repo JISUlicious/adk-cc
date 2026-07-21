@@ -80,9 +80,12 @@ def test_parsing():
 
 
 def test_check_required_and_conditional():
-    # API_KEY missing → hard error.
-    errors, _ = C.check({})
-    assert any("ADK_CC_API_KEY" in e for e in errors), errors
+    # API_KEY missing → WARNING, not error: the app deliberately boots keyless
+    # (desktop first-run enters the key in the UI; agent.py warns only), so
+    # `config check` as a CI gate must not fail a supported configuration.
+    errors, warnings = C.check({})
+    assert not any("ADK_CC_API_KEY" in e for e in errors), errors
+    assert any("ADK_CC_API_KEY" in w for w in warnings), warnings
 
     # With API_KEY + backend=daytona → daytona creds become conditionally required (warnings).
     _, warnings = C.check({"ADK_CC_API_KEY": "x", "ADK_CC_SANDBOX_BACKEND": "daytona"})
@@ -130,6 +133,47 @@ def test_enum_choices_and_rules():
     _, w2 = C.check({"ADK_CC_API_KEY": "x", "ADK_CC_ALLOW_NO_AUTH": "1"})  # web (no DESKTOP)
     assert any("NO auth" in m for m in w2), w2
     print("OK enum_choices_and_rules")
+
+
+def test_check_trustworthy():
+    """Phase-B review fixes: the check's model must MATCH the runtime."""
+    base = {"ADK_CC_API_KEY": "x", "ADK_CC_DESKTOP": "1"}
+
+    # env_bool is the one canonical bool read (unset→default; token semantics).
+    assert C.env_bool("ADK_CC_NOPE", True, environ={}) is True
+    assert C.env_bool("X", environ={"X": "true"}) is True
+    assert C.env_bool("X", True, environ={"X": "off"}) is False
+
+    # resolve(): out-of-choices enum falls back to the DEFAULT (like bad ints),
+    # while check() still errors from the raw value.
+    r = C.resolve({"ADK_CC_PERMISSION_MODE": "plany"})
+    assert r["ADK_CC_PERMISSION_MODE"] == "bypassPermissions", r["ADK_CC_PERMISSION_MODE"]
+    e, _ = C.check({**base, "ADK_CC_PERMISSION_MODE": "plany"})
+    assert any("ADK_CC_PERMISSION_MODE" in m for m in e), e
+
+    # Compaction rule mirrors agent.py's real gate:
+    # RETENTION alone → ignored (warn, NOT error — code silently disables).
+    e2, w2 = C.check({**base, "ADK_CC_COMPACTION_EVENT_RETENTION": "20"})
+    assert not any("COMPACTION" in m for m in e2), e2
+    assert any("ignored" in m for m in w2 if "COMPACTION" in m), w2
+    # THRESHOLD without RETENTION → error (agent.py raises).
+    e3, _ = C.check({**base, "ADK_CC_COMPACTION_TOKEN_THRESHOLD": "1000"})
+    assert any("COMPACTION" in m for m in e3), e3
+    # INTERVAL+RETENTION without THRESHOLD → error (enable via interval, unpaired).
+    e4, _ = C.check({**base, "ADK_CC_COMPACTION_INTERVAL": "5",
+                     "ADK_CC_COMPACTION_EVENT_RETENTION": "20"})
+    assert any("COMPACTION" in m for m in e4), e4
+
+    # AUTH_TOKENS silently dead under a higher-priority mode → warned.
+    _, w5 = C.check({"ADK_CC_API_KEY": "x", "ADK_CC_AUTH_TOKENS": "t=u:t",
+                     "ADK_CC_JWT_JWKS_URL": "https://idp/jwks",
+                     "ADK_CC_JWT_ISSUER": "i", "ADK_CC_JWT_AUDIENCE": "a"})
+    assert any("ADK_CC_AUTH_TOKENS" in m for m in w5), w5
+
+    # as_csv preserves host:port; as_csv_colon still splits on colon.
+    assert C.as_csv("example.com:8443, b.com") == ("example.com:8443", "b.com")
+    assert C.as_csv_colon("/a:/b,/c") == ("/a", "/b", "/c")
+    print("OK check_trustworthy")
 
 
 def test_gen_env_shape():
@@ -196,6 +240,7 @@ def main():
     test_defaults_mirror_current_behavior()
     test_parsing()
     test_check_required_and_conditional()
+    test_check_trustworthy()
     test_enum_choices_and_rules()
     test_gen_env_shape()
     test_effective_masks_secrets()

@@ -96,6 +96,15 @@ def env_bool(name: str, default: bool = False, environ: Optional[dict] = None) -
 
 
 def as_csv(raw: str) -> tuple[str, ...]:
+    """Comma-separated list. Comma ONLY — entries may legitimately contain
+    colons (host:port allowlist entries, URLs), which must stay intact."""
+    return tuple(p.strip() for p in raw.split(",") if p.strip())
+
+
+def as_csv_colon(raw: str) -> tuple[str, ...]:
+    """Comma- OR colon-separated list — for PATH-style path/command lists whose
+    read-sites (permissions/protected.py, permissions/command_safety.py) accept
+    both separators. Not for host lists: it would tear host:port entries."""
     return tuple(p.strip() for p in raw.replace(":", ",").split(",") if p.strip())
 
 
@@ -118,6 +127,10 @@ class Var:
     default_display: Optional[str] = None  # override the shown default (e.g. "off", "auto")
     secret: bool = False                # mask in `print`
     choices: Optional[tuple] = None     # allowed values (enum vars) — `check` rejects others
+    # REQUIRED-unconditional vars: hard=True → missing is an ERROR (deployment
+    # cannot work). hard=False → missing is a WARNING (the app deliberately
+    # boots without it, e.g. API_KEY on a keyless first run / enter-in-UI flow).
+    hard: bool = True
     # Optional conditional-requirement: given the resolved config dict, is this
     # var required? Used by `check` (e.g. DAYTONA_API_URL required iff backend=daytona).
     required_if: Optional[Callable[[dict], bool]] = field(default=None, compare=False)
@@ -127,9 +140,15 @@ class Var:
         if raw is None or raw.strip() == "":
             return self.default
         try:
-            return self.parse(raw)
+            value = self.parse(raw)
         except Exception:
             return self.default  # tolerate garbage → default (check() flags it separately)
+        if self.choices and value not in self.choices:
+            # Same posture as a failed parse: an out-of-range enum value falls
+            # back to the safe default (check() reports it as an error from the
+            # raw value) instead of flowing through resolve()/print verbatim.
+            return self.default
+        return value
 
     def shown_default(self) -> str:
         if self.default_display is not None:
@@ -149,8 +168,10 @@ class Var:
 FIELDS: list[Var] = [
     # --- Model (the one thing a user actually fills in) -------------------
     Var("ADK_CC_API_KEY", Tier.REQUIRED, "Model",
-        "API key for your OpenAI-compatible model server.",
-        secret=True, example="sk-replace-me"),
+        "API key for your OpenAI-compatible model server. The server BOOTS "
+        "without it (warned, model calls fail until set) — desktop first-run "
+        "enters it in the UI.",
+        secret=True, example="sk-replace-me", hard=False),
     Var("ADK_CC_API_BASE", Tier.COMMON, "Model",
         "OpenAI-compatible model server base URL.",
         default="http://localhost:18000/v1", parse=as_str),
@@ -202,8 +223,9 @@ FIELDS: list[Var] = [
         default="noop",
         choices=("noop","container","docker","e2b","sandbox_service","daytona","ssh")),
     Var("ADK_CC_SANDBOX_IMAGE", Tier.ADVANCED, "Sandbox",
-        "Container image for container/docker backends.",
-        default="python:3.12-slim"),
+        "Container image override. Per-backend defaults when unset: docker = "
+        "adk-cc-sandbox:latest; container/desktop = python:3.12-slim.",
+        default=None, default_display="per-backend (see help)"),
     Var("ADK_CC_SANDBOX_NETWORK", Tier.ADVANCED, "Sandbox",
         "container backend: 1 = network on (dev), 0 = none.",
         default=True, parse=as_bool),
@@ -306,6 +328,9 @@ FIELDS: list[Var] = [
         choices=("open","allowlist")),
     Var("ADK_CC_SKIP_DOTENV", Tier.DEV, "Behavior",
         "Skip .env loading (CI/containers where env is already populated).",
+        default=False, parse=as_bool),
+    Var("ADK_CC_SKIP_CONFIG_CHECK", Tier.DEV, "Behavior",
+        "Skip the import-time config self-check log (tests/CLI noise control).",
         default=False, parse=as_bool),
 
     # ===================== remaining coverage =========================
@@ -584,13 +609,13 @@ FIELDS: list[Var] = [
     Var("ADK_CC_SETTINGS_FILE", Tier.ADVANCED, "Deployment", profile=Profile.DESKTOP,
         help="Desktop settings.env path override.", default=None, parse=as_path),
     Var("ADK_CC_PROTECTED_DENY", Tier.ADVANCED, "Permissions",
-        "Extra hard-deny path patterns (additive to the built-in secret floor).", default=None, parse=as_csv),
+        "Extra hard-deny path patterns (additive to the built-in secret floor).", default=None, parse=as_csv_colon),
     Var("ADK_CC_PROTECTED_ASK", Tier.ADVANCED, "Permissions",
-        "Extra always-ask path patterns.", default=None, parse=as_csv),
+        "Extra always-ask path patterns.", default=None, parse=as_csv_colon),
     Var("ADK_CC_DANGEROUS_CMDS", Tier.ADVANCED, "Permissions",
-        "Extra 'dangerous' command basenames (always-ask).", default=None, parse=as_csv),
+        "Extra 'dangerous' command basenames (always-ask).", default=None, parse=as_csv_colon),
     Var("ADK_CC_CATASTROPHIC_CMDS", Tier.ADVANCED, "Permissions",
-        "Extra 'catastrophic' command basenames (hard-deny).", default=None, parse=as_csv),
+        "Extra 'catastrophic' command basenames (hard-deny).", default=None, parse=as_csv_colon),
     Var("ADK_CC_CMD_SAFETY", Tier.ADVANCED, "Permissions",
         "run_bash danger classifier (set 0 to disable entirely).", default=True, parse=as_bool),
 
@@ -700,12 +725,22 @@ def _truthy(resolved: dict, is_set: dict, name: str) -> bool:
 
 
 RULES: list[Rule] = [
-    # Compaction requires both threshold + retention, or neither (ADK's
-    # EventsCompactionConfig validator raises at boot otherwise).
+    # Compaction — mirrors agent.py's ACTUAL gate: compaction is enabled by
+    # THRESHOLD or INTERVAL; once enabled, THRESHOLD/RETENTION must pair
+    # (agent.py raises). RETENTION alone (no enable) is NOT an error — the
+    # code silently ignores it — so that case is a warn, not an error.
     Rule("error", lambda r, s: (
         "ADK_CC_COMPACTION_TOKEN_THRESHOLD and ADK_CC_COMPACTION_EVENT_RETENTION "
-        "must be set together (or neither)."
-        if s.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD") != s.get("ADK_CC_COMPACTION_EVENT_RETENTION")
+        "must be set together when compaction is enabled."
+        if (s.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD") != s.get("ADK_CC_COMPACTION_EVENT_RETENTION"))
+        and (s.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD") or s.get("ADK_CC_COMPACTION_INTERVAL"))
+        else None)),
+    Rule("warn", lambda r, s: (
+        "ADK_CC_COMPACTION_EVENT_RETENTION is set but compaction is disabled "
+        "(set COMPACTION_TOKEN_THRESHOLD or COMPACTION_INTERVAL) — it is ignored."
+        if s.get("ADK_CC_COMPACTION_EVENT_RETENTION")
+        and not s.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD")
+        and not s.get("ADK_CC_COMPACTION_INTERVAL")
         else None)),
     # External IdP without iss/aud verification is a silent security gap.
     Rule("warn", lambda r, s: (
@@ -713,11 +748,19 @@ RULES: list[Rule] = [
         "the token issuer/audience are NOT verified."
         if s.get("ADK_CC_JWT_JWKS_URL") and not (s.get("ADK_CC_JWT_ISSUER") and s.get("ADK_CC_JWT_AUDIENCE"))
         else None)),
-    # Two auth modes selected → only the higher-priority one runs.
+    # Multiple auth modes selected → only the highest-priority arm runs
+    # (make_app: JWKS > AUTH_PASSWORD > AUTH_TOKENS). Warn about EVERY
+    # silently-ignored arm, not just the password/JWKS pair.
     Rule("warn", lambda r, s: (
-        "ADK_CC_AUTH_PASSWORD=1 and ADK_CC_JWT_JWKS_URL are both set — JWKS wins; "
+        "ADK_CC_AUTH_PASSWORD and ADK_CC_JWT_JWKS_URL are both set — JWKS wins; "
         "password auth is ignored."
         if _truthy(r, s, "ADK_CC_AUTH_PASSWORD") and s.get("ADK_CC_JWT_JWKS_URL")
+        else None)),
+    Rule("warn", lambda r, s: (
+        "ADK_CC_AUTH_TOKENS is set alongside a higher-priority auth mode "
+        "(JWKS/password) — the static tokens are ignored."
+        if s.get("ADK_CC_AUTH_TOKENS")
+        and (s.get("ADK_CC_JWT_JWKS_URL") or _truthy(r, s, "ADK_CC_AUTH_PASSWORD"))
         else None)),
     # Allowlisted hosts do nothing unless the fetch mode is 'allowlist'.
     Rule("warn", lambda r, s: (
@@ -727,11 +770,11 @@ RULES: list[Rule] = [
         else None)),
     # Security-relevant opt-outs — always worth surfacing.
     Rule("warn", lambda r, s: (
-        "ADK_CC_WEB_FETCH_ALLOW_PRIVATE=1 — the SSRF guard is disabled "
+        "ADK_CC_WEB_FETCH_ALLOW_PRIVATE is enabled — the SSRF guard is disabled "
         "(localhost/private IPs are fetchable)."
         if _truthy(r, s, "ADK_CC_WEB_FETCH_ALLOW_PRIVATE") else None)),
     Rule("warn", lambda r, s: (
-        "ADK_CC_ALLOW_NO_AUTH=1 in a non-desktop deployment — the server runs with NO auth."
+        "ADK_CC_ALLOW_NO_AUTH is enabled in a non-desktop deployment — the server runs with NO auth."
         if _truthy(r, s, "ADK_CC_ALLOW_NO_AUTH") and not r.get("ADK_CC_DESKTOP") else None)),
 ]
 
@@ -768,17 +811,25 @@ def check(environ: Optional[dict] = None) -> tuple[list[str], list[str]]:
                 v.parse(set_raw)
             except Exception:
                 warnings.append(f"{v.name}: value {set_raw!r} failed to parse; using default")
-        # enum constraint
-        if setp and v.choices and resolved[v.name] not in v.choices:
-            errors.append(
-                f"{v.name}: {set_raw!r} is not one of {'|'.join(map(str, v.choices))}"
-            )
-        # required (unconditional → error; conditional → warn)
+        # enum constraint — from the RAW value (resolve() falls back to the
+        # default for out-of-choice values, so the resolved dict can't show it)
+        if setp and v.choices:
+            try:
+                raw_val = v.parse(set_raw)
+            except Exception:
+                raw_val = None
+            if raw_val not in v.choices:
+                errors.append(
+                    f"{v.name}: {set_raw!r} is not one of {'|'.join(map(str, v.choices))}"
+                )
+        # required. Unconditional+hard → error; unconditional+soft (the app
+        # deliberately boots without it) and conditional → warning.
         if v.tier is Tier.REQUIRED:
             required = True if v.required_if is None else bool(v.required_if(resolved))
             if required and not setp:
                 cond = "" if v.required_if is None else " (conditionally required by current config)"
-                (warnings if v.required_if is not None else errors).append(
+                hard_missing = v.required_if is None and v.hard
+                (errors if hard_missing else warnings).append(
                     f"{v.name}: required but not set{cond} — {v.help}"
                 )
     # cross-var rules

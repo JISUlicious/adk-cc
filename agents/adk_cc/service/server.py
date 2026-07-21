@@ -313,37 +313,6 @@ def _mount_ui(app, dist_dir: str) -> None:
     app.mount("/", StaticFiles(directory=str(dist), html=False), name="ui")
 
 
-def _run_config_check() -> None:
-    """Validate os.environ against the central schema and log the result.
-
-    Errors (missing required var, bad enum value, contradictory cross-var
-    combo) go to ERROR; softer issues (conditional-required, parse failure,
-    dangerous-but-allowed combo) go to WARNING. Deliberately non-fatal — a
-    misconfigured deployment gets a loud, specific boot log rather than a
-    silent fallback or a late opaque crash. Never raises: a failure in the
-    check itself must not stop the server from starting."""
-    import logging
-
-    log = logging.getLogger("adk_cc.config")
-    try:
-        from ..config import check as _check
-
-        errors, warnings = _check(dict(os.environ))
-    except Exception:  # pragma: no cover — validation must never block boot
-        log.debug("config self-check skipped (error while validating)", exc_info=True)
-        return
-    for w in warnings:
-        log.warning("config: %s", w)
-    for e in errors:
-        log.error("config: %s", e)
-    if errors:
-        log.error(
-            "config self-check found %d error(s) above — the deployment may "
-            "misbehave; fix the environment (see `python -m adk_cc.config check`).",
-            len(errors),
-        )
-
-
 def make_app():
     """Default factory consumed by `uvicorn ... --factory`.
 
@@ -394,16 +363,10 @@ def make_app():
     agent module is loaded. Disable via `ADK_CC_SKIP_DOTENV=1`. See the
     package `__init__.py` for the lookup order.
     """
-    # Validate the environment against the central schema BEFORE building
-    # anything. This surfaces misconfiguration loudly at boot — a missing
-    # required var, an out-of-range enum value (e.g. a typo'd SANDBOX_BACKEND),
-    # or a dangerous/contradictory combination (JWKS without iss/aud,
-    # ALLOW_NO_AUTH in a web deployment) — instead of it manifesting later as
-    # silent wrong behavior or an opaque runtime failure. Non-fatal by design:
-    # we log and continue, so a newly-added check never takes down a previously
-    # working deployment; errors go to ERROR, softer issues to WARNING.
-    _run_config_check()
-
+    # NB: the config self-check runs at PACKAGE import (adk_cc/__init__.py
+    # `_boot_config_check`), before this factory is even reachable — so it
+    # covers `adk web`/`adk run` and the desktop sidecar too, and genuinely
+    # precedes the agent-graph construction.
     agents_dir = os.environ.get("ADK_CC_AGENTS_DIR")
     if not agents_dir:
         # Default to this package's own agents/ dir — in a SOURCE checkout

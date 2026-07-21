@@ -75,6 +75,46 @@ def _bootstrap_dotenv() -> None:
                 pass
 
 
+def _boot_config_check() -> None:
+    """Validate os.environ against the central schema, logging errors/warnings.
+
+    Lives HERE — after the dotenv bootstrap, before the agent import — so it
+    genuinely runs before anything is built and covers EVERY entrypoint that
+    imports the package (`uvicorn …make_app`, `adk web` / `adk run`, the
+    desktop sidecar, scripts). It previously lived in make_app(), which the
+    `adk web` path never calls and which runs only after the whole agent graph
+    was already constructed at import time.
+
+    Non-fatal by design (log-and-continue), and a failure of the check itself
+    must never block boot — but that failure is logged at WARNING, not DEBUG:
+    a silently-skipped validator is invisible exactly when the env is broken.
+    `ADK_CC_SKIP_CONFIG_CHECK=1` disables (the config CLI does its own
+    explicit check/print, so import-time log noise can be turned off)."""
+    import logging as _logging
+
+    log = _logging.getLogger("adk_cc.config")
+    if _env_bool("ADK_CC_SKIP_CONFIG_CHECK"):
+        return
+    try:
+        from .config.schema import check as _check
+
+        errors, warnings = _check(dict(_os.environ))
+    except Exception:  # pragma: no cover — validation must never block boot
+        log.warning("config self-check skipped (error while validating)", exc_info=True)
+        return
+    for w in warnings:
+        log.warning("config: %s", w)
+    for e in errors:
+        log.error("config: %s", e)
+    if errors:
+        log.error(
+            "config self-check found %d error(s) above — the deployment may "
+            "misbehave; fix the environment (see `python -m adk_cc.config check`).",
+            len(errors),
+        )
+
+
 _bootstrap_dotenv()
+_boot_config_check()
 
 from . import agent  # noqa: E402 — must follow the dotenv bootstrap above
