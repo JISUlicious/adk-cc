@@ -85,11 +85,49 @@ def test_codex_provider_untouched():
     print("OK codex_provider_untouched")
 
 
+def test_request_model_id_is_aligned_to_delegate():
+    """THE precedence trap that bit in the field: ADK's LiteLlm uses
+    `llm_request.model or self.model`, and the flow stamps llm_request.model
+    from SelectableLlm.model — the RAW display id — overriding the routed id
+    on the delegate. generate_content_async must align the request with the
+    delegate before delegating."""
+    import asyncio
+
+    from google.adk.models.llm_request import LlmRequest
+
+    os.environ.pop("ADK_CC_MODEL_MIN_INTERVAL_S", None)
+    os.environ.pop("ADK_CC_MODEL_MAX_RPM", None)
+
+    class _FakeDelegate:
+        # What _build_litellm would produce for the raw registry id.
+        model = "openai/google/gemma-4-31b-it:free"
+
+        async def generate_content_async(self, llm_request, stream=False):
+            yield ("seen", llm_request.model)
+
+    sel = SelectableLlm(registry=None, default_model_id="boot")
+    sel._resolve_delegate = lambda: _FakeDelegate()  # type: ignore[method-assign]
+
+    req = LlmRequest(model="google/gemma-4-31b-it:free")  # raw display id, as stamped by the flow
+
+    async def drive():
+        out = []
+        async for item in sel.generate_content_async(req):
+            out.append(item)
+        return out
+
+    out = asyncio.run(drive())
+    assert out == [("seen", "openai/google/gemma-4-31b-it:free")], out
+    assert req.model == "openai/google/gemma-4-31b-it:free", req.model
+    print("OK request_model_id_is_aligned_to_delegate")
+
+
 def main() -> None:
     test_raw_discovered_id_gets_routed()
     test_already_prefixed_id_unchanged()
     test_plain_local_model_id_gets_routed()
     test_codex_provider_untouched()
+    test_request_model_id_is_aligned_to_delegate()
     print("\nall model-routing tests passed")
 
 

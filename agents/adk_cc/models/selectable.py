@@ -369,6 +369,16 @@ class SelectableLlm(BaseLlm):
         # the first model turn. to_thread keeps the loop free. (The build is
         # cached, so steady-state resolves are a tiny off-loop file read.)
         delegate = await asyncio.to_thread(self._resolve_delegate)
+        # ADK's LiteLlm uses `llm_request.model or self.model` — and the flow
+        # stamps llm_request.model from OUR `self.model`, which is the RAW
+        # registry id kept for display. That would override the ROUTED id
+        # `_build_litellm` configured on the delegate (field failure: raw
+        # OpenRouter ids reached litellm unprefixed even after constructor-side
+        # normalization). Align the request with the delegate — the delegate's
+        # model is authoritative for the wire. Inert for chatgpt-codex, which
+        # reads only its own self.model.
+        if getattr(delegate, "model", None) and hasattr(llm_request, "model"):
+            llm_request.model = delegate.model
         async for resp in delegate.generate_content_async(llm_request, stream=stream):
             # Root cause for tolerant_tool_json's truncation recovery: a
             # MAX_TOKENS finish means the model ran out of output budget — likely
