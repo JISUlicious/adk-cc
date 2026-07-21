@@ -7,6 +7,7 @@ import { SettingsFrame, type SettingsTab } from "@/shared/settings/SettingsFrame
 import { ThemeSection } from "@/shared/settings/sections"
 import { Button } from "@/shared/components/ui/button"
 import { Input } from "@/shared/components/ui/input"
+import { ModelCombobox } from "@/shared/components/ModelCombobox"
 import { ApiError } from "@/shared/api/client"
 import {
   listDesktopModels, setDesktopModel, activateDesktopModel, deleteDesktopModel, type DesktopModel,
@@ -199,14 +200,13 @@ function ModelsSection() {
                 <div className="space-y-2 border-t border-border/50 px-2 py-2">
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-muted-foreground">Model</span>
-                    <select
+                    <ModelCombobox
+                      options={models.length ? models : [e.model]}
                       value={e.model}
                       disabled={busy === e.name}
-                      onChange={(ev) => pickModel(e.name, ev.target.value)}
-                      className="min-w-0 flex-1 rounded border border-input bg-background px-1.5 py-1 font-mono text-xs"
-                    >
-                      {(models.length ? models : [e.model]).map((m) => <option key={m} value={m}>{baseName(m)}</option>)}
-                    </select>
+                      onPick={(m) => pickModel(e.name, m)}
+                      className="flex-1"
+                    />
                     <Button size="sm" variant="ghost" disabled={busy === e.name} onClick={() => refresh(e.name)} title="Re-discover this provider's models">
                       <RefreshCw className="h-3.5 w-3.5" />
                     </Button>

@@ -34,6 +34,7 @@ import { pickDirectory } from "@/shared/lib/tauri"
 import { addWorkingDir } from "@/shared/api/desktop-settings"
 import { type SlashAction } from "@/shared/components/SlashCommandMenu"
 import { RewindDialog } from "@/shared/components/RewindDialog"
+import { ModelChip } from "@/shared/components/ModelChip"
 import { ModelPicker } from "@/shared/components/ModelPicker"
 import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/shared/lib/theme"
 
@@ -97,6 +98,9 @@ export function ChatPage({
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [rewindOpen, setRewindOpen] = useState(false)
   const [modelPickerOpen, setModelPickerOpen] = useState(false)
+  // Bumped whenever the active model may have changed (palette pick, Settings
+  // close) → the composer's ModelChip re-reads the registry.
+  const [modelTick, setModelTick] = useState(0)
   // Count of required skill/MCP secrets the user hasn't set → badge on the
   // Settings gear. Refreshed on mount and whenever the Settings dialog closes
   // (the user may have just set some on the Account page).
@@ -539,6 +543,9 @@ export function ChatPage({
           userId={userId}
           footer={session ? <ContextGauge current={ctxTokens} limits={ctxLimits} /> : undefined}
           taskStrip={session ? <TaskStrip events={events} /> : undefined}
+          modelChip={IS_DESKTOP ? (
+            <ModelChip refreshKey={modelTick} onClick={() => setModelPickerOpen(true)} />
+          ) : undefined}
         />
       </div>
       {appName && session && (
@@ -554,7 +561,7 @@ export function ChatPage({
       )}
       <Settings
         open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+        onClose={() => { setSettingsOpen(false); setModelTick((t) => t + 1) }}
       />
       {IS_DESKTOP && session && (
         <RewindDialog
@@ -568,7 +575,7 @@ export function ChatPage({
       {IS_DESKTOP && modelPickerOpen && (
         <ModelPicker
           onClose={() => setModelPickerOpen(false)}
-          onPicked={(label) => showNotice(`✓ Model switched to ${label} (next turn)`)}
+          onPicked={(label) => { showNotice(`✓ Model switched to ${label} (next turn)`); setModelTick((t) => t + 1) }}
         />
       )}
     </div>

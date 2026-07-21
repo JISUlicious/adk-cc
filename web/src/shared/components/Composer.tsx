@@ -39,6 +39,7 @@ export function Composer({
   userId,
   footer,
   taskStrip,
+  modelChip,
 }: {
   onSend: (text: string) => void
   onAbort: () => void
@@ -57,6 +58,9 @@ export function Composer({
   /** Slim strip stacked directly above the plan-mode row (e.g. the task list),
    *  aligned to the same max-width column as the input. */
   taskStrip?: ReactNode
+  /** Current-model chip (desktop) — rendered in the meta row next to the
+   *  sandbox badge so the user sees which model the next turn uses. */
+  modelChip?: ReactNode
 }) {
   const [value, setValue] = useState("")
   const [slashCursor, setSlashCursor] = useState(0)
@@ -180,6 +184,7 @@ export function Composer({
               </span>
             </div>
             <div className="ml-auto flex items-center gap-2 shrink-0">
+              {modelChip}
               <SandboxBadge sessionId={sessionId} userId={userId} />
               {footer && <div className="adk-gauge-slot">{footer}</div>}
             </div>
