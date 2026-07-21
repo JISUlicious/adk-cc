@@ -49,6 +49,7 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
+from ..config.schema import env_bool
 from ..permissions.token_counter import (
     estimate_prompt_tokens,
     estimate_prompt_tokens_full,
@@ -179,7 +180,7 @@ class ContextGuardPlugin(BasePlugin):
         # tool-heavy turns — a real REJECT-safety gap). Default off to preserve
         # ADK-aligned behavior; the fuller number is always shown in the logs.
         self._count_tool_payloads = (
-            os.environ.get("ADK_CC_CONTEXT_COUNT_TOOL_PAYLOADS") == "1"
+            env_bool("ADK_CC_CONTEXT_COUNT_TOOL_PAYLOADS")
         )
 
         # Logged at startup so operators see the resolved ladder and can catch

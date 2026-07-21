@@ -28,6 +28,7 @@ import re
 
 from ..tools.bash.parse import ParsedSegment, parse_segment, split_statements
 from ..tools.bash.readonly import is_read_only_command
+from ..config.schema import env_bool
 
 _SEVERITY = {"read_only": 0, "mutating": 1, "dangerous": 2, "catastrophic": 3}
 
@@ -37,7 +38,7 @@ def _worse(a: str, b: str) -> str:
 
 
 def _enabled() -> bool:
-    return os.environ.get("ADK_CC_CMD_SAFETY", "1") != "0"
+    return env_bool("ADK_CC_CMD_SAFETY", True)
 
 
 def _env_bins(var: str) -> set[str]:

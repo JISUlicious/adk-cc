@@ -27,9 +27,12 @@ from __future__ import annotations
 import os as _os
 from pathlib import Path as _Path
 
+# stdlib-only; safe pre-dotenv. THE canonical bool-env parse (see config/schema.py).
+from .config.schema import env_bool as _env_bool
+
 
 def _bootstrap_dotenv() -> None:
-    if _os.environ.get("ADK_CC_SKIP_DOTENV") == "1":
+    if _env_bool("ADK_CC_SKIP_DOTENV"):
         return
     try:
         from dotenv import load_dotenv as _load_dotenv
@@ -44,7 +47,7 @@ def _bootstrap_dotenv() -> None:
     _settings = _os.environ.get("ADK_CC_SETTINGS_FILE")
     if _settings:
         candidates.append(_Path(_settings).expanduser())
-    elif _os.environ.get("ADK_CC_DESKTOP") == "1" or _os.environ.get("ADK_CC_DESKTOP_DATA"):
+    elif _env_bool("ADK_CC_DESKTOP") or _os.environ.get("ADK_CC_DESKTOP_DATA"):
         _data = _os.environ.get("ADK_CC_DESKTOP_DATA")
         _base = _Path(_data) if _data else _Path.home() / ".adk-cc-desktop"
         candidates.append(_base / "settings.env")

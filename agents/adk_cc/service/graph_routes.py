@@ -14,10 +14,11 @@ import os
 from typing import Any
 
 from starlette.requests import Request
+from ..config.schema import env_bool
 
 
 def knowledge_ui_enabled() -> bool:
-    return os.environ.get("ADK_CC_KNOWLEDGE_UI") == "1"
+    return env_bool("ADK_CC_KNOWLEDGE_UI")
 
 
 def _principal(request) -> tuple[str, str]:

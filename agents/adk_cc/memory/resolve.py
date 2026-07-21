@@ -23,6 +23,7 @@ from dataclasses import dataclass
 
 from .canonicalize import deterministic_canonical
 from .store import MemoryStore, _slugify
+from ..config.schema import env_bool
 
 NEW, CORROBORATE, UPDATE = "new", "corroborate", "update"
 
@@ -38,11 +39,11 @@ class Resolution:
 
 
 def _enabled() -> bool:
-    return os.environ.get("ADK_CC_MEMORY_RESOLVE") != "0"
+    return env_bool("ADK_CC_MEMORY_RESOLVE", True)
 
 
 def _verify_enabled() -> bool:
-    return os.environ.get("ADK_CC_MEMORY_RESOLVE_VERIFY") != "0"
+    return env_bool("ADK_CC_MEMORY_RESOLVE_VERIFY", True)
 
 
 def _existing_view(store: MemoryStore, user_id: str) -> dict[str, str]:

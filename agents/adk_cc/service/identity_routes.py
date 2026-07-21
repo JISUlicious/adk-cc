@@ -25,6 +25,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 
 from ..identity.provider import AccountPendingError
 from ..identity.ratelimit import FailureLockout, SlidingWindowLimiter
+from ..config.schema import env_bool
 
 _MAX_SKILL_ZIP = 10 * 1024 * 1024  # 10 MiB per personal skill upload
 _MAX_USER_RESOURCES = 50  # cap personal skills / MCP servers per user
@@ -79,7 +80,7 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
     # Per-IP burst budget + per-(ip|email) lockout after repeated failures.
     # In-memory/per-process — right for the self-hosted deployment.
     # ADK_CC_AUTH_RATELIMIT=0 disables (dev/tests).
-    rl_enabled = os.environ.get("ADK_CC_AUTH_RATELIMIT", "1").lower() not in ("0", "false")
+    rl_enabled = env_bool("ADK_CC_AUTH_RATELIMIT", True)
     ip_limiter = SlidingWindowLimiter(
         limit=int(os.environ.get("ADK_CC_AUTH_RATELIMIT_MAX", "30")),
         window_s=float(os.environ.get("ADK_CC_AUTH_RATELIMIT_WINDOW_S", "60")))

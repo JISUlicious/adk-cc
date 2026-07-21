@@ -41,6 +41,16 @@ def credential_provider_from_env() -> Optional[CredentialProvider]:
             from .. import deployment as _dep
 
             store_dir = str(_dep.data_dir() / "secrets")
+            # Loud on purpose: encrypted secrets are landing at a DERIVED
+            # location. The old code hard-failed here; we default instead (dev
+            # convenience) but the operator must be able to see where the
+            # store lives, or a later cwd/home change looks like data loss.
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "ADK_CC_CREDENTIAL_STORE_DIR not set — encrypted secret store "
+                "defaulting to %s (set it explicitly for production).", store_dir,
+            )
         return EncryptedFileCredentialProvider(root=store_dir)
     raise RuntimeError(
         f"unknown ADK_CC_CREDENTIAL_PROVIDER={kind!r}; "

@@ -80,6 +80,7 @@ from ..config import (
     SandboxViolation,
 )
 from .base import SandboxBackend
+from ...config.schema import env_bool
 
 if TYPE_CHECKING:
     from ...credentials import CredentialProvider
@@ -714,7 +715,7 @@ def make_sandbox_service_backend_from_env(
             "ADK_CC_SANDBOX_SERVICE_SHARED_TOKEN (dev / single-tenant) "
             "or a CredentialProvider passed to the factory (production)."
         )
-    verify_tls = os.environ.get("ADK_CC_SANDBOX_SERVICE_VERIFY_TLS", "1") != "0"
+    verify_tls = env_bool("ADK_CC_SANDBOX_SERVICE_VERIFY_TLS", True)
 
     limits: dict[str, Any] = {}
     for env_key, limit_key, cast in (

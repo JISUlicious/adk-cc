@@ -27,6 +27,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
+from ..config.schema import env_bool
 from ..authz import (
     AbacPolicyDecisionPoint,
     Action,
@@ -49,7 +50,7 @@ class AuthzPlugin(BasePlugin):
         name: str = "adk_cc_authz",
     ) -> None:
         super().__init__(name=name)
-        self._enabled = os.environ.get("ADK_CC_AUTHZ") == "1"
+        self._enabled = env_bool("ADK_CC_AUTHZ")
         # PDP is injectable (tests / external engines); default is the
         # ABAC PDP loaded from the same YAML the permission layer uses.
         self._pdp = pdp if pdp is not None else _default_pdp()

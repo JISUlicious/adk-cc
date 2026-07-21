@@ -15,11 +15,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Optional
+from .config.schema import as_bool, env_bool
 
 
 def is_desktop() -> bool:
     """True in the local single-user desktop deployment (`ADK_CC_DESKTOP=1`)."""
-    return os.environ.get("ADK_CC_DESKTOP") == "1"
+    return env_bool("ADK_CC_DESKTOP")
 
 
 def desktop_data_dir() -> Path:
@@ -41,10 +42,18 @@ def data_dir() -> Path:
     here.
 
     Resolution: `$ADK_CC_DATA_DIR`, else the desktop data dir in desktop mode
-    (so `$ADK_CC_DESKTOP_DATA` is its desktop alias), else `<cwd>/.adk-cc` for
-    the web service. Returns the path WITHOUT creating it — each subsystem makes
+    (so `$ADK_CC_DESKTOP_DATA` is its desktop alias), else `~/.adk-cc` for the
+    web service. Returns the path WITHOUT creating it — each subsystem makes
     its own subdir only when it activates, so a bare web deployment never
     materializes dirs it doesn't use.
+
+    The web fallback is HOME-based on purpose: it matches where the audit log,
+    task store, and codex token lived before this root existed (so upgrades
+    don't relocate data), and persistent state must not depend on whatever cwd
+    the process happened to start in (systemd vs shell vs cron would otherwise
+    each see a different "root"). A cwd-relative root briefly shipped and
+    silently orphaned data — don't reintroduce it; use ADK_CC_DATA_DIR for an
+    explicit per-deployment location.
 
     NB: the WORKSPACE root (`ADK_CC_WORKSPACE_ROOT`) and its `.memory`/`.wiki`
     siblings are a DIFFERENT axis — that data travels with the tenant workspace,
@@ -54,7 +63,7 @@ def data_dir() -> Path:
         return Path(os.path.abspath(os.path.expanduser(raw)))
     if is_desktop():
         return desktop_data_dir()
-    return Path(os.path.abspath(os.getcwd())) / ".adk-cc"
+    return Path.home() / ".adk-cc"
 
 
 # --- desktop sandbox setting (live JSON, no restart) ------------------------
@@ -107,7 +116,7 @@ def sandbox_network_enabled() -> bool:
     stored setting → True (dev-friendly default)."""
     env = os.environ.get("ADK_CC_SANDBOX_NETWORK")
     if env is not None:
-        return env.strip().lower() not in ("0", "false")
+        return as_bool(env)
     val = read_sandbox_settings().get("network")
     return True if val is None else bool(val)
 
@@ -127,7 +136,7 @@ def sandbox_require() -> bool:
     setting → False (default: warn + fall back to host, which stays usable)."""
     env = os.environ.get("ADK_CC_SANDBOX_REQUIRE")
     if env is not None:
-        return env.strip().lower() not in ("0", "false")
+        return as_bool(env)
     return bool(read_sandbox_settings().get("require"))
 
 
@@ -172,7 +181,7 @@ def noop_ack_host_exec() -> bool:
     wires it — the Tauri sidecar also sets the env var for the shipped app.)"""
     v = os.environ.get("ADK_CC_NOOP_ACK_HOST_EXEC")
     if v is not None:
-        return v == "1"
+        return as_bool(v)
     return is_desktop()
 
 

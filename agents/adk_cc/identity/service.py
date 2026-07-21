@@ -29,6 +29,7 @@ from .store import (
     normalize_email,
 )
 from .tokens import TokenIssuer
+from ..config.schema import env_bool
 
 MEMBER_ROLE = "member"
 OWNER_ROLE = "owner"
@@ -115,7 +116,7 @@ class IdentityService:
         )
         provider = EmailPasswordProvider(
             store, mode=mode, global_tenant_id=global_tenant, admin_role=admin_role,
-            access_requests=os.environ.get("ADK_CC_ACCESS_REQUESTS", "1").lower() not in ("0", "false"),
+            access_requests=env_bool("ADK_CC_ACCESS_REQUESTS", True),
         )
         invites = JsonFileInviteStore(os.path.join(base, "invites.json"))
         api_keys = JsonFileApiKeyStore(os.path.join(base, "api_keys.json"))

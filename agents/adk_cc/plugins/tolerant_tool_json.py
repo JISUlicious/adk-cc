@@ -62,6 +62,7 @@ import json as _stdlib_json
 import logging
 import os
 import re
+from ..config.schema import env_bool
 
 _log = logging.getLogger(__name__)
 
@@ -343,7 +344,7 @@ def install_tolerant_tool_json() -> None:
     (logged) if ADK's module layout changes so the patch can't apply — we
     never want this to break agent import.
     """
-    if os.environ.get("ADK_CC_TOLERANT_TOOL_JSON") == "0":
+    if not env_bool("ADK_CC_TOLERANT_TOOL_JSON", True):
         return
     try:
         from google.adk.models import lite_llm as _ll

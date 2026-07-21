@@ -46,6 +46,7 @@ from google.adk.tools.tool_context import ToolContext
 
 from ..tools._artifact import save_part_as_artifact
 from ..tools._mcp_content import mcp_content_to_part, safe_artifact_name
+from ..config.schema import env_bool
 
 _log = logging.getLogger(__name__)
 
@@ -55,11 +56,11 @@ class McpExportArtifactPlugin(BasePlugin):
 
     def __init__(self, name: str = "adk_cc_mcp_export_artifact") -> None:
         super().__init__(name=name)
-        self._enabled = os.environ.get("ADK_CC_MCP_AUTOSAVE_EXPORTS", "1") != "0"
+        self._enabled = env_bool("ADK_CC_MCP_AUTOSAVE_EXPORTS", True)
         # Default ON: only auto-save content meant for the user (audience
         # includes "user"), so the model's own working blobs aren't swept up.
         self._user_only = (
-            os.environ.get("ADK_CC_MCP_AUTOSAVE_AUDIENCE_USER_ONLY", "1") != "0"
+            env_bool("ADK_CC_MCP_AUTOSAVE_AUDIENCE_USER_ONLY", True)
         )
 
     async def after_tool_callback(

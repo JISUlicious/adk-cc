@@ -85,6 +85,7 @@ from google.adk.tools.skill_toolset import (
 )
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
+from ..config.schema import env_bool
 
 _log = logging.getLogger(__name__)
 
@@ -315,7 +316,7 @@ def _resource_read_max_bytes() -> int:
 def _guards_on() -> bool:
     """Phase-2 guards (script-on-noop refusal + untrusted-content delimiters),
     toggled together. Off by default — opt in with ADK_CC_SKILL_GUARDS=1."""
-    return os.environ.get("ADK_CC_SKILL_GUARDS") == "1"
+    return env_bool("ADK_CC_SKILL_GUARDS")
 
 
 def _wrap_untrusted(content: str, source: str) -> str:
@@ -789,7 +790,7 @@ class _NoopGuardedRunSkillScriptTool(RunSkillScriptTool):
     async def run_async(
         self, *, args: dict[str, Any], tool_context: ToolContext
     ) -> Any:
-        if os.environ.get("ADK_CC_SKILL_SCRIPTS_ACK_HOST_EXEC") != "1":
+        if not env_bool("ADK_CC_SKILL_SCRIPTS_ACK_HOST_EXEC"):
             from ..sandbox import get_backend, is_noop_backend
 
             try:

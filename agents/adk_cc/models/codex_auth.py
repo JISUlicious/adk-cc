@@ -49,8 +49,13 @@ def _override_path() -> Optional[Path]:
 
 
 def own_store_path() -> Path:
-    """adk-cc's own token store (Phase-2 login target)."""
-    d = os.environ.get("ADK_CC_CODEX_STORE_DIR")
+    """adk-cc's own token store (Phase-2 login target).
+
+    Resolution: `ADK_CC_CODEX_STORE_DIR` → `ADK_CC_DESKTOP_DATA` (legacy: the
+    pre-DATA_DIR chain consulted it unconditionally, and dropping it silently
+    orphaned stored tokens for deployments that set it without ADK_CC_DESKTOP)
+    → `deployment.data_dir()`."""
+    d = os.environ.get("ADK_CC_CODEX_STORE_DIR") or os.environ.get("ADK_CC_DESKTOP_DATA")
     if d:
         base = Path(d).expanduser()
     else:

@@ -41,6 +41,7 @@ from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.utils.context_utils import Aclosing
 from google.genai import types
 
+from ..config.schema import env_bool
 from ..memory import (
     MemoryStore,
     consolidate_user,
@@ -167,7 +168,7 @@ def _recall_budget() -> int:
 
 
 def _autocapture_enabled() -> bool:
-    return os.environ.get("ADK_CC_MEMORY_AUTOCAPTURE") != "0"
+    return env_bool("ADK_CC_MEMORY_AUTOCAPTURE", True)
 
 
 def _tenant_user(state) -> tuple[str, str]:

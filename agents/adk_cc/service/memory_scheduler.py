@@ -39,6 +39,7 @@ import asyncio
 import contextlib
 import logging
 import os
+from ..config.schema import env_bool
 
 _log = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ def _stale_days() -> int:
 
 
 def scheduler_enabled() -> bool:
-    return os.environ.get("ADK_CC_MEMORY") == "1" and _interval_s() > 0
+    return env_bool("ADK_CC_MEMORY") and _interval_s() > 0
 
 
 def _synthesizer():
@@ -86,7 +87,7 @@ def _synthesizer():
 
 
 def _compact_enabled() -> bool:
-    return os.environ.get("ADK_CC_MEMORY_COMPACT") != "0"
+    return env_bool("ADK_CC_MEMORY_COMPACT", True)
 
 
 async def _run_once() -> None:

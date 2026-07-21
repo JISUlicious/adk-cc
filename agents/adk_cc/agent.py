@@ -84,6 +84,7 @@ from .plugins import (
 from .plugins.secret_redaction import SecretRedactionPlugin
 from .plugins.truncated_tool_call import TruncatedToolCallPlugin
 from .credentials import credential_provider_from_env
+from .config.schema import env_bool
 from .service.tenancy import TenancyPlugin
 from .tools import (
     AskUserQuestionTool,
@@ -335,9 +336,9 @@ def _make_static_mcp_toolset():
         server_name=name,
         connection_params=params,
         save_resources_as_artifacts=(
-            os.environ.get("ADK_CC_MCP_SAVE_RESOURCES_AS_ARTIFACTS") == "1"
+            env_bool("ADK_CC_MCP_SAVE_RESOURCES_AS_ARTIFACTS")
         ),
-        use_mcp_resources=(os.environ.get("ADK_CC_MCP_USE_RESOURCES") == "1"),
+        use_mcp_resources=env_bool("ADK_CC_MCP_USE_RESOURCES"),
     )
 
 
@@ -474,7 +475,7 @@ if _tenant_skills is not None:
 # notes on the shared wiki. Inert unless the flag is set, so the
 # dev/default tool surface is unchanged. Explore (read-only) gets the
 # recall tools too; only the coordinator can capture.
-if os.environ.get("ADK_CC_WIKI") == "1":
+if env_bool("ADK_CC_WIKI"):
     from .tools import WikiAddTool, WikiReadTool, WikiSearchTool
 
     _wiki_search, _wiki_read = WikiSearchTool(), WikiReadTool()
@@ -598,7 +599,7 @@ def _seed_memory_into_summary(event, events):
     re-injected each turn by MemoryPlugin recall). Opt-in
     (ADK_CC_COMPACTION_SEED_MEMORY=1); best-effort — any failure / missing
     principal / empty recall leaves the summary untouched."""
-    if os.environ.get("ADK_CC_COMPACTION_SEED_MEMORY") != "1":
+    if not env_bool("ADK_CC_COMPACTION_SEED_MEMORY"):
         return event
     try:
         from .memory import MemoryStore, get_principal, recall_context
@@ -1255,7 +1256,7 @@ if _compaction_config is not None:
 # Same flag also enables SESSION titles for the rail — an out-of-band LLM
 # call after the first turn (SessionTitlePlugin), not a tool the agent must
 # remember to call.
-if os.environ.get("ADK_CC_TOOL_TITLES") == "1":
+if env_bool("ADK_CC_TOOL_TITLES"):
     from .plugins import SessionTitlePlugin, ToolTitlePlugin
 
     _app_kwargs["plugins"].append(ToolTitlePlugin())
@@ -1273,7 +1274,7 @@ if os.environ.get("ADK_CC_TOOL_TITLES") == "1":
 # output + tool results, not just the user message). Capture is on by default
 # with the flag; ADK_CC_MEMORY_AUTOCAPTURE=0 disables it. Consolidation
 # (episodic→semantic) is the separate scripts/memory_consolidator.py cron.
-if os.environ.get("ADK_CC_MEMORY") == "1":
+if env_bool("ADK_CC_MEMORY"):
     from .plugins import MemoryPlugin
 
     _app_kwargs["plugins"].append(MemoryPlugin())

@@ -26,6 +26,7 @@ from typing import Optional
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_request import LlmRequest
 from google.adk.plugins.base_plugin import BasePlugin
+from ..config.schema import env_bool
 
 _log = logging.getLogger(__name__)
 
@@ -105,7 +106,7 @@ class WorkspaceHintPlugin(BasePlugin):
     async def before_model_callback(
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
     ) -> None:
-        if os.environ.get("ADK_CC_DISABLE_WORKSPACE_HINT") == "1":
+        if env_bool("ADK_CC_DISABLE_WORKSPACE_HINT"):
             return None
         try:
             ws = _in_context_cwd(callback_context)

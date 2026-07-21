@@ -55,6 +55,7 @@ from ..config import (
     SandboxViolation,
 )
 from .base import SandboxBackend
+from ...config.schema import env_bool
 
 if TYPE_CHECKING:
     from ..workspace import WorkspaceRoot
@@ -225,7 +226,7 @@ class DockerBackend(SandboxBackend):
         # want truly stateless containers.
         if (
             self._is_per_user_layout
-            and os.environ.get("ADK_CC_DISABLE_INSTALL_CACHE_MOUNT") != "1"
+            and not env_bool("ADK_CC_DISABLE_INSTALL_CACHE_MOUNT")
         ):
             cache_dir = os.path.join(self._workspace_abs_path, ".cache")
             volumes[cache_dir] = {
@@ -297,7 +298,7 @@ class DockerBackend(SandboxBackend):
             targets.append(ws.session_scratch_path)
         if (
             self._is_per_user_layout
-            and os.environ.get("ADK_CC_DISABLE_INSTALL_CACHE_MOUNT") != "1"
+            and not env_bool("ADK_CC_DISABLE_INSTALL_CACHE_MOUNT")
         ):
             targets.append(os.path.join(ws.abs_path, ".cache"))
 

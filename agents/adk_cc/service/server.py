@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Optional
+from ..config.schema import env_bool
 
 
 def build_fastapi_app(
@@ -405,11 +406,22 @@ def make_app():
 
     agents_dir = os.environ.get("ADK_CC_AGENTS_DIR")
     if not agents_dir:
-        # Default to this package's own agents/ dir — server.py lives at
-        # agents/adk_cc/service/server.py, so parents[2] is the agents/ root
-        # ADK discovers the agent package under. Operators only set
-        # ADK_CC_AGENTS_DIR to point ADK at a different agents root.
-        agents_dir = str(Path(__file__).resolve().parents[2])
+        # Default to this package's own agents/ dir — in a SOURCE checkout
+        # server.py lives at agents/adk_cc/service/server.py, so parents[2] is
+        # the agents/ root ADK discovers the agent package under. When the
+        # package is pip-installed (site-packages/adk_cc/service/server.py),
+        # parents[2] is site-packages itself — handing ADK's discovery every
+        # installed distribution as a candidate agent — so in that layout the
+        # default is WRONG and we keep the old loud failure instead.
+        candidate = Path(__file__).resolve().parents[2]
+        if candidate.name != "agents":
+            raise RuntimeError(
+                "ADK_CC_AGENTS_DIR must be set: adk_cc is installed as a "
+                f"package (auto-detected root {candidate} is not an agents/ "
+                "dir), so point ADK_CC_AGENTS_DIR at the directory that "
+                "contains your agent packages."
+            )
+        agents_dir = str(candidate)
 
     # Admin panel (default-OFF). When enabled, default the tenant registry /
     # skills dirs in the environment BEFORE the agent module loads (it reads
@@ -433,7 +445,7 @@ def make_app():
             roles_claim=os.environ.get("ADK_CC_JWT_ROLES_CLAIM", "roles"),
             scopes_claim=os.environ.get("ADK_CC_JWT_SCOPES_CLAIM", "scope"),
         )
-    elif os.environ.get("ADK_CC_AUTH_PASSWORD") == "1":
+    elif env_bool("ADK_CC_AUTH_PASSWORD"):
         # In-house email+password identity: adk-cc mints its own RS256 tokens
         # and validates them in-process via the same JwtAuthExtractor (no
         # network). The /auth/* routes are mounted by build_fastapi_app.
@@ -446,7 +458,7 @@ def make_app():
 
         extractor = BearerTokenExtractor()
 
-    if extractor is None and os.environ.get("ADK_CC_ALLOW_NO_AUTH") != "1":
+    if extractor is None and not env_bool("ADK_CC_ALLOW_NO_AUTH"):
         raise RuntimeError(
             "make_app(): no auth extractor configured. Pick one:\n"
             "  - Set ADK_CC_JWT_JWKS_URL (and optionally ISSUER/AUDIENCE) "
@@ -462,7 +474,7 @@ def make_app():
         )
 
     ui_dist_dir: Optional[str] = None
-    if os.environ.get("ADK_CC_SERVE_UI") == "1":
+    if env_bool("ADK_CC_SERVE_UI"):
         explicit = os.environ.get("ADK_CC_UI_DIST")
         if explicit:
             ui_dist_dir = explicit
@@ -501,11 +513,16 @@ def _resolve_session_dsn() -> Optional[str]:
 # set. It rides the per-tenant registry machinery (which hot-reloads per
 # invocation) pinned to a single tenant id — matching what TenancyPlugin's
 # default resolver produces for an unauthenticated / single-tenant run.
-_ADMIN_DEFAULT_DATA_DIR = ".adk-cc/admin-data"
+#
+# LEGACY location: before the ADK_CC_DATA_DIR root existed, admin data
+# defaulted to this cwd-relative path. _prepare_admin_env still prefers it
+# when it exists and the new home-rooted location doesn't, so upgrading
+# doesn't orphan an existing admin store.
+_ADMIN_LEGACY_DATA_DIR = ".adk-cc/admin-data"
 
 
 def _admin_enabled() -> bool:
-    return os.environ.get("ADK_CC_ADMIN_PANEL") == "1"
+    return env_bool("ADK_CC_ADMIN_PANEL")
 
 
 def _global_tenant_id() -> str:
@@ -524,9 +541,22 @@ def _prepare_admin_env() -> None:
         return
     from .. import deployment as _dep
 
-    base = os.environ.get("ADK_CC_ADMIN_DATA_DIR") or str(
-        (_dep.data_dir() / "admin-data").resolve()
-    )
+    base = os.environ.get("ADK_CC_ADMIN_DATA_DIR")
+    if not base:
+        new_default = (_dep.data_dir() / "admin-data").resolve()
+        legacy = Path(_ADMIN_LEGACY_DATA_DIR).resolve()
+        if legacy.is_dir() and not new_default.exists():
+            # Existing pre-DATA_DIR admin store in the old cwd-relative spot —
+            # keep using it rather than silently starting an empty one.
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "admin data found at legacy %s — using it; move it to %s (or set "
+                "ADK_CC_ADMIN_DATA_DIR) to silence this.", legacy, new_default,
+            )
+            base = str(legacy)
+        else:
+            base = str(new_default)
     os.environ["ADK_CC_ADMIN_DATA_DIR"] = base
     os.environ.setdefault("ADK_CC_TENANT_REGISTRY_DIR", str(Path(base) / "registry"))
     os.environ.setdefault("ADK_CC_TENANT_SKILLS_DIR", str(Path(base) / "skills"))

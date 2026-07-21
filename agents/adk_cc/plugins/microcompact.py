@@ -34,6 +34,7 @@ from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
+from ..config.schema import env_bool
 
 _log = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ _DEFAULT_MIN_TOKENS = 800
 
 
 def _enabled() -> bool:
-    return os.environ.get("ADK_CC_MICROCOMPACT") == "1"
+    return env_bool("ADK_CC_MICROCOMPACT")
 
 
 def _int_env(name: str, default: int) -> int:

@@ -40,6 +40,7 @@ from google.genai import types
 
 from ..sandbox import get_workspace
 from ..tasks import TaskStatus, get_runner
+from ..config.schema import env_bool
 
 _SPECIALIST_AGENTS = frozenset({"Explore", "verification"})
 
@@ -228,7 +229,7 @@ class TaskReminderPlugin(BasePlugin):
         self._default_mode = (default_mode or "default").lower()
         # Master on/off. `ADK_CC_TASK_REMINDER=0` disables the periodic
         # reminder injection entirely (the task TOOLS still work).
-        self._enabled = os.environ.get("ADK_CC_TASK_REMINDER", "1") != "0"
+        self._enabled = env_bool("ADK_CC_TASK_REMINDER", True)
         # Cadence knobs — internal defaults (constructor kwargs, no longer env).
         self._turns_since_write = turns_since_write
         self._turns_between = turns_between

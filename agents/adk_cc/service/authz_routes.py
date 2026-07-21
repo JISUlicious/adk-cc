@@ -23,6 +23,7 @@ import os
 import re
 from typing import Optional
 
+from ..config.schema import env_bool
 from ..authz import (
     Action,
     AuthzContext,
@@ -53,7 +54,7 @@ def make_authz_middleware(pdp: PolicyDecisionPoint):
     class _RestAuthzMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
             # Default-OFF, checked per-request so tests/env toggles apply.
-            if os.environ.get("ADK_CC_AUTHZ") != "1":
+            if not env_bool("ADK_CC_AUTHZ"):
                 return await call_next(request)
 
             m = _USER_PATH.match(request.url.path)

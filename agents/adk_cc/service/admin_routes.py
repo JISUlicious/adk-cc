@@ -54,6 +54,7 @@ from fastapi import APIRouter, HTTPException, Request
 from ..credentials import CredentialProvider
 from ..tools.mcp_tenant import McpServerConfig
 from .registry import TenantResourceRegistry
+from ..config.schema import env_bool
 
 
 def _ensure_safe_id(value: str, label: str) -> str:
@@ -226,7 +227,7 @@ def mount_tenant_admin(
     # corroboration threshold N (how many independent users must corroborate
     # a claim to overturn a domain fact without human adjudication). Stored
     # in the tenant's wiki settings.json; the librarian reads it each run.
-    if os.environ.get("ADK_CC_WIKI") == "1":
+    if env_bool("ADK_CC_WIKI"):
         from ..wiki import WikiStore
 
         @router.get("/wiki-settings")

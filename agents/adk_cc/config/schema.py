@@ -69,11 +69,30 @@ def as_float(raw: str) -> float:
     return float(raw.strip())
 
 
+_FALSY_TOKENS = ("0", "false", "no", "off")
+
+
 def as_bool(raw: str) -> bool:
     """Truthy unless an explicit falsy token. Works for BOTH default-off opt-in
     flags and default-on kill switches — only the `default` differs (a kill
     switch has default=True and disables on '0'; an opt-in has default=False)."""
-    return raw.strip().lower() not in ("0", "false", "no", "off")
+    return raw.strip().lower() not in _FALSY_TOKENS
+
+
+def env_bool(name: str, default: bool = False, environ: Optional[dict] = None) -> bool:
+    """THE canonical boolean env read for runtime code.
+
+    Historically read-sites used three incompatible conventions (`== "1"`,
+    `!= "0"`, `not in ("0","false")`), so a value like `true` enabled some
+    features and silently didn't enable others — and the schema (which
+    documents every bool as `as_bool`) disagreed with the runtime. Every boolean read-site
+    delegates here now: unset/empty → `default`, else `as_bool` (truthy unless
+    0/false/no/off). Stdlib-only — safe from the earliest import."""
+    env = os.environ if environ is None else environ
+    raw = env.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return as_bool(raw)
 
 
 def as_csv(raw: str) -> tuple[str, ...]:
@@ -254,7 +273,7 @@ FIELDS: list[Var] = [
     Var("ADK_CC_DATA_DIR", Tier.COMMON, "Deployment",
         "Server-side data root — identity, admin/tenant registry, credentials, "
         "audit, tasks, codex token all default under here.",
-        default=None, parse=as_path, default_display="<cwd>/.adk-cc (web) / desktop data dir"),
+        default=None, parse=as_path, default_display="~/.adk-cc (web) / desktop data dir"),
     Var("ADK_CC_SESSION_DSN", Tier.COMMON, "Deployment",
         "Persistent session store DSN (postgres/sqlite). Unset = in-memory. Ignored in desktop.",
         default=None, profile=Profile.WEB, default_display="in-memory"),
@@ -495,9 +514,11 @@ FIELDS: list[Var] = [
     Var("ADK_CC_CREDENTIAL_PROVIDER", Tier.COMMON, "Credentials",
         "memory | encrypted_file | none.", default="memory",
         choices=("memory","encrypted_file","none")),
-    Var("ADK_CC_CREDENTIAL_STORE_DIR", Tier.COMMON, "Credentials",
-        "Secret store dir (defaults to <DATA_DIR>/secrets for encrypted_file).",
-        default=None, parse=as_path, default_display="<DATA_DIR>/secrets"),
+    Var("ADK_CC_CREDENTIAL_STORE_DIR", Tier.REQUIRED, "Credentials",
+        "Secret store dir for encrypted_file (defaults to <DATA_DIR>/secrets, "
+        "logged at boot — set explicitly so the store's location is deliberate).",
+        default=None, parse=as_path, default_display="<DATA_DIR>/secrets",
+        required_if=lambda c: c.get("ADK_CC_CREDENTIAL_PROVIDER") == "encrypted_file"),
     Var("ADK_CC_CREDENTIAL_KEY", Tier.REQUIRED, "Credentials", secret=True,
         help="Fernet key for the encrypted secret store.", default=None,
         required_if=lambda c: c.get("ADK_CC_CREDENTIAL_PROVIDER") == "encrypted_file"),

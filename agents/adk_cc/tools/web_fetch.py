@@ -42,6 +42,7 @@ from google.adk.tools.tool_context import ToolContext
 
 from .base import AdkCcTool, ToolMeta
 from .schemas import WebFetchArgs
+from ..config.schema import env_bool
 
 # Convenience defaults used only in allowlist mode (common docs sites LLMs
 # reach for). In the default OPEN mode these are irrelevant — everything's
@@ -77,7 +78,7 @@ def _host_allowed(host: str, allowed: tuple[str, ...]) -> bool:
 
 
 def _allow_private() -> bool:
-    return os.environ.get("ADK_CC_WEB_FETCH_ALLOW_PRIVATE") == "1"
+    return env_bool("ADK_CC_WEB_FETCH_ALLOW_PRIVATE")
 
 
 def _ip_is_internal(ip_str: str) -> bool:

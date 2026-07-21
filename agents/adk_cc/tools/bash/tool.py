@@ -11,6 +11,7 @@ from ...sandbox.config import ExecChunk, ExecResult, NetworkConfig
 from ..base import AdkCcTool, ToolMeta
 from ..schemas import RunBashArgs
 from .prompt import DESCRIPTION
+from ...config.schema import env_bool
 
 _log = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ class BashTool(AdkCcTool):
         # Operators wanting outbound for builds (apt, pip) configure
         # this via Stage E's WebFetch path or by setting NetworkConfig
         # at session-state level.
-        if os.environ.get("ADK_CC_BASH_STREAM") == "1":
+        if env_bool("ADK_CC_BASH_STREAM"):
             result = await self._exec_streaming(backend, ws, args)
         else:
             result = await backend.exec(

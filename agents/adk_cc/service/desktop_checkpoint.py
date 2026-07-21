@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .desktop_routes import desktop_data_dir
+from ..config.schema import env_bool
 
 _log = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ def enabled() -> bool:
     """Checkpointing is on by default in desktop mode; ADK_CC_CHECKPOINT=0 kills it."""
     from .. import deployment
 
-    return deployment.is_desktop() and os.environ.get("ADK_CC_CHECKPOINT") != "0"
+    return deployment.is_desktop() and env_bool("ADK_CC_CHECKPOINT", True)
 
 
 def _shadow_dir(project_id: str, session_id: str) -> Path:

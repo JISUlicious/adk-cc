@@ -114,6 +114,7 @@ from ..config import (
     SandboxViolation,
 )
 from .base import SandboxBackend
+from ...config.schema import env_bool
 
 if TYPE_CHECKING:
     from ...credentials import CredentialProvider
@@ -1115,7 +1116,7 @@ def make_daytona_backend_from_env(
         ),
         autostop_minutes=_int_env("ADK_CC_DAYTONA_AUTOSTOP_MIN", 15),
         autodelete_minutes=_int_env("ADK_CC_DAYTONA_AUTODELETE_MIN", 1440),
-        delete_on_close=os.environ.get("ADK_CC_DAYTONA_DELETE_ON_CLOSE") == "1",
+        delete_on_close=env_bool("ADK_CC_DAYTONA_DELETE_ON_CLOSE"),
         start_timeout_s=_float_env("ADK_CC_DAYTONA_START_TIMEOUT_S", 120.0),
         request_timeout_s=_float_env("ADK_CC_DAYTONA_REQUEST_TIMEOUT_S", 30.0),
         create_max_attempts=_int_env("ADK_CC_DAYTONA_CREATE_MAX_ATTEMPTS", 6),
@@ -1128,6 +1129,6 @@ def make_daytona_backend_from_env(
         # ADK_CC_DAYTONA_CA_BUNDLE at the PEM. For a self-signed
         # dev/test Daytona, ADK_CC_DAYTONA_VERIFY_SSL=0 disables verify
         # entirely (use only when the network path is otherwise trusted).
-        verify_ssl=os.environ.get("ADK_CC_DAYTONA_VERIFY_SSL", "1") != "0",
+        verify_ssl=env_bool("ADK_CC_DAYTONA_VERIFY_SSL", True),
         ca_bundle=os.environ.get("ADK_CC_DAYTONA_CA_BUNDLE") or None,
     )

@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any
+from ..config.schema import env_bool
 
 _log = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ def install_retry_on_stale() -> None:
     calls are no-ops once the flag is set. Defensive imports tolerate
     either class being unavailable in some ADK release.
     """
-    if os.environ.get("ADK_CC_SESSION_RETRY_ON_STALE") != "1":
+    if not env_bool("ADK_CC_SESSION_RETRY_ON_STALE"):
         return
 
     try:
