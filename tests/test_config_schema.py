@@ -52,6 +52,36 @@ def test_defaults_mirror_current_behavior():
         "ADK_CC_CHECKPOINT": True,
         "ADK_CC_WEB_FETCH_MODE": "open",
         "ADK_CC_SKIP_DOTENV": False,
+        # --- security-relevant / multi-site vars (the drift-prone set: the
+        # PIDS 256/512 and credential-provider divergences happened exactly
+        # because these weren't locked) ---
+        "ADK_CC_SANDBOX_PIDS_LIMIT": 512,       # docker + container backends
+        "ADK_CC_SANDBOX_CPU_QUOTA": 100000,
+        "ADK_CC_SANDBOX_IMAGE": None,           # per-backend defaults (see help)
+        "ADK_CC_CREDENTIAL_PROVIDER": "memory",
+        "ADK_CC_CREDENTIAL_STORE_DIR": None,
+        "ADK_CC_ALLOW_NO_AUTH": False,
+        "ADK_CC_WEB_FETCH_ALLOW_PRIVATE": False,
+        "ADK_CC_DESKTOP": False,
+        "ADK_CC_DATA_DIR": None,
+        "ADK_CC_TRUST_PROXY": False,
+        "ADK_CC_ACCESS_REQUESTS": True,
+        "ADK_CC_AUTH_RATELIMIT": True,
+        "ADK_CC_TASK_REMINDER": True,
+        "ADK_CC_MEMORY_AUTOCAPTURE": True,
+        "ADK_CC_MEMORY_RESOLVE": True,
+        "ADK_CC_MEMORY_RESOLVE_VERIFY": True,
+        "ADK_CC_MEMORY_COMPACT": True,
+        "ADK_CC_CMD_SAFETY": True,
+        "ADK_CC_DAYTONA_VERIFY_SSL": True,
+        "ADK_CC_SANDBOX_SERVICE_VERIFY_TLS": True,
+        "ADK_CC_NOOP_ACK_HOST_EXEC": None,      # unset → desktop-mode fallback
+        "ADK_CC_ADMIN_PANEL": False,
+        "ADK_CC_AUTHZ": False,
+        "ADK_CC_SERVE_UI": False,
+        "ADK_CC_MICROCOMPACT": False,
+        "ADK_CC_TENANCY_MODE": "single",
+        "ADK_CC_GLOBAL_TENANT_ID": "local",
     }
     for name, want in expected.items():
         assert r[name] == want, f"{name}: default {r[name]!r} != expected {want!r}"
@@ -197,6 +227,29 @@ def test_effective_masks_secrets():
     print("OK effective_masks_secrets")
 
 
+def test_secret_flags():
+    """Every var whose NAME says it's a credential must carry secret=True, so
+    `config print` can never leak it. Suffix-matched (not substring) so
+    MAX_OUTPUT_TOKENS / COMPACTION_TOKEN_THRESHOLD don't false-positive."""
+    secret_suffixes = ("_KEY", "_PASSWORD", "_SECRET")
+    explicit = {"ADK_CC_AUTH_TOKENS"}  # token=user map — a credential
+    # Reviewed non-secrets despite the suffix — each is a NAME/PATH, not key
+    # material. Adding a var here requires the same judgment call.
+    reviewed_not_secret = {
+        "ADK_CC_DOCKER_CLIENT_KEY",        # mTLS client key PATH on disk
+        "ADK_CC_DAYTONA_CREDENTIAL_KEY",   # lookup name inside the cred store
+        "ADK_CC_SANDBOX_SERVICE_TOKEN_KEY",  # lookup name inside the cred store
+    }
+    for v in C.FIELDS:
+        if v.parse is C.as_bool:
+            continue  # a bool flag can't be a credential (e.g. AUTH_PASSWORD=1)
+        if v.name in reviewed_not_secret:
+            continue
+        if v.name.endswith(secret_suffixes) or v.name in explicit:
+            assert v.secret, f"{v.name} looks like a credential but secret=False"
+    print("OK secret_flags")
+
+
 def test_coverage_complete():
     """Every ADK_CC_* var read anywhere in agents/ must be in the schema — this
     is the guard that keeps the generated docs complete (a new env var forces a
@@ -238,6 +291,7 @@ def test_env_example_in_sync():
 
 def main():
     test_schema_wellformed()
+    test_secret_flags()
     test_coverage_complete()
     test_env_example_in_sync()
     test_defaults_mirror_current_behavior()

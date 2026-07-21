@@ -104,11 +104,7 @@ _TEXTUAL_CT_HINTS = (
     "application/atom",
 )
 # PDFs are read whole (a truncated PDF can't be parsed), up to this cap.
-_DEFAULT_PDF_MAX_BYTES = 10_000_000
-
-
-def _pdf_max_bytes() -> int:
-    return _DEFAULT_PDF_MAX_BYTES
+_PDF_MAX_BYTES = 10_000_000
 
 
 def _looks_textual(content_type: str, body: bytes) -> bool:
@@ -184,7 +180,7 @@ def _fetch_and_process(url: str, max_bytes: int) -> dict[str, Any]:
             # PDFs must be read whole to parse, so use a larger cap when
             # the response declares itself a PDF.
             is_pdf_ct = "application/pdf" in content_type.lower()
-            read_cap = _pdf_max_bytes() if is_pdf_ct else max_bytes
+            read_cap = _PDF_MAX_BYTES if is_pdf_ct else max_bytes
             body = resp.read(read_cap + 1)
             body_truncated = len(body) > read_cap
             if body_truncated:

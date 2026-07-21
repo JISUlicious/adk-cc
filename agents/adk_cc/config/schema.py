@@ -693,7 +693,7 @@ FIELDS: list[Var] = [
 
 
 def _validate_schema() -> None:
-    """Guard against duplicate / malformed names at import (cheap)."""
+    """Guard against duplicate / malformed rows at import (cheap)."""
     seen: set[str] = set()
     for v in FIELDS:
         if not v.name.startswith("ADK_CC_"):
@@ -701,6 +701,15 @@ def _validate_schema() -> None:
         if v.name in seen:
             raise ValueError(f"config schema: duplicate var {v.name!r}")
         seen.add(v.name)
+        # tier/profile are compared with `is` throughout (check, gen-env), so
+        # a row written with a plain string ('required') would silently bypass
+        # every branch — reject it here instead.
+        if not isinstance(v.tier, Tier):
+            raise ValueError(f"config schema: {v.name} tier must be a Tier enum")
+        if not isinstance(v.profile, Profile):
+            raise ValueError(f"config schema: {v.name} profile must be a Profile enum")
+        if v.default is not None and v.choices and v.default not in v.choices:
+            raise ValueError(f"config schema: {v.name} default not in choices")
 
 
 _validate_schema()
@@ -749,8 +758,16 @@ DEPRECATED: dict[str, str] = {
 
 @dataclass(frozen=True)
 class Rule:
-    level: str                                        # "error" | "warn"
-    check: "Callable[[dict, dict], Optional[str]]"    # (resolved, is_set) -> message or None
+    """One cross-var check: a POSITIVE predicate + a static message.
+
+    (level, message, when) — check() appends `message` when `when(resolved,
+    is_set)` is True. The predicate states the BAD condition directly; the
+    earlier `MESSAGE if COND else None` inverted-ternary template made it easy
+    to emit the message on the healthy case."""
+
+    level: str                                   # "error" | "warn"
+    message: str
+    when: "Callable[[dict, dict], bool]"         # (resolved, is_set) -> bad?
 
 
 def _truthy(resolved: dict, is_set: dict, name: str) -> bool:
@@ -763,53 +780,55 @@ RULES: list[Rule] = [
     # THRESHOLD or INTERVAL; once enabled, THRESHOLD/RETENTION must pair
     # (agent.py raises). RETENTION alone (no enable) is NOT an error — the
     # code silently ignores it — so that case is a warn, not an error.
-    Rule("error", lambda r, s: (
-        "ADK_CC_COMPACTION_TOKEN_THRESHOLD and ADK_CC_COMPACTION_EVENT_RETENTION "
-        "must be set together when compaction is enabled."
-        if (s.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD") != s.get("ADK_CC_COMPACTION_EVENT_RETENTION"))
-        and (s.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD") or s.get("ADK_CC_COMPACTION_INTERVAL"))
-        else None)),
-    Rule("warn", lambda r, s: (
-        "ADK_CC_COMPACTION_EVENT_RETENTION is set but compaction is disabled "
-        "(set COMPACTION_TOKEN_THRESHOLD or COMPACTION_INTERVAL) — it is ignored."
-        if s.get("ADK_CC_COMPACTION_EVENT_RETENTION")
-        and not s.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD")
-        and not s.get("ADK_CC_COMPACTION_INTERVAL")
-        else None)),
+    Rule("error",
+         "ADK_CC_COMPACTION_TOKEN_THRESHOLD and ADK_CC_COMPACTION_EVENT_RETENTION "
+         "must be set together when compaction is enabled.",
+         lambda r, s: (s.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD")
+                       != s.get("ADK_CC_COMPACTION_EVENT_RETENTION"))
+                      and bool(s.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD")
+                               or s.get("ADK_CC_COMPACTION_INTERVAL"))),
+    Rule("warn",
+         "ADK_CC_COMPACTION_EVENT_RETENTION is set but compaction is disabled "
+         "(set COMPACTION_TOKEN_THRESHOLD or COMPACTION_INTERVAL) — it is ignored.",
+         lambda r, s: bool(s.get("ADK_CC_COMPACTION_EVENT_RETENTION"))
+                      and not s.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD")
+                      and not s.get("ADK_CC_COMPACTION_INTERVAL")),
     # External IdP without iss/aud verification is a silent security gap.
-    Rule("warn", lambda r, s: (
-        "ADK_CC_JWT_JWKS_URL is set but JWT_ISSUER/JWT_AUDIENCE are unset — "
-        "the token issuer/audience are NOT verified."
-        if s.get("ADK_CC_JWT_JWKS_URL") and not (s.get("ADK_CC_JWT_ISSUER") and s.get("ADK_CC_JWT_AUDIENCE"))
-        else None)),
+    Rule("warn",
+         "ADK_CC_JWT_JWKS_URL is set but JWT_ISSUER/JWT_AUDIENCE are unset — "
+         "the token issuer/audience are NOT verified.",
+         lambda r, s: bool(s.get("ADK_CC_JWT_JWKS_URL"))
+                      and not (s.get("ADK_CC_JWT_ISSUER") and s.get("ADK_CC_JWT_AUDIENCE"))),
     # Multiple auth modes selected → only the highest-priority arm runs
     # (make_app: JWKS > AUTH_PASSWORD > AUTH_TOKENS). Warn about EVERY
-    # silently-ignored arm, not just the password/JWKS pair.
-    Rule("warn", lambda r, s: (
-        "ADK_CC_AUTH_PASSWORD and ADK_CC_JWT_JWKS_URL are both set — JWKS wins; "
-        "password auth is ignored."
-        if _truthy(r, s, "ADK_CC_AUTH_PASSWORD") and s.get("ADK_CC_JWT_JWKS_URL")
-        else None)),
-    Rule("warn", lambda r, s: (
-        "ADK_CC_AUTH_TOKENS is set alongside a higher-priority auth mode "
-        "(JWKS/password) — the static tokens are ignored."
-        if s.get("ADK_CC_AUTH_TOKENS")
-        and (s.get("ADK_CC_JWT_JWKS_URL") or _truthy(r, s, "ADK_CC_AUTH_PASSWORD"))
-        else None)),
+    # silently-ignored arm.
+    Rule("warn",
+         "ADK_CC_AUTH_PASSWORD and ADK_CC_JWT_JWKS_URL are both set — JWKS wins; "
+         "password auth is ignored.",
+         lambda r, s: _truthy(r, s, "ADK_CC_AUTH_PASSWORD")
+                      and bool(s.get("ADK_CC_JWT_JWKS_URL"))),
+    Rule("warn",
+         "ADK_CC_AUTH_TOKENS is set alongside a higher-priority auth mode "
+         "(JWKS/password) — the static tokens are ignored.",
+         lambda r, s: bool(s.get("ADK_CC_AUTH_TOKENS"))
+                      and (bool(s.get("ADK_CC_JWT_JWKS_URL"))
+                           or _truthy(r, s, "ADK_CC_AUTH_PASSWORD"))),
     # Allowlisted hosts do nothing unless the fetch mode is 'allowlist'.
-    Rule("warn", lambda r, s: (
-        "ADK_CC_WEB_FETCH_HOSTS is set but ADK_CC_WEB_FETCH_MODE is not 'allowlist' — "
-        "the extra hosts are ignored."
-        if s.get("ADK_CC_WEB_FETCH_HOSTS") and r.get("ADK_CC_WEB_FETCH_MODE") != "allowlist"
-        else None)),
+    Rule("warn",
+         "ADK_CC_WEB_FETCH_HOSTS is set but ADK_CC_WEB_FETCH_MODE is not "
+         "'allowlist' — the extra hosts are ignored.",
+         lambda r, s: bool(s.get("ADK_CC_WEB_FETCH_HOSTS"))
+                      and r.get("ADK_CC_WEB_FETCH_MODE") != "allowlist"),
     # Security-relevant opt-outs — always worth surfacing.
-    Rule("warn", lambda r, s: (
-        "ADK_CC_WEB_FETCH_ALLOW_PRIVATE is enabled — the SSRF guard is disabled "
-        "(localhost/private IPs are fetchable)."
-        if _truthy(r, s, "ADK_CC_WEB_FETCH_ALLOW_PRIVATE") else None)),
-    Rule("warn", lambda r, s: (
-        "ADK_CC_ALLOW_NO_AUTH is enabled in a non-desktop deployment — the server runs with NO auth."
-        if _truthy(r, s, "ADK_CC_ALLOW_NO_AUTH") and not r.get("ADK_CC_DESKTOP") else None)),
+    Rule("warn",
+         "ADK_CC_WEB_FETCH_ALLOW_PRIVATE is enabled — the SSRF guard is "
+         "disabled (localhost/private IPs are fetchable).",
+         lambda r, s: _truthy(r, s, "ADK_CC_WEB_FETCH_ALLOW_PRIVATE")),
+    Rule("warn",
+         "ADK_CC_ALLOW_NO_AUTH is enabled in a non-desktop deployment — the "
+         "server runs with NO auth.",
+         lambda r, s: _truthy(r, s, "ADK_CC_ALLOW_NO_AUTH")
+                      and not r.get("ADK_CC_DESKTOP")),
 ]
 
 
@@ -868,9 +887,8 @@ def check(environ: Optional[dict] = None) -> tuple[list[str], list[str]]:
                 )
     # cross-var rules
     for rule in RULES:
-        msg = rule.check(resolved, is_set)
-        if msg:
-            (errors if rule.level == "error" else warnings).append(msg)
+        if rule.when(resolved, is_set):
+            (errors if rule.level == "error" else warnings).append(rule.message)
     # retired vars still present in the environment
     for name, why in REMOVED.items():
         if (env.get(name) or "").strip():
