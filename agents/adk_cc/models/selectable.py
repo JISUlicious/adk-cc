@@ -98,9 +98,17 @@ def escalated_max_output_tokens() -> Optional[int]:
 # is set, every model call through SelectableLlm waits so call STARTS are
 # spaced by the configured minimum — paces all callers (agent, plugins,
 # crons) uniformly without limiting their concurrency. Default off (no cost).
+#
+# Loop-safety (load-bearing): callers pace from MANY event loops — uvicorn's
+# serving loop, and the throwaway `asyncio.run()` loops the memory subsystem
+# spins for synth/resolve/canonicalize. An asyncio.Lock here binds to the
+# first loop that contends on it and then KILLS every other loop's model
+# calls with "bound to a different event loop" (field failure, 2026-07-21;
+# pinned by tests/test_model_pacing.py). So the throttle uses slot
+# RESERVATION under a threading.Lock — held for arithmetic only, never
+# across an await — and sleeps outside it. No asyncio primitive is shared.
 # --------------------------------------------------------------------------
-_pace_creation_lock = threading.Lock()
-_pace_lock: Optional["asyncio.Lock"] = None
+_pace_state_lock = threading.Lock()
 _pace_last_at: float = 0.0
 
 _log = logging.getLogger(__name__)
@@ -122,20 +130,28 @@ def _model_min_interval() -> float:
 
 
 async def _pace_model_call() -> None:
+    """Space model-call starts by the configured minimum interval.
+
+    Slot reservation: atomically claim the next start time under the
+    threading lock (loop-agnostic; arrival order = slot order), then sleep
+    to the claimed slot OUTSIDE any lock. Global across every event loop
+    and thread in the process — see the loop-safety note above.
+
+    A caller cancelled mid-sleep has already claimed its slot, so one
+    interval goes unused; rare (user abort) and harmless — the call was
+    attempted, and the rate cap is still honored.
+    """
     interval = _model_min_interval()
     if interval <= 0:
         return
-    global _pace_lock, _pace_last_at
-    if _pace_lock is None:
-        with _pace_creation_lock:
-            if _pace_lock is None:
-                _pace_lock = asyncio.Lock()
-    async with _pace_lock:
+    global _pace_last_at
+    with _pace_state_lock:
         now = time.monotonic()
-        wait = _pace_last_at + interval - now
-        if wait > 0:
-            await asyncio.sleep(wait)
-        _pace_last_at = time.monotonic()
+        start = max(now, _pace_last_at + interval)
+        _pace_last_at = start
+        wait = start - now
+    if wait > 0:
+        await asyncio.sleep(wait)
 
 
 class SelectableLlm(BaseLlm):

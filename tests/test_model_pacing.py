@@ -44,11 +44,18 @@ def _reset(interval: str | None) -> None:
 
 
 def _pace_contended_once() -> None:
-    """One fresh event loop with two CONCURRENT pacers — the second one takes
-    the lock's contended path (this is what binds an asyncio.Lock)."""
+    """One fresh event loop with two pacers in REAL contention: priming
+    `_pace_last_at` to 'now' forces the first pacer to sleep ~interval while
+    holding the (pre-fix) lock, so the second pacer takes the contended
+    acquire path — which is what binds an asyncio.Lock to a loop. Bounded so
+    a pre-fix cross-loop deadlock fails the test instead of hanging it."""
+    sel._pace_last_at = time.monotonic()
 
     async def two() -> None:
-        await asyncio.gather(sel._pace_model_call(), sel._pace_model_call())
+        await asyncio.wait_for(
+            asyncio.gather(sel._pace_model_call(), sel._pace_model_call()),
+            timeout=10,
+        )
 
     asyncio.run(two())
 
