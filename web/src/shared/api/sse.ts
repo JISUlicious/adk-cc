@@ -213,6 +213,17 @@ async function _runStreamLoop(
           if (!json) continue
           try {
             const event = JSON.parse(json) as RunEvent
+            // A server-side failure (model error, rate limit, …) arrives as a
+            // VALID event: `{"error": "..."}`. Routing it through onEvent
+            // renders as an empty event — the chat just "stops" with no
+            // explanation (field confusion, 2026-07-22: every backend failure
+            // looked like a silent hang). Surface it as the error it is;
+            // ChatPage's onError shows the banner and ends the stream state.
+            const errText = (event as { error?: unknown }).error
+            if (typeof errText === "string" && errText) {
+              cb.onError?.(new Error(errText))
+              continue
+            }
             cb.onEvent(event)
           } catch (parseErr) {
             cb.onError?.(
