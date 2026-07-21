@@ -12,17 +12,19 @@ deployment profile, default, parser, and help text. From that schema we
   - **report** effective values (secrets masked) — `python -m adk_cc.config print`.
 
 Design notes (see analysis/env-var-refactor-plan.md):
-  - Stdlib-only, no heavy imports — safe to import anywhere, including early boot.
+  - Stdlib-only, no heavy imports — safe to import anywhere, including early
+    boot (import via `adk_cc.config.schema` directly; the package facade
+    lazy-loads the heavier settings_loader).
   - `resolve(environ)` is a pure function (pass a dict; unit-testable).
-  - **Phase 1 (this commit) is a faithful MIRROR of current behavior**, consumed
-    only by the generator / `check` / `print` — NOT yet the source of truth for
-    the app (modules still read `os.environ` directly). Converting readers to
-    `config.get(...)` and deleting their inline reads happens per-cluster in a
-    later phase, so this change is behavior-neutral. Defaults here MUST match the
-    current inline defaults (guarded by tests/test_config_schema.py).
-  - The field set below is being populated incrementally; it currently covers the
-    Quickstart tiers plus a representative spread of every tier/profile/section.
-    Remaining advanced/backend clusters are additive `Var(...)` rows.
+  - **Booleans: the schema IS the source of truth** — every boolean read-site
+    delegates to `env_bool` here, so `check`/`print`/docs and the runtime
+    cannot disagree on truthiness. For OTHER types the schema is still a
+    faithful MIRROR (read-sites keep their inline `os.environ.get` + default);
+    defaults here MUST match those read-sites, guarded by the locked-defaults
+    test in tests/test_config_schema.py — extend that lock when you add or
+    change a multi-site or security-relevant var.
+  - Removals/renames go in REMOVED / DEPRECATED below (same commit), so a
+    retired var warns at boot instead of silently losing effect.
 
 Lives at `adk_cc/config/schema.py` (the `adk_cc.config` package also holds the
 pre-existing `settings_loader`). CLI: `python -m adk_cc.config <check|print|gen-env>`.
