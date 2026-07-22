@@ -186,6 +186,14 @@ FIELDS: list[Var] = [
     Var("ADK_CC_MODEL_MIN_INTERVAL_S", Tier.ADVANCED, "Model",
         "Alternative to MAX_RPM: min seconds between model-call starts.",
         default=None, parse=as_float, default_display="off"),
+    Var("ADK_CC_MODEL_RETRIES", Tier.ADVANCED, "Model",
+        "Retries for provider rate-limit (429) failures that hit BEFORE any "
+        "output streamed. Paced exponential backoff; 0 disables.",
+        default=3, parse=as_int),
+    Var("ADK_CC_MODEL_RETRY_BASE_S", Tier.ADVANCED, "Model",
+        "First retry delay (doubles per attempt, 0-25% jitter, 60s cap; a "
+        "provider Retry-After hint is honored as a floor).",
+        default=5.0, parse=as_float),
     Var("ADK_CC_MAX_OUTPUT_TOKENS", Tier.ADVANCED, "Model",
         "Cap on model OUTPUT tokens/call (litellm max_tokens). 0 = uncapped; per-endpoint wins.",
         default=8192, parse=as_int),

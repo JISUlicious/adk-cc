@@ -39,6 +39,8 @@ def test_defaults_mirror_current_behavior():
         "ADK_CC_MAX_OUTPUT_TOKENS": 8192,
         "ADK_CC_MAX_OUTPUT_TOKENS_ESCALATED": 32768,
         "ADK_CC_MODEL_MAX_RPM": None,          # off
+        "ADK_CC_MODEL_RETRIES": 3,
+        "ADK_CC_MODEL_RETRY_BASE_S": 5.0,
         "ADK_CC_PERMISSION_MODE": "bypassPermissions",
         "ADK_CC_SANDBOX_BACKEND": "noop",
         "ADK_CC_SANDBOX_NETWORK": True,

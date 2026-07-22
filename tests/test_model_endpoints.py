@@ -562,6 +562,156 @@ def test_model_session_plugin_sets_and_clears():
 
 
 
+# --- rate-limit retry -----------------------------------------------------
+
+class _RL(Exception):
+    """Rate-limit stand-in: matched structurally via status_code == 429."""
+    status_code = 429
+
+
+class _FlakyLlm:
+    """Delegate that raises `exc` for the first `failures` calls, then streams.
+    `fail_after_yield` instead yields one chunk and THEN raises (mid-stream)."""
+    def __init__(self, failures=0, exc=None, fail_after_yield=False):
+        self.calls = 0
+        self.failures = failures
+        self.exc = exc or _RL("429 too many requests")
+        self.fail_after_yield = fail_after_yield
+        self.model = "openai/flaky"
+
+    async def generate_content_async(self, llm_request, stream=False):
+        self.calls += 1
+        if self.fail_after_yield:
+            yield "partial"
+            raise self.exc
+        if self.calls <= self.failures:
+            raise self.exc
+        yield "ok"
+
+
+def _retry_sel(tmp, fake):
+    r = _reg(tmp)
+    r.upsert(ModelEndpointConfig(name="p", model="openai/flaky",
+             api_base="http://x/v1", api_key="k"))
+    sel = SelectableLlm(registry=r)
+    sel._build_litellm = lambda cfg: fake  # type: ignore
+    return sel
+
+
+def test_retry_recovers_from_pre_stream_429():
+    from adk_cc.models import selectable as S
+    sleeps = []
+    async def fake_sleep(d): sleeps.append(d)
+    orig = S._retry_sleep
+    S._retry_sleep = fake_sleep
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = _FlakyLlm(failures=2)
+            sel = _retry_sel(tmp, fake)
+            async def main():
+                return [x async for x in sel.generate_content_async(object())]
+            out = asyncio.run(main())
+            assert out == ["ok"], out
+            assert fake.calls == 3, fake.calls          # 2 failures + 1 success
+            assert len(sleeps) == 2, sleeps
+            # schedule: base 5s doubling, jitter 0-25% (env unset -> defaults)
+            assert 5.0 <= sleeps[0] <= 6.25 and 10.0 <= sleeps[1] <= 12.5, sleeps
+    finally:
+        S._retry_sleep = orig
+    print("OK test_retry_recovers_from_pre_stream_429")
+
+
+def test_retry_never_after_first_chunk():
+    from adk_cc.models import selectable as S
+    sleeps = []
+    async def fake_sleep(d): sleeps.append(d)
+    orig = S._retry_sleep
+    S._retry_sleep = fake_sleep
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = _FlakyLlm(fail_after_yield=True)
+            sel = _retry_sel(tmp, fake)
+            got = []
+            async def main():
+                async for x in sel.generate_content_async(object()):
+                    got.append(x)
+            try:
+                asyncio.run(main())
+                assert False, "expected the mid-stream 429 to raise"
+            except _RL:
+                pass
+            assert got == ["partial"] and fake.calls == 1 and sleeps == []
+    finally:
+        S._retry_sleep = orig
+    print("OK test_retry_never_after_first_chunk")
+
+
+def test_retry_only_rate_limits_and_exhaustion():
+    from adk_cc.models import selectable as S
+    sleeps = []
+    async def fake_sleep(d): sleeps.append(d)
+    orig = S._retry_sleep
+    S._retry_sleep = fake_sleep
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            # non-429 -> immediate raise, no sleeps
+            fake = _FlakyLlm(failures=1, exc=ValueError("bad model id"))
+            sel = _retry_sel(tmp, fake)
+            async def run(s):
+                return [x async for x in s.generate_content_async(object())]
+            try:
+                asyncio.run(run(sel)); assert False
+            except ValueError:
+                pass
+            assert fake.calls == 1 and sleeps == []
+
+            # exhaustion: fails forever -> initial + RETRIES attempts, then raises
+            os.environ["ADK_CC_MODEL_RETRIES"] = "2"
+            try:
+                fake2 = _FlakyLlm(failures=99)
+                sel2 = _retry_sel(tmp, fake2)
+                try:
+                    asyncio.run(run(sel2)); assert False
+                except _RL:
+                    pass
+                assert fake2.calls == 3, fake2.calls    # 1 + 2 retries
+                assert len(sleeps) == 2
+
+                # RETRIES=0 disables entirely
+                os.environ["ADK_CC_MODEL_RETRIES"] = "0"
+                fake3 = _FlakyLlm(failures=1)
+                sel3 = _retry_sel(tmp, fake3)
+                try:
+                    asyncio.run(run(sel3)); assert False
+                except _RL:
+                    pass
+                assert fake3.calls == 1
+            finally:
+                os.environ.pop("ADK_CC_MODEL_RETRIES", None)
+    finally:
+        S._retry_sleep = orig
+    print("OK test_retry_only_rate_limits_and_exhaustion")
+
+
+def test_retry_honors_retry_after_hint():
+    from adk_cc.models import selectable as S
+    # provider hint is a FLOOR over the computed backoff, capped at 60s
+    class _Hinted(_RL):
+        retry_after = 42
+    d = S._retry_delay_s(_Hinted(), attempt=1, base=5.0)
+    assert 42.0 <= d <= 60.0, d
+    class _Huge(_RL):
+        retry_after = 999
+    assert S._retry_delay_s(_Huge(), attempt=1, base=5.0) == 60.0
+    # litellm/openai class-name match (no status_code attr needed)
+    class RateLimitError(Exception):
+        pass
+    assert S._is_rate_limited(RateLimitError())
+    assert not S._is_rate_limited(ValueError())
+    print("OK test_retry_honors_retry_after_hint")
+
+
+
 if __name__ == "__main__":
     test_first_endpoint_becomes_active()
     test_activate_and_persist()
@@ -589,4 +739,8 @@ if __name__ == "__main__":
     test_session_override_resolution()
     test_session_override_task_isolation()
     test_model_session_plugin_sets_and_clears()
+    test_retry_recovers_from_pre_stream_429()
+    test_retry_never_after_first_chunk()
+    test_retry_only_rate_limits_and_exhaustion()
+    test_retry_honors_retry_after_hint()
     print("\nall model-endpoint tests passed")

@@ -22,6 +22,7 @@ import asyncio
 import contextvars
 import logging
 import os
+import random
 import threading
 import time
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Optional
@@ -41,6 +42,65 @@ if TYPE_CHECKING:
 # the root cause behind truncated tool-call JSON (plugins/tolerant_tool_json).
 _DEFAULT_MAX_OUTPUT_TOKENS = 8192
 _DEFAULT_ESCALATED_MAX_TOKENS = 32768
+
+# --- rate-limit retry -----------------------------------------------------
+# A provider 429 (e.g. an OpenRouter :free model "temporarily rate-limited
+# upstream") used to kill the turn on the FIRST model call. When the failure
+# happens before any output has streamed, the call is retried with paced
+# exponential backoff instead; mid-stream failures still fail fast (a retry
+# would duplicate the chunks already delivered downstream).
+
+_DEFAULT_MODEL_RETRIES = 3
+_DEFAULT_RETRY_BASE_S = 5.0
+_RETRY_DELAY_CAP_S = 60.0
+
+# Indirection so tests can patch the backoff sleep without touching asyncio.
+_retry_sleep = asyncio.sleep
+
+
+def _retry_count() -> int:
+    try:
+        return max(0, int(os.environ.get("ADK_CC_MODEL_RETRIES", "")))
+    except ValueError:
+        return _DEFAULT_MODEL_RETRIES
+
+
+def _retry_base_s() -> float:
+    try:
+        return max(0.5, float(os.environ.get("ADK_CC_MODEL_RETRY_BASE_S", "")))
+    except ValueError:
+        return _DEFAULT_RETRY_BASE_S
+
+
+def _is_rate_limited(err: BaseException) -> bool:
+    """True for provider rate-limit failures (HTTP 429). Checked structurally
+    (status_code attr / class name anywhere in the MRO) so this module stays
+    import-light — litellm.RateLimitError, openai.RateLimitError, and httpx-ish
+    wrappers all match without importing any of them."""
+    if getattr(err, "status_code", None) == 429:
+        return True
+    return any(cls.__name__ == "RateLimitError" for cls in type(err).__mro__)
+
+
+def _retry_delay_s(err: BaseException, attempt: int, base: float) -> float:
+    """Backoff for 1-based `attempt`: base·2^(n-1) with 0–25% jitter, capped.
+    When the provider hints a Retry-After (attr or response header), honor it
+    as a FLOOR (still capped) — it knows its own window better than we do."""
+    delay = min(base * (2 ** (attempt - 1)), _RETRY_DELAY_CAP_S)
+    delay *= 1.0 + random.random() * 0.25
+    hint = getattr(err, "retry_after", None)
+    if hint is None:
+        headers = getattr(getattr(err, "response", None), "headers", None)
+        if headers is not None and hasattr(headers, "get"):
+            hint = headers.get("retry-after")
+    try:
+        hinted = float(hint) if hint is not None else None
+    except (TypeError, ValueError):
+        hinted = None
+    if hinted is not None and hinted > 0:
+        delay = max(delay, min(hinted, _RETRY_DELAY_CAP_S))
+    return min(delay, _RETRY_DELAY_CAP_S)
+
 
 # --- per-session model override -------------------------------------------
 # A session can pin (endpoint_name, model_id) in its state (`/model` in chat);
@@ -411,32 +471,54 @@ class SelectableLlm(BaseLlm):
     async def generate_content_async(
         self, llm_request: "LlmRequest", stream: bool = False
     ) -> "AsyncGenerator[LlmResponse, None]":
-        await _pace_model_call()  # opt-in global rate-limit throttle
-        # Resolve the delegate OFF the event loop: the first call (cache miss)
-        # builds the LiteLlm delegate — and litellm's cold import is ~hundreds of
-        # ms — and EVERY call reads the model-registry file. Both are blocking;
-        # on the loop they'd stall all requests (health checks included) during
-        # the first model turn. to_thread keeps the loop free. (The build is
-        # cached, so steady-state resolves are a tiny off-loop file read.)
-        delegate = await asyncio.to_thread(self._resolve_delegate)
-        # ADK's LiteLlm uses `llm_request.model or self.model` — and the flow
-        # stamps llm_request.model from OUR `self.model`, which is the RAW
-        # registry id kept for display. That would override the ROUTED id
-        # `_build_litellm` configured on the delegate (field failure: raw
-        # OpenRouter ids reached litellm unprefixed even after constructor-side
-        # normalization). Align the request with the delegate — the delegate's
-        # model is authoritative for the wire. Inert for chatgpt-codex, which
-        # reads only its own self.model.
-        if getattr(delegate, "model", None) and hasattr(llm_request, "model"):
-            llm_request.model = delegate.model
-        async for resp in delegate.generate_content_async(llm_request, stream=stream):
-            # Root cause for tolerant_tool_json's truncation recovery: a
-            # MAX_TOKENS finish means the model ran out of output budget — likely
-            # mid tool-call. Log it AND escalate the cap (Claude-Code-style) so
-            # the model's truncated-tool-call retry has more room.
-            if getattr(getattr(resp, "finish_reason", None), "name", None) == "MAX_TOKENS":
-                self._on_max_tokens()
-            yield resp
+        attempt = 0  # retries used so far (rate-limit failures only)
+        while True:
+            await _pace_model_call()  # opt-in global rate-limit throttle
+            # Resolve the delegate OFF the event loop: the first call (cache miss)
+            # builds the LiteLlm delegate — and litellm's cold import is ~hundreds of
+            # ms — and EVERY call reads the model-registry file. Both are blocking;
+            # on the loop they'd stall all requests (health checks included) during
+            # the first model turn. to_thread keeps the loop free. (The build is
+            # cached, so steady-state resolves are a tiny off-loop file read.
+            # Re-resolving PER ATTEMPT also means an operator fixing the endpoint
+            # mid-retry is picked up by the next attempt.)
+            delegate = await asyncio.to_thread(self._resolve_delegate)
+            # ADK's LiteLlm uses `llm_request.model or self.model` — and the flow
+            # stamps llm_request.model from OUR `self.model`, which is the RAW
+            # registry id kept for display. That would override the ROUTED id
+            # `_build_litellm` configured on the delegate (field failure: raw
+            # OpenRouter ids reached litellm unprefixed even after constructor-side
+            # normalization). Align the request with the delegate — the delegate's
+            # model is authoritative for the wire. Inert for chatgpt-codex, which
+            # reads only its own self.model.
+            if getattr(delegate, "model", None) and hasattr(llm_request, "model"):
+                llm_request.model = delegate.model
+            yielded = False
+            try:
+                async for resp in delegate.generate_content_async(llm_request, stream=stream):
+                    # Root cause for tolerant_tool_json's truncation recovery: a
+                    # MAX_TOKENS finish means the model ran out of output budget —
+                    # likely mid tool-call. Log it AND escalate the cap
+                    # (Claude-Code-style) so the truncated-tool-call retry has room.
+                    if getattr(getattr(resp, "finish_reason", None), "name", None) == "MAX_TOKENS":
+                        self._on_max_tokens()
+                    yielded = True
+                    yield resp
+                return
+            except Exception as e:  # CancelledError/GeneratorExit are BaseException — never caught
+                # Retry ONLY pre-first-chunk rate limits: once anything has been
+                # yielded, a retry would duplicate delivered output — and
+                # non-429 errors (auth, bad model id) won't heal by waiting.
+                if yielded or not _is_rate_limited(e) or attempt >= _retry_count():
+                    raise
+                attempt += 1
+                delay = _retry_delay_s(e, attempt, _retry_base_s())
+                _log.warning(
+                    "model %s rate-limited (attempt %d/%d) — retrying in %.1fs: %s",
+                    getattr(delegate, "model", "?"), attempt, _retry_count(), delay,
+                    str(e)[:200],
+                )
+                await _retry_sleep(delay)
 
     async def warm(self) -> None:
         """Pre-build the active delegate OFF the loop (e.g. at server startup),
