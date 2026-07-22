@@ -19,6 +19,7 @@ Design choices:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import threading
@@ -40,6 +41,24 @@ if TYPE_CHECKING:
 # the root cause behind truncated tool-call JSON (plugins/tolerant_tool_json).
 _DEFAULT_MAX_OUTPUT_TOKENS = 8192
 _DEFAULT_ESCALATED_MAX_TOKENS = 32768
+
+# --- per-session model override -------------------------------------------
+# A session can pin (endpoint_name, model_id) in its state (`/model` in chat);
+# ModelSessionPlugin copies that into this contextvar on EVERY before_model
+# callback (value or None — never stale). ADK runs the callback and the model
+# call in the same async task, and `asyncio.to_thread` copies the context into
+# its worker, so `_resolve_delegate` sees the override for exactly the calls
+# belonging to that session's turn. Unset/None → the registry's global active
+# endpoint (the Settings-managed default).
+_SESSION_MODEL: "contextvars.ContextVar[Optional[tuple[str, str]]]" = (
+    contextvars.ContextVar("adk_cc_session_model", default=None)
+)
+
+
+def set_session_model_override(value: Optional[tuple[str, str]]) -> None:
+    """Set (endpoint_name, model_id) for the current task's model calls, or
+    None to follow the global default. Called by ModelSessionPlugin."""
+    _SESSION_MODEL.set(value)
 
 
 def _cap_from(raw, *, default: Optional[int], warn_name: Optional[str] = None) -> Optional[int]:
@@ -200,6 +219,8 @@ class SelectableLlm(BaseLlm):
         # lazily on first need via `default_delegate_factory`.
         self._cap_floor: Optional[int] = None
         self._escalated_default_delegate: Optional[BaseLlm] = None
+        # endpoint names we've already warned about (session pin → deleted).
+        self._warned_missing_override: set[str] = set()
 
     def _get_registry(self) -> "Optional[ModelEndpointRegistry]":
         if self._registry is not None:
@@ -215,13 +236,42 @@ class SelectableLlm(BaseLlm):
 
     # -- delegate resolution -------------------------------------------
 
+    def _session_override_cfg(self, reg) -> "Optional[ModelEndpointConfig]":  # noqa: ANN001
+        """The session-pinned endpoint config, or None to use the global active.
+
+        The override names an (endpoint, model_id) PAIR: the session may pick
+        any model the provider offers without mutating the provider's global
+        `model` field (a model_copy is handed to the cache/builder instead).
+        A pinned endpoint that no longer exists falls back to the global
+        default with a warning — a deleted provider must not brick the
+        session."""
+        ov = _SESSION_MODEL.get()
+        if not ov or reg is None:
+            return None
+        name, model_id = ov
+        cfg = reg.get(name)
+        if cfg is None:
+            if name not in self._warned_missing_override:
+                self._warned_missing_override.add(name)
+                _log.warning(
+                    "session pinned model endpoint %r no longer exists — "
+                    "falling back to the global default", name,
+                )
+            return None
+        if model_id and model_id != cfg.model:
+            cfg = cfg.model_copy(update={"model": model_id})
+        return cfg
+
     def _resolve_delegate(self) -> BaseLlm:
-        """Return the BaseLlm for the currently-active endpoint.
+        """Return the BaseLlm for the session-pinned endpoint if the current
+        task carries an override, else the globally-active endpoint.
 
         Falls back to the default delegate when there's no registry or no
         active endpoint (panel off / not yet configured)."""
         reg = self._get_registry()
-        active = reg.get_active() if reg is not None else None
+        active = self._session_override_cfg(reg)
+        if active is None:
+            active = reg.get_active() if reg is not None else None
         if active is None:
             if self._default_delegate is None:
                 raise RuntimeError(

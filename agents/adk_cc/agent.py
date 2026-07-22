@@ -81,6 +81,7 @@ from .plugins import (
     ToolCallValidatorPlugin,
     WorkspaceHintPlugin,
 )
+from .plugins.model_session import ModelSessionPlugin
 from .plugins.secret_redaction import SecretRedactionPlugin
 from .plugins.truncated_tool_call import TruncatedToolCallPlugin
 from .credentials import credential_provider_from_env
@@ -1126,6 +1127,11 @@ _app_kwargs = dict(
         # when no CredentialProvider is configured.
         SecretRedactionPlugin(credential_provider_from_env()),
         AuditPlugin(),
+        # Copies a session's pinned model (state: model_endpoint/model_id,
+        # set by /model in chat) into the SelectableLlm contextvar before
+        # every model call. Order-independent — nothing else reads it during
+        # the callback chain; unpinned sessions are explicitly cleared.
+        ModelSessionPlugin(),
         # Tenancy seeds state["temp:tenant_context"] / sandbox_workspace /
         # sandbox_backend before any tool fires AND calls
         # backend.ensure_workspace(ws) so remote-API backends (Daytona,

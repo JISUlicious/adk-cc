@@ -454,6 +454,114 @@ def test_route_put_preserves_stored_key_when_omitted():
 
 
 
+# --- per-session model override (contextvar + plugin) ---------------------
+
+def test_session_override_resolution():
+    """Override picks the named endpoint + model WITHOUT touching the global
+    active pointer or the endpoint's stored model field."""
+    from adk_cc.models.selectable import set_session_model_override
+    with tempfile.TemporaryDirectory() as tmp:
+        r = _reg(tmp)
+        r.upsert(ModelEndpointConfig(name="glob", model="openai/global-m",
+                 api_base="http://g/v1", api_key="sk-g"))
+        r.upsert(ModelEndpointConfig(name="other", model="openai/first",
+                 api_base="http://o/v1", api_key="sk-o",
+                 models=["openai/first", "openai/second"]))
+        r.activate("glob")
+        sel = SelectableLlm(registry=r)
+        sel._build_litellm = lambda cfg: _FakeLlmForKey(  # type: ignore
+            model=cfg.model, api_base=cfg.api_base, api_key=cfg.resolve_api_key())
+        try:
+            # no override → global active
+            set_session_model_override(None)
+            d_glob = sel._resolve_delegate()
+            assert _FakeLlmForKey.last_kwargs["model"] == "openai/global-m"
+            # override → named endpoint + per-session model id
+            set_session_model_override(("other", "openai/second"))
+            d_over = sel._resolve_delegate()
+            assert d_over is not d_glob
+            assert _FakeLlmForKey.last_kwargs["model"] == "openai/second"
+            assert _FakeLlmForKey.last_kwargs["api_base"] == "http://o/v1"
+            assert _FakeLlmForKey.last_kwargs["api_key"] == "sk-o"
+            # registry untouched: global active + stored model unchanged
+            assert r.active_name() == "glob"
+            assert r.get("other").model == "openai/first"
+            # deleted endpoint → warn + fall back to the global active
+            # delegate (the CACHED one — no rebuild, so compare identity)
+            set_session_model_override(("gone", "openai/x"))
+            assert sel._resolve_delegate() is d_glob
+        finally:
+            set_session_model_override(None)
+    print("OK test_session_override_resolution")
+
+
+def test_session_override_task_isolation():
+    """Two concurrent tasks with different overrides resolve different
+    delegates — the contextvar is task-scoped, and asyncio.to_thread (the real
+    call path) preserves it."""
+    from adk_cc.models.selectable import set_session_model_override
+    with tempfile.TemporaryDirectory() as tmp:
+        r = _reg(tmp)
+        r.upsert(ModelEndpointConfig(name="a", model="openai/ma",
+                 api_base="http://a/v1", api_key="ka"))
+        r.upsert(ModelEndpointConfig(name="b", model="openai/mb",
+                 api_base="http://b/v1", api_key="kb"))
+        r.activate("a")
+        sel = SelectableLlm(registry=r)
+
+        async def turn(endpoint, expect_model):
+            # mimic the plugin (before_model in the turn's task) then the
+            # real resolve path (asyncio.to_thread)
+            set_session_model_override((endpoint, ""))
+            delegate = await asyncio.to_thread(sel._resolve_delegate)
+            got = getattr(delegate, "model", None)
+            assert got == expect_model, f"{endpoint}: {got} != {expect_model}"
+            return delegate
+
+        async def main():
+            d1, d2 = await asyncio.gather(turn("a", "openai/ma"), turn("b", "openai/mb"))
+            assert d1 is not d2, "distinct endpoints must get distinct cached delegates"
+
+        asyncio.run(main())
+    print("OK test_session_override_task_isolation")
+
+
+def test_model_session_plugin_sets_and_clears():
+    from adk_cc.models import selectable as S
+    from adk_cc.plugins.model_session import ModelSessionPlugin
+
+    class _Ctx:  # minimal CallbackContext stand-in
+        def __init__(self, state):
+            self.state = state
+
+    plug = ModelSessionPlugin()
+
+    async def main():
+        # pinned session → override set
+        await plug.before_model_callback(
+            callback_context=_Ctx({"model_endpoint": "prov", "model_id": "openai/x"}),
+            llm_request=object())
+        assert S._SESSION_MODEL.get() == ("prov", "openai/x")
+        # unpinned session (same task!) → override CLEARED, not stale
+        await plug.before_model_callback(
+            callback_context=_Ctx({}), llm_request=object())
+        assert S._SESSION_MODEL.get() is None
+        # endpoint set, model empty → endpoint's own model (empty id)
+        await plug.before_model_callback(
+            callback_context=_Ctx({"model_endpoint": "prov"}), llm_request=object())
+        assert S._SESSION_MODEL.get() == ("prov", "")
+        # a broken state object must not raise or leave a stale pin
+        class _Bad:
+            @property
+            def state(self):
+                raise RuntimeError("boom")
+        await plug.before_model_callback(callback_context=_Bad(), llm_request=object())
+        assert S._SESSION_MODEL.get() is None
+    asyncio.run(main())
+    print("OK test_model_session_plugin_sets_and_clears")
+
+
+
 if __name__ == "__main__":
     test_first_endpoint_becomes_active()
     test_activate_and_persist()
@@ -478,4 +586,7 @@ if __name__ == "__main__":
     test_inline_key_activation_and_empty_key_accepted()
     test_selectable_uses_inline_key_and_recaches_on_change()
     test_route_put_preserves_stored_key_when_omitted()
+    test_session_override_resolution()
+    test_session_override_task_isolation()
+    test_model_session_plugin_sets_and_clears()
     print("\nall model-endpoint tests passed")
