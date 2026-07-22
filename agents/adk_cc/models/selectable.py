@@ -82,11 +82,19 @@ def _is_rate_limited(err: BaseException) -> bool:
     return any(cls.__name__ == "RateLimitError" for cls in type(err).__mro__)
 
 
-def _retry_delay_s(err: BaseException, attempt: int, base: float) -> float:
-    """Backoff for 1-based `attempt`: base·2^(n-1) with 0–25% jitter, capped.
-    When the provider hints a Retry-After (attr or response header), honor it
-    as a FLOOR (still capped) — it knows its own window better than we do."""
-    delay = min(base * (2 ** (attempt - 1)), _RETRY_DELAY_CAP_S)
+_UPSTREAM_DELAY_CAP_S = 120.0  # slower ladder for opaque upstream throttles
+
+
+def _retry_delay_s(err: BaseException, attempt: int, base: float,
+                   kind: str = "burst") -> float:
+    """Backoff for 1-based `attempt`, per 429 class (see models/rate_limit.py):
+    burst → base·2^(n-1) capped 60s; upstream → (6·base)·2^(n-1) capped 120s
+    (minutes-scale windows deserve patience before giving up). 0–25% jitter.
+    A provider Retry-After hint is honored as a FLOOR (still capped) — the
+    provider knows its own window better than we do."""
+    eff_base = base * 6 if kind == "upstream" else base
+    cap = _UPSTREAM_DELAY_CAP_S if kind == "upstream" else _RETRY_DELAY_CAP_S
+    delay = min(eff_base * (2 ** (attempt - 1)), cap)
     delay *= 1.0 + random.random() * 0.25
     hint = getattr(err, "retry_after", None)
     if hint is None:
@@ -98,8 +106,8 @@ def _retry_delay_s(err: BaseException, attempt: int, base: float) -> float:
     except (TypeError, ValueError):
         hinted = None
     if hinted is not None and hinted > 0:
-        delay = max(delay, min(hinted, _RETRY_DELAY_CAP_S))
-    return min(delay, _RETRY_DELAY_CAP_S)
+        delay = max(delay, min(hinted, cap))
+    return min(delay, cap)
 
 
 # --- per-session model override -------------------------------------------
@@ -511,12 +519,23 @@ class SelectableLlm(BaseLlm):
                 # non-429 errors (auth, bad model id) won't heal by waiting.
                 if yielded or not _is_rate_limited(e) or attempt >= _retry_count():
                     raise
+                from .rate_limit import classify_429, describe_quota
+
+                kind, reset_hint = classify_429(e)
+                if kind == "quota":
+                    # A daily/monthly cap hours from reset — in-turn retries
+                    # are pure waste. Fail fast with an actionable message
+                    # (chained so the stream error still shows provider text).
+                    raise RuntimeError(
+                        f"model {getattr(delegate, 'model', '?')}: "
+                        + describe_quota(reset_hint)
+                    ) from e
                 attempt += 1
-                delay = _retry_delay_s(e, attempt, _retry_base_s())
+                delay = _retry_delay_s(e, attempt, _retry_base_s(), kind)
                 _log.warning(
-                    "model %s rate-limited (attempt %d/%d) — retrying in %.1fs: %s",
-                    getattr(delegate, "model", "?"), attempt, _retry_count(), delay,
-                    str(e)[:200],
+                    "model %s rate-limited [%s] (attempt %d/%d) — retrying in %.1fs: %s",
+                    getattr(delegate, "model", "?"), kind, attempt, _retry_count(),
+                    delay, str(e)[:200],
                 )
                 await _retry_sleep(delay)
 

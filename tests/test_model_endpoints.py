@@ -712,6 +712,57 @@ def test_retry_honors_retry_after_hint():
 
 
 
+def test_429_classification_and_ladders():
+    """F2a: three 429 classes get three responses (see models/rate_limit.py)."""
+    import time as _time
+    from adk_cc.models import selectable as S
+    from adk_cc.models.rate_limit import classify_429, describe_quota
+
+    class _H(dict):
+        pass
+
+    def _err(msg="429", headers=None):
+        e = _RL(msg)
+        if headers is not None:
+            e.response = type("R", (), {"headers": _H(headers)})()
+        return e
+
+    # upstream: body sniff (today's gemma:free failure text)
+    k, _ = classify_429(_err("google/gemma-4-31b-it:free is temporarily rate-limited upstream. Please retry shortly"))
+    assert k == "upstream", k
+    # quota: reset hours away (epoch seconds)
+    k, hint = classify_429(_err("Rate limit exceeded", {"x-ratelimit-reset": str(_time.time() + 5 * 3600)}))
+    assert k == "quota" and hint and hint > 3600, (k, hint)
+    assert "resets in ~" in describe_quota(hint)
+    # burst: plain 429, near reset
+    k, _ = classify_429(_err("Rate limit exceeded", {"retry-after": "7"}))
+    assert k == "burst", k
+
+    # ladders: upstream is ~6x slower and caps at 120s
+    b1 = S._retry_delay_s(_err("x"), 1, 5.0, "burst")
+    u1 = S._retry_delay_s(_err("x"), 1, 5.0, "upstream")
+    assert 5.0 <= b1 <= 6.25 and 30.0 <= u1 <= 37.5, (b1, u1)
+    u9 = S._retry_delay_s(_err("x"), 9, 5.0, "upstream")
+    assert u9 <= 120.0, u9
+
+    # quota → fail-fast from the retry envelope with the actionable message
+    from adk_cc.models.selectable import set_session_model_override
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = _FlakyLlm(failures=99,
+                         exc=_err("Rate limit exceeded",
+                                  {"x-ratelimit-reset": str(_time.time() + 4 * 3600)}))
+        sel = _retry_sel(tmp, fake)
+        async def run():
+            return [x async for x in sel.generate_content_async(object())]
+        try:
+            asyncio.run(run()); assert False, "expected fail-fast"
+        except RuntimeError as e:
+            assert "quota exhausted" in str(e), e
+            assert fake.calls == 1, fake.calls   # zero retries burned
+    print("OK test_429_classification_and_ladders")
+
+
+
 if __name__ == "__main__":
     test_first_endpoint_becomes_active()
     test_activate_and_persist()
@@ -743,4 +794,5 @@ if __name__ == "__main__":
     test_retry_never_after_first_chunk()
     test_retry_only_rate_limits_and_exhaustion()
     test_retry_honors_retry_after_hint()
+    test_429_classification_and_ladders()
     print("\nall model-endpoint tests passed")
