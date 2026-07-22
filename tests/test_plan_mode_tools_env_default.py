@@ -369,6 +369,57 @@ def test_run_async_approved_without_comment_omits_field() -> None:
 # --- Driver ---------------------------------------------------------
 
 
+# --- F4: pre-plan mode restore (dogfooding fix) ---------------------
+
+
+def test_enter_records_previous_mode() -> None:
+    """enter_plan_mode persists the pre-plan mode for exit to restore."""
+    tool = EnterPlanModeTool(default_mode="default")
+    ctx = _FakeToolContext({"permission_mode": "bypasspermissions"})
+    out = _run_enter(tool, ctx)
+    assert out["status"] == "ok", out
+    assert ctx.state["permission_mode"] == "plan", ctx.state._d
+    assert ctx.state["plan_previous_mode"] == "bypasspermissions", ctx.state._d
+    print("OK test_enter_records_previous_mode")
+
+
+def test_exit_restores_recorded_previous_mode() -> None:
+    """THE F4 FIX: bypassPermissions → plan → approve → bypassPermissions
+    (was: hardcoded "default", turning every post-approval write into a
+    confirmation prompt on desktop)."""
+    ctx = _FakeToolContext({"permission_mode": "bypasspermissions"})
+    _run_enter(EnterPlanModeTool(default_mode="default"), ctx)
+    out = _run_exit(ExitPlanModeTool(default_mode="default"), ctx)
+    assert out["status"] == "approved", out
+    assert out["new_mode"] == "bypasspermissions", out
+    assert ctx.state["permission_mode"] == "bypasspermissions", ctx.state._d
+    # marker consumed — a later UI-toggled plan cycle must not inherit it
+    assert not ctx.state.get("plan_previous_mode"), ctx.state._d
+    print("OK test_exit_restores_recorded_previous_mode")
+
+
+def test_exit_without_marker_falls_back_to_default() -> None:
+    """Plan mode entered WITHOUT the tool (UI toggle patches state directly)
+    → no marker → exit restores "default" (pre-fix behavior preserved)."""
+    ctx = _FakeToolContext({"permission_mode": "plan"})
+    out = _run_exit(ExitPlanModeTool(default_mode="default"), ctx)
+    assert out["status"] == "approved", out
+    assert out["new_mode"] == "default", out
+    assert ctx.state["permission_mode"] == "default", ctx.state._d
+    print("OK test_exit_without_marker_falls_back_to_default")
+
+
+def test_exit_never_restores_into_plan() -> None:
+    """A stale/corrupt marker saying "plan" must not trap the session."""
+    ctx = _FakeToolContext(
+        {"permission_mode": "plan", "plan_previous_mode": "plan"}
+    )
+    out = _run_exit(ExitPlanModeTool(default_mode="default"), ctx)
+    assert out["status"] == "approved", out
+    assert ctx.state["permission_mode"] == "default", ctx.state._d
+    print("OK test_exit_never_restores_into_plan")
+
+
 def main() -> None:
     test_exit_flips_state_when_explicit_plan()
     test_exit_flips_state_when_state_unset_but_env_plan()
@@ -387,6 +438,10 @@ def main() -> None:
     test_run_async_denied_without_comment_omits_field()
     test_run_async_approved_surfaces_user_comment()
     test_run_async_approved_without_comment_omits_field()
+    test_enter_records_previous_mode()
+    test_exit_restores_recorded_previous_mode()
+    test_exit_without_marker_falls_back_to_default()
+    test_exit_never_restores_into_plan()
     print("\nall plan-mode-tools env-default tests passed")
 
 

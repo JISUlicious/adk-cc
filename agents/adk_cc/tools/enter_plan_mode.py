@@ -90,6 +90,11 @@ class EnterPlanModeTool(AdkCcTool):
             }
         try:
             ctx.state["permission_mode"] = "plan"
+            # F4 (dogfooding): remember the ORIGINAL posture so exit_plan_mode
+            # can restore it — a desktop bypassPermissions session must come
+            # back as bypassPermissions, not hardcoded "default" (which turned
+            # every post-approval write into a confirmation prompt).
+            ctx.state["plan_previous_mode"] = previous
         except Exception as e:
             return {"status": "error", "error": f"could not update state: {e}"}
         if _log.isEnabledFor(logging.DEBUG):

@@ -126,19 +126,32 @@ class ExitPlanModeTool(AdkCcTool):
                     "Use the regular tools to proceed."
                 ),
             }
+        # F4 (dogfooding): restore the mode the session was in BEFORE
+        # enter_plan_mode (recorded there), not a hardcoded "default".
+        # Guards: never restore INTO plan mode (a stale/corrupt marker would
+        # trap the session), and fall back to "default" when no marker exists
+        # (plan mode entered via the UI toggle, which doesn't record one).
         try:
-            ctx.state["permission_mode"] = "default"
+            restored = ctx.state.get("plan_previous_mode")
+        except Exception:
+            restored = None
+        if not restored or restored == "plan":
+            restored = "default"
+        try:
+            ctx.state["permission_mode"] = restored
+            ctx.state["plan_previous_mode"] = None  # consumed — one cycle only
         except Exception as e:
             return {"status": "error", "error": f"could not update state: {e}"}
         if _log.isEnabledFor(logging.DEBUG):
             _log.debug(
-                "state_mutation permission_mode %s -> default",
+                "state_mutation permission_mode %s -> %s",
                 previous,
+                restored,
                 extra={
                     "mutation_type": "permission_mode_change",
                     "state_key": "permission_mode",
                     "previous_value": previous,
-                    "new_value": "default",
+                    "new_value": restored,
                 },
             )
         from ..plugins.audit import emit_state_mutation  # deferred — see module-top NOTE
@@ -147,14 +160,14 @@ class ExitPlanModeTool(AdkCcTool):
             state_key="permission_mode",
             details={
                 "previous_value": previous,
-                "new_value": "default",
+                "new_value": restored,
             },
             ctx=ctx,
         )
         response: dict[str, Any] = {
             "status": "approved",
             "previous_mode": previous,
-            "new_mode": "default",
+            "new_mode": restored,
             "plan_summary": args.plan_summary,
         }
         # If the operator added a comment in the approval form, the model

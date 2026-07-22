@@ -19,7 +19,7 @@ UI carrying real content. The findings below are what broke or ground.
 | F1 | Turn dies on client disconnect | High | open (design first) |
 | F2 | Retry ladder ≪ free-tier throttle windows; no retry affordance | Medium | open |
 | F3 | Confirmation-resume ends at `_handback_to_coordinator` | High | open (investigate) |
-| F4 | `exit_plan_mode` restores hardcoded `default`, not pre-plan mode | High | open (small fix) |
+| F4 | `exit_plan_mode` restores hardcoded `default`, not pre-plan mode | High | **FIXED** (enter records `plan_previous_mode`; exit restores it, never into plan, marker consumed) |
 | F5 | Confirmation waves: N cards, mid-turn `allow_always` efficacy unverified | Medium | open (investigate) |
 | F2c | Failed zero-output turns leave duplicate user messages in history | Medium | open |
 
