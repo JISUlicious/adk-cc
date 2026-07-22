@@ -325,7 +325,7 @@ export function ChatPage({
             "Available slash commands: /help, /clear (new session), " +
               "/plan, /exit-plan, /theme, /settings, /signout, " +
               "/wiki (open the knowledge graph — wiki pages + memory)" +
-              (IS_DESKTOP ? ", /model (switch the active model across providers), /rewind (rewind to a checkpoint — roll back files + conversation), /add-dir (grant a working directory outside the project)" : "") +
+              (IS_DESKTOP ? ", /model (pin a model for this session; default set in Settings), /rewind (rewind to a checkpoint — roll back files + conversation), /add-dir (grant a working directory outside the project)" : "") +
               ". These are UI shortcuts on the client; the agent doesn't see them.",
           )
         }
@@ -383,7 +383,7 @@ export function ChatPage({
         setRewindOpen(true)
         return
       case "model":
-        // Desktop-only: open the model palette to switch the active model across
+        // Desktop-only: open the model palette to pin a model for THIS session
         // providers (takes effect on the next turn — SelectableLlm re-reads).
         if (!IS_DESKTOP) return
         setModelPickerOpen(true)

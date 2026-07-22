@@ -72,7 +72,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   },
   {
     name: "model",
-    description: "Switch the active model across your providers",
+    description: "Pin a model for this session (default: Settings → Models)",
     icon: Cpu,
     kind: { type: "action", action: "model" },
     desktopOnly: true,
