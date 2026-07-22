@@ -17,10 +17,10 @@ UI carrying real content. The findings below are what broke or ground.
 | # | Finding | Severity | Status |
 |---|---------|----------|--------|
 | F1 | Turn dies on client disconnect | High | open (design first) |
-| F2 | Retry ladder ≪ free-tier throttle windows; no retry affordance | Medium | open |
-| F3 | Confirmation-resume ends at `_handback_to_coordinator` | High | open (investigate) |
+| F2 | Retry ladder ≪ free-tier throttle windows; no retry affordance | Medium | **F2a FIXED** (classifier: burst/upstream/quota ladders, quota fail-fast w/ reset time); F2b UI retry button still open |
+| F3 | Confirmation-resume ends at `_handback_to_coordinator` | High | **ROOT-CAUSED + client mitigation shipped** (see below); server-side fix still open |
 | F4 | `exit_plan_mode` restores hardcoded `default`, not pre-plan mode | High | **FIXED** (enter records `plan_previous_mode`; exit restores it, never into plan, marker consumed) |
-| F5 | Confirmation waves: N cards, mid-turn `allow_always` efficacy unverified | Medium | open (investigate) |
+| F5 | Confirmation waves: N cards, mid-turn `allow_always` efficacy unverified | Medium | **F5a RESOLVED — grants work as designed** (see below); F5b apply-to-all UI still open |
 | F2c | Failed zero-output turns leave duplicate user messages in history | Medium | open |
 
 ### F1 — turn dies on client disconnect
@@ -39,6 +39,18 @@ attempts over ~9 min; `console-1` T1 needed more). The user's only affordance
 after the surfaced error is manually re-sending the message.
 
 ### F3 — confirmation-resume drops the coordinator continuation
+**Root cause (confirmed in ADK source)**: `Runner._find_agent_to_run` roots a
+function-response resume at the agent that ISSUED the call (the sub-agent).
+Our `_force_coordinator_continuation` handback is a synthetic non-final event
+that only works when a coordinator flow WRAPS the specialist — in the resumed
+invocation there is none, so the marker dangles and the run ends.
+**Shipped mitigation (client)**: ChatPage detects a stream that ENDS on a
+dangling `_handback_to_coordinator` (never happens in healthy turns — the
+coordinator's reply always follows it) and auto-continues once ("Continue.").
+**Still open (server)**: continuation belongs server-side — e.g. after a
+resumed run terminates on a dangling handback, re-invoke the coordinator in
+the same request. Client mitigation covers the web UI only; API drivers still
+see the drop.
 Repro observed on `console-gpt-1`: Explore (sub-agent, in plan mode) hit a
 protected-path confirmation; answering it resumed the run; Explore finished
 and called `_handback_to_coordinator`; the RUN ENDED there — the coordinator
@@ -56,6 +68,16 @@ after plan approval on `console-gpt-1`). `enter_plan_mode` already computes
 `previous_mode` for its tool result; it just isn't persisted/restored.
 
 ### F5 — confirmation waves and mid-turn `allow_always`
+**F5a verdict (code-read, plugins/permissions.py:518)**: grants are stored in
+session state (`adk_cc_allow_rules`) and reloaded by `_effective_settings` on
+EVERY decide — a mid-turn `allow_always` DOES cover all future iterations.
+The observed waves have a structural cause: the model emits several gated
+calls in ONE iteration, and each requests confirmation before any answer can
+exist. So the remaining work is ergonomics (F5b apply-to-all; optionally a
+server sweep where a new grant auto-resolves other PENDING confirmations it
+covers), not a grant bug. NOTE: `tests/e2e_confirmation_flow.py` is broken
+in this environment (fails identically at bc78acd, pre-dating all of this
+work — separate investigation).
 A plan-approved build emits many writes; each wave parks the turn on N
 pending confirmation cards. Whether an `allow_always` grant registered
 mid-turn suppresses subsequent same-pattern confirmations in the SAME turn is
