@@ -81,8 +81,36 @@ pending" affordance exists.
    Choose based on where the drop actually happens.
 
 ### P2 — rate-limit UX + confirmation ergonomics
+
+#### F2 design (researched 2026-07-22, openrouter.ai/docs/api-reference/limits)
+OpenRouter facts: free-variant models (`:free`) are capped at **20 req/min**
+AND **50 req/day** (1,000/day with ≥$10 lifetime credits); daily caps reset at
+**UTC midnight**. 429s carry `X-RateLimit-Limit/Remaining/Reset` and sometimes
+`Retry-After`; `GET /api/v1/key` reports remaining quota. Crucially there are
+THREE distinct 429 classes and one ladder cannot serve them:
+
+| Class | Signature | Right response |
+|---|---|---|
+| Burst (20 rpm) | OpenRouter `rate_limit_exceeded`, reset near | current ladder (5/10/20s) is well-matched |
+| Daily quota | `X-RateLimit-Reset` far away (hours) | retrying is POINTLESS — fail fast with "free-tier daily quota exhausted, resets HH:MM UTC (in Xh)"; suggest switching model |
+| Upstream provider throttle | `metadata.provider_name` + "temporarily rate-limited upstream" (today's gemma case) | longer paced ladder: ~30/60/120s, then surface with the Retry button |
+
+Implementation sketch (`models/selectable.py` + a small
+`models/rate_limit.py` classifier):
+1. `classify_429(err) -> (kind, reset_hint_s)` — parse
+   `X-RateLimit-Reset`/`Retry-After` from `err.response.headers`, sniff
+   `provider_name`/"rate-limited upstream" in the body for the upstream class.
+2. Ladder per class: burst → base·2^n (today's behavior); upstream →
+   (6·base)·2^n capped 120s; quota → zero retries, raise a wrapped error whose
+   message carries the human reset time. No new env knobs — both ladders
+   derive from ADK_CC_MODEL_RETRIES / ADK_CC_MODEL_RETRY_BASE_S.
+3. Keep every sleep behind the global pacing throttle (never burst).
+4. NOT doing: proactive `GET /api/v1/key` quota probes — requires handling
+   the raw key outside the write-only boundary; revisit only if the
+   classifier proves insufficient.
+
 3. **F2a** backend: honor an explicit provider `Retry-After` hint up to 120s
-   (computed backoff stays capped at 60s).
+   (computed backoff stays capped at 60s). Subsumed by the classifier above.
 4. **F2b** UI: rate-limit stream error → render a **"Retry turn"** button.
    MUST reuse the existing user event, not append a new one — see F2c.
 5. **F2c** (found while retrying gemma): a turn that fails before ANY model
