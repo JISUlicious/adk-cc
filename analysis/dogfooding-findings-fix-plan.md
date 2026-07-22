@@ -21,6 +21,7 @@ UI carrying real content. The findings below are what broke or ground.
 | F3 | Confirmation-resume ends at `_handback_to_coordinator` | High | open (investigate) |
 | F4 | `exit_plan_mode` restores hardcoded `default`, not pre-plan mode | High | open (small fix) |
 | F5 | Confirmation waves: N cards, mid-turn `allow_always` efficacy unverified | Medium | open (investigate) |
+| F2c | Failed zero-output turns leave duplicate user messages in history | Medium | open |
 
 ### F1 — turn dies on client disconnect
 Symptom (twice): SSE consumer timing out / dropping severs the run mid-flight.
@@ -82,9 +83,14 @@ pending" affordance exists.
 ### P2 — rate-limit UX + confirmation ergonomics
 3. **F2a** backend: honor an explicit provider `Retry-After` hint up to 120s
    (computed backoff stays capped at 60s).
-4. **F2b** UI: rate-limit stream error → render a **"Retry turn"** button
-   (re-send the same message; session is intact). Converts the free-tier
-   dead-end into one click.
+4. **F2b** UI: rate-limit stream error → render a **"Retry turn"** button.
+   MUST reuse the existing user event, not append a new one — see F2c.
+5. **F2c** (found while retrying gemma): a turn that fails before ANY model
+   output still leaves its user message appended to the session — external
+   retries piled up 6 duplicate "Go on." events + a duplicated task prompt in
+   `console-1`. Fix direction: roll back (or dedupe) the user event when the
+   run dies with zero model-authored events, or make retry-by-resend reuse
+   the last user event. Also poisons context for the eventual successful turn.
 5. **F5a** investigation: controlled test — grant `allow_always` at wave N,
    verify wave N+1 of the same pattern doesn't ask. Fix grant-consultation
    timing in the permission engine if it does.
