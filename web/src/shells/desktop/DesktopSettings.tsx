@@ -175,7 +175,7 @@ function ModelsSection() {
   return (
     <div className="space-y-3 py-1">
       <CodexConnect onChange={reload} refreshTick={refreshTick} />
-      <p className="text-xs text-muted-foreground">Model providers are global — the active model serves every project's agent (next turn). Click a provider to pick its model; also switchable in chat with <code>/model</code>.</p>
+      <p className="text-xs text-muted-foreground">Sets the <span className="font-medium">default</span> model — used by every session that hasn't pinned its own. Pin a model for a single session in chat with <code>/model</code> (or the model chip by the input).</p>
       <div className="space-y-1">
         {endpoints.map((e) => {
           const open = expanded === e.name

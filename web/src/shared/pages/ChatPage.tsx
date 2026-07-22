@@ -429,6 +429,12 @@ export function ChatPage({
     }
   }
 
+  const _st = (session?.state ?? {}) as Record<string, unknown>
+  const pinnedEndpoint =
+    typeof _st.model_endpoint === "string" && _st.model_endpoint ? _st.model_endpoint : null
+  const pinnedModel =
+    pinnedEndpoint && typeof _st.model_id === "string" && _st.model_id ? _st.model_id : null
+
   const permissionMode =
     typeof session?.state?.permission_mode === "string"
       ? (session.state.permission_mode as string)
@@ -544,7 +550,12 @@ export function ChatPage({
           footer={session ? <ContextGauge current={ctxTokens} limits={ctxLimits} /> : undefined}
           taskStrip={session ? <TaskStrip events={events} /> : undefined}
           modelChip={IS_DESKTOP ? (
-            <ModelChip refreshKey={modelTick} onClick={() => setModelPickerOpen(true)} />
+            <ModelChip
+              pinnedModel={pinnedModel}
+              refreshKey={modelTick}
+              interactive={!!(session && appName)}
+              onClick={() => setModelPickerOpen(true)}
+            />
           ) : undefined}
         />
       </div>
@@ -572,10 +583,25 @@ export function ChatPage({
           onRestored={reloadSession}
         />
       )}
-      {IS_DESKTOP && modelPickerOpen && (
+      {IS_DESKTOP && modelPickerOpen && appName && session && (
         <ModelPicker
+          appName={appName}
+          userId={userId}
+          sessionId={session.id}
+          pinnedEndpoint={pinnedEndpoint}
+          pinnedModel={pinnedModel}
           onClose={() => setModelPickerOpen(false)}
-          onPicked={(label) => { showNotice(`✓ Model switched to ${label} (next turn)`); setModelTick((t) => t + 1) }}
+          onPicked={(label, s) => {
+            // The PATCH returns the updated session (new state + the
+            // synthetic state-update event) — apply it like the plan toggle.
+            setSession(s)
+            setEvents(s.events)
+            setRefreshTick((t) => t + 1)
+            setModelTick((t) => t + 1)
+            showNotice(label
+              ? `✓ Model for this session → ${label} (next turn)`
+              : "✓ Session model reset to the default")
+          }}
         />
       )}
     </div>
