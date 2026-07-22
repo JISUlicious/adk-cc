@@ -22,7 +22,8 @@ UI carrying real content. The findings below are what broke or ground.
 | F4 | `exit_plan_mode` restores hardcoded `default`, not pre-plan mode | High | **FIXED** (enter records `plan_previous_mode`; exit restores it, never into plan, marker consumed) |
 | F5 | Confirmation waves: N cards, mid-turn `allow_always` efficacy unverified | Medium | **F5a RESOLVED — grants work as designed** (see below); F5b apply-to-all UI still open |
 | F2c | Failed zero-output turns leave duplicate user messages in history | Medium | open |
-| F6 | Command-safety: `cat > /tmp/... <<EOF` heredoc writes outside the project passed the gate twice; a later out-of-project write was correctly flagged | High (security) | open (investigate) |
+| F6 | Command-safety: heredoc handling + /tmp scope | High (security) | **FIXED** — 3 parts: heredoc bodies stripped as data (the flagged probe was a FALSE POSITIVE: a JS regex mined as a path); /tmp+$TMPDIR now in scope by design (scratch convention, user decision); `_in_scope` fail-open now logs. The live /tmp pass was thus consistent with intended design; the false positive was the actual bug. |
+| F7 | Desktop audit sink: no audit.jsonl written under ~/.adk-cc-desktop since the data-root change (tool events ran; file absent) | High | open (investigate — possible silent audit loss on desktop) |
 
 ### F1 — turn dies on client disconnect
 Symptom (twice): SSE consumer timing out / dropping severs the run mid-flight.

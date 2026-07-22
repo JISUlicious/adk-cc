@@ -103,6 +103,13 @@ class WorkspaceRoot:
             )
         for root in self.extra_roots:
             paths = paths + (f"{root}/**", root)
+        # System temp is the universal throwaway convention — agents write
+        # probe scripts and scratch files there constantly, and blocking it
+        # only trains users to blanket-approve (F6 discussion). The protected
+        # deny floor still overrides, and /tmp contents are exactly the data
+        # nobody needs the checkpoint/undo net for.
+        for r in _system_temp_roots():
+            paths = paths + (f"{r}/**", r)
         return paths
 
     def fs_read_config(self) -> FsReadConfig:
@@ -110,6 +117,18 @@ class WorkspaceRoot:
 
     def fs_write_config(self) -> FsWriteConfig:
         return FsWriteConfig(allow_paths=self._allow_paths())
+
+
+def _system_temp_roots() -> tuple[str, ...]:
+    """The system scratch locations, resolved: /tmp (and its macOS realpath
+    /private/tmp) plus $TMPDIR (macOS per-user /var/folders/...)."""
+    import tempfile
+
+    roots = {"/tmp", "/private/tmp"}
+    t = os.path.realpath(tempfile.gettempdir()).rstrip("/")
+    if t:
+        roots.add(t)
+    return tuple(sorted(roots))
 
 
 def default_workspace() -> WorkspaceRoot:

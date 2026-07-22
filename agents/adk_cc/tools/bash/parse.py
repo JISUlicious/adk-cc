@@ -73,6 +73,38 @@ def has_unsafe_shell_metachars(segment: str) -> bool:
     return state != "unquoted"
 
 
+_HEREDOC_START = re.compile(r"(?<!<)<<-?\s*(?P<q>['\"]?)(?P<tag>[A-Za-z0-9_+.-]+)(?P=q)(?!<)")
+
+
+def strip_heredocs(command: str) -> str:
+    """Remove heredoc BODIES, keeping the `<<TAG` operator line intact.
+
+    A heredoc body is DATA fed to stdin — JS/Python/SQL, not shell. Leaving it
+    in makes the newline statement splitter mine those lines for binaries and
+    paths, producing false tiers ("rm = ..." in a script) and false path hits
+    (a JS regex like /@media .../ read as an absolute path — the observed F6
+    false positive). Stripping is strictly more truthful: the shell-level
+    surface (command, redirects incl. the heredoc's own `> file`) is fully
+    preserved on the first line. Best-effort like the rest of this parser —
+    quoted `<<` inside strings and exotic nesting are not modeled; the OS
+    sandbox stays the airtight boundary. `<<<` herestrings are untouched."""
+    if "<<" not in command:
+        return command
+    out: list[str] = []
+    pending: list[str] = []
+    for line in command.split("\n"):
+        if pending:
+            # Inside a body: drop the line; a line equal to the tag (allowing
+            # leading tabs, per `<<-`) terminates the current heredoc.
+            if line.rstrip() == pending[0] or line.lstrip("\t").rstrip() == pending[0]:
+                pending.pop(0)
+            continue
+        out.append(line)
+        for m in _HEREDOC_START.finditer(line):
+            pending.append(m.group("tag"))
+    return "\n".join(out)
+
+
 def split_statements(command: str) -> Optional[list[tuple[str, str]]]:
     """Split into [(segment, delimiter_to_next)] on `&& || | ; &` and newlines,
     quote-aware. Last delimiter is "". None on degenerate input (empty,
@@ -80,6 +112,7 @@ def split_statements(command: str) -> Optional[list[tuple[str, str]]]:
     command as one opaque segment."""
     if not command.strip():
         return None
+    command = strip_heredocs(command)
     pairs: list[tuple[str, str]] = []
     buf: list[str] = []
     i, n, state = 0, len(command), "unquoted"

@@ -361,8 +361,15 @@ class PermissionPlugin(BasePlugin):
             from ..sandbox import get_workspace
 
             return get_workspace(tool_context).fs_read_config().allows(resolved)
-        except Exception:
-            return True  # fail open to the normal flow; gate 2 still enforces
+        except Exception as e:  # noqa: BLE001
+            # Fail open to the normal flow (gate 2 still enforces) — but LOUDLY:
+            # a silent fail-open here made the F6 live inconsistency
+            # undiagnosable (out-of-scope writes passing with no trace).
+            _log.warning(
+                "scope check failed OPEN for %r (%s: %s) — treating as in-scope",
+                resolved, type(e).__name__, e,
+            )
+            return True
 
     def _bash_out_of_scope(
         self, tool: AdkCcTool, args: dict, tool_context: ToolContext,

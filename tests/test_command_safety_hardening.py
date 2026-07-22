@@ -239,7 +239,10 @@ def test_plugin_computes_out_of_scope_for_run_bash() -> None:
     # End-to-end plugin wiring: for run_bash the plugin computes cmd_out_of_scope
     # from the folded workspace (project ∪ granted) and feeds it to decide().
     proj = os.path.realpath(tempfile.mkdtemp())
-    outside = os.path.realpath(tempfile.mkdtemp())
+    # NB: must NOT be under the system temp dirs — those are in scope by design
+    # (scratch convention, F6). A nonexistent path is fine: the gate is pure
+    # string->verdict and never stats or executes anything.
+    outside = "/opt/adk-cc-hardening-test-outside"
     p = PermissionPlugin(SettingsHierarchy([]), default_mode=M.BYPASS_PERMISSIONS)
     bypass = M.BYPASS_PERMISSIONS.value
 
@@ -276,6 +279,50 @@ def test_protected_case_and_metachar_hardening() -> None:
     print("OK test_protected_case_and_metachar_hardening")
 
 
+def test_heredoc_bodies_are_not_shell() -> None:
+    """F6: heredoc bodies are DATA — no path mining, no false tiers; the
+    shell surface on the first line (incl. redirects) is fully preserved."""
+    from adk_cc.permissions.command_safety import classify_command, command_paths
+    from adk_cc.tools.bash.parse import strip_heredocs
+
+    # the live false positive: JS regex in the body read as an absolute path
+    probe = "node - <<'NODE'\nconst has = /@media \\(max-width: 900px\\)/.test('x');\nNODE"
+    assert command_paths(probe) == [], command_paths(probe)
+    # body text mentioning rm -rf / must not raise the tier — it is data
+    note = "python3 - <<'P'\nnote = 'rm -rf / would be bad'\nP"
+    assert classify_command(note) not in ("catastrophic", "dangerous"), classify_command(note)
+    # the heredoc's own redirect target IS still shell surface
+    write = "cat > /tmp/probe.js <<'EOF'\nbody\nEOF"
+    assert "/tmp/probe.js" in command_paths(write)
+    assert classify_command(write) == "mutating"
+    # a REAL second statement after the terminator is still seen
+    two = "cat <<'EOF'\nbody\nEOF\nrm -rf /"
+    assert classify_command(two) == "catastrophic", classify_command(two)
+    # unterminated heredoc: body runs to end, nothing leaks
+    open_ended = "cat <<'EOF'\nrm -rf /\nstill body"
+    assert classify_command(open_ended) not in ("catastrophic", "dangerous")
+    # herestring is untouched
+    hs = "grep x <<< '/etc/passwd contents'"
+    assert strip_heredocs(hs) == hs
+    print("OK test_heredoc_bodies_are_not_shell")
+
+
+def test_system_temp_is_in_scope() -> None:
+    """F6 design decision: /tmp + $TMPDIR are scratch — writable without the
+    out-of-project prompt. Everything else stays gated."""
+    import tempfile as _tf
+    from adk_cc.sandbox.workspace import WorkspaceRoot
+
+    proj = os.path.realpath(tempfile.mkdtemp())
+    cfg = WorkspaceRoot(abs_path=proj, tenant_id="t", session_id="s").fs_read_config()
+    assert cfg.allows("/tmp/scratch.js")
+    assert cfg.allows("/private/tmp/scratch.js")
+    assert cfg.allows(os.path.realpath(_tf.gettempdir()) + "/x")
+    assert not cfg.allows("/opt/adk-cc-hardening-test-outside/x")
+    assert not cfg.allows(os.path.expanduser("~/outside.txt"))
+    print("OK test_system_temp_is_in_scope")
+
+
 def main() -> None:
     test_wrapper_and_separator_evasions_are_catastrophic()
     test_protected_case_and_metachar_hardening()
@@ -287,6 +334,8 @@ def main() -> None:
     test_out_of_project_command_floor()
     test_deletion_broadening_is_literal_only()
     test_plugin_computes_out_of_scope_for_run_bash()
+    test_heredoc_bodies_are_not_shell()
+    test_system_temp_is_in_scope()
     print("\nall command-safety hardening tests passed")
 
 
