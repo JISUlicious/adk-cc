@@ -62,13 +62,14 @@ export function ModelChip({ pinnedModel, refreshKey, interactive = true, onClick
       onClick={interactive ? onClick : undefined}
       disabled={!interactive}
       className={cn(
-        "inline-flex max-w-[14rem] items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary",
-        interactive && "hover:bg-primary/20",
+        "inline-flex max-w-[16rem] items-center gap-1 text-[10px]",
+        pinnedModel ? "text-primary" : "text-muted-foreground",
+        interactive && "hover:text-foreground",
         !interactive && "cursor-default",
       )}
       title={title}
     >
-      {pinnedModel ? <Pin className="h-3 w-3 shrink-0" /> : <Cpu className="h-3 w-3 shrink-0" />}
+      {pinnedModel ? <Pin className="h-2.5 w-2.5 shrink-0" /> : <Cpu className="h-2.5 w-2.5 shrink-0" />}
       <span className="truncate font-mono">{label}</span>
     </button>
   )

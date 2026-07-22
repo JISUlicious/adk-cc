@@ -184,7 +184,6 @@ export function Composer({
               </span>
             </div>
             <div className="ml-auto flex items-center gap-2 shrink-0">
-              {modelChip}
               <SandboxBadge sessionId={sessionId} userId={userId} />
               {footer && <div className="adk-gauge-slot">{footer}</div>}
             </div>
@@ -231,6 +230,11 @@ export function Composer({
           </Button>
         )}
           </div>
+          {/* Minimal model line under the input — quiet by design; the pin
+              state is the only thing that earns a colour. */}
+          {modelChip && (
+            <div className="flex items-center px-1 pt-0.5">{modelChip}</div>
+          )}
         </div>
       </div>
     </div>
