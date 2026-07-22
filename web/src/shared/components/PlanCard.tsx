@@ -75,7 +75,7 @@ export function PlanCard({
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-[80%] w-full rounded-md border border-primary/40 bg-brand-tint text-sm">
+      <div className="w-full rounded-md border border-primary/40 bg-brand-tint text-sm">
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}
@@ -121,8 +121,10 @@ export function PlanCard({
                 {r.warning}
               </div>
             )}
+            {/* max-h-[70vh]: the plan is the primary reading surface in
+                plan mode — 24rem forced a nested scroll for any real plan. */}
             {content && (
-              <div className="rounded bg-background/60 p-3 max-h-96 overflow-y-auto text-sm leading-relaxed">
+              <div className="rounded bg-background/60 p-3 max-h-[70vh] overflow-y-auto text-sm leading-relaxed">
                 <Markdown>{content}</Markdown>
               </div>
             )}

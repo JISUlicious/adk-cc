@@ -63,9 +63,9 @@ export function ConfirmationCard({
     <div className="flex justify-start">
       {/* kami: single accent. The "this needs your attention" weight
           comes from ink-blue framing and the icon, not a second hue. */}
-      <div className="max-w-[80%] w-full rounded-md border border-primary/40 bg-brand-tint text-sm">
-        <div className="flex items-start gap-2 px-3 pt-3">
-          <ShieldAlert className="h-5 w-5 text-primary mt-0.5 shrink-0" />
+      <div className="w-full rounded-md border border-primary/40 bg-brand-tint text-sm">
+        <div className="flex items-start gap-2 px-3 pt-2">
+          <ShieldAlert className="h-4 w-4 text-primary mt-0.5 shrink-0" />
           <div className="min-w-0 flex-1">
             <div className="font-medium">{payload.title}</div>
             <div className="text-xs text-muted-foreground whitespace-pre-wrap mt-1">
@@ -74,7 +74,7 @@ export function ConfirmationCard({
           </div>
         </div>
         {payload.with_comment && (
-          <div className="px-3 pt-3">
+          <div className="px-3 pt-2">
             <textarea
               value={comment}
               onChange={(e) => setComment(e.target.value)}
@@ -86,7 +86,7 @@ export function ConfirmationCard({
           </div>
         )}
         {payload.with_persist_toggle && (
-          <label className="flex items-center gap-2 px-3 pt-3 text-xs text-muted-foreground">
+          <label className="flex items-center gap-2 px-3 pt-2 text-xs text-muted-foreground">
             <input
               type="checkbox"
               checked={persist}
@@ -96,7 +96,11 @@ export function ConfirmationCard({
             Persist across sessions
           </label>
         )}
-        <div className="flex flex-col gap-2 p-3">
+        {/* Slim single-row actions: labels visible, the per-option
+            description one hover away (title) — the stacked two-line buttons
+            tripled the card's height for information the detail line above
+            already frames. Wraps on narrow panes. */}
+        <div className="flex flex-wrap gap-1.5 p-2 pt-2">
           {payload.options.map((opt) => (
             <Button
               key={opt.id}
@@ -111,14 +115,10 @@ export function ConfirmationCard({
               size="sm"
               disabled={disabled}
               onClick={() => pick(opt.id)}
-              className="justify-start text-left h-auto py-2"
+              title={opt.description}
+              className="h-7 px-2.5 text-xs"
             >
-              <div className="flex flex-col items-start gap-0.5">
-                <span className="font-medium">{opt.label}</span>
-                <span className="text-[10px] font-normal opacity-70">
-                  {opt.description}
-                </span>
-              </div>
+              {opt.label}
             </Button>
           ))}
         </div>
