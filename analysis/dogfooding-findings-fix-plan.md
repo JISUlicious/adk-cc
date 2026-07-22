@@ -127,9 +127,19 @@ Implementation sketch (`models/selectable.py` + a small
    message carries the human reset time. No new env knobs — both ladders
    derive from ADK_CC_MODEL_RETRIES / ADK_CC_MODEL_RETRY_BASE_S.
 3. Keep every sleep behind the global pacing throttle (never burst).
-4. NOT doing: proactive `GET /api/v1/key` quota probes — requires handling
-   the raw key outside the write-only boundary; revisit only if the
-   classifier proves insufficient.
+4. NOT doing in-product: proactive `GET /api/v1/key` quota probes — requires
+   handling the raw key outside the write-only boundary. As an OPERATOR
+   diagnostic it's documented here: read the key from the registry file
+   locally, `GET https://openrouter.ai/api/v1/key`, never echo the key.
+5. ACCOUNT FACTS (probed 2026-07-23, user-authorized): this account has the
+   $10 deposit → `is_free_tier: false`, free-model cap 1,000/day, key-level
+   rate limit unlimited. The 2026-07-22 all-day gemma:free 429s were therefore
+   the SHARED UPSTREAM POOL (Google AI Studio capacity for OpenRouter's free
+   route, pooled across all OpenRouter users), NOT account quota — ~30-40
+   requests used of 1,000. For the `upstream` class there is no computable
+   reset; switching the session's model is the only reliable remedy (the
+   classifier + slow ladder behaved correctly; the earlier "daily quota wall,
+   resets UTC midnight" narrative in this doc was wrong for this account).
 
 3. **F2a** backend: honor an explicit provider `Retry-After` hint up to 120s
    (computed backoff stays capped at 60s). Subsumed by the classifier above.
