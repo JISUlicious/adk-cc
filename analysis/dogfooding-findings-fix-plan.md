@@ -22,6 +22,7 @@ UI carrying real content. The findings below are what broke or ground.
 | F4 | `exit_plan_mode` restores hardcoded `default`, not pre-plan mode | High | **FIXED** (enter records `plan_previous_mode`; exit restores it, never into plan, marker consumed) |
 | F5 | Confirmation waves: N cards, mid-turn `allow_always` efficacy unverified | Medium | **F5a RESOLVED — grants work as designed** (see below); F5b apply-to-all UI still open |
 | F2c | Failed zero-output turns leave duplicate user messages in history | Medium | open |
+| F6 | Command-safety: `cat > /tmp/... <<EOF` heredoc writes outside the project passed the gate twice; a later out-of-project write was correctly flagged | High (security) | open (investigate) |
 
 ### F1 — turn dies on client disconnect
 Symptom (twice): SSE consumer timing out / dropping severs the run mid-flight.
@@ -86,6 +87,15 @@ bugs (answered-call detection matched by name; responses are recorded under
 the ORIGINAL call name `adk_request_confirmation`, not the rewrite name
 `adk_cc_confirmation_form` — match by call id). Also: no "apply to all
 pending" affordance exists.
+
+### F6 — out-of-project heredoc redirect passed the write gate
+Observed in the gpt-5.4-mini A/B run (`f4e707522004/mvp-1`): two commands of
+the shape `cat > /tmp/console_probe.js <<'NODE' ...` executed with status ok,
+while a third out-of-project write was correctly stopped with "command writes
+or deletes a path outside the project — requires confirmation". Suggests the
+danger classifier misses (some) `>` redirect targets — possibly heredoc
+parsing. Security-relevant (silent-exec/exfil class); reproduce with the
+classifier's unit harness (pure string→verdict, no exec) and fix detection.
 
 ## Fix plan
 
