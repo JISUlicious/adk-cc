@@ -11,8 +11,6 @@ import {
   type Session,
 } from "@/shared/api/sessions"
 import {
-  streamRun,
-  streamFunctionResponse,
   isFinalResponse,
   type RunEvent,
   type StreamCallbacks,
@@ -34,6 +32,15 @@ import { pickDirectory } from "@/shared/lib/tauri"
 import { addWorkingDir } from "@/shared/api/desktop-settings"
 import { type SlashAction } from "@/shared/components/SlashCommandMenu"
 import { RewindDialog } from "@/shared/components/RewindDialog"
+import {
+  TurnFailedError,
+  latestTurn,
+  retryLastTurn,
+  streamExistingTurn,
+  streamTurnFunctionResponse,
+  streamTurnRun,
+  type TurnError,
+} from "@/shared/api/turns"
 import { ModelChip } from "@/shared/components/ModelChip"
 import { ModelPicker } from "@/shared/components/ModelPicker"
 import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/shared/lib/theme"
@@ -85,6 +92,9 @@ export function ChatPage({
   const [isStreaming, setIsStreaming] = useState(false)
   const [refreshTick, setRefreshTick] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  // Broker-classified terminal error of the last turn (rate-limited etc.) —
+  // drives the Retry button on the error banner (F2b).
+  const [turnError, setTurnError] = useState<TurnError | null>(null)
   // Neutral transient confirmation channel (e.g. /add-dir), distinct from the
   // destructive-styled `error` banner.
   const [notice, setNotice] = useState<string | null>(null)
@@ -172,6 +182,14 @@ export function ChatPage({
         // Refresh local Session reference so state.permission_mode etc.
         // stay current even when the rail's cached row is stale.
         setSession(s)
+        // Durable runs (F1): if this session has a turn STILL RUNNING
+        // server-side (we refreshed / reopened mid-turn), re-attach its
+        // tail — cursor 0 + id-dedupe stitches buffer and loaded events.
+        void latestTurn(appName, userId, s.id).then((t) => {
+          if (cancelled || !t || t.status !== "running") return
+          setIsStreaming(true)
+          attachStream((cb) => streamExistingTurn(t.turn_id, 0, cb))
+        })
       })
       .catch((e) => {
         if (!cancelled) setError(`Failed to load session: ${e.message}`)
@@ -213,7 +231,10 @@ export function ChatPage({
       onEvent: (e) => {
         if (gen !== streamGen.current) return
         lastStreamEventRef.current = e
-        setEvents((prev) => [...prev, e])
+        // Dedupe by event id: a re-attached tail replays from a cursor and
+        // may overlap events already loaded from the session.
+        setEvents((prev) =>
+          e.id && prev.some((x) => x.id === e.id) ? prev : [...prev, e])
         // Final response → the reply is done (or the agent is now waiting on the
         // user). Re-arm on any later non-final event (multi-agent turns emit a
         // final response per sub-agent before control returns to the coordinator).
@@ -229,6 +250,7 @@ export function ChatPage({
       onError: (err) => {
         if (gen !== streamGen.current) return
         setError(err.message)
+        if (err instanceof TurnFailedError) setTurnError(err.turnError)
         setIsStreaming(false)
       },
       onClose: () => {
@@ -293,8 +315,9 @@ export function ChatPage({
     }
     setEvents((prev) => [...prev, optimistic])
 
+    setTurnError(null)
     attachStream((cb) =>
-      streamRun({ appName, userId, sessionId: session.id, message: text }, cb),
+      streamTurnRun({ appName, userId, sessionId: session.id, message: text }, cb),
     )
   }
 
@@ -322,12 +345,24 @@ export function ChatPage({
     }
     setEvents((prev) => [...prev, optimistic])
 
+    setTurnError(null)
     attachStream((cb) =>
-      streamFunctionResponse(
+      streamTurnFunctionResponse(
         { appName, userId, sessionId: session.id, callId, toolName, response },
         cb,
       ),
     )
+  }
+
+  function handleRetryTurn() {
+    if (!appName || !session) return
+    setError(null)
+    setTurnError(null)
+    void retryLastTurn(appName, userId, session.id)
+      .then((snap) =>
+        attachStream((cb) => streamExistingTurn(snap.turn_id, 0, cb)),
+      )
+      .catch((e) => setError(`Retry failed: ${(e as Error).message}`))
   }
 
   function handleAbort() {
@@ -526,8 +561,14 @@ export function ChatPage({
           </div>
         </header>
         {error && (
-          <div className="border-b bg-destructive/10 px-6 py-2 text-sm text-destructive">
-            {error}
+          <div className="flex items-center gap-3 border-b bg-destructive/10 px-6 py-2 text-sm text-destructive">
+            <span className="min-w-0 flex-1 truncate">{error}</span>
+            {turnError?.rate_limited && (
+              <Button size="sm" variant="outline" className="h-7 shrink-0"
+                onClick={handleRetryTurn}>
+                Retry turn
+              </Button>
+            )}
           </div>
         )}
         {notice && (
