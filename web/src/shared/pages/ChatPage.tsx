@@ -213,24 +213,17 @@ export function ChatPage({
   // lags behind by any silent post-turn work (e.g. the session-title model call).
   // Every callback is fenced by the turn's `gen`, so a prior stream finishing its
   // tail can't stomp a newer turn.
-  // F3 (dogfooding): a confirmation answered inside a sub-agent resumes the
-  // run ROOTED at that sub-agent; when it finishes, its `_handback_to_
-  // coordinator` marker dangles and the run ends without the coordinator's
-  // continuation. Detect that exact shape at stream close (a healthy turn
-  // never ENDS on the handback — the coordinator's reply follows it) and
-  // auto-continue once.
-  const lastStreamEventRef = useRef<RunEvent | null>(null)
-  const autoContinuedRef = useRef(false)
+  // F3 continuation lives SERVER-SIDE now: ADK resumability keeps the resumed
+  // run rooted at the coordinator, and the Turn Broker auto-continues when a
+  // handback lacks a coordinator reply — for every driver, not just this UI.
+  // (The client-side "Continue." hack that lived here is retired.)
 
   function attachStream(make: (cb: StreamCallbacks) => () => void) {
     const gen = ++streamGen.current
     setIsStreaming(true)
-    lastStreamEventRef.current = null
-    autoContinuedRef.current = false
     abortRef.current = make({
       onEvent: (e) => {
         if (gen !== streamGen.current) return
-        lastStreamEventRef.current = e
         // Dedupe by event id: a re-attached tail replays from a cursor and
         // may overlap events already loaded from the session.
         setEvents((prev) =>
@@ -258,16 +251,6 @@ export function ChatPage({
         setIsStreaming(false)
         abortRef.current = null
         refreshAfterTurn()
-        // Dangling sub-agent handback → the coordinator never got its turn.
-        const last = lastStreamEventRef.current
-        const dangling = (last?.content?.parts ?? []).some(
-          (p) => (p as { functionCall?: { name?: string } }).functionCall?.name ===
-            "_handback_to_coordinator",
-        )
-        if (dangling && !autoContinuedRef.current) {
-          autoContinuedRef.current = true
-          handleSend("Continue.")
-        }
       },
     })
   }

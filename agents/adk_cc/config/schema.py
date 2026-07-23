@@ -691,6 +691,10 @@ FIELDS: list[Var] = [
         "Generate tool/session titles (costs extra model tokens).", default=False, parse=as_bool),
     Var("ADK_CC_TASK_REMINDER", Tier.ADVANCED, "Behavior",
         "Periodic task-list nudge (set 0 to disable).", default=True, parse=as_bool),
+    Var("ADK_CC_RESUMABLE", Tier.ADVANCED, "Behavior",
+        "ADK-native resumable invocations: confirmations inside specialists "
+        "resume the original run (kill switch for durable-runs P3).",
+        default=True, parse=as_bool),
     Var("ADK_CC_WEB_FETCH_ALLOW_PRIVATE", Tier.DEV, "Behavior",
         "Disable the SSRF guard so localhost can be fetched (security-sensitive).", default=False, parse=as_bool),
     Var("ADK_CC_WEB_FETCH_HOSTS", Tier.ADVANCED, "Behavior",

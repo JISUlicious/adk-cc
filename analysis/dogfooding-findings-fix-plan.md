@@ -16,12 +16,12 @@ UI carrying real content. The findings below are what broke or ground.
 
 | # | Finding | Severity | Status |
 |---|---------|----------|--------|
-| F1 | Turn dies on client disconnect | High | open (design first) |
-| F2 | Retry ladder ≪ free-tier throttle windows; no retry affordance | Medium | **F2a FIXED** (classifier: burst/upstream/quota ladders, quota fail-fast w/ reset time); F2b UI retry button still open |
-| F3 | Confirmation-resume ends at `_handback_to_coordinator` | High | **ROOT-CAUSED + client mitigation shipped** (see below); server-side fix still open |
+| F1 | Turn dies on client disconnect | High | **FIXED** (Turn Broker P1+P2: server-side turns, re-attachable tail, UI reconnect-on-mount; live-verified through reload AND full client exit) |
+| F2 | Retry ladder ≪ free-tier throttle windows; no retry affordance | Medium | **F2a FIXED** (classifier: burst/upstream/quota ladders, quota fail-fast w/ reset time); **F2b FIXED** (broker `retry-last` + UI Retry button on rate-limited errors) |
+| F3 | Confirmation-resume ends at `_handback_to_coordinator` | High | **FIXED** (P3: ADK resumability ON — answer resumes the ORIGINAL invocation, root preserved, completed tools not re-run; broker auto-continue supplies the coordinator reply for every driver; client hack retired. `ADK_CC_RESUMABLE=0` kill switch) |
 | F4 | `exit_plan_mode` restores hardcoded `default`, not pre-plan mode | High | **FIXED** (enter records `plan_previous_mode`; exit restores it, never into plan, marker consumed) |
 | F5 | Confirmation waves: N cards, mid-turn `allow_always` efficacy unverified | Medium | **F5a RESOLVED — grants work as designed** (see below); F5b apply-to-all UI still open |
-| F2c | Failed zero-output turns leave duplicate user messages in history | Medium | open |
+| F2c | Failed zero-output turns leave duplicate user messages in history | Medium | open (durable-runs P4: broker prunes the orphan via file-session `delete_last_event`) |
 | F6 | Command-safety: heredoc handling + /tmp scope | High (security) | **FIXED** — 3 parts: heredoc bodies stripped as data (the flagged probe was a FALSE POSITIVE: a JS regex mined as a path); /tmp+$TMPDIR now in scope by design (scratch convention, user decision); `_in_scope` fail-open now logs. The live /tmp pass was thus consistent with intended design; the false positive was the actual bug. |
 | F7 | Desktop audit sink apparently silent | High | **CLOSED — not a bug.** Repo `.env` sets a RELATIVE `ADK_CC_AUDIT_LOG=./.audit/audit.jsonl`; the sidecar (cwd=repo) wrote 6k+ rows there all along, incl. every dogfooding session. Hardening shipped: override absolutized at bind + the bound sink logged once at INFO (the trail was undiscoverable, which is what made this look like data loss). |
 
@@ -49,10 +49,13 @@ invocation there is none, so the marker dangles and the run ends.
 **Shipped mitigation (client)**: ChatPage detects a stream that ENDS on a
 dangling `_handback_to_coordinator` (never happens in healthy turns — the
 coordinator's reply always follows it) and auto-continues once ("Continue.").
-**Still open (server)**: continuation belongs server-side — e.g. after a
-resumed run terminates on a dangling handback, re-invoke the coordinator in
-the same request. Client mitigation covers the web UI only; API drivers still
-see the drop.
+**FIXED server-side (durable-runs P3)**: ADK `ResumabilityConfig` is ON —
+the answer resumes the ORIGINAL invocation (root preserved, completed tools
+not re-executed; pinned by tests/test_resumability_f3.py). ADK still ends a
+resumed parent right after its sub-agent completes (upstream design), so the
+coordinator's reply comes from the Turn Broker's bounded auto-continue —
+detection generalized to "handback with no model text after it". The ChatPage
+client mitigation is retired; all drivers are covered.
 Repro observed on `console-gpt-1`: Explore (sub-agent, in plan mode) hit a
 protected-path confirmation; answering it resumed the run; Explore finished
 and called `_handback_to_coordinator`; the RUN ENDED there — the coordinator

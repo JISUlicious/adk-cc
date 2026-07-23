@@ -45,6 +45,8 @@ Discovered by `adk web` / `adk run` via the module-level `root_agent`.
 from __future__ import annotations
 
 import os
+import uuid
+from typing import Optional
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.context import Context
@@ -110,7 +112,36 @@ from .tools import (
 )
 
 
-def _force_coordinator_continuation(callback_context: Context) -> types.Content:
+def _invocation_is_pausing(callback_context: Context) -> bool:
+    """True when the CURRENT invocation has an outstanding long-running
+    function call (a confirmation / HITL pause) with no answer yet.
+
+    ADK's resumable-pause heuristic only inspects the LAST TWO events of a
+    step to decide whether the invocation is pausing (base_llm_flow, its own
+    TODO admits this). An after-agent event appended after the pause point
+    pushes the long-running call out of that window and the run barrels on —
+    so the handback marker below must stay silent while a pause is in
+    flight."""
+    try:
+        ictx = callback_context._invocation_context
+        events = ictx.session.events or []
+    except AttributeError:  # internals shifted — fail open (emit the marker)
+        return False
+    pending: set[str] = set()
+    for ev in events:
+        if getattr(ev, "invocation_id", None) != callback_context.invocation_id:
+            continue
+        pending.update(getattr(ev, "long_running_tool_ids", None) or ())
+        for part in (getattr(ev.content, "parts", None) or []):
+            fr = getattr(part, "function_response", None)
+            if fr is not None and fr.id:
+                pending.discard(fr.id)
+    return bool(pending)
+
+
+def _force_coordinator_continuation(
+    callback_context: Context,
+) -> Optional[types.Content]:
     """Force the parent flow to take another step after a specialist finishes.
 
     Returning a Content with a function_call Part makes the wrapping Event
@@ -120,13 +151,23 @@ def _force_coordinator_continuation(callback_context: Context) -> types.Content:
     specialist's output in the conversation history.
 
     The synthetic call is for a no-op name, never executed; it's a control
-    signal, not a real tool call.
-    """
+    signal, not a real tool call. It carries a REAL id: a resumable run
+    auto-answers unanswered function calls when control returns to the
+    parent, and an id-less call/response pair crashes ADK's content
+    rearrangement (`function responses ids: {None}`).
+
+    When the invocation is PAUSING on a confirmation, no marker is emitted:
+    the specialist hasn't semantically finished, and the marker would both
+    hide the pause from ADK's resumable-pause detection and dangle as the
+    run's last event (F3)."""
+    if _invocation_is_pausing(callback_context):
+        return None
     return types.Content(
         role="model",
         parts=[
             types.Part(
                 function_call=types.FunctionCall(
+                    id=f"handback-{uuid.uuid4().hex[:8]}",
                     name="_handback_to_coordinator",
                     args={},
                 )
@@ -1284,5 +1325,19 @@ if env_bool("ADK_CC_MEMORY"):
     from .plugins import MemoryPlugin
 
     _app_kwargs["plugins"].append(MemoryPlugin())
+
+# Durable runs P3 (analysis/durable-runs-design.md): ADK-native resumability.
+# A confirmation answered inside a specialist RESUMES the original invocation
+# (root stays the coordinator, per-agent states restored, completed tools NOT
+# re-executed) instead of starting a fresh run rooted at the specialist —
+# fixing both F3 facets (dangling handback + later turns stuck on the
+# specialist). NOTE ADK ends a resumed parent right after the sub-agent
+# completes (llm_agent._run_async_impl), so the coordinator's final reply
+# still comes from the Turn Broker's bounded auto-continue. Kill switch:
+# ADK_CC_RESUMABLE=0.
+if env_bool("ADK_CC_RESUMABLE", default=True):
+    from google.adk.apps.app import ResumabilityConfig
+
+    _app_kwargs["resumability_config"] = ResumabilityConfig(is_resumable=True)
 
 app = App(**_app_kwargs)

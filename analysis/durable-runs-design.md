@@ -1,9 +1,10 @@
 # Durable runs — owning the turn lifecycle
 
 Design note for the F1 + F3-server + F2b/F2c cluster
-(analysis/dogfooding-findings-fix-plan.md). Status: **P0+P1 LANDED** —
-broker + endpoints live (service/turns.py, service/turn_routes.py); P2 (UI
-switchover) next; P3 resumability trial; P4 pruning.
+(analysis/dogfooding-findings-fix-plan.md). Status: **P0–P3 LANDED** —
+broker + endpoints (service/turns.py, service/turn_routes.py), UI on broker
+turns, resumability ON by default (`ADK_CC_RESUMABLE=0` kill switch). P4
+(orphaned-user-event pruning) remains.
 
 P0 answers: AdkWebServer extracted via endpoint closure cells (routes are
 local functions closing over self); ADK resumability restores per-agent
@@ -11,6 +12,27 @@ states and keeps the ROOT agent on resume → the proper F3 fix, gated to P3
 behind its at-least-once tool semantics. P1 lesson: a task cancelled before
 its first step never runs its coroutine — terminal state needs a
 done-callback net, not just in-coroutine except handlers.
+
+P3 findings (tests/test_resumability_f3.py, all on the real App):
+
+- **ADK ends a resumed parent right after its sub-agent completes**
+  (`llm_agent._run_async_impl`: "run it and then end the current agent") —
+  so even resumable, the coordinator's REPLY still comes from the broker's
+  bounded auto-continue. Detection generalized: a handback with no model
+  text after it (the marker is NOT the last event in the resumable shape —
+  an auto-response + end-of-agent checkpoints follow it).
+- **ADK's resumable-pause heuristic only inspects the last 2 events** of a
+  step; our after-agent handback marker used to land after the pause point
+  and hide it. Fix: `_force_coordinator_continuation` stays silent while the
+  invocation has an unanswered long-running call, and the marker carries a
+  real id (a resumable run auto-answers unanswered calls; an id-less pair
+  crashes ADK's content rearrangement with `function responses ids: {None}`).
+- At-least-once risk did NOT materialize: tools completed before the pause
+  are not re-executed on resume (pinned by test).
+- Next-turn rooting was empirically fine even WITHOUT resumability — the
+  damage was confined to the resumed turn itself.
+- The ChatPage client auto-continue is retired; the broker owns the F3
+  continuation for every driver.
 
 ## Problem
 

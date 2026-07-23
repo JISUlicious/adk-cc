@@ -41,13 +41,24 @@ _HANDBACK = "_handback_to_coordinator"
 
 
 def _is_dangling_handback(event: Any) -> bool:
-    """True when `event` (the run's LAST event) is the specialist's synthetic
-    handback marker — a healthy turn always has the coordinator's reply after
-    it, so ENDING on it means the resumed run dropped the continuation."""
+    """True when `event` carries the specialist's synthetic handback marker
+    (a `_handback_to_coordinator` function call)."""
     content = getattr(event, "content", None)
     for p in getattr(content, "parts", None) or []:
         fc = getattr(p, "function_call", None)
         if fc is not None and getattr(fc, "name", None) == _HANDBACK:
+            return True
+    return False
+
+
+def _has_model_text(event: Any) -> bool:
+    """A model-authored, non-partial event with visible (non-thought) text —
+    i.e. an actual reply the user sees."""
+    if getattr(event, "author", "user") == "user" or getattr(event, "partial", False):
+        return False
+    content = getattr(event, "content", None)
+    for p in getattr(content, "parts", None) or []:
+        if getattr(p, "text", None) and not getattr(p, "thought", False):
             return True
     return False
 
@@ -238,20 +249,31 @@ class TurnBroker:
             runner = await self._get_runner(turn.app_name)
             message = turn.new_message
             for round_ in range(1 + _MAX_CONTINUES):
-                last_event = None
+                # F3 detection: the round needs a continuation when a handback
+                # marker appears with NO model text after it. Covers both
+                # shapes: non-resumable (marker IS the last event) and
+                # resumable (ADK ends a resumed parent right after the
+                # sub-agent — the marker is followed only by its auto-response
+                # and end-of-agent checkpoints, never a reply).
+                dangling = False
+                saw_any = False
                 async for event in runner.run_async(
                     user_id=turn.user_id,
                     session_id=turn.session_id,
                     new_message=message,
                     state_delta=turn.state_delta if round_ == 0 else None,
                 ):
-                    last_event = event
+                    saw_any = True
+                    if _is_dangling_handback(event):
+                        dangling = True
+                    elif _has_model_text(event):
+                        dangling = False
                     authored = getattr(event, "author", "user") != "user"
                     await turn.push(
                         event.model_dump_json(exclude_none=True, by_alias=True),
                         model_authored=authored,
                     )
-                if last_event is None or not _is_dangling_handback(last_event):
+                if not saw_any or not dangling:
                     break
                 # F3 (server half): the resumed run ended on the specialist's
                 # dangling handback — continue so the coordinator replies.
