@@ -169,6 +169,10 @@ Implementation sketch (`models/selectable.py` + a small
    pending in one turn.
 
 ### P3 — durable turns (design-first, biggest)
+**Design note written: analysis/durable-runs-design.md (PROPOSED)** — Turn
+Broker owning run execution server-side; closes F1, F3-server, F2b, F2c in
+four phases. Review before implementing.
+
 7. **F1**: decouple run execution from the SSE consumer — the run executes as
    a server-side task persisting events; `/run_sse` tails it; disconnect
    loses the view, not the work; reopening re-attaches. Touches the
