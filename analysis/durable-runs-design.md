@@ -1,8 +1,16 @@
 # Durable runs — owning the turn lifecycle
 
 Design note for the F1 + F3-server + F2b/F2c cluster
-(analysis/dogfooding-findings-fix-plan.md). Status: PROPOSED — review before
-implementing.
+(analysis/dogfooding-findings-fix-plan.md). Status: **P0+P1 LANDED** —
+broker + endpoints live (service/turns.py, service/turn_routes.py); P2 (UI
+switchover) next; P3 resumability trial; P4 pruning.
+
+P0 answers: AdkWebServer extracted via endpoint closure cells (routes are
+local functions closing over self); ADK resumability restores per-agent
+states and keeps the ROOT agent on resume → the proper F3 fix, gated to P3
+behind its at-least-once tool semantics. P1 lesson: a task cancelled before
+its first step never runs its coroutine — terminal state needs a
+done-callback net, not just in-coroutine except handlers.
 
 ## Problem
 

@@ -103,6 +103,32 @@ def build_fastapi_app(
         lifespan=make_consolidation_lifespan(),
     )
 
+    # Durable runs (Turn Broker — analysis/durable-runs-design.md): turns
+    # execute as server-side tasks; /api/turns/* is a re-attachable tail, so a
+    # client disconnect no longer kills the run. Uses the SAME runner+session
+    # service as ADK's routes (extracted from the AdkWebServer the app was
+    # built around). Degrades gracefully if ADK's internals shift: the legacy
+    # /run_sse path is untouched either way.
+    from .turn_routes import mount_turn_routes
+    from .turns import TurnBroker, extract_adk_web_server
+
+    _adk_server = extract_adk_web_server(fastapi_app)
+    if _adk_server is not None:
+        mount_turn_routes(
+            fastapi_app,
+            TurnBroker(
+                get_runner=_adk_server.get_runner_async,
+                session_service=_adk_server.session_service,
+            ),
+        )
+    else:  # pragma: no cover — ADK internals changed
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "durable turns disabled: AdkWebServer not found behind "
+            "get_fast_api_app (ADK internals changed?) — /run_sse still works."
+        )
+
     # Context-fullness limits for the UI gauge (compaction-indicator P2). Returns
     # the resolved ladder (max/reserve/effective/warn/reject + compaction
     # threshold), or {} when the guard is disabled. Read-only; behind auth.
