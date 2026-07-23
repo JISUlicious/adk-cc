@@ -73,6 +73,7 @@ from .plugins import (
     ModelIOTracePlugin,
     ProjectContextPlugin,
     ConfirmationFormUiPlugin,
+    HandbackHygienePlugin,
     ContextGuardPlugin,
     McpExportArtifactPlugin,
     MicrocompactPlugin,
@@ -1260,6 +1261,11 @@ _app_kwargs = dict(
         # request_confirmation resume processor handles them unchanged.
         # Disable to fall back to the binary widget.
         ConfirmationFormUiPlugin(),
+        # With resumability ON, ADK auto-answers the trailing handback
+        # marker; the response can never pair with its (foreign) call in the
+        # coordinator's contents and aborts the turn. Strip it. See
+        # plugins/handback_hygiene.py.
+        HandbackHygienePlugin(),
         # Microcompaction (opt-in, ADK_CC_MICROCOMPACT=1): stub old, large
         # tool-result content in the outgoing request — the cheap, no-model
         # tier. Runs BEFORE ContextGuard so the shrink is reflected in its

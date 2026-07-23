@@ -318,6 +318,33 @@ def test_resumable_broker_completes_the_turn() -> None:
     print("OK test_resumable_broker_completes_the_turn")
 
 
+def test_resumable_plain_transfer_turn() -> None:
+    """A PLAIN (non-resumed) turn that transfers to a specialist, with
+    resumability ON — the everyday Explore/verification path. ADK's resumable
+    step-runner auto-executes the trailing handback marker; without hygiene
+    the coordinator's next contents assembly dies with 'No function call
+    event found for function responses ids' (live dogfooding crash). The
+    turn must complete IN-TURN with the coordinator's synthesis."""
+    async def main():
+        import adk_cc.agent as A
+
+        runner, svc, llm = _fresh([
+            _fc_resp("fc-t", "transfer_to_agent", {"agent_name": "Explore"}),
+            _text_resp("explore report: nothing scary"),
+            _text_resp("SYNTHESIS: all good"),
+        ], resumable=True)
+        s = await svc.create_session(app_name=A.app.name, user_id="u1")
+        ev = await asyncio.wait_for(_run(runner, s.id, _msg("look around")), 60)
+        assert any("SYNTHESIS" in t for t in _coordinator_texts(ev)), (
+            [getattr(e, "author", "?") for e in ev])
+        assert llm.calls == 3, llm.calls
+        # hygiene: no handback function_response survives in history
+        full = await _session_events(svc, s.id)
+        assert _tool_response_count(full, "_handback_to_coordinator") == 0
+    asyncio.run(main())
+    print("OK test_resumable_plain_transfer_turn")
+
+
 def test_resumable_plain_turn_unchanged() -> None:
     """Everyday path: a plain text turn with resumability ON is unaffected."""
     async def main():
@@ -368,6 +395,7 @@ def main() -> None:
         test_baseline_reproduces_f3()
         test_resumable_resumes_original_invocation()
         test_resumable_broker_completes_the_turn()
+        test_resumable_plain_transfer_turn()
         test_resumable_plain_turn_unchanged()
         test_resumable_coordinator_level_confirmation()
     finally:
