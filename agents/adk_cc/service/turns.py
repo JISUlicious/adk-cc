@@ -13,6 +13,10 @@ Also closes, at the broker layer:
     the specialist's handback marker then dangles) is auto-continued — bounded
     — so the coordinator gets its turn for EVERY driver, not just the web UI.
   - F2b: `retry_last` re-runs the last errored turn's original message.
+  - F2c: an errored ZERO-output turn's orphaned user message is pruned when
+    the session gets its next turn (retry or fresh message), via the file
+    session service's `delete_last_event`; other services degrade to the old
+    reuse-without-prune behavior.
   - Error classification: terminal errors carry the rate-limit class from
     `models/rate_limit.py` so UIs can render "retry" vs "switch model".
 
@@ -100,6 +104,7 @@ class Turn:
         self.started_at = time.time()
         self.finished_at: Optional[float] = None
         self.task: Optional[asyncio.Task] = None
+        self.prune_orphan_of: Optional["Turn"] = None  # F2c, set by the broker
         self._cond = asyncio.Condition()
 
     # -- event flow -----------------------------------------------------
@@ -194,6 +199,14 @@ class TurnBroker:
             raise RuntimeError(f"session busy: turn {cur.id} is running")
         turn = Turn(app_name=app_name, user_id=user_id, session_id=session_id,
                     new_message=new_message, state_delta=state_delta)
+        # F2c: an errored turn with ZERO model events left exactly one thing
+        # in history — its orphaned user message. Whatever the user does next
+        # (Retry button or a fresh message), prune it first so the transcript
+        # doesn't grow a duplicate. Resolved inside _drive (async), BEFORE the
+        # new run appends anything.
+        if (cur is not None and cur.status == "error"
+                and cur.model_events == 0):
+            turn.prune_orphan_of = cur
         self._turns[turn.id] = turn
         self._latest_by_session[(app_name, user_id, session_id)] = turn.id
         turn.task = asyncio.create_task(self._drive(turn), name=f"adk-cc-{turn.id}")
@@ -227,10 +240,10 @@ class TurnBroker:
 
     def retry_last(self, *, app_name: str, user_id: str, session_id: str) -> Turn:
         """Re-run the latest turn's ORIGINAL message (F2b). Only for turns
-        that ended in error. NOTE (F2c): the errored attempt's user event may
-        still sit in history; pruning lands with the session-service delete
-        support — until then the model sees a repeated user message, which is
-        exactly what manual re-sending caused anyway."""
+        that ended in error. F2c: when the errored attempt produced zero
+        model events, its orphaned user event is pruned before the re-run
+        (start() marks it; _drive prunes via the session service's
+        `delete_last_event` when available)."""
         last = self.latest_for(app_name, user_id, session_id)
         if last is None:
             raise LookupError("no previous turn for this session")
@@ -244,9 +257,47 @@ class TurnBroker:
 
     # -- the run itself -------------------------------------------------
 
+    async def _prune_orphan(self, turn: Turn) -> None:
+        """F2c: delete the previous errored zero-output turn's orphaned user
+        message. Guarded three ways: the session service must support
+        `delete_last_event` (our file service does; others degrade to the old
+        reuse-without-prune behavior), the session's LAST event must still be
+        a plain user message, and its text must match the failed turn's —
+        anything else means another driver touched the session and we leave
+        history alone. Best-effort: a prune failure never blocks the turn."""
+        prev = turn.prune_orphan_of
+        svc = self.session_service
+        if prev is None or not hasattr(svc, "delete_last_event"):
+            return
+        try:
+            session = await svc.get_session(
+                app_name=turn.app_name, user_id=turn.user_id,
+                session_id=turn.session_id)
+            events = getattr(session, "events", None) or []
+            if not events:
+                return
+            last = events[-1]
+            if getattr(last, "author", None) != "user":
+                return
+
+            def _texts(content: Any) -> list[str]:
+                return [p.text for p in getattr(content, "parts", None) or []
+                        if getattr(p, "text", None)]
+
+            if _texts(getattr(last, "content", None)) != _texts(prev.new_message):
+                return
+            if await svc.delete_last_event(
+                    user_id=turn.user_id, session_id=turn.session_id,
+                    event_id=getattr(last, "id", "")):
+                _log.info("turn %s: pruned orphaned user event of errored "
+                          "turn %s (F2c)", turn.id, prev.id)
+        except Exception as e:  # noqa: BLE001 — prune is best-effort
+            _log.warning("turn %s: orphan prune failed: %s", turn.id, e)
+
     async def _drive(self, turn: Turn) -> None:
         try:
             runner = await self._get_runner(turn.app_name)
+            await self._prune_orphan(turn)
             message = turn.new_message
             for round_ in range(1 + _MAX_CONTINUES):
                 # F3 detection: the round needs a continuation when a handback

@@ -13,7 +13,7 @@
  */
 
 import { getToken } from "./auth"
-import { apiFetch, ensureFreshAccess } from "./client"
+import { ApiError, apiFetch, ensureFreshAccess } from "./client"
 import type { FunctionResponseArgs, RunArgs, RunEvent, StreamCallbacks } from "./sse"
 
 export interface TurnError {
@@ -72,10 +72,25 @@ async function _startTurn(
   args: { appName: string; userId: string; sessionId: string },
   newMessage: unknown,
 ): Promise<TurnSnapshot> {
-  return apiFetch<TurnSnapshot>(`/api/turns`, {
-    method: "POST",
-    body: JSON.stringify({ ...args, newMessage }),
-  })
+  // 409 = single-flight busy. The visible turn can END (final reply, or a
+  // confirmation card) while its server-side task briefly lives on for
+  // post-turn work (e.g. the out-of-band session-title call) — a user who
+  // answers a confirmation the moment the card appears lands in that window.
+  // Briefly retry instead of surfacing a spurious "busy" error.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await apiFetch<TurnSnapshot>(`/api/turns`, {
+        method: "POST",
+        body: JSON.stringify({ ...args, newMessage }),
+      })
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409 && attempt < 20) {
+        await new Promise((r) => setTimeout(r, 500))
+        continue
+      }
+      throw e
+    }
+  }
 }
 
 /** Tail a turn's SSE stream from `cursor`. Resolves when the stream ends. */

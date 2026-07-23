@@ -365,6 +365,35 @@ class FileSessionService(BaseSessionService):
             os.replace(tmp, path)
         return len(kept)
 
+    async def delete_last_event(
+        self, *, user_id: str, session_id: str, event_id: str
+    ) -> bool:
+        """Delete the session's LAST event — only when its id matches
+        `event_id` (the caller states what it believes is last; a mismatch
+        means someone appended meanwhile and nothing is touched). Used by the
+        Turn Broker to prune the orphaned user message of an errored
+        zero-output turn (F2c) before re-running it. Atomic (tmp + replace).
+        Returns True when the event was deleted."""
+        try:
+            path = self._session_file(user_id, session_id)
+        except ValueError:
+            return False
+        if not path.exists() or not event_id:
+            return False
+        async with self._lock_for(session_id):
+            header, events = self._read_file(path)
+            if not events or getattr(events[-1], "id", None) != event_id:
+                return False
+            kept = events[:-1]
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                if header:
+                    f.write(json.dumps(header) + "\n")
+                for ev in kept:
+                    f.write(json.dumps({"kind": "event", "event": ev.model_dump(mode="json")}) + "\n")
+            os.replace(tmp, path)
+        return True
+
     async def append_event(self, session: Session, event: Event) -> Event:
         if event.partial:
             return event

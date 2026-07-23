@@ -1,10 +1,20 @@
 # Durable runs — owning the turn lifecycle
 
 Design note for the F1 + F3-server + F2b/F2c cluster
-(analysis/dogfooding-findings-fix-plan.md). Status: **P0–P3 LANDED** —
+(analysis/dogfooding-findings-fix-plan.md). Status: **COMPLETE (P0–P4)** —
 broker + endpoints (service/turns.py, service/turn_routes.py), UI on broker
-turns, resumability ON by default (`ADK_CC_RESUMABLE=0` kill switch). P4
-(orphaned-user-event pruning) remains.
+turns, resumability ON by default (`ADK_CC_RESUMABLE=0` kill switch),
+orphaned-user-event pruning. Full-UI e2e (Playwright on the live desktop
+app) covers: confirmation→resume, error→Retry→prune, reload-mid-turn.
+
+P4 findings: `FileSessionService.delete_last_event` (atomic, id-guarded);
+the broker marks the prune target in `start()` (covers Retry AND a fresh
+message after a zero-output error) and executes it in `_drive` before the
+new run — three guards (service capability, last-event-is-user,
+text equality) keep foreign history untouched. The UI e2e also exposed a
+real race: a turn's task outlives its visible end (out-of-band session-title
+call), so answering a confirmation instantly hit the single-flight 409 —
+fixed with a bounded 409 retry in the turns client (`_startTurn`).
 
 P0 answers: AdkWebServer extracted via endpoint closure cells (routes are
 local functions closing over self); ADK resumability restores per-agent
