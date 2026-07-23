@@ -23,7 +23,7 @@ UI carrying real content. The findings below are what broke or ground.
 | F5 | Confirmation waves: N cards, mid-turn `allow_always` efficacy unverified | Medium | **F5a RESOLVED — grants work as designed** (see below); F5b apply-to-all UI still open |
 | F2c | Failed zero-output turns leave duplicate user messages in history | Medium | open |
 | F6 | Command-safety: heredoc handling + /tmp scope | High (security) | **FIXED** — 3 parts: heredoc bodies stripped as data (the flagged probe was a FALSE POSITIVE: a JS regex mined as a path); /tmp+$TMPDIR now in scope by design (scratch convention, user decision); `_in_scope` fail-open now logs. The live /tmp pass was thus consistent with intended design; the false positive was the actual bug. |
-| F7 | Desktop audit sink: no audit.jsonl written under ~/.adk-cc-desktop since the data-root change (tool events ran; file absent) | High | open (investigate — possible silent audit loss on desktop) |
+| F7 | Desktop audit sink apparently silent | High | **CLOSED — not a bug.** Repo `.env` sets a RELATIVE `ADK_CC_AUDIT_LOG=./.audit/audit.jsonl`; the sidecar (cwd=repo) wrote 6k+ rows there all along, incl. every dogfooding session. Hardening shipped: override absolutized at bind + the bound sink logged once at INFO (the trail was undiscoverable, which is what made this look like data loss). |
 
 ### F1 — turn dies on client disconnect
 Symptom (twice): SSE consumer timing out / dropping severs the run mid-flight.

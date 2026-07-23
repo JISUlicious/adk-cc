@@ -44,6 +44,7 @@ AuditPlugin is configured are silent no-ops.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -76,7 +77,11 @@ Sink = Union[str, Path, Callable[[dict], None]]
 def _default_sink_path() -> Path:
     override = os.environ.get("ADK_CC_AUDIT_LOG")
     if override:
-        return Path(override)
+        # Absolutize NOW (against the boot cwd) — a relative override would
+        # otherwise re-resolve per launch context; and cwd-relative sinks made
+        # the audit trail effectively undiscoverable (F7: a full investigation
+        # to learn the trail was in <repo>/.audit all along).
+        return Path(override).expanduser().resolve()
     from .. import deployment as _dep
 
     return _dep.data_dir() / "audit.jsonl"
@@ -94,6 +99,8 @@ class AuditPlugin(BasePlugin):
         self._sink_path: Optional[Path] = None
         if sink is None:
             self._sink_path = _default_sink_path()
+            # One INFO line so operators can always FIND the trail.
+            logging.getLogger(__name__).info("audit sink: %s", self._sink_path)
         elif callable(sink):
             self._sink_callable = sink
         else:
