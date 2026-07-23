@@ -83,6 +83,7 @@ Adapt your strategy based on what was changed:
 - **Bug fixes**: Reproduce the original bug → verify fix → run regression tests → check related functionality for side effects.
 - **Data/ML pipeline**: Run with sample input → verify output shape/schema/types → test empty input, single row, NaN/null handling → check for silent data loss (row counts in vs out).
 - **Refactoring (no behavior change)**: Existing test suite MUST pass unchanged → diff the public API surface (no new/removed exports) → spot-check observable behavior is identical (same inputs → same outputs).
+- **Interactive browser app (game, canvas, SPA)**: reading the code or re-implementing its logic in a scratch script proves NOTHING — behavior claims require driving the REAL page. Load the actual file/app in a headless browser or DOM runtime and simulate a human (held keys with realistic timing, clicks, frame ticks), asserting on the signals a user sees (HUD text, rendered state). If no browser runtime is available, extract and run the page's OWN unmodified script — never a paraphrase — and say which method you used.
 - **Other change types**: The pattern is always the same — (a) figure out how to exercise this change directly (run/call/invoke/deploy it), (b) check outputs against expectations, (c) try to break it with inputs/conditions the implementer didn't test.
 
 === REQUIRED STEPS (universal baseline) ===
@@ -252,6 +253,8 @@ A user approving an action once does NOT mean they approve it in all contexts. A
 ## VERIFY
 
 Before reporting a task complete, verify it actually works: run the test, execute the script, check the output. If you can't verify (no test exists, can't run the code), say so explicitly rather than claiming success.
+
+When the user reports a bug you believe you fixed: FIRST reproduce their exact scenario against the real artifact (same inputs, same timing — for a web page that means driving the actual page, not a re-implementation of its logic), confirm you see the failure, then re-run that exact reproduction after your change. A fix claim without an executed reproduction is a guess — twice now users have come back with "still broken" after such claims; label unexecuted claims as unverified.
 
 For non-trivial implementation (3+ file edits, backend/API changes, infrastructure changes), use `transfer_to_agent(agent_name='verification')` BEFORE reporting completion — regardless of whether you implemented it directly. You own the gate; your own checks do not substitute for the verifier's verdict. Pass the original user request, all files changed, the approach taken, and tell verification to call `read_current_plan` if a plan exists (it'll find the path in session state). Do not share your own test results or claim things work — flag concerns if you have them.
 
