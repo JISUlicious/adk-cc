@@ -32,13 +32,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import Optional
 
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.models.llm_request import LlmRequest
 from google.adk.plugins.base_plugin import BasePlugin
-from google.adk.utils.context_utils import Aclosing
 from google.genai import types
 
 from ..config.schema import env_bool
@@ -46,7 +46,6 @@ from ..memory import (
     MemoryStore,
     consolidate_user,
     consolidation_lock,
-    pending_episodic_count,
     recall_context,
 )
 
@@ -99,17 +98,27 @@ def _threshold_synthesizer(model):
 
 
 async def maybe_threshold_consolidate(store: MemoryStore, user_id: str, model=None):
-    """If ≥ threshold unprocessed episodics have stacked for this user,
-    consolidate now (episodic→semantic). Uses the LLM synthesizer to distill the
-    facts unless ADK_CC_MEMORY_SYNTH=deterministic (then latest-wins, no model
-    call). Serialized against the periodic scheduler via the shared lock;
-    self-guarded so it never breaks a run."""
+    """Promote topics whose unprocessed episodic count reached the threshold
+    (episodic→semantic). PER-TOPIC: the threshold expresses corroboration —
+    "this fact was observed N times" — so a lone capture on topic A must not
+    ride to semantic on the back of unrelated captures B, C, D (which is what
+    a global pending count did: 4 singleton topics ≥ 2 → everything promoted
+    at confidence 0.5). Topics below the bar stay episodic until corroborated
+    or until the periodic scheduler's sweep promotes them time-based. Uses the
+    LLM synthesizer unless ADK_CC_MEMORY_SYNTH=deterministic. Serialized
+    against the periodic scheduler via the shared lock; self-guarded so it
+    never breaks a run."""
     try:
         threshold = _consolidate_threshold()
         if threshold <= 0:
             return None
-        pending = pending_episodic_count(store, user_id)
-        if pending < threshold:
+        from ..memory.store import ACTIVE, DRAFT
+        per_topic: dict[str, int] = {}
+        for item in store.list_episodic(user_id):
+            if item.status in (ACTIVE, DRAFT):
+                per_topic[item.topic] = per_topic.get(item.topic, 0) + 1
+        eligible = {t for t, n in per_topic.items() if n >= threshold}
+        if not eligible:
             return None
 
         synth = _threshold_synthesizer(model)
@@ -117,12 +126,13 @@ async def maybe_threshold_consolidate(store: MemoryStore, user_id: str, model=No
         def _run():  # sync; runs in a worker thread, holds the cross-caller lock
             with consolidation_lock:
                 return consolidate_user(
-                    store, user_id, synthesizer=synth, stale_days=_stale_days())
+                    store, user_id, synthesizer=synth,
+                    stale_days=_stale_days(), only_topics=eligible)
 
         rep = await asyncio.to_thread(_run)
         _log.info(
-            "memory: threshold consolidation user=%s pending=%d topics=%d synth=%s",
-            user_id, pending, rep.topics_consolidated,
+            "memory: threshold consolidation user=%s topics=%d/%d pending "
+            "synth=%s", user_id, rep.topics_consolidated, len(per_topic),
             "llm" if synth else "deterministic",
         )
         return rep
@@ -222,16 +232,26 @@ def _turn_transcript(ictx: InvocationContext, *, max_chars: int = 6000) -> str:
 
 
 def _parse_facts(raw: str) -> list[tuple[str, str]]:
+    """Parse `TOPIC: <slug> | <fact>` lines. Hardened against glued model
+    output (a mid-line `TOPIC:` starts a new entry — seen live when a
+    double-yielding delegate joined two copies without a newline) and against
+    duplicate facts (same topic+text kept once)."""
     out: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for line in (raw or "").splitlines():
         s = line.strip()
         if not s or s.upper() == "NONE":
             continue
-        if s.upper().startswith("TOPIC:"):
-            body = s[len("TOPIC:"):].strip()
-            topic, sep, fact = body.partition("|")
+        for chunk in re.split(r"(?=TOPIC:)", s, flags=re.IGNORECASE):
+            c = chunk.strip()
+            if not c.upper().startswith("TOPIC:"):
+                continue
+            body = c[len("TOPIC:"):].strip()
+            topic, _sep, fact = body.partition("|")
             topic, fact = topic.strip(), fact.strip()
-            if topic and fact:
+            key = (topic.lower(), fact)
+            if topic and fact and key not in seen:
+                seen.add(key)
                 out.append((topic, fact))
     return out[:_MAX_FACTS]
 
@@ -277,17 +297,25 @@ class MemoryPlugin(BasePlugin):
             return None
         ictx = invocation_context
         try:
+            # Observability (found live: 1-of-11 turns captured with zero
+            # trace of why the others didn't): every skip path logs its
+            # reason at INFO — one terse line per turn.
             model = getattr(ictx.agent, "canonical_model", None)
             if model is None:
+                _log.info("memory: capture skipped (no model)")
                 return None
             transcript = _turn_transcript(ictx)
             if not transcript.strip():
+                _log.info("memory: capture skipped (empty transcript)")
                 return None
             raw = await asyncio.wait_for(
                 self._extract(model, transcript), timeout=_capture_timeout()
             )
             facts = _parse_facts(raw)
             if not facts:
+                _log.info(
+                    "memory: capture found no durable facts (raw %d chars: %r)",
+                    len(raw or ""), (raw or "")[:80])
                 return None
             state = getattr(ictx.session, "state", None)
             tenant_id, user_id = _tenant_user(state)
@@ -330,13 +358,9 @@ class MemoryPlugin(BasePlugin):
             ],
             config=types.GenerateContentConfig(),
         )
-        raw = ""
-        async with Aclosing(model.generate_content_async(req, stream=False)) as agen:
-            async for resp in agen:
-                for p in (getattr(getattr(resp, "content", None), "parts", None) or []):
-                    if not getattr(p, "thought", None) and getattr(p, "text", None):
-                        raw += p.text
-        return raw
+        # double-yield-safe collector (see memory/llm_text.py)
+        from ..memory.llm_text import final_response_text
+        return await final_response_text(model, req)
 
 
 def _append_to_system_instruction(req: LlmRequest, text: str) -> None:

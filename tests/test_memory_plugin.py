@@ -166,6 +166,61 @@ def test_parse_facts():
     print("OK parse_facts")
 
 
+def test_parse_facts_glued_and_duplicated():
+    """The live double-yield raw: copy-2's first line glued to copy-1's last
+    line without a newline, and middle lines duplicated verbatim. Parsing must
+    split the glue and keep each fact once."""
+    raw = (
+        "TOPIC: game-project | game in game.html\n"
+        "TOPIC: market | uses a bounding box\n"
+        "TOPIC: purchase | exposes buyShopItem()TOPIC: game-project | game in game.html\n"
+        "TOPIC: market | uses a bounding box\n"
+    )
+    facts = _parse_facts(raw)
+    assert facts == [
+        ("game-project", "game in game.html"),
+        ("market", "uses a bounding box"),
+        ("purchase", "exposes buyShopItem()"),
+    ], facts
+    print("OK parse_facts_glued_and_duplicated")
+
+
+def test_final_response_text_double_yield():
+    """Root cause of the doubled memories: a delegate yielding the COMPLETE
+    response twice must produce ONE copy; true partial streams still
+    assemble."""
+    from types import SimpleNamespace
+
+    from adk_cc.memory.llm_text import final_response_text
+
+    def _resp(text, partial=False):
+        return SimpleNamespace(
+            partial=partial,
+            content=SimpleNamespace(parts=[SimpleNamespace(text=text, thought=False)]),
+        )
+
+    class _DoubleYield:
+        async def generate_content_async(self, req, stream=False):
+            yield _resp("THE FACT.")
+            yield _resp("THE FACT.")
+
+    class _PartialsThenFinal:
+        async def generate_content_async(self, req, stream=False):
+            yield _resp("THE ", partial=True)
+            yield _resp("FACT.", partial=True)
+            yield _resp("THE FACT.")  # aggregate replaces the chunks
+
+    class _PartialsOnly:
+        async def generate_content_async(self, req, stream=False):
+            yield _resp("THE ", partial=True)
+            yield _resp("FACT.", partial=True)
+
+    assert asyncio.run(final_response_text(_DoubleYield(), None)) == "THE FACT."
+    assert asyncio.run(final_response_text(_PartialsThenFinal(), None)) == "THE FACT."
+    assert asyncio.run(final_response_text(_PartialsOnly(), None)) == "THE FACT."
+    print("OK final_response_text_double_yield")
+
+
 def main():
     test_recall_injects_known_facts()
     test_recall_skips_empty_query()
@@ -173,6 +228,8 @@ def main():
     test_capture_disabled_via_env()
     test_capture_failure_never_breaks_run()
     test_parse_facts()
+    test_parse_facts_glued_and_duplicated()
+    test_final_response_text_double_yield()
     print("\nall memory-plugin tests passed")
 
 

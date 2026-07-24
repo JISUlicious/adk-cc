@@ -42,18 +42,61 @@ def test_below_threshold_does_not_promote():
     assert pending_episodic_count(s, "alice") == 2
 
 
-def test_at_threshold_promotes_and_resets():
+def test_threshold_is_per_topic():
+    """The threshold expresses CORROBORATION: N observations of the SAME
+    topic. Unrelated singleton captures must not add up to a promotion
+    (the old global count promoted 4 singleton topics on threshold 2 —
+    observed live)."""
     os.environ["ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD"] = "3"
     s = _store()
     s.add_episodic("alice", "deploys to fly", topic="deploy")
     s.add_episodic("alice", "uses postgres", topic="db")
     s.add_episodic("alice", "prefers dark mode", topic="prefs")
     rep = asyncio.run(maybe_threshold_consolidate(s, "alice"))
-    assert rep is not None and rep.topics_consolidated == 3, rep
+    assert rep is None, "3 unrelated singletons must NOT promote"
+    assert s.list_semantic("alice") == []
+    assert pending_episodic_count(s, "alice") == 3
+
+
+def test_corroborated_topic_promotes_alone():
+    """Only the topic that reached the bar is promoted; bystander singletons
+    stay episodic (until corroborated or the periodic sweep)."""
+    os.environ["ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD"] = "2"
+    s = _store()
+    s.add_episodic("alice", "deploys to fly", topic="deploy")
+    s.add_episodic("alice", "fly.io is the deploy target", topic="deploy")
+    s.add_episodic("alice", "uses postgres", topic="db")
+    rep = asyncio.run(maybe_threshold_consolidate(s, "alice"))
+    assert rep is not None and rep.topics_consolidated == 1, rep
     sem = {i.topic for i in s.list_semantic("alice")}
-    assert sem == {"deploy", "db", "prefs"}, sem
-    # sources flipped to CONSOLIDATED → pending resets to 0
-    assert pending_episodic_count(s, "alice") == 0
+    assert sem == {"deploy"}, sem
+    # the uncorroborated topic still pends
+    assert pending_episodic_count(s, "alice") == 1
+
+
+def test_duplicate_captures_do_not_double_semantic_text():
+    """Identical episodic texts corroborate but must not repeat inside the
+    consolidated fact (live bug: every semantic body was its sentence
+    twice)."""
+    os.environ["ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD"] = "2"
+    os.environ["ADK_CC_MEMORY_SYNTH"] = "deterministic"
+    try:
+        seen_lists = []
+        from adk_cc.memory import consolidate_user
+
+        def spy_synth(existing, texts):
+            seen_lists.append(list(texts))
+            return " ".join(texts)
+
+        s = _store()
+        s.add_episodic("alice", "the market uses a bounding box", topic="market")
+        s.add_episodic("alice", "the market uses a bounding box", topic="market")
+        consolidate_user(s, "alice", synthesizer=spy_synth)
+        assert seen_lists == [["the market uses a bounding box"]], seen_lists
+        sem = s.list_semantic("alice")[0]
+        assert sem.text == "the market uses a bounding box", sem.text
+    finally:
+        os.environ.pop("ADK_CC_MEMORY_SYNTH", None)
 
 
 def test_llm_synth_processes_semantic_text():

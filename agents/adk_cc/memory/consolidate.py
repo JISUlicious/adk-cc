@@ -82,9 +82,12 @@ def consolidate_user(
     synthesizer: Optional[Synthesizer] = None,
     stale_days: int = 90,
     now_epoch: Optional[float] = None,
+    only_topics: Optional[set] = None,
 ) -> ConsolidationReport:
     """Fold a user's fresh episodic memories into semantic facts, then sweep
-    stale semantic items to archived."""
+    stale semantic items to archived. `only_topics` restricts the promotion to
+    those topics (the per-topic threshold trigger passes the corroborated
+    ones); None promotes everything pending (the periodic sweep)."""
     synth = synthesizer or _default_synth
     now = now_epoch if now_epoch is not None else time.time()
     report = ConsolidationReport(user_id=user_id)
@@ -96,6 +99,8 @@ def consolidate_user(
     report.episodic_seen = len(fresh)
     clusters: dict[str, list[MemoryItem]] = {}
     for item in fresh:
+        if only_topics is not None and item.topic not in only_topics:
+            continue
         clusters.setdefault(item.topic, []).append(item)
     for items in clusters.values():
         items.sort(key=lambda i: i.created, reverse=True)
@@ -103,7 +108,9 @@ def consolidate_user(
     # 2. merge each topic into its semantic item
     for topic, items in sorted(clusters.items()):
         existing = store.get_semantic(user_id, topic)
-        texts = [i.text for i in items]  # newest first
+        # identical captures corroborate, they don't multiply: dedup before
+        # synthesis or the merged fact repeats itself
+        texts = list(dict.fromkeys(i.text for i in items))  # newest first
         merged = synth(existing.text if existing else None, texts).strip()
         supersedes = list(existing.supersedes) if existing else []
         # keep superseded history: older captures in THIS batch that differ

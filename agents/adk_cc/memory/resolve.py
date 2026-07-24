@@ -82,20 +82,15 @@ _VERIFY_PROMPT = (
 
 async def _generate(model, prompt: str) -> str:
     from google.adk.models.llm_request import LlmRequest
-    from google.adk.utils.context_utils import Aclosing
     from google.genai import types
 
     req = LlmRequest(
         contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
         config=types.GenerateContentConfig(),
     )
-    out = ""
-    async with Aclosing(model.generate_content_async(req, stream=False)) as agen:
-        async for resp in agen:
-            for p in (getattr(getattr(resp, "content", None), "parts", None) or []):
-                if not getattr(p, "thought", None) and getattr(p, "text", None):
-                    out += p.text
-    return out
+    # double-yield-safe collector (see llm_text.py)
+    from .llm_text import final_response_text
+    return await final_response_text(model, req)
 
 
 def _parse(raw: str, facts: list[tuple[str, str]], existing: dict[str, str]) -> list[Resolution]:
