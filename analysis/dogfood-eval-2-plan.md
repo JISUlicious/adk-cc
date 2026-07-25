@@ -64,3 +64,63 @@ and slightly ambiguous. Model: gpt-5.4-mini again (comparability with round
 - Findings ledger appended to this file per phase; adk-cc platform bugs get
   the usual root-cause → fix → test treatment inline (per standing
   instruction).
+
+
+---
+
+# RESULTS (2026-07-25, gpt-5.4-mini, 4 phases + 4 confirmation approvals)
+
+## Pass/fail bars — ALL MET
+
+- Service boots + its own tests pass untouched: PASS (4/4 independently re-run).
+- End-to-end in a real browser: PASS — game served same-origin at
+  `/game.html`, telemetry rows land, Top-10 panel renders live data
+  (screenshot lb3_panel_fixed.png). Zero console errors.
+- **Zero unverified fix claims** (round 1: three). The executed-reproduction
+  prompt rule visibly changed behavior: phase 4's FIRST action was probing
+  for browser tooling, then it authored `service/test_browser_telemetry.py`
+  and iterated it under pytest before claiming the fix.
+- Memory: phase captures are clean single sentences; `game-backend` got
+  corroborated → semantic_supersede (per-topic threshold working live).
+
+## Phase notes
+
+- P1 plan: textbook — enter_plan_mode → explore → write_plan →
+  exit_plan_mode approval; "build nothing yet" respected post-approval.
+  Plan added its own good constraint (game stays playable offline).
+- P2 build: read_current_plan FIRST; files exactly per the plan's critical
+  list; verification specialist ran and returned VERDICT: PASS through the
+  natural resumability path (confirmation inside the sub-agent, resumed,
+  handback, coordinator synthesis). Observation: overshoot — it also built
+  the phase-3 game hooks ("build it" was read as the whole plan).
+- P4 bug (CORS from file:// — invisible to its curl-based checks): correct
+  diagnosis, architectural fix (same-origin `GET /game.html` bridge +
+  permissive CORS), browser-facing regression test. One ~35-minute turn,
+  ~87 tool calls, carried flawlessly by the durable-turn broker.
+
+## Platform findings (adk-cc, this round)
+
+- **F8 title-stanza leak (cosmetic, open):** coordinator sometimes emits the
+  tool-title JSON (`{"title":"Calling verifier"}`) as a TEXT event —
+  polluted final-reply extraction three times. Fix plan: suppress/strip
+  text events that are exactly a title stanza (ToolTitlePlugin on_event, or
+  UI-side), plus a scripted test.
+- **F9 command-safety variable blindness (noisy, open):** `rm -f "$DB"`
+  with `DB=.sessions/...` set in the SAME command was flagged "outside the
+  project". Fix plan: resolve simple same-command `VAR=value` assignments
+  before path classification; keep conservative fallback for unresolvable
+  variables.
+- Confirmation gates (4) were all reasonable (deletes/writes with variable
+  or /tmp paths); resume-after-approval worked every time, including inside
+  the verification specialist — the P3 stack validated repeatedly in
+  unstaged conditions.
+
+## Round-1 vs round-2 delta
+
+| Metric | R1 (game) | R2 (service) |
+|---|---|---|
+| Unverified fix claims | 3 | **0** |
+| Turns to working deliverable | 12 | 4 (+4 approvals) |
+| Verification specialist used | never spontaneously | twice, meaningful |
+| Plan mode | n/a | clean end-to-end |
+| Memory capture | 1 silent capture, corrupted | per-phase, clean, consolidated |
