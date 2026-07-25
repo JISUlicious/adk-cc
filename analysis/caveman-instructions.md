@@ -70,6 +70,10 @@ tier etc.), instruction compression saves its delta on EVERY turn.
 
 ## Phasing (folds into the Apple-FM plan)
 
+> Superseded by the concrete build plan:
+> `analysis/caveman-profile-implementation-plan.md` (off-by-default
+> ADK_CC_PROMPT_PROFILE, InstructionProvider wiring, drift test, AUTO mode).
+
 - **C1** (with Apple-FM P1): none — utility prompts stay full.
 - **C2** (with Apple-FM P2 lite profile): caveman EXPLORE + CORE coordinator
   + profile selection + drift test. This is what makes the 4K lite agent fit.
