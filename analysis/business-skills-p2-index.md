@@ -91,7 +91,9 @@ native to adk-cc (its own tools, plugins, and the bundled `example-skills`).
 
 ## Phase 3 preview (next step)
 
-Shortlist ≈ 12–16 built-ins from the 162, biased toward: universal across
+Shortlist ≈ 20 built-ins from the 162 (see `business-skills-p3-plan.md`; the
+earlier 12–16 figure came from a token-cost assumption that p3 disproved),
+biased toward: universal across
 company stage, self-contained, complementary to adk-cc's existing tools, and
 license-clean (MIT/Apache-2.0 with attribution). Expect the built-in set to be
 **part adopted, part authored** — adopted for finance/ops/support/data where

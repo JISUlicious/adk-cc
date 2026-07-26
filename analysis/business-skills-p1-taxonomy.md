@@ -20,10 +20,11 @@ Two constraints that follow:
   `claude-office-skills/skills`) and Apache-2.0 (Composio, most `anthropics/skills`)
   are vendorable with attribution. Anthropic's `docx/pdf/pptx/xlsx` skills are
   **source-available, NOT open source** — reference them, do not copy them in.
-- **Built-ins are always-on surface area.** Every built-in skill costs tokens in
-  the tool listing and competes for the model's attention. The right built-in
-  set is ~10–20 high-leverage skills, not 166. Breadth belongs in an optional
-  *pack* users opt into; only the universal core ships built-in.
+- **Built-ins are always-on surface area.** ~~Every built-in skill costs tokens in
+  the tool listing~~ — **CORRECTED in p3**: ADK's `SkillToolset` exposes only 5
+  fixed tools regardless of skill count, and the skill catalog is progressively
+  disclosed via `list_skills`. The binding constraint is selection precision and
+  maintenance, not always-on tokens. See `business-skills-p3-plan.md`.
 
 ## The organizing axes
 
