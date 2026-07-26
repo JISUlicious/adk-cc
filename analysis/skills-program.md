@@ -22,8 +22,8 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | I | — pd-skills profiled + verified against the real loader | ✅ 2026-07-26 |
 | I | 3. Verified platform facts (discovery, progressive disclosure, runtime) | ✅ 2026-07-26 |
 | II | W1 runtime — uv-managed analysis env | ✅ 2026-07-27 (unit + API + UI verified) |
-| II | W2 built-in skills plumbing | ⬜ |
-| II | W3 the built-in set (~21) | ⬜ |
+| II | W2 built-in skills plumbing | ✅ 2026-07-27 (incl. real wheel-packaging test) |
+| II | W3 the built-in set (~21) | 🔨 1/21 — `data-analyst` shipped & live-verified |
 | II | W4 agent/tool layer | ⬜ |
 | II | W5 data layer (ingestion) | ⬜ |
 | II | W6 UI/UX frontend | ⬜ |
@@ -196,7 +196,30 @@ packages depend on what the host ships.
 - **Explicit failure**: provisioning errors say what failed and how to fix it —
   never a bare `ModuleNotFoundError`.
 
-## W2 — Built-in skills plumbing ⬜
+## W2 — Built-in skills plumbing ✅ DONE (2026-07-27)
+
+**Shipped**: `agents/adk_cc/skills/` created (first built-in: `data-analyst`,
+vendored from pd-skills with companions moved to `references/` so they load at
+discovery as well as on demand); `ADK_CC_BUILTIN_SKILLS=0` kill switch + schema
+row; `[tool.setuptools.package-data]` so the wheel actually ships SKILL.md;
+`ATTRIBUTION.md`; the stale "install fallback" docstring corrected to describe
+the base-layer semantics it always had.
+
+**Verified**: 6 tests incl. a REAL `uv build` asserting the wheel contains
+SKILL.md + 13 references (without package-data it shipped zero — the failure
+mode that passes every other test). Live: gpt-5.4-mini called `load_skill`,
+pulled 3 methodology references by bare filename, and produced a correct EDA
+with hand-computed VIFs.
+
+**Two W1 bugs surfaced by live testing** (unit tests with a fake backend could
+not have caught either):
+1. `uv venv` refuses an existing environment ("Use --clear to replace it") and
+   `--clear` would discard installed tiers → escalation now skips creation.
+2. Re-passing already-installed tiers over-constrained the resolver: asking for
+   pandas+numpy+shap in one solve made uv select `numba 0.53.1` (Python <3.10
+   only) and the build failed. Escalation now installs **only the delta**.
+Both pinned by regression tests. Also: when the env can't be prepared, run_bash
+now prefixes the reason to stderr instead of leaving a bare `exit 127`.
 
 - Create `agents/adk_cc/skills/`; fix the stale `_resolve_skills_dirs`
   docstring.

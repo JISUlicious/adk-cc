@@ -28,9 +28,12 @@ skill name appears in multiple dirs, the FIRST discovered wins
          `.adk-cc/skills/`, `.claude/skills/`. First existing wins
          for that dir.
        - Skipped entirely when `ADK_CC_DISABLE_PROJECT_SKILLS=1`.
-  3. **Install fallback** `<install>/adk_cc/skills/` — the dir
-     co-located with the agent module, used when no env var / no
-     project skills are discovered.
+  3. **Built-in skills** `<install>/adk_cc/skills/` — the dir
+     co-located with the agent module. ALWAYS included (it is a base
+     layer, not a fallback): a project/env skill of the same name
+     simply wins by the first-found rule above, so users override
+     built-ins by name without losing the rest. Disable the whole
+     layer with `ADK_CC_BUILTIN_SKILLS=0`.
 
 Why the pick-one rule for `.adk-cc/skills` vs `.claude/skills`:
 projects adopting both conventions would otherwise double-register
@@ -106,7 +109,8 @@ def _resolve_skills_dirs() -> list[Path]:
       2. Project walk-up (`.adk-cc/skills/` or `.claude/skills/` per
          directory, walked from cwd up to home / filesystem root).
          Skipped entirely when `ADK_CC_DISABLE_PROJECT_SKILLS=1`.
-      3. Install fallback `<install>/adk_cc/skills/`.
+      3. Built-in skills `<install>/adk_cc/skills/` — always included
+         (base layer), unless `ADK_CC_BUILTIN_SKILLS=0`.
 
     Each dir is included at most once (dedup by resolved path). A dir
     that doesn't exist or isn't a directory is silently dropped.
@@ -150,9 +154,12 @@ def _resolve_skills_dirs() -> list[Path]:
                     break
                 cursor = cursor.parent
 
-    # 3. Install fallback.
-    here = Path(__file__).resolve().parent.parent / "skills"
-    _add(here)
+    # 3. Built-in skills — a base layer, always added (never a "fallback"):
+    # higher-precedence sources override BY NAME via the first-found rule,
+    # so a project skill shadows one built-in without hiding the others.
+    if env_bool("ADK_CC_BUILTIN_SKILLS", True):
+        here = Path(__file__).resolve().parent.parent / "skills"
+        _add(here)
 
     return dirs
 

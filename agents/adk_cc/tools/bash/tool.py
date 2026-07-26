@@ -77,13 +77,18 @@ class BashTool(AdkCcTool):
             prefixed = f'export PATH="$PWD/{bin_dir}:$PATH"; {args.command}'
             return args.model_copy(update={"command": prefixed})
         except Exception as e:  # noqa: BLE001 — never block a shell command
+            # Record WHY. Without this the user just sees `exit 127: python:
+            # command not found`, which is precisely the unexplained failure
+            # this whole subsystem exists to prevent.
+            self._env_note = str(e)
             _log.warning("managed python unavailable (%s: %s); using PATH as-is",
-                         type(e).__name__, str(e)[:120])
+                         type(e).__name__, str(e)[:200])
             return args
 
     async def _execute(self, args: RunBashArgs, ctx: ToolContext) -> dict[str, Any]:
         backend = get_backend(ctx)
         ws = get_workspace(ctx)
+        self._env_note: str = ""
         args = await self._with_managed_python(backend, ws, args)
         # Network policy is intentionally empty here — bash with no
         # explicit network allowlist gets no egress in real backends.
@@ -143,12 +148,22 @@ class BashTool(AdkCcTool):
                     "outcome": "ok",
                 },
             )
+        stderr = result.stderr[-2000:]
+        if self._env_note and result.exit_code != 0:
+            # The command failed AND the managed interpreter was unavailable —
+            # almost certainly the cause. Say so instead of leaving the model
+            # to guess at `python: command not found`.
+            stderr = (
+                "[adk-cc] the managed Python environment could not be "
+                f"prepared, so `python` may be missing or lack packages:\n"
+                f"{self._env_note}\n\n" + stderr
+            )
         return {
             "status": "ok",
             "command": args.command,
             "exit_code": result.exit_code,
             "stdout": result.stdout[-4000:],
-            "stderr": result.stderr[-2000:],
+            "stderr": stderr,
         }
 
     async def _exec_streaming(self, backend, ws, args: RunBashArgs) -> ExecResult:

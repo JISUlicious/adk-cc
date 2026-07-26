@@ -691,6 +691,9 @@ FIELDS: list[Var] = [
         "Generate tool/session titles (costs extra model tokens).", default=False, parse=as_bool),
     Var("ADK_CC_TASK_REMINDER", Tier.ADVANCED, "Behavior",
         "Periodic task-list nudge (set 0 to disable).", default=True, parse=as_bool),
+    Var("ADK_CC_BUILTIN_SKILLS", Tier.ADVANCED, "Behavior",
+        "Load adk-cc's built-in skills (base layer; project/env skills of the "
+        "same name still override individually).", default=True, parse=as_bool),
     Var("ADK_CC_ANALYSIS_ENV", Tier.ADVANCED, "Sandbox",
         "Interpreter for code execution: 'auto' (uv-managed, provisioned on "
         "demand), 'off' (bare python3 — on stock macOS that is 3.9 with no "

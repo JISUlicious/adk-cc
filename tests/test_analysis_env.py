@@ -41,10 +41,12 @@ class _FakeResult:
 class _FakeBackend:
     """Records commands; scripted stdout/exit per substring match."""
 
-    def __init__(self, *, has_uv=True, marker="", fail_on=None):
+    def __init__(self, *, has_uv=True, marker="", fail_on=None, venv_exists=None):
         self.cmds: list[str] = []
         self.writes: dict[str, str] = {}
         self._has_uv, self._marker, self._fail_on = has_uv, marker, fail_on
+        # default: a marker implies the interpreter is there too
+        self._venv = bool(marker) if venv_exists is None else venv_exists
 
     async def exec(self, cmd, **kw):
         self.cmds.append(cmd)
@@ -53,7 +55,8 @@ class _FakeBackend:
         if "command -v uv" in cmd:
             return _FakeResult(stdout="/opt/homebrew/bin/uv\n" if self._has_uv else "")
         if cmd.startswith("test -x"):
-            return _FakeResult(stdout=self._marker)
+            out = ("__PY_OK__\n" if self._venv else "") + (self._marker or "")
+            return _FakeResult(stdout=out)
         return _FakeResult()
 
     async def write_text(self, path, content, **kw):
@@ -112,13 +115,39 @@ def test_reuses_existing_env_without_reinstalling():
         assert not env.provisioned, "should have reused the existing env"
         assert not any("uv pip install" in c for c in b2.cmds), b2.cmds
 
-        # asking for a tier the marker lacks DOES reinstall (with the union)
+        # asking for a tier the marker lacks installs ONLY the delta —
+        # re-passing core over-constrains the resolver (see the escalation test)
         b3 = _FakeBackend(marker=marker)
         env3 = asyncio.run(ensure_env(b3, _ws(tmp), tiers={"modeling"}))
         assert env3.provisioned
         joined = " ".join(b3.cmds)
-        assert "xgboost" in joined and "pandas>=2.3" in joined, joined
+        assert "xgboost" in joined, joined
+        assert "pandas>=2.3" not in joined, f"delta only, not the union: {joined}"
     print("OK reuses_existing_env_without_reinstalling")
+
+
+def test_escalation_does_not_recreate_the_venv():
+    """LIVE BUG (found by an escalation turn): `uv venv` refuses to touch an
+    existing environment ("Use --clear to replace it"), and --clear would
+    discard the tiers already installed. Escalating core -> modeling must skip
+    creation and install only the delta."""
+    _clean_env()
+    with tempfile.TemporaryDirectory() as tmp:
+        b = _FakeBackend()
+        asyncio.run(ensure_env(b, _ws(tmp), tiers={"core"}))
+        marker = next(v for k, v in b.writes.items() if k.endswith(".adk-cc-tiers"))
+
+        reset_cache()
+        b2 = _FakeBackend(marker=marker, venv_exists=True)
+        env = asyncio.run(ensure_env(b2, _ws(tmp), tiers={"modeling"}))
+        joined = " ".join(b2.cmds)
+        assert "uv venv" not in joined, f"must not recreate the venv: {joined}"
+        assert "uv pip install" in joined and "xgboost" in joined, joined
+        # DELTA ONLY: re-solving with core made uv pick numba 0.53.1
+        # (Python <3.10 only) and the build failed — observed live.
+        assert "pandas>=2.3" not in joined, f"must install only the delta: {joined}"
+        assert env.provisioned and {"core", "modeling"} <= set(env.tiers), env
+    print("OK escalation_does_not_recreate_the_venv")
 
 
 def test_missing_uv_is_actionable_not_silent_fallback():
@@ -227,6 +256,7 @@ def main():
     test_required_tiers_from_imports()
     test_provisions_and_escalates_tiers()
     test_reuses_existing_env_without_reinstalling()
+    test_escalation_does_not_recreate_the_venv()
     test_missing_uv_is_actionable_not_silent_fallback()
     test_install_failure_surfaces_output()
     test_modes_off_and_explicit_path()

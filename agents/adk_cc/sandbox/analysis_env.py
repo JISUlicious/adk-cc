@@ -186,11 +186,19 @@ async def ensure_env(
     marker = shlex.quote(_MARKER_REL)
     # One round trip for the fast path: does the interpreter exist AND does the
     # marker already record (at least) the tiers we need?
+    # Two bits in one round trip: does the interpreter exist, and what tiers
+    # does the marker record? They differ — an env can exist with FEWER tiers
+    # than we need, and then venv creation must be skipped (uv refuses to
+    # recreate one) while the package delta is still installed.
     probe = (
-        f"test -x {shlex.quote(py_rel)} && cat {marker} 2>/dev/null || true"
+        f"test -x {shlex.quote(py_rel)} && echo __PY_OK__; "
+        f"cat {marker} 2>/dev/null || true"
     )
     res = await _exec(backend, ws, probe, timeout_s=30)
-    have_token = (res.stdout or "").strip()
+    lines = [ln for ln in (res.stdout or "").splitlines() if ln.strip()]
+    venv_exists = any(ln.strip() == "__PY_OK__" for ln in lines)
+    have_token = next((ln.strip() for ln in lines if ln.strip() != "__PY_OK__"), "")
+    already: frozenset[str] = frozenset()
     if have_token:
         have_tiers = frozenset(
             t for t in have_token.split("|")[0].split(",") if t
@@ -199,10 +207,12 @@ async def ensure_env(
             env = AnalysisEnv(python=py_rel, tiers=have_tiers)
             _verified[key] = env
             return env
-        # Existing env, but missing a tier → install the delta below.
+        # Existing env, missing a tier → install ONLY the delta below.
+        already = have_tiers
         want = want | have_tiers
 
-    await _provision(backend, ws, py_rel, want)
+    await _provision(backend, ws, py_rel, want, venv_exists=venv_exists,
+                     already=already)
     env = AnalysisEnv(python=py_rel, tiers=want, provisioned=True)
     _verified[(ws.abs_path, _tier_token(want))] = env
     _verified[key] = env
@@ -210,9 +220,21 @@ async def ensure_env(
 
 
 async def _provision(
-    backend: SandboxBackend, ws: WorkspaceRoot, py_rel: str, tiers: frozenset[str]
+    backend: SandboxBackend,
+    ws: WorkspaceRoot,
+    py_rel: str,
+    tiers: frozenset[str],
+    *,
+    venv_exists: bool = False,
+    already: frozenset[str] = frozenset(),
 ) -> None:
-    """Create/extend the env. Every failure carries a fix."""
+    """Create the env (or EXTEND an existing one) and install `tiers`.
+
+    `venv_exists` matters: `uv venv` refuses to touch an existing environment
+    ("Use --clear to replace it"), and --clear would throw away tiers already
+    installed. Escalating from core→modeling must therefore skip creation and
+    install only the delta.
+    """
     check = await _exec(backend, ws, "command -v uv || true", timeout_s=30)
     if not (check.stdout or "").strip():
         raise AnalysisEnvError(
@@ -227,25 +249,33 @@ async def _provision(
         )
 
     pyver = _python_version()
-    steps = [
+    steps = []
+    if not venv_exists:
         # `uv venv` downloads the pinned interpreter itself when missing, so the
         # host's own python version is irrelevant.
-        (f"uv venv --python {shlex.quote(pyver)} {shlex.quote(_ENV_REL)}",
-         f"create a Python {pyver} virtualenv"),
-    ]
-    pkgs = _packages_for(tiers)
+        steps.append(
+            (f"uv venv --python {shlex.quote(pyver)} {shlex.quote(_ENV_REL)}",
+             f"create a Python {pyver} virtualenv")
+        )
+    # Install only the DELTA. Re-passing already-installed tiers over-constrains
+    # the resolver: asking for pandas+numpy+shap in one shot made uv pick
+    # numba 0.53.1 (supports only Python <3.10) and the build failed, whereas
+    # resolving just {scikit-learn, xgboost, shap} against the installed set
+    # picks a modern numba. Escalation means "add packages", not "re-solve
+    # everything".
+    pkgs = _packages_for(set(tiers) - set(already))
     if pkgs:
         steps.append((
             "uv pip install --quiet "
             f"--python {shlex.quote(py_rel)} " + " ".join(shlex.quote(p) for p in pkgs),
-            f"install the {', '.join(sorted(tiers))} package tier(s)",
+            f"install the {', '.join(sorted(set(tiers) - set(already)))} package tier(s)",
         ))
 
     for cmd, what in steps:
         _log.info("analysis env: %s", what)
         res = await _exec(backend, ws, cmd, timeout_s=_install_timeout_s())
         if res.exit_code != 0:
-            tail = ((res.stderr or res.stdout or "").strip() or "(no output)")[-600:]
+            tail = ((res.stderr or res.stdout or "").strip() or "(no output)")[-1500:]
             raise AnalysisEnvError(
                 f"Failed to {what} for the analysis environment.\n\n{tail}\n\n"
                 "Retry, or set ADK_CC_ANALYSIS_ENV=<path-to-python> to use an "

@@ -31,3 +31,9 @@ s3 = ["boto3>=1.34"]
 [tool.setuptools.packages.find]
 where = ["agents"]
 include = ["adk_cc*"]
+
+# Built-in skills are DATA, not code: `packages.find` alone ships only *.py,
+# so without this the wheel would contain zero SKILL.md files and the
+# install-fallback skills dir would silently be empty in every installed copy.
+[tool.setuptools.package-data]
+adk_cc = ["skills/**/*"]
