@@ -26,7 +26,12 @@ from __future__ import annotations
 import os
 import re
 
-from ..tools.bash.parse import ParsedSegment, parse_segment, split_statements
+from ..tools.bash.parse import (
+    ParsedSegment,
+    parse_segment,
+    split_statements,
+    strip_heredocs,
+)
 from ..tools.bash.readonly import is_read_only_command
 from ..config.schema import env_bool
 
@@ -202,19 +207,90 @@ def command_deletes(command: str) -> bool:
     return False
 
 
+# Write-safe device files: targeting them is a discard/no-op, never a write
+# "outside the project". Exempting them keeps the out-of-scope floor from
+# gating on `2>/dev/null`, which appears in virtually every careful shell
+# command (observed: it gated ALL FOUR run_bash calls of a dogfooding
+# session). Deliberately an ALLOWLIST — block devices like /dev/disk0 or
+# /dev/sda must still be mined (writing those is catastrophic, not a no-op).
+_SAFE_DEVICES = frozenset({
+    "/dev/null", "/dev/zero", "/dev/tty", "/dev/stdin", "/dev/stdout",
+    "/dev/stderr", "/dev/random", "/dev/urandom", "/dev/full",
+})
+_VAR_REF = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?(/.*)?$")
+_ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
+_REDIR_PREFIX = re.compile(r"^(?:\d+|&)?>>?(.+)$")
+
+
+def _is_safe_device(tok: str) -> bool:
+    return tok in _SAFE_DEVICES or tok.startswith("/dev/fd/")
+
+
 def command_paths(command: str) -> list[str]:
     """Path-like tokens a command references, for the run_bash protected-path
-    floor (engine._decide_impl). Best-effort: shell expansion (`$HOME`, globs
-    the shell resolves) can hide a path — the OS sandbox is the airtight
-    boundary. Returns the raw tokens; the caller resolves + classifies them."""
+    floor (engine._decide_impl) and the out-of-project write floor.
+
+    Resolves ONE level of shell indirection: `VAR=value` assignments are mined
+    for their value AND recorded, so a later `"$VAR"` reference contributes the
+    same path. Without that, `KEY=~/.ssh/id_rsa; cat "$KEY"` mined ZERO paths
+    and slipped past the protected-path floor entirely.
+
+    Best-effort by design: unresolvable expansion (`$HOME`, command
+    substitution, shell globs) can still hide a path — the OS sandbox is the
+    airtight boundary. Returns raw tokens; the caller resolves + classifies."""
     out: list[str] = []
     stmts = split_statements(command)
-    segments = [command] if stmts is None else [seg for seg, _sep in stmts]
+    if stmts is None:
+        # Degenerate parse → treat the whole command as one segment, but STILL
+        # drop heredoc bodies: they are data (JS/Python/SQL), and mining them
+        # produced the F6 false positive. split_statements strips them on its
+        # success path; this fallback must not be the back door.
+        segments = [strip_heredocs(command)]
+    else:
+        segments = [seg for seg, _sep in stmts]
+
+    # `$HOME` is the one expansion worth modeling: it is the gateway to every
+    # credential path the protected floor guards (`$HOME/.ssh/...`), and `~`
+    # is what the resolver already expands.
+    bindings: dict[str, str] = {"HOME": "~"}
+
+    def _mine(tok: str) -> None:
+        if not tok or tok.startswith("-"):
+            return
+        # A degenerate parse leaves redirect operators glued to their target
+        # (`2>/dev/null`); normalize so the target is classified, not the
+        # operator+target string.
+        red = _REDIR_PREFIX.match(tok)
+        if red:
+            tok = red.group(1)
+        # `$(pwd)/x` is the working directory — i.e. the workspace root — so
+        # the remainder is simply a project-relative path.
+        if tok.startswith("$(pwd)/"):
+            tok = tok[len("$(pwd)/"):]
+        m = _VAR_REF.match(tok)
+        if m:
+            value = bindings.get(m.group(1))
+            if value is None:
+                return  # unknown variable — nothing truthful to mine
+            tok = value + (m.group(2) or "")
+        if _is_safe_device(tok):
+            return
+        if "/" in tok or tok.startswith("~") or tok in (".", ".."):
+            out.append(tok)
+
     for seg in segments:
         p = parse_segment(seg)
+        for name, value in p.assignments.items():
+            bindings.setdefault(name, value)
+            _mine(value)
         for tok in (*p.args, *p.redirect_targets):
-            if tok.startswith(("-",)):
+            # An assignment can also appear mid-segment (e.g. when the
+            # statement splitter degenerates and the whole command is one
+            # segment) — mine its value, not the `NAME=` prefix.
+            a = _ASSIGN.match(tok)
+            if a:
+                bindings.setdefault(a.group(1), a.group(2))
+                _mine(a.group(2))
                 continue
-            if "/" in tok or tok.startswith("~") or tok in (".", ".."):
-                out.append(tok)
+            _mine(tok)
     return out

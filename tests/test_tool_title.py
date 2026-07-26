@@ -162,6 +162,82 @@ def test_stripped_args_still_validate():
     print("OK stripped_args_still_validate")
 
 
+def _ev(parts, author="coordinator"):
+    from google.adk.events.event import Event
+    from google.genai import types
+
+    return Event(invocation_id="inv", author=author,
+                 content=types.Content(role="model", parts=parts))
+
+
+def _texts(event):
+    from google.genai import types  # noqa: F401
+
+    return [p.text for p in ((event.content.parts if event.content else []) or [])
+            if getattr(p, "text", None)]
+
+
+def test_title_stanza_stripped_from_tool_call_event():
+    """F8: models answer the title instruction TWICE — correctly in the call's
+    `title` arg, and again as a leading text part that reaches the transcript
+    as raw JSON. Observed 128x in one project; every occurrence rode along
+    with a call whose args already carried the title, so dropping it is
+    lossless."""
+    from google.genai import types
+
+    plugin = ToolTitlePlugin()
+    # the exact live shape: [text stanza, functionCall(args include title)]
+    ev = _ev([
+        types.Part(text='{"title":"Reading current plan"}'),
+        types.Part(function_call=types.FunctionCall(
+            id="c1", name="read_current_plan",
+            args={"title": "Reading current plan"})),
+    ])
+    out = asyncio.run(plugin.on_event_callback(invocation_context=None, event=ev))
+    assert out is not None, "stanza should have been stripped"
+    assert _texts(out) == [], _texts(out)
+    # the tool call itself survives untouched, title arg intact for the UI
+    calls = [p.function_call for p in out.content.parts if p.function_call]
+    assert len(calls) == 1 and calls[0].args["title"] == "Reading current plan"
+    # ORIGINAL event is untouched (the flow decides loop-vs-stop on it)
+    assert _texts(ev) == ['{"title":"Reading current plan"}']
+    print("OK title_stanza_stripped_from_tool_call_event")
+
+
+def test_title_stanza_never_blanks_a_reply():
+    """Guarded to events that also carry a function call, so a genuine
+    user-facing reply can never be erased — even if it happens to be JSON."""
+    from google.genai import types
+
+    plugin = ToolTitlePlugin()
+    # a lone stanza with NO call: left alone (cannot blank the final reply)
+    lone = _ev([types.Part(text='{"title":"Calling verifier"}')])
+    assert asyncio.run(plugin.on_event_callback(
+        invocation_context=None, event=lone)) is None
+    # prose that merely mentions a title is untouched
+    prose = _ev([
+        types.Part(text='I set the title to {"title":"x"} in the config.'),
+        types.Part(function_call=types.FunctionCall(id="c", name="read_file", args={})),
+    ])
+    assert asyncio.run(plugin.on_event_callback(
+        invocation_context=None, event=prose)) is None
+    # a JSON object with MORE than title is real content, not the stanza
+    rich = _ev([
+        types.Part(text='{"title":"x","path":"/tmp/a"}'),
+        types.Part(function_call=types.FunctionCall(id="c", name="read_file", args={})),
+    ])
+    assert asyncio.run(plugin.on_event_callback(
+        invocation_context=None, event=rich)) is None
+    # real prose alongside a call keeps flowing
+    mixed = _ev([
+        types.Part(text="Reading the plan now."),
+        types.Part(function_call=types.FunctionCall(id="c", name="read_file", args={})),
+    ])
+    assert asyncio.run(plugin.on_event_callback(
+        invocation_context=None, event=mixed)) is None
+    print("OK title_stanza_never_blanks_a_reply")
+
+
 def main():
     test_injects_into_json_schema_tool()
     test_injects_into_types_schema_tool()
@@ -170,6 +246,8 @@ def main():
     test_guidance_appended_once()
     test_strip_only_injected_tools()
     test_stripped_args_still_validate()
+    test_title_stanza_stripped_from_tool_call_event()
+    test_title_stanza_never_blanks_a_reply()
     print("\nall tool-title tests passed")
 
 

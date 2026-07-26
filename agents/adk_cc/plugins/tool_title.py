@@ -36,6 +36,7 @@ output tokens per tool call).
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Optional
 
@@ -50,6 +51,26 @@ from google.genai import types
 _log = logging.getLogger(__name__)
 
 _TITLE_ARG = "title"
+
+
+def _is_title_stanza(part: Any) -> bool:
+    """True for a text part that is EXACTLY a `{"title": "..."}` object —
+    the duplicated stanza, never prose that merely mentions a title."""
+    text = getattr(part, "text", None)
+    if not text or getattr(part, "thought", None):
+        return False
+    text = text.strip()
+    if not (text.startswith("{") and text.endswith("}") and '"title"' in text):
+        return False
+    try:
+        obj = json.loads(text)
+    except (ValueError, TypeError):
+        return False
+    return (
+        isinstance(obj, dict)
+        and set(obj) == {_TITLE_ARG}
+        and isinstance(obj.get(_TITLE_ARG), str)
+    )
 
 _TITLE_DESCRIPTION = (
     "Optional short label for this call, shown to the user in the UI while "
@@ -149,6 +170,39 @@ class ToolTitlePlugin(BasePlugin):
             except Exception:  # noqa: BLE001 — guidance is best-effort
                 pass
         return None
+
+    # ---- stanza hygiene --------------------------------------------------
+
+    async def on_event_callback(
+        self,
+        *,
+        invocation_context: Any,
+        event: Any,
+    ) -> Optional[Any]:
+        """Drop a `{"title": "..."}` TEXT part emitted alongside a tool call.
+
+        Some models answer the title instruction twice: correctly in the
+        call's `title` ARG, and again as a leading text part. That text is
+        chat content — it reached the transcript, the UI, and final-reply
+        extraction as raw JSON (observed 128× in one dogfooding project;
+        every occurrence accompanied a function call whose args ALREADY
+        carried the same title, so removing it loses nothing).
+
+        Guarded to events that DO contain a function call, so a genuine
+        user-facing reply can never be blanked. Returns a COPY: the flow
+        decides loop-vs-stop on the original object after this hook, and
+        mutating it in place would change control flow (the lesson from
+        HandbackHygienePlugin)."""
+        content = getattr(event, "content", None)
+        parts = getattr(content, "parts", None) or []
+        if not any(getattr(p, "function_call", None) is not None for p in parts):
+            return None
+        keep = [p for p in parts if not _is_title_stanza(p)]
+        if len(keep) == len(parts):
+            return None
+        stripped = event.model_copy(deep=True)
+        stripped.content = types.Content(role=content.role, parts=keep)
+        return stripped
 
     # ---- arg stripping ---------------------------------------------------
 

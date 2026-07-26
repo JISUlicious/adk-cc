@@ -323,6 +323,83 @@ def test_system_temp_is_in_scope() -> None:
     print("OK test_system_temp_is_in_scope")
 
 
+def test_safe_devices_do_not_gate() -> None:
+    """F9 (root cause): `2>/dev/null` is a discard, not a write outside the
+    project. Mining it gated ALL FOUR run_bash calls of a dogfooding session.
+    The exemption is an ALLOWLIST — block devices stay mined."""
+    from adk_cc.permissions.command_safety import command_paths
+
+    # the exact shape from the live session's cleanup trap
+    trap = 'cleanup(){ kill $PID >/dev/null 2>&1 || true; }\ntrap cleanup EXIT'
+    assert command_paths(trap) == [], command_paths(trap)
+    for benign in ("/dev/null", "/dev/stderr", "/dev/stdout", "/dev/zero",
+                   "/dev/urandom", "/dev/fd/3"):
+        assert command_paths(f"echo hi > {benign}") == [], benign
+    # glued redirect operators normalize to the target
+    assert command_paths("cmd 2>/dev/null") == []
+    # …but real devices are still mined AND still catastrophic
+    assert "/dev/disk0" in command_paths("dd if=/dev/zero of=/dev/disk0")
+    assert _c("dd if=/dev/zero of=/dev/disk0") == "catastrophic"
+    assert "/dev/sda" in command_paths("cat x > /dev/sda")
+    print("OK test_safe_devices_do_not_gate")
+
+
+def test_assignment_indirection_is_resolved() -> None:
+    """F9 (security half): a protected path assigned to a variable used to
+    mine ZERO tokens — one level of indirection defeated the protected-path
+    floor entirely. Assignment VALUES are mined and `$VAR` is expanded."""
+    from adk_cc.permissions.command_safety import command_paths
+
+    # the hole: direct read was denied, the variable form saw nothing
+    assert command_paths('KEY=~/.ssh/id_rsa\ncat "$KEY"\n') != []
+    assert "~/.ssh/id_rsa" in command_paths('KEY=~/.ssh/id_rsa\ncat "$KEY"\n')
+    # $HOME is the other gateway to every credential path
+    assert "~/.ssh/id_rsa" in command_paths('cat $HOME/.ssh/id_rsa')
+    assert "~/.aws/credentials" in command_paths(
+        'DEST=$HOME/.aws/credentials\ncp "$DEST" /tmp/x\n')
+    # the VALUE is mined, never the `NAME=` prefix as a path
+    toks = command_paths('DB=.sessions/x.sqlite3\nrm -f "$DB"\n')
+    assert ".sessions/x.sqlite3" in toks
+    assert not any(t.startswith("DB=") for t in toks), toks
+    # an unknown variable yields nothing to mine (no garbage token)
+    assert command_paths('rm -f "$NOPE"') == []
+    # `$(pwd)/x` is the working directory — project-relative, not foreign
+    assert command_paths('rm -f $(pwd)/.sessions/x') == [".sessions/x"]
+    print("OK test_assignment_indirection_is_resolved")
+
+
+def test_degenerate_parse_still_strips_heredocs() -> None:
+    """F9 (third half): when split_statements degenerates, command_paths fell
+    back to the RAW command — re-admitting heredoc bodies through the back
+    door that F6 closed on the success path."""
+    from adk_cc.permissions.command_safety import command_paths
+    from adk_cc.tools.bash.parse import split_statements
+
+    probe = (
+        "for i in $(seq 1 3); do\n"
+        "  if python3 - <<'PY'\n"
+        "import urllib.request\n"
+        "print(urllib.request.urlopen('http://127.0.0.1:8001/health').read())\n"
+        "PY\n"
+        "  then break; fi\n"
+        "done\n"
+    )
+    assert split_statements(probe) is None, "probe must exercise the fallback"
+    assert not any("urllib" in t for t in command_paths(probe)), command_paths(probe)
+    print("OK test_degenerate_parse_still_strips_heredocs")
+
+
+def test_env_prefix_still_reaches_payload() -> None:
+    """Regression on the _peel change (assignments are now RETURNED, not
+    dropped): peeling must still expose the real binary to the classifier."""
+    assert _c("FOO=bar rm -rf /") == "catastrophic"
+    assert _c("LC_ALL=C rm -rf /") == "catastrophic"
+    assert _c("env FOO=bar rm -rf /") == "catastrophic"
+    assert _c("FOO=1 dd if=/dev/zero of=/dev/disk0") == "catastrophic"
+    assert _c("PIXEL_ROGUE_DB=/tmp/x.db python3 -m pytest") == "mutating"
+    print("OK test_env_prefix_still_reaches_payload")
+
+
 def main() -> None:
     test_wrapper_and_separator_evasions_are_catastrophic()
     test_protected_case_and_metachar_hardening()
@@ -336,6 +413,10 @@ def main() -> None:
     test_plugin_computes_out_of_scope_for_run_bash()
     test_heredoc_bodies_are_not_shell()
     test_system_temp_is_in_scope()
+    test_safe_devices_do_not_gate()
+    test_assignment_indirection_is_resolved()
+    test_degenerate_parse_still_strips_heredocs()
+    test_env_prefix_still_reaches_payload()
     print("\nall command-safety hardening tests passed")
 
 

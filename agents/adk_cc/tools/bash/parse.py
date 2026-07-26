@@ -190,6 +190,11 @@ class ParsedSegment:
     privileged: bool = False                 # sudo/doas/su seen
     wrapped: bool = False                    # any prefix-runner peeled
     ok: bool = True                          # shlex parsed cleanly
+    # Leading `VAR=value` assignments, peeled off the front of the segment.
+    # Kept (not discarded) because the VALUE can be a path the floors must
+    # see: `KEY=~/.ssh/id_rsa; cat "$KEY"` used to mine ZERO paths, hiding a
+    # protected target behind one level of indirection.
+    assignments: dict[str, str] = field(default_factory=dict)
 
 
 _REDIR = re.compile(r"^(?:\d+|&)?>>?(.*)$")
@@ -214,17 +219,21 @@ def _extract_redirects(tokens: list[str]) -> list[str]:
     return out
 
 
-def _peel(tokens: list[str]) -> tuple[list[str], bool, bool]:
+def _peel(tokens: list[str]) -> tuple[list[str], bool, bool, dict[str, str]]:
     """Strip leading VAR=val assignments and prefix runners so tokens[0] is the
-    real payload binary. Returns (tokens, privileged, wrapped). Best-effort:
-    curated value-flags and `timeout`'s duration are skipped; exotic
-    wrapper+flag forms may mis-peel (then the payload falls to 'mutating', still
-    gated — the OS sandbox is the airtight boundary)."""
+    real payload binary. Returns (tokens, privileged, wrapped, assignments) —
+    the peeled assignments are RETURNED rather than dropped so path mining can
+    see their values. Best-effort: curated value-flags and `timeout`'s duration
+    are skipped; exotic wrapper+flag forms may mis-peel (then the payload falls
+    to 'mutating', still gated — the OS sandbox is the airtight boundary)."""
     privileged = wrapped = False
+    assignments: dict[str, str] = {}
     changed = True
     while tokens and changed:
         changed = False
         while tokens and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", tokens[0]):
+            name, _, value = tokens[0].partition("=")
+            assignments.setdefault(name, value)
             tokens = tokens[1:]; changed = True
         if not tokens:
             break
@@ -245,7 +254,7 @@ def _peel(tokens: list[str]) -> tuple[list[str], bool, bool]:
                 j += 1  # the DURATION argument
             tokens = rest[j:]
             changed = True
-    return tokens, privileged, wrapped
+    return tokens, privileged, wrapped, assignments
 
 
 def parse_segment(seg: str) -> ParsedSegment:
@@ -258,10 +267,11 @@ def parse_segment(seg: str) -> ParsedSegment:
     except ValueError:
         return ParsedSegment(binary=None, ok=False)
     redirects = _extract_redirects(toks)
-    payload, privileged, wrapped = _peel(toks)
+    payload, privileged, wrapped, assignments = _peel(toks)
     if not payload:
         return ParsedSegment(binary=None, redirect_targets=redirects,
-                             privileged=privileged, wrapped=wrapped, ok=True)
+                             privileged=privileged, wrapped=wrapped, ok=True,
+                             assignments=assignments)
     return ParsedSegment(
         binary=payload[0].rsplit("/", 1)[-1],
         args=payload[1:],
@@ -269,4 +279,5 @@ def parse_segment(seg: str) -> ParsedSegment:
         privileged=privileged,
         wrapped=wrapped,
         ok=True,
+        assignments=assignments,
     )
