@@ -691,6 +691,18 @@ FIELDS: list[Var] = [
         "Generate tool/session titles (costs extra model tokens).", default=False, parse=as_bool),
     Var("ADK_CC_TASK_REMINDER", Tier.ADVANCED, "Behavior",
         "Periodic task-list nudge (set 0 to disable).", default=True, parse=as_bool),
+    Var("ADK_CC_ANALYSIS_ENV", Tier.ADVANCED, "Sandbox",
+        "Interpreter for code execution: 'auto' (uv-managed, provisioned on "
+        "demand), 'off' (bare python3 — on stock macOS that is 3.9 with no "
+        "packages), or an explicit interpreter path.", default="auto"),
+    Var("ADK_CC_ANALYSIS_PYTHON", Tier.ADVANCED, "Sandbox",
+        "Python version uv provisions for the analysis env.", default="3.12"),
+    Var("ADK_CC_ANALYSIS_TIERS", Tier.ADVANCED, "Sandbox",
+        "Package tiers to pre-install (core,modeling,stats). Empty = install "
+        "on demand from the code's imports.", default=None, parse=as_csv),
+    Var("ADK_CC_ANALYSIS_INSTALL_TIMEOUT_S", Tier.ADVANCED, "Sandbox",
+        "Timeout for analysis-env provisioning (venv + package install).",
+        default=900, parse=as_int),
     Var("ADK_CC_RESUMABLE", Tier.ADVANCED, "Behavior",
         "ADK-native resumable invocations: confirmations inside specialists "
         "resume the original run (kill switch for durable-runs P3).",

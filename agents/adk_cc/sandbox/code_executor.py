@@ -9,7 +9,8 @@ Without this adapter, ADK's default code executor runs Python on the
 agent process — defeating the sandbox boundary for skills.
 
 Implementation: writes the code to a workspace-relative scratch file
-via `backend.write_text`, runs `python3 <file>` via `backend.exec`,
+via `backend.write_text`, runs it with a uv-managed interpreter
+(`analysis_env.ensure_env`) via `backend.exec`,
 returns stdout/stderr. The exec lifecycle is async; ADK's
 `execute_code` is sync, so we run the async work on a private event
 loop in a worker thread (the conventional pattern when ADK calls a
@@ -32,6 +33,7 @@ from google.adk.code_executors.code_execution_utils import (
 )
 
 from .config import NetworkConfig
+from .analysis_env import AnalysisEnvError, ensure_env, required_tiers
 from .backends.base import SandboxBackend
 from .workspace import WorkspaceRoot
 
@@ -107,7 +109,16 @@ class SandboxBackedCodeExecutor(BaseCodeExecutor):
             # by the backend (Docker / sandbox_service → /workspace,
             # Noop → identity), so the relative path resolves correctly
             # inside whichever runtime is in play.
-            cmd = f"python3 {shlex.quote(rel_tmpfile)}"
+            # NEVER a bare `python3`: inside NoopBackend that resolves to the
+            # host interpreter (stock macOS: Python 3.9 with no packages), which
+            # made every analysis skill fail on its first import. `analysis_env`
+            # supplies a uv-managed interpreter — and escalates package tiers
+            # based on what this code actually imports, so a trivial script
+            # doesn't pay for the modeling stack.
+            env = await ensure_env(
+                backend, ws, tiers=required_tiers(code_execution_input.code)
+            )
+            cmd = f"{shlex.quote(env.python)} {shlex.quote(rel_tmpfile)}"
             res = await backend.exec(
                 cmd,
                 fs_write=ws.fs_write_config(),
@@ -115,6 +126,10 @@ class SandboxBackedCodeExecutor(BaseCodeExecutor):
                 timeout_s=self.timeout_seconds,
                 cwd=ws.abs_path,
             )
+        except AnalysisEnvError as e:
+            # Actionable by construction — surface verbatim rather than as a
+            # bare ModuleNotFoundError three steps later.
+            return CodeExecutionResult(stdout="", stderr=str(e))
         except Exception as e:  # noqa: BLE001 — surface as stderr
             return CodeExecutionResult(stdout="", stderr=f"{type(e).__name__}: {e}")
 

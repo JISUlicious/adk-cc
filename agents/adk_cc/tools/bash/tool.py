@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import logging
 import os
 from typing import Any
@@ -14,6 +16,9 @@ from .prompt import DESCRIPTION
 from ...config.schema import env_bool
 
 _log = logging.getLogger(__name__)
+
+
+_INVOKES_PYTHON = re.compile(r"(?:^|[\s;&|(`$])(?:python3?|pip3?|uv\s+run)\b")
 
 
 class BashTool(AdkCcTool):
@@ -43,9 +48,43 @@ class BashTool(AdkCcTool):
     input_model = RunBashArgs
     description = DESCRIPTION
 
+
+    async def _with_managed_python(self, backend, ws, args: RunBashArgs) -> RunBashArgs:
+        """Put the uv-managed interpreter on PATH when the command runs Python.
+
+        A bare `python3` in a shell resolves to whatever the runtime ships —
+        on stock macOS that is Python 3.9 with no packages, so any analysis
+        one-liner fails on `import pandas` even though the code executor has a
+        perfectly good managed env. Only python-invoking commands pay the
+        (first-time, then cached) provisioning cost.
+
+        `$PWD` is used rather than a relative entry because cwd is the
+        workspace in every backend, and a script that `cd`s must not lose the
+        interpreter. Failures degrade to the original command — a broken
+        analysis env must never make ordinary shell commands unrunnable.
+        """
+        if not _INVOKES_PYTHON.search(args.command or ""):
+            return args
+        try:
+            from ...sandbox.analysis_env import ensure_env, required_tiers
+
+            env = await ensure_env(
+                backend, ws, tiers=required_tiers(args.command)
+            )
+            if not env.is_managed:
+                return args
+            bin_dir = env.python.rsplit("/", 1)[0]
+            prefixed = f'export PATH="$PWD/{bin_dir}:$PATH"; {args.command}'
+            return args.model_copy(update={"command": prefixed})
+        except Exception as e:  # noqa: BLE001 — never block a shell command
+            _log.warning("managed python unavailable (%s: %s); using PATH as-is",
+                         type(e).__name__, str(e)[:120])
+            return args
+
     async def _execute(self, args: RunBashArgs, ctx: ToolContext) -> dict[str, Any]:
         backend = get_backend(ctx)
         ws = get_workspace(ctx)
+        args = await self._with_managed_python(backend, ws, args)
         # Network policy is intentionally empty here — bash with no
         # explicit network allowlist gets no egress in real backends.
         # Operators wanting outbound for builds (apt, pip) configure

@@ -21,7 +21,7 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | I | — machine-readable index (`business-skills-index.json`) | ✅ 2026-07-26 |
 | I | — pd-skills profiled + verified against the real loader | ✅ 2026-07-26 |
 | I | 3. Verified platform facts (discovery, progressive disclosure, runtime) | ✅ 2026-07-26 |
-| II | W1 runtime — uv-managed analysis env | ⬜ **critical path** |
+| II | W1 runtime — uv-managed analysis env | ✅ 2026-07-27 (unit + API + UI verified) |
 | II | W2 built-in skills plumbing | ⬜ |
 | II | W3 the built-in set (~21) | ⬜ |
 | II | W4 agent/tool layer | ⬜ |
@@ -151,7 +151,27 @@ Checked against the installed ADK and adk-cc source, not assumed:
 Seven workstreams. **W1 is the critical path**: several skills are inert
 without it.
 
-## W1 — Runtime: a uv-managed analysis environment ⬜ **critical path**
+## W1 — Runtime: a uv-managed analysis environment ✅ DONE (2026-07-27)
+
+**Shipped**: `sandbox/analysis_env.py` (uv-provisioned interpreter + tiered
+packages, marker-cached on disk and in-process); `code_executor` now resolves a
+managed interpreter instead of bare `python3`; `run_bash` puts the managed env
+on `PATH` **only for commands that invoke Python** (`_with_managed_python`), so
+ordinary shell commands are untouched and a broken env can never block them;
+4 schema vars + `.env.example`; `tests/test_analysis_env.py` (8 tests incl. a
+REAL provisioning test).
+
+**Verified**: unit — 8/8, including real `uv` provisioning of Python 3.12.13 +
+pandas 3.0.5 while host `/usr/bin/python3 import pandas` fails (rc=1).
+API — gpt-5.4-mini analysed a CSV via `python - <<'PY'`, returning
+`pandas 3.0.5` and correct group-bys. UI — same model pinned through the model
+picker, 3 tool calls, `exit 0`, mean price by channel rendered, no console
+errors. Counterfactual confirmed: the identical command under host python is
+`ModuleNotFoundError: No module named 'pandas'`.
+
+*Note for future work*: the injected PATH is invisible in recorded tool args —
+ADK snapshots args before plugins mutate them — so verify by outcome
+(does pandas resolve?), not by grepping the event log.
 
 Never invoke a bare interpreter — it routes to system python (user's
 direction, and the only way to control the version). `uv 0.10.11` is present
