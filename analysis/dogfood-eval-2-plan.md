@@ -100,16 +100,30 @@ and slightly ambiguous. Model: gpt-5.4-mini again (comparability with round
 
 ## Platform findings (adk-cc, this round)
 
-- **F8 title-stanza leak (cosmetic, open):** coordinator sometimes emits the
+- **F8 title-stanza leak — FIXED** (commit ff1d744; was cosmetic): coordinator sometimes emits the
   tool-title JSON (`{"title":"Calling verifier"}`) as a TEXT event —
   polluted final-reply extraction three times. Fix plan: suppress/strip
-  text events that are exactly a title stanza (ToolTitlePlugin on_event, or
-  UI-side), plus a scripted test.
-- **F9 command-safety variable blindness (noisy, open):** `rm -f "$DB"`
-  with `DB=.sessions/...` set in the SAME command was flagged "outside the
-  project". Fix plan: resolve simple same-command `VAR=value` assignments
-  before path classification; keep conservative fallback for unresolvable
-  variables.
+  Measured 128 occurrences in this project, ALL riding along with a call
+  whose args already carried the same title → lossless to drop.
+  ToolTitlePlugin.on_event_callback strips a text part that is exactly
+  `{"title": "..."}`, guarded to events that also carry a function call so a
+  real reply can never be blanked, returning a COPY (flow decides
+  loop-vs-stop on the original).
+- **F9 command-safety — FIXED** (commit ff1d744). The hypothesis above was
+  WRONG; reproducing against the four real gated commands found three
+  defects in `command_paths`, one a security hole:
+  1. `/dev/null` was mined as an out-of-project path — `2>/dev/null` appears
+     in ALL FOUR gated commands. Now an allowlist of write-safe devices;
+     block devices stay mined + catastrophic.
+  2. **SECURITY:** `_peel` DISCARDED leading `VAR=value`, so
+     `KEY=~/.ssh/id_rsa; cat "$KEY"` mined ZERO paths and bypassed the
+     protected-path deny floor (direct `cat ~/.ssh/id_rsa` is denied).
+     Assignments now survive on ParsedSegment; values are mined and
+     `$VAR`/`$HOME` resolve.
+  3. The degenerate-parse fallback used the RAW command, re-admitting
+     heredoc bodies that F6 excluded on the success path.
+  Live-verified: a bypass-mode session (where this floor still applies) runs
+  the exact shape with ZERO confirmations and the file written.
 - Confirmation gates (4) were all reasonable (deletes/writes with variable
   or /tmp paths); resume-after-approval worked every time, including inside
   the verification specialist — the P3 stack validated repeatedly in
