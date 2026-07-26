@@ -28,6 +28,7 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | II | W5 data layer (ingestion) | ⬜ |
 | II | W6 UI/UX frontend | ⬜ |
 | II | W7 verification | ⬜ |
+| II | **W8 skill enable/disable from the UI** (all scopes) | ⬜ **unblocked — shippable now** |
 
 **Nothing in Part II is implemented yet** — no code has been written for this
 program. Part I is complete research, and its findings are what shaped Part II.
@@ -270,6 +271,65 @@ Build on it rather than inventing a viewer.
   confirming the non-advice header) and one authored skill
   (`tech-due-diligence` over a real repo).
 
+## W8 — Skill enable/disable from the UI ⬜
+
+Requirement: toggle skills on/off from the UI — **not only built-ins, but every
+installed skill** (built-in, project, per-user, org/tenant).
+
+**Independently shippable.** Unlike the rest of Part II this is not blocked by
+W1/W2/W3: users can already install skills today (zip upload via
+`/desktop/settings/skills`, `/auth/skills`, `/admin/skills`), and those skills
+are all-or-nothing right now — the only way to stop one is to delete it.
+
+### Verified constraints
+
+- `_skills = make_skill_toolset()` is built **once at module import**
+  (`agent.py:312`) and shared across sessions/users → a toggle **cannot** rebuild
+  the toolset per user. **The filter must be dynamic, evaluated per call.**
+- adk-cc already swaps ADK's skill tools for bounded variants in
+  `_patch_skill_tools` → an established seam to add filtering, no fork.
+- The catalog is produced by `ListSkillsTool._list_skills()` at `list_skills`
+  time, so filtering there is naturally per-request.
+- Today's APIs are **install/uninstall only** — there is no "installed but
+  disabled" state anywhere in the model.
+
+### Design
+
+1. **Enablement state** — a persisted set of *disabled* skill names (deny-list,
+   so newly added skills default to on, matching current behavior).
+   Scopes, in precedence order: **session override** (like the model pin, for
+   "not in this chat") → **user/global default** (Settings) → default on.
+   Storage follows the existing patterns: desktop settings file for desktop,
+   identity store for per-user in web.
+2. **Enforcement — two layers, not one.**
+   - `ListSkillsTool` → `_FilteredListSkillsTool`: disabled skills never enter
+     the catalog. This *also* shrinks the `list_skills` payload, which is the
+     real scarce resource (selection precision).
+   - `LoadSkillTool` / `RunSkillScriptTool` → refuse a disabled skill by name.
+     Defense in depth: a model that saw the name earlier in context must not be
+     able to route around the toggle.
+3. **API** — `GET /…/skills/catalog` returning every *discovered* skill with
+   `name · source (built-in|project|user|org) · path · enabled · shadowed_by`;
+   `PATCH /…/skills/{name}` `{enabled: bool}`. One shape, three mounts
+   (desktop / auth / admin) mirroring the existing skill routes.
+4. **UI** — extend the existing **Settings → Skills** tab (`UserSkillsSection`
+   + `SkillsAdminTab` already exist; do not invent a new surface):
+   - list every discovered skill grouped by source, each with a toggle;
+   - show **shadowing** explicitly — a project skill overriding a built-in of
+     the same name is invisible today and confusing when toggled;
+   - show the resulting catalog size / token estimate, tying the control to the
+     reason it matters;
+   - admin scope can disable org-wide; users can disable for themselves.
+5. **Invalidation** — none needed for the catalog (per-call). The existing
+   `_invalidate_required_inputs()` hook covers install/uninstall.
+
+### Tests
+Unit: deny-list filtering; disabled skill absent from catalog **and** refused by
+`load_skill`/`run_skill_script`; session override beats user default; unknown
+name is a no-op. API: three mounts, authz (a user cannot disable org skills for
+others). **Live UI**: toggle a skill off in Settings → `list_skills` no longer
+lists it → toggle on → it returns; screenshot.
+
 ## Sequencing
 
 | Order | Work | Why here |
@@ -280,6 +340,10 @@ Build on it rather than inventing a viewer.
 | 4 | **W5 ingestion** | A way in besides the file system |
 | 5 | **W3 remainder** (adopted 11) | Bulk editing after the path is proven |
 | 6 | **W6.2–6.7, W4, W5 polish** | Depth once the loop works |
+
+**W8 runs out of band** — it is unblocked today and does not wait on W1–W3.
+Landing it early is also a hedge: it is the control users need once the built-in
+set starts growing.
 
 ## Risks
 
