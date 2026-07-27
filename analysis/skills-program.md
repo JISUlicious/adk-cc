@@ -29,6 +29,7 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | II | W6 UI/UX frontend | ⬜ |
 | II | W7 verification | ⬜ |
 | II | **W8 skill enable/disable from the UI** (all scopes) | ⬜ **unblocked — shippable now** |
+| II | **W9 verification in the skill loop** (soft → hard ladder) | ⬜ planned |
 
 **Nothing in Part II is implemented yet** — no code has been written for this
 program. Part I is complete research, and its findings are what shaped Part II.
@@ -422,6 +423,97 @@ Unit: deny-list filtering; disabled skill absent from catalog **and** refused by
 name is a no-op. API: three mounts, authz (a user cannot disable org skills for
 others). **Live UI**: toggle a skill off in Settings → `list_skills` no longer
 lists it → toggle on → it returns; screenshot.
+
+## W9 — Verification inside the skill loop ⬜
+
+Today `verification` is a real sub-agent that works (139 verification-authored
+events in the session store; a genuine **FAIL** on 2026-07-23, so it is not
+rubber-stamping) — but it fires **only when the coordinator chooses to call
+it**. In eval round 1 it was never reached for; in round 2 it was used twice.
+Discretionary verification is not part of the loop.
+
+**The core idea**: *the skill declares what "done" means; the loop enforces
+checking it.* The verifier's weakest point is deciding what "working" should
+mean for an arbitrary task. A skill that ships its own acceptance criteria
+turns that judgment call into an objective target — and those criteria are
+exactly what a skill author knows best.
+
+### Verified foundations
+
+- `frontmatter.metadata` is a dict on every loaded skill, and `x-adk-cc/*` is
+  an established namespace (`x-adk-cc/secrets`, `credentials/required_inputs`)
+  → a verification contract needs **no new plumbing**.
+- Forcing another coordinator step is a proven mechanism
+  (`_force_coordinator_continuation` + the broker's bounded auto-continue).
+- Plugins already hook `after_tool_callback` / `on_event_callback` /
+  `after_run_callback`.
+
+### The ladder (each step usable alone; later steps subsume earlier)
+
+**S0 — Authored self-verification (soft, zero machinery).**
+Every step-based built-in ends with a Verify step naming *skill-specific*
+evidence: data-analyst re-checks row counts in/out and that a stated figure
+recomputes; tech-due-diligence re-runs two cited commands; feasibility
+sanity-checks the estimate against its calibration commits; contract-review
+confirms every finding quotes a clause number. Ship this with each skill.
+
+**S1 — Declarative contract (`x-adk-cc/verify`).**
+```yaml
+metadata:
+  x-adk-cc/verify: |
+    {"mode": "self",
+     "checks": ["every finding cites a command output or file:line",
+                "the 'could not determine' section is present"],
+     "commands": ["git log --oneline | wc -l"]}
+```
+`mode`: `none` (default) · `self` (model must self-check) · `verifier`
+(independent pass required). Parsed like the secrets declaration —
+malformed metadata is skipped with a debug log, never fatal.
+
+**S2 — Soft nudge (plugin).**
+When a skill with a contract was loaded and the turn is ending without evidence
+of its checks, inject a short reminder into the next model turn — the
+TaskReminderPlugin pattern. Advisory: the model may proceed. Cheap, no extra
+model call, and it makes the criteria visible at the moment they matter.
+
+**S3 — Hard gate (plugin).**
+For `mode: verifier`, force one transfer to `verification` before the
+user-facing answer, passing the skill's declared checks as the acceptance
+criteria. Bounded to **once per turn**; skipped when the turn produced no
+artifacts. The verifier returns its usual `VERDICT: PASS|FAIL|PARTIAL`, and on
+FAIL the coordinator must address it before answering.
+
+**S4 — Step-level gates (hard, mid-workflow).**
+Long workflows fail *before* the end: a diligence report assembled from a
+README is already lost by the time it is written. Group `checks` by step so a
+gate can fire at the transition that matters (e.g. evidence-gathering →
+report-writing). Opt-in per skill; the same bounded mechanism as S3.
+
+**S5 — Surface it.**
+The skill card shows verified / failed / unverified with the verdict; the
+verdict is a first-class part of the answer rather than buried in the
+transcript.
+
+### Cost controls (non-negotiable — verification doubles work)
+
+`verifier` mode is opt-in per skill, never the default. Global kill switch
+(`ADK_CC_SKILL_VERIFY=off|soft|hard`) and a per-turn budget of one verification
+pass. Trivial turns (no files written, no commands run) skip the gate entirely.
+
+### Tests
+
+Contract parsing incl. malformed metadata; S2 nudge fires exactly once and only
+with a contract; S3 forces exactly one verification transfer and none when the
+turn produced nothing; kill switch honored at each level; a scripted-LLM
+harness turn proving FAIL blocks the answer. Live: a skill with a deliberately
+unmet check must come back FAIL, and the UI must show it.
+
+### Sequencing
+
+S0 ships with each remaining skill (free). S1+S2 together (small, safe,
+immediately useful). S3 after S2 has shown the nudge is insufficient — deploy
+the expensive mechanism only where the cheap one demonstrably failed. S4/S5
+last.
 
 ## Sequencing
 
