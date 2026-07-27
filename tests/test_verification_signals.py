@@ -288,6 +288,20 @@ def test_gate_emits_no_user_facing_text():
     print("OK gate_emits_no_user_facing_text")
 
 
+def test_gate_transfer_carries_an_id():
+    """An id-less function call pairs with an id-less response; ADK's content
+    rearrangement cannot match them, the coordinator's next request is
+    malformed, and it returns EMPTY content — the turn ends with no answer
+    (observed live: three empty coordinator events after the handback). Same
+    failure mode as the id-less handback marker."""
+    out = _gate("Done. Added multiply().", [_call("edit_file", path="calc.py")])
+    fcs = [p.function_call for p in (out.content.parts or [])
+           if getattr(p, "function_call", None)]
+    assert fcs and fcs[0].id, "forged transfer must carry a real id"
+    assert fcs[0].id.startswith("verifygate-"), fcs[0].id
+    print("OK gate_transfer_carries_an_id")
+
+
 def test_gate_is_quiet_when_verified():
     turn = [_call("edit_file", path="calc.py"),
             _call("run_bash", command="python -m pytest -q")]
@@ -363,6 +377,7 @@ def main():
     test_builtin_skill_contracts_parse()
     test_gate_blocks_unverified_claim()
     test_gate_emits_no_user_facing_text()
+    test_gate_transfer_carries_an_id()
     test_gate_is_quiet_when_verified()
     test_gate_is_quiet_without_a_claim_or_change()
     test_gate_respects_mode_and_fires_once()

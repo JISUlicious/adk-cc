@@ -29,7 +29,7 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | II | W6 UI/UX frontend | ⬜ |
 | II | W7 verification | ⬜ |
 | II | **W8 skill enable/disable from the UI** (all scopes) | ⬜ **unblocked — shippable now** |
-| II | **W9 verification in the agentic loop** | 🔨 S0–S2 shipped; S3 gate built, EXPERIMENTAL (empty-answer defect) |
+| II | **W9 verification in the agentic loop** | ✅ S0–S3 shipped & live-verified 2026-07-27 (hard = opt-in) |
 
 **Nothing in Part II is implemented yet** — no code has been written for this
 program. Part I is complete research, and its findings are what shaped Part II.
@@ -585,9 +585,23 @@ altered`). 7 unit tests.
 real commands and returned **VERDICT: FAIL** on a change the coordinator had
 already called done — precisely the value the gate exists for.
 
-**Blocking defect**: after the verifier hands back, the coordinator does not
-synthesize, so the turn can end with an **empty user-facing answer**. `hard`
-is therefore opt-in and NOT the default. Fix before promoting it.
+**The empty-answer defect is FIXED.** Root cause: the forged
+`transfer_to_agent` call carried **no `id`**. An id-less call pairs with an
+id-less response, ADK's content rearrangement cannot match them, and the
+coordinator's next request is malformed — it returned EMPTY content three
+times in a row and the turn ended with no reply. This is the *same* failure
+mode as the id-less `_handback_to_coordinator` marker fixed during P3; the
+lesson did not transfer, so it is now pinned by a test asserting the forged
+call has an id.
+
+Confirmed live after the fix: gate fired → verifier ran → `VERDICT: PARTIAL`
+→ **the user received a real answer**. `hard` stays opt-in (default `soft`)
+pending the larger-N measurement, but it is no longer defective.
+
+**The ladder also demonstrably works as a ladder**: in one run the nudge fired,
+the model responded by running `assert calc.power(...)`, and the gate correctly
+stayed silent because evidence now existed. Soft rung handled it; the expensive
+rung never engaged.
 
 Two design bugs were also found and fixed live: the gate initially emitted its
 own instruction as a text part, which was recorded as a coordinator message and

@@ -34,19 +34,18 @@ altered`), so the forged call is processed as a normal transfer.
 
 Config: `ADK_CC_VERIFY=off|soft|hard` (default `soft`).
 
-STATUS — `hard` is EXPERIMENTAL and off by default. The gate itself works
-end-to-end live: it fires on an unverified claim, routes to `verification`,
-which runs real checks and returns a verdict (a live run returned FAIL on a
-change the coordinator had called done — exactly the value). But the
-coordinator does **not** currently synthesize a user-facing answer after the
-verifier hands back, so the turn can end with an empty reply. Until that is
-fixed, do not make `hard` the default.
+STATUS — `hard` is opt-in (default `soft`) but now complete end-to-end: the
+gate fires on an unverified claim, routes to `verification`, which runs real
+checks and returns a verdict, and the coordinator then answers the user
+normally. Live runs have returned FAIL and PARTIAL on changes the coordinator
+had already called done — exactly the value.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import uuid
 from typing import Optional
 
 from google.adk.agents.callback_context import CallbackContext
@@ -190,6 +189,14 @@ class VerifyNudgePlugin(BasePlugin):
                 role="model",
                 parts=[
                     types.Part(function_call=types.FunctionCall(
+                        # A REAL id is mandatory. An id-less call pairs with an
+                        # id-less response, and ADK's content rearrangement
+                        # then cannot match them — the coordinator's next
+                        # request is malformed and it returns EMPTY content, so
+                        # the turn ends with no answer (observed: three empty
+                        # coordinator events after the handback). Same failure
+                        # mode as the id-less _handback_to_coordinator marker.
+                        id=f"verifygate-{uuid.uuid4().hex[:8]}",
                         name="transfer_to_agent",
                         args={"agent_name": _VERIFIER},
                     )),
