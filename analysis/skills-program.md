@@ -540,14 +540,37 @@ tests:
    nothing" — which is what is knowable beforehand. The reactive claim signal
    is retained for measurement and for S3.
 
-**Measured effect (small sample, honest):** on the turn that previously wrote a
-file and answered `"Done."` with no verification, the nudge fired
-(`files=1 cmds=0 checks=0`) and the model added a read-back of the file it had
-written before answering. So the mechanism fires at the right moment and does
-change behaviour — but the answer was still a bare `"Done."` rather than a
-stated verification, and a read-back is weak evidence. **A larger sample is
-needed before concluding whether S3 is required**; that measurement is the next
-step, not more mechanism.
+### Measurement (2026-07-27) — S2 alone is NOT sufficient
+
+Paired experiment, `scripts/measure_verify_nudge.py`: 5 identical mutate-then-
+report prompts under `ADK_CC_VERIFY=off` and `=soft`, gpt-5.4-mini, fresh
+session each, workspace reset between arms, scored with the same detectors the
+nudge uses.
+
+| Arm | verified | unverified claims |
+|---|---|---|
+| `off` | 0/5 | **5/5** |
+| `soft` | 1/5 | **4/5** |
+
+**Conclusion: the advisory nudge moved one case out of five.** The model
+receives the reminder before composing its answer and mostly proceeds anyway.
+That is a real effect but nowhere near sufficient, and it is the measurement
+the plan demanded before spending on the expensive rung — **S3 (the hard gate)
+is now justified by data rather than by speculation.**
+
+Caveat, stated plainly: the prompts *instructed* the model to "just tell me
+it's done", which is adversarial by design and inflates the claim rate above
+normal use. The comparison between arms is still valid (both arms got the same
+prompts); the absolute rate is not a general-population figure.
+
+Two detector corrections came out of the same run, both from real answers
+rather than imagination: completion claims are dominantly `"Done — …"`,
+`"Done. Added …"`, `"Created X …"` — a whole-message match caught only a bare
+`"Done."`, so claim detection is now anchored to the *start* of the answer;
+and the first attempt scored five empty sessions as "clean" because the harness
+leaked `ADK_CC_API_KEY=x` into the sidecar (every turn died with
+AuthenticationError). The harness now fails loudly on a turn that did nothing —
+a measurement that cannot distinguish "clean" from "broken" is worse than none.
 
 ### Sequencing
 

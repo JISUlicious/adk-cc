@@ -41,10 +41,16 @@ _CLAIM_RE = re.compile(
     r")\b"
 )
 
-# A bare "Done." IS the claim — observed live as the entire answer after an
-# edit. Matched separately so the word "done" in prose ("when done, run X")
-# does not trip it.
-_BARE_DONE_RE = re.compile(r"(?i)^\s*(done|all done|complete|completed)[.!]?\s*$")
+# Completion reports, matched at the START of the answer. Measurement against
+# real turns showed the dominant forms are "Done.", "Done — …", "Done. Added …",
+# and "Created X" / "Added X" — a whole-message match caught only the first.
+# Anchoring to the start keeps "when done, run X" and "I am not done" out.
+_LEAD_CLAIM_RE = re.compile(
+    r"(?i)^\s*(?:\*\*)?"
+    r"(done|all done|complete|completed|finished|"
+    r"created|added|updated|implemented|applied|renamed)"
+    r"\b"
+)
 
 # Hedges that explicitly disclaim verification — these DEFUSE a claim, because
 # saying "unverified" is exactly the behaviour we want to encourage.
@@ -188,8 +194,9 @@ def collect(events: Iterable[Any], *, author: Optional[str] = None) -> TurnSigna
         if _HEDGE_RE.search(text):
             hedged = True
         claims.extend(m.group(1) for m in _CLAIM_RE.finditer(text))
-        if _BARE_DONE_RE.match(text.strip()):
-            claims.append("done")
+        lead = _LEAD_CLAIM_RE.match(text.strip())
+        if lead:
+            claims.append(lead.group(1).lower())
 
     return TurnSignals(
         mutated_files=mutated,
