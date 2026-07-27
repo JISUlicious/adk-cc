@@ -662,9 +662,33 @@ directly or say the fix is unverified. Live after the fix, on the same
 scenario, the answer became *"Verified with runtime checks and `py_compile`;
 both passed"* and the code was genuinely correct.
 
-The deeper limitation stands and is worth knowing: **the verify → fix →
-re-verify loop cannot complete within a single turn.** Re-verification needs a
-new turn. That is an ADK-level constraint, not a prompt problem.
+**CORRECTION (2026-07-28): "ADK cannot re-run a sub-agent in one turn" was
+wrong.** A controlled reproduction against the real adk-cc app
+(`scripts/probe_verification_reentry.py`, scripted LLM) transfers to
+`verification` twice in a single invocation and **both runs execute** — the
+second returns its verdict normally. ADK also has an explicit mechanism for
+this: `InvocationContext.set_agent_state(name)` with no arguments "clear[s] the
+agent_state and end_of_agent flag, to allow the agent to re-run", and
+`LoopAgent` uses exactly that via `reset_sub_agent_states`.
+
+So re-entry is supported. What was actually observed live is narrower: the
+second verification run produced **nothing at all** — no tool calls, no text,
+only the handback marker. The harness reproduces the *shape* (`runs=[2, 0]` by
+tool count) but not the emptiness, because a scripted LLM answers regardless of
+whether the request it received was well-formed.
+
+**Leading hypothesis** (untested, filed): `HandbackHygienePlugin` strips the
+auto-generated function_RESPONSE to the handback marker while the handback
+CALL remains in history. For the coordinator that is harmless — the call is a
+foreign event and gets narrated to text. But a re-entering `verification` sees
+its OWN unanswered call on its branch, which is exactly the malformed-content
+shape that produced empty model responses twice before in this project
+(id-less handback marker; id-less gate transfer). Next step is to capture the
+actual request sent on re-entry (ModelIOTracePlugin) and confirm before
+changing a load-bearing plugin.
+
+The shipped mitigation stands regardless: detect the no-op and tell the
+coordinator the truth rather than let it promise a verdict that never arrives.
 
 ### Sequencing
 
