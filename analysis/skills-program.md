@@ -23,7 +23,7 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | I | 3. Verified platform facts (discovery, progressive disclosure, runtime) | ✅ 2026-07-26 |
 | II | W1 runtime — uv-managed analysis env | ✅ 2026-07-27 (unit + API + UI verified) |
 | II | W2 built-in skills plumbing | ✅ 2026-07-27 (incl. real wheel-packaging test) |
-| II | W3 the built-in set (~21) | 🔨 1/21 — `data-analyst` shipped & live-verified |
+| II | W3 the built-in set (~21) | 🔨 4/21 — `data-analyst` + authored R&D trio, live-verified |
 | II | W4 agent/tool layer | ⬜ |
 | II | W5 data layer (ingestion) | ⬜ |
 | II | W6 UI/UX frontend | ⬜ |
@@ -229,7 +229,29 @@ now prefixes the reason to stderr instead of leaving a bare `exit 127`.
   companions — a package that drops non-`.py` files silently ships zero skills.
 - `ATTRIBUTION.md`: upstream repo + commit + license per vendored skill.
 
-## W3 — The built-in set (~21) ⬜
+## W3 — The built-in set (~21) 🔨 4 of 21 shipped
+
+**Shipped (2026-07-27)**: `data-analyst` (adopted) + the authored R&D trio
+`tech-due-diligence`, `feasibility-study`, `prd-writer`. Catalog cost ~342
+tokens for 4 skills — well inside the 2K budget test.
+
+The trio is **authored, not adopted**, because the corpus survey found only 4
+clean candidates in this domain (thinnest of any) while it is exactly where
+reading a real codebase is the advantage. Each is built around evidence from the
+repo rather than a template: diligence cites command output and `file:line`;
+feasibility calibrates estimates against *this* repo's comparable past changes
+(`git log --stat`) instead of industry averages; the PRD reads existing code
+before specifying.
+
+**Live-verified**: `tech-due-diligence` run by gpt-5.4-mini against a real repo
+loaded all 3 references and produced a structured report whose lead finding —
+*no LICENSE file → all rights reserved* — is correct and consequential.
+`feasibility-study` in the UI produced ground truth, an effort range, risks and
+a recommendation; all 4 skills appeared in `list_skills` with usable
+descriptions.
+
+**Remaining 17**: finance (4), operations (3), data/BI (3), customers (3),
+people (2), legal (2, Tier C with non-advice framing), governance (2).
 
 Selection bars — all six must pass: **(1)** genuinely Tier A (no vendor data
 provider/API key); **(2)** license-clean MIT/Apache-2.0 with attribution
