@@ -29,7 +29,7 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | II | W6 UI/UX frontend | ⬜ |
 | II | W7 verification | ⬜ |
 | II | **W8 skill enable/disable from the UI** (all scopes) | ⬜ **unblocked — shippable now** |
-| II | **W9 verification in the skill loop** (soft → hard ladder) | ⬜ planned |
+| II | **W9 verification in the agentic loop** (general; soft → hard) | ⬜ planned |
 
 **Nothing in Part II is implemented yet** — no code has been written for this
 program. Part I is complete research, and its findings are what shaped Part II.
@@ -424,91 +424,111 @@ name is a no-op. API: three mounts, authz (a user cannot disable org skills for
 others). **Live UI**: toggle a skill off in Settings → `list_skills` no longer
 lists it → toggle on → it returns; screenshot.
 
-## W9 — Verification inside the skill loop ⬜
+## W9 — Verification in the agentic loop ⬜
 
-Today `verification` is a real sub-agent that works (139 verification-authored
-events in the session store; a genuine **FAIL** on 2026-07-23, so it is not
-rubber-stamping) — but it fires **only when the coordinator chooses to call
-it**. In eval round 1 it was never reached for; in round 2 it was used twice.
-Discretionary verification is not part of the loop.
+Verification is not a skills feature. The recurring failure this session was
+**claims made without evidence** — eval round 1 produced three "fixed" claims
+that a real reproduction contradicted, and none of them involved a skill. The
+prompt rule I shipped (executed reproduction before claiming a fix) took that
+to zero in round 2, which is the proof that the *claim* is the right unit of
+verification, not the skill.
 
-**The core idea**: *the skill declares what "done" means; the loop enforces
-checking it.* The verifier's weakest point is deciding what "working" should
-mean for an arbitrary task. A skill that ships its own acceptance criteria
-turns that judgment call into an objective target — and those criteria are
-exactly what a skill author knows best.
+So: verify **results, whenever they are asserted**. Skills are one input among
+several, not the trigger.
 
-### Verified foundations
+Today `verification` is a real, working sub-agent (139 authored events in the
+session store, including a genuine **FAIL**, so it is not rubber-stamping) —
+but it fires only when the coordinator elects to call it: never in round 1,
+twice in round 2. Discretionary verification is not a loop.
 
-- `frontmatter.metadata` is a dict on every loaded skill, and `x-adk-cc/*` is
-  an established namespace (`x-adk-cc/secrets`, `credentials/required_inputs`)
-  → a verification contract needs **no new plumbing**.
-- Forcing another coordinator step is a proven mechanism
-  (`_force_coordinator_continuation` + the broker's bounded auto-continue).
-- Plugins already hook `after_tool_callback` / `on_event_callback` /
-  `after_run_callback`.
+### What triggers verification
 
-### The ladder (each step usable alone; later steps subsume earlier)
+Any of these, evaluated at turn end (all cheap — none needs a model call):
 
-**S0 — Authored self-verification (soft, zero machinery).**
-Every step-based built-in ends with a Verify step naming *skill-specific*
-evidence: data-analyst re-checks row counts in/out and that a stated figure
-recomputes; tech-due-diligence re-runs two cited commands; feasibility
-sanity-checks the estimate against its calibration commits; contract-review
-confirms every finding quotes a clause number. Ship this with each skill.
+1. **A claim without evidence** *(primary)* — the answer asserts a result
+   ("fixed", "passing", "works", "deployed", "verified") while the turn ran no
+   command, test, or reproduction that could support it. This is the automated
+   form of the executed-reproduction rule.
+2. **Material change** — files mutated at/above a threshold. Already computable
+   for free: desktop keeps a shadow-git snapshot per turn
+   (`service/desktop_checkpoint.snapshot`) and `desktop_files` already parses
+   `git status --porcelain`.
+3. **Risk class** — irreversible or outward-facing effects: deletes, migrations,
+   deploys, publishes, sends, credential changes. The command-safety classifier
+   already tiers commands, so this signal exists too.
+4. **A declared contract** — a skill's `x-adk-cc/verify`, or a plan's success
+   criteria.
+5. **The user asked.**
 
-**S1 — Declarative contract (`x-adk-cc/verify`).**
-```yaml
-metadata:
-  x-adk-cc/verify: |
-    {"mode": "self",
-     "checks": ["every finding cites a command output or file:line",
-                "the 'could not determine' section is present"],
-     "commands": ["git log --oneline | wc -l"]}
-```
-`mode`: `none` (default) · `self` (model must self-check) · `verifier`
-(independent pass required). Parsed like the secrets declaration —
-malformed metadata is skipped with a debug log, never fatal.
+### What it verifies against — acceptance criteria, in priority order
 
-**S2 — Soft nudge (plugin).**
-When a skill with a contract was loaded and the turn is ending without evidence
-of its checks, inject a short reminder into the next model turn — the
-TaskReminderPlugin pattern. Advisory: the model may proceed. Cheap, no extra
-model call, and it makes the criteria visible at the moment they matter.
+The verifier's weakest point is deciding what "working" means. Give it a target,
+from the best available source:
 
-**S3 — Hard gate (plugin).**
-For `mode: verifier`, force one transfer to `verification` before the
-user-facing answer, passing the skill's declared checks as the acceptance
-criteria. Bounded to **once per turn**; skipped when the turn produced no
-artifacts. The verifier returns its usual `VERDICT: PASS|FAIL|PARTIAL`, and on
-FAIL the coordinator must address it before answering.
+1. **Skill contract** (`x-adk-cc/verify`: `mode`, `checks`, `commands`) — the
+   author knows the criteria best.
+2. **The current plan** — plan mode already writes success criteria and
+   `read_current_plan` already exists.
+3. **The user's original request** — did it do what was asked, not what was
+   easy?
+4. **Repo-native signals** — the project's own test/build/lint commands.
+5. **The agent's own claims** — the universal fallback: whatever it asserted,
+   check that. Nothing else is needed for this to work on any turn.
 
-**S4 — Step-level gates (hard, mid-workflow).**
-Long workflows fail *before* the end: a diligence report assembled from a
-README is already lost by the time it is written. Group `checks` by step so a
-gate can fire at the transition that matters (e.g. evidence-gathering →
-report-writing). Opt-in per skill; the same bounded mechanism as S3.
+### The ladder (soft → hard; each rung usable alone)
 
-**S5 — Surface it.**
-The skill card shows verified / failed / unverified with the verdict; the
-verdict is a first-class part of the answer rather than buried in the
-transcript.
+**S0 — Self-verification in the prompt (soft, shipped in part).** The
+coordinator already must reproduce before claiming a fix. Extend the same
+discipline to result claims generally, and give each step-based skill a Verify
+step naming skill-specific evidence.
+
+**S1 — Declarative contracts.** `x-adk-cc/verify` on skills (frontmatter
+`metadata` is a dict; `x-adk-cc/*` is an established namespace, so no new
+plumbing) and success criteria from the plan.
+
+**S2 — Soft nudge (plugin, no extra model call).** At turn end, if a trigger
+fired and no supporting evidence exists, inject the relevant acceptance criteria
+as a reminder before the answer is finalized. Advisory. The TaskReminderPlugin
+pattern.
+
+**S3 — Hard gate (plugin).** For high-risk triggers (risk class, or a contract
+demanding `verifier`), force one `verification` pass carrying the acceptance
+criteria, before the user-facing answer. `FAIL` must be addressed, not
+narrated. Bounded to one pass per turn; skipped when the turn changed nothing.
+
+**S4 — Mid-workflow gates.** Long work fails *before* the end — a diligence
+report assembled from a README is already lost by the time it is written. Gate
+the transition that matters (evidence gathered → conclusions written), not just
+the finish.
+
+**S5 — Surface it.** Verdict as a first-class part of the answer — verified /
+failed / unverified — in the UI, not buried in the transcript.
 
 ### Cost controls (non-negotiable — verification doubles work)
 
-`verifier` mode is opt-in per skill, never the default. Global kill switch
-(`ADK_CC_SKILL_VERIFY=off|soft|hard`) and a per-turn budget of one verification
-pass. Trivial turns (no files written, no commands run) skip the gate entirely.
+`ADK_CC_VERIFY=off|soft|hard`; hard reserved for risk-class and opted-in
+contracts; **one pass per turn**; skipped entirely when the turn produced no
+artifacts and made no claim. The nudge (S2) costs nothing extra and should
+carry most of the value.
 
 ### Tests
 
-Contract parsing incl. malformed metadata; S2 nudge fires exactly once and only
-with a contract; S3 forces exactly one verification transfer and none when the
-turn produced nothing; kill switch honored at each level; a scripted-LLM
-harness turn proving FAIL blocks the answer. Live: a skill with a deliberately
-unmet check must come back FAIL, and the UI must show it.
+Trigger detection (claim-without-evidence, change threshold, risk class) as
+pure functions over a turn's events — fast and deterministic. Contract parsing
+incl. malformed metadata. S2 fires once, only when a trigger fired. S3 forces
+exactly one transfer, none on a no-op turn, and a `FAIL` blocks the answer
+(scripted-LLM harness). Kill switch honored at each level. Live: a deliberately
+false claim ("I fixed it" with no change) must be caught; a clean turn must not
+pay for a verification pass.
 
 ### Sequencing
+
+S0/S1 first (free). Then **S2, and measure**: does the nudge alone move the
+unverified-claim rate? Round 1 → round 2 went 3 → 0 on a prompt change alone,
+so the cheap rung may well be sufficient. Deploy S3 only where S2 measurably
+fails — that ordering is the whole point.
+
+## Sequencing
 
 S0 ships with each remaining skill (free). S1+S2 together (small, safe,
 immediately useful). S3 after S2 has shown the nudge is insufficient — deploy
