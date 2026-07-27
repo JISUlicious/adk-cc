@@ -29,7 +29,7 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | II | W6 UI/UX frontend | ⬜ |
 | II | W7 verification | ⬜ |
 | II | **W8 skill enable/disable from the UI** (all scopes) | ⬜ **unblocked — shippable now** |
-| II | **W9 verification in the agentic loop** | 🔨 S0–S2 shipped 2026-07-27; S3+ pending measurement |
+| II | **W9 verification in the agentic loop** | 🔨 S0–S2 shipped; S3 gate built, EXPERIMENTAL (empty-answer defect) |
 
 **Nothing in Part II is implemented yet** — no code has been written for this
 program. Part I is complete research, and its findings are what shaped Part II.
@@ -571,6 +571,39 @@ and the first attempt scored five empty sessions as "clean" because the harness
 leaked `ADK_CC_API_KEY=x` into the sidecar (every turn died with
 AuthenticationError). The harness now fails loudly on a turn that did nothing —
 a measurement that cannot distinguish "clean" from "broken" is worse than none.
+
+### S3 status (2026-07-27) — built, works, one blocking defect
+
+The gate lives in `after_model_callback` — the first moment the claim exists
+(`before_model` structurally cannot see it, which is why the soft rung is
+weak). It replaces an unverified-claim answer with a forged
+`transfer_to_agent(verification)`; ADK honours the replacement
+(`if (altered := await _handle_after_model_callback(...)): llm_response =
+altered`). 7 unit tests.
+
+**Live: the gate works.** It fired, routed to `verification`, which ran six
+real commands and returned **VERDICT: FAIL** on a change the coordinator had
+already called done — precisely the value the gate exists for.
+
+**Blocking defect**: after the verifier hands back, the coordinator does not
+synthesize, so the turn can end with an **empty user-facing answer**. `hard`
+is therefore opt-in and NOT the default. Fix before promoting it.
+
+Two design bugs were also found and fixed live: the gate initially emitted its
+own instruction as a text part, which was recorded as a coordinator message and
+became the user-visible reply (the gate must route, not speak); and the method
+was appended to the end of the module, landing nested inside a helper rather
+than on the class — `hasattr` passed because `BasePlugin` defines a no-op of
+the same name, so the plugin silently did nothing.
+
+### Correction to the S2 measurement
+
+A second run of the same experiment gave `soft` **3/4** verified, against
+**1/5** in the first. At n=5 the run-to-run variance exceeds the effect, so the
+earlier conclusion ("the nudge moves only 1 in 5, therefore S3 is justified")
+was over-claimed from a single sample. S3 is worth having on its own merits —
+it demonstrably catches a bad change — but the claim that S2 is insufficient is
+**not established**; a larger sample is still owed.
 
 ### Sequencing
 

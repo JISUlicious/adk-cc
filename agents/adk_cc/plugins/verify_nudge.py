@@ -18,8 +18,29 @@ the expensive rung (forcing a verification pass) is warranted. A prompt change
 alone once took that rate from 3 to 0 in a dogfooding round, so the cheap
 mechanism deserves the first shot.
 
-Config: `ADK_CC_VERIFY=off|soft|hard` (default `soft`). `hard` is reserved for
-S3 and currently behaves as `soft` — the plugin never blocks.
+`hard` adds the S3 GATE, justified by measurement rather than taste: a paired
+experiment (scripts/measure_verify_nudge.py) found the advisory nudge moved only
+1 of 5 mutate-then-report turns (off 0/5 verified, soft 1/5). The model reads
+the reminder and mostly proceeds anyway.
+
+The gate lives in `after_model_callback`, which matters: that is the FIRST
+moment the claim exists. `before_model` cannot see it — the claim is in the
+response being generated — which is precisely why the soft rung is weak. At
+`after_model` the plugin can compare the claim against the turn's evidence and,
+finding none, replace the answer with a transfer to the `verification`
+sub-agent. ADK honours the replacement
+(`if (altered := await _handle_after_model_callback(...)): llm_response =
+altered`), so the forged call is processed as a normal transfer.
+
+Config: `ADK_CC_VERIFY=off|soft|hard` (default `soft`).
+
+STATUS — `hard` is EXPERIMENTAL and off by default. The gate itself works
+end-to-end live: it fires on an unverified claim, routes to `verification`,
+which runs real checks and returns a verdict (a live run returned FAIL on a
+change the coordinator had called done — exactly the value). But the
+coordinator does **not** currently synthesize a user-facing answer after the
+verifier hands back, so the turn can end with an empty reply. Until that is
+fixed, do not make `hard` the default.
 """
 
 from __future__ import annotations
@@ -34,11 +55,13 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
-from ..verification.signals import collect, nudge_text
+from ..verification.signals import _CLAIM_RE, _LEAD_CLAIM_RE, collect, nudge_text
 
 _log = logging.getLogger(__name__)
 
 _STATE_NUDGED = "temp:verify_nudged_invocation"
+_STATE_GATED = "temp:verify_gated_invocation"
+_VERIFIER = "verification"
 
 
 def _mode() -> str:
@@ -89,6 +112,90 @@ class VerifyNudgePlugin(BasePlugin):
         _log.info("verify nudge: %s", sig.summary())
         _append_to_system_instruction(llm_request, text)
         return None
+
+
+    # ---- S3: the hard gate -------------------------------------------------
+
+    async def after_model_callback(
+        self, *, callback_context: CallbackContext, llm_response: LlmResponse
+    ) -> Optional[LlmResponse]:
+        """Block an unverified claim by routing to the verifier instead.
+
+        Fires only when ALL hold: mode is `hard`; this is a final text answer
+        (not a tool call); the turn changed something; nothing checked it; and
+        the answer asserts a result (or the turn did something irreversible).
+        Bounded to once per invocation, so a FAIL cannot ping-pong.
+        """
+        if _mode() != "hard":
+            return None
+        content = getattr(llm_response, "content", None)
+        parts = list(getattr(content, "parts", None) or [])
+        if not parts:
+            return None
+        # A tool call is not an answer — let the turn continue.
+        if any(getattr(p, "function_call", None) is not None for p in parts):
+            return None
+        if getattr(llm_response, "partial", False):
+            return None
+        answer = "\n".join(
+            p.text for p in parts
+            if getattr(p, "text", None) and not getattr(p, "thought", False)
+        ).strip()
+        if not answer:
+            return None
+
+        try:
+            ictx = callback_context._invocation_context
+            inv = callback_context.invocation_id
+            agent = getattr(ictx.agent, "name", None)
+            events = ictx.session.events or []
+        except AttributeError:
+            return None
+
+        # Never gate the verifier itself — it would recurse.
+        if agent == _VERIFIER:
+            return None
+
+        state = getattr(callback_context, "state", None)
+        if state is not None and state.get(_STATE_GATED) == inv:
+            return None
+
+        turn = [e for e in events if getattr(e, "invocation_id", None) == inv]
+        if not turn:
+            return None
+        # Already verified this turn? Then nothing to gate.
+        if any(getattr(e, "author", None) == _VERIFIER for e in turn):
+            return None
+
+        sig = collect(turn, author=agent)
+        if sig.has_evidence or not sig.changed_anything:
+            return None
+        claims = bool(_CLAIM_RE.search(answer)) or bool(_LEAD_CLAIM_RE.match(answer))
+        if not (claims or sig.risky):
+            return None
+
+        if state is not None:
+            try:
+                state[_STATE_GATED] = inv
+            except Exception:  # noqa: BLE001
+                pass
+        _log.info("verify GATE: routing to %s (%s)", _VERIFIER, sig.summary())
+
+        # ONLY the transfer — no text part. A text part here is recorded as a
+        # coordinator message and becomes the user-visible answer (observed
+        # live: the gate's own scaffolding was shown as the reply). The reason
+        # belongs in the log and in the transfer, not in the conversation.
+        return LlmResponse(
+            content=types.Content(
+                role="model",
+                parts=[
+                    types.Part(function_call=types.FunctionCall(
+                        name="transfer_to_agent",
+                        args={"agent_name": _VERIFIER},
+                    )),
+                ],
+            )
+        )
 
 
 def _append_to_system_instruction(req: LlmRequest, text: str) -> None:

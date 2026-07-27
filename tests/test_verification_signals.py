@@ -231,6 +231,121 @@ def test_builtin_skill_contracts_parse():
     print(f"OK builtin_skill_contracts_parse ({n} active)")
 
 
+# --- S3: the hard gate -----------------------------------------------------
+
+def _gate(answer, turn_events, mode="hard", agent="coordinator", gated=None):
+    """Drive VerifyNudgePlugin.after_model_callback with a fake context."""
+    import asyncio as _a
+    from google.adk.models.llm_response import LlmResponse
+    from google.genai import types
+    from adk_cc.plugins.verify_nudge import VerifyNudgePlugin
+
+    os.environ["ADK_CC_VERIFY"] = mode
+    try:
+        ictx = SimpleNamespace(
+            agent=SimpleNamespace(name=agent),
+            session=SimpleNamespace(events=turn_events),
+        )
+        cc = SimpleNamespace(
+            _invocation_context=ictx, invocation_id="inv",
+            state=(gated if gated is not None else {}),
+        )
+        resp = LlmResponse(content=types.Content(
+            role="model", parts=[types.Part(text=answer)]))
+        return _a.run(VerifyNudgePlugin().after_model_callback(
+            callback_context=cc, llm_response=resp))
+    finally:
+        os.environ.pop("ADK_CC_VERIFY", None)
+
+
+def _transfers_to_verification(out):
+    if out is None:
+        return False
+    for p in (out.content.parts or []):
+        fc = getattr(p, "function_call", None)
+        if fc and fc.name == "transfer_to_agent" and fc.args.get("agent_name") == "verification":
+            return True
+    return False
+
+
+def test_gate_blocks_unverified_claim():
+    """The 4-of-5 case the measurement found: edited, checked nothing, claimed."""
+    out = _gate("Done. Added multiply().", [_call("edit_file", path="calc.py")])
+    assert _transfers_to_verification(out), out
+    print("OK gate_blocks_unverified_claim")
+
+
+def test_gate_emits_no_user_facing_text():
+    """Observed live: a text part in the gate response is recorded as a
+    coordinator message and becomes the answer the user reads — the gate's
+    internal scaffolding leaked into the conversation. The gate must route,
+    not speak."""
+    out = _gate("Done. Added multiply().", [_call("edit_file", path="calc.py")])
+    assert out is not None
+    texts = [p.text for p in (out.content.parts or []) if getattr(p, "text", None)]
+    assert texts == [], f"gate must not emit user-facing text: {texts}"
+    assert _transfers_to_verification(out)
+    print("OK gate_emits_no_user_facing_text")
+
+
+def test_gate_is_quiet_when_verified():
+    turn = [_call("edit_file", path="calc.py"),
+            _call("run_bash", command="python -m pytest -q")]
+    assert _gate("Done — tests pass.", turn) is None
+    print("OK gate_is_quiet_when_verified")
+
+
+def test_gate_is_quiet_without_a_claim_or_change():
+    # no claim
+    assert _gate("Here is what the file contains.", [_call("edit_file", path="a")]) is None
+    # no change
+    assert _gate("Done.", [_call("read_file", path="a")]) is None
+    # read-only turn entirely
+    assert _gate("Done.", []) is None
+    print("OK gate_is_quiet_without_a_claim_or_change")
+
+
+def test_gate_respects_mode_and_fires_once():
+    turn = [_call("edit_file", path="calc.py")]
+    assert _gate("Done.", turn, mode="soft") is None, "soft must never block"
+    assert _gate("Done.", turn, mode="off") is None
+    # bounded: a turn already gated is not gated again (no ping-pong on FAIL)
+    st = {"temp:verify_gated_invocation": "inv"}
+    assert _gate("Done.", turn, gated=st) is None
+    print("OK gate_respects_mode_and_fires_once")
+
+
+def test_gate_never_blocks_the_verifier_itself():
+    turn = [_call("edit_file", path="a", author="verification")]
+    assert _gate("Done.", turn, agent="verification") is None
+    print("OK gate_never_blocks_the_verifier_itself")
+
+
+def test_gate_ignores_tool_calls_and_partials():
+    """Only a final text answer is gated; a tool call is the turn continuing."""
+    import asyncio as _a
+    from google.adk.models.llm_response import LlmResponse
+    from google.genai import types
+    from adk_cc.plugins.verify_nudge import VerifyNudgePlugin
+
+    os.environ["ADK_CC_VERIFY"] = "hard"
+    try:
+        ictx = SimpleNamespace(agent=SimpleNamespace(name="coordinator"),
+                               session=SimpleNamespace(events=[_call("edit_file", path="a")]))
+        cc = SimpleNamespace(_invocation_context=ictx, invocation_id="inv", state={})
+        tool_resp = LlmResponse(content=types.Content(role="model", parts=[
+            types.Part(function_call=types.FunctionCall(name="read_file", args={}))]))
+        assert _a.run(VerifyNudgePlugin().after_model_callback(
+            callback_context=cc, llm_response=tool_resp)) is None
+        partial = LlmResponse(content=types.Content(
+            role="model", parts=[types.Part(text="Done.")]), partial=True)
+        assert _a.run(VerifyNudgePlugin().after_model_callback(
+            callback_context=cc, llm_response=partial)) is None
+    finally:
+        os.environ.pop("ADK_CC_VERIFY", None)
+    print("OK gate_ignores_tool_calls_and_partials")
+
+
 def main():
     test_claim_without_evidence_fires()
     test_claim_with_evidence_is_quiet()
@@ -246,6 +361,13 @@ def main():
     test_contract_parsing()
     test_criteria_appear_in_the_nudge()
     test_builtin_skill_contracts_parse()
+    test_gate_blocks_unverified_claim()
+    test_gate_emits_no_user_facing_text()
+    test_gate_is_quiet_when_verified()
+    test_gate_is_quiet_without_a_claim_or_change()
+    test_gate_respects_mode_and_fires_once()
+    test_gate_never_blocks_the_verifier_itself()
+    test_gate_ignores_tool_calls_and_partials()
     print("\nall verification-signal tests passed")
 
 
