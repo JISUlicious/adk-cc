@@ -9,6 +9,8 @@ vendored from. Skills authored for adk-cc are marked `first-party`.
 | `tech-due-diligence` | authored for adk-cc | first-party | 2026-07-27 |
 | `feasibility-study` | authored for adk-cc | first-party | 2026-07-27 |
 | `prd-writer` | authored for adk-cc | first-party | 2026-07-27 |
+| `contract-review` | authored for adk-cc (informed by w95 `contract-review`, MIT) | first-party | 2026-07-27 |
+| `nda-triage` | authored for adk-cc (informed by w95 `nda-triage`, MIT) | first-party | 2026-07-27 |
 
 The three R&D skills are **authored, not adopted**: the 1,185-skill corpus
 surveyed in `analysis/skills-program.md` yielded only 4 clean candidates in this

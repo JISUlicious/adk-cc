@@ -8,7 +8,7 @@
 | Weak copyleft | LGPL, MPL-2.0, EPL | Usually fine when dynamically linked/unmodified; document the linkage. |
 | Permissive | MIT, BSD, Apache-2.0 | Low risk. Apache-2.0 adds a patent grant (a plus). |
 | **Source-available (NOT open source)** | BUSL, Elastic, SSPL, Commons Clause | Look open, restrict commercial use. Commonly missed — check the LICENSE text, never the label. |
-| Unlicensed / missing | no LICENSE file | Default is "all rights reserved" — legally the worst case, not the most permissive. |
+| Unlicensed / missing | no LICENSE file | Generally treated as "all rights reserved" rather than permissive — i.e. the worst case for a would-be user. Copyright specifics are jurisdictional; flag it, refer the conclusion. |
 
 ## Checks worth running
 

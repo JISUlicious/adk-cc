@@ -115,6 +115,52 @@ def test_catalog_token_budget():
     print(f"OK catalog_token_budget (~{approx_tokens} tokens, {len(pairs)} skills)")
 
 
+# Skills whose subject matter is bound to jurisdiction / entity / current rules.
+_JURISDICTION_SENSITIVE = {"contract-review", "nda-triage"}
+
+
+def test_jurisdiction_sensitive_skills_ask_before_asserting():
+    """A built-in ships to everyone. A skill that bakes in one country's rules
+    is confidently wrong for most readers with no signal that it is wrong, so
+    these must establish the user's context and refuse to state local rules
+    from memory (see skills/AUTHORING.md)."""
+    for name in _JURISDICTION_SENSITIVE:
+        body = (_BUILTIN_DIR / name / "SKILL.md").read_text().lower()
+        assert "jurisdiction" in body, f"{name}: must establish jurisdiction"
+        assert "governing law" in body, f"{name}: must locate governing law"
+        assert "entity" in body, f"{name}: must establish entity type"
+        # explicitly asks rather than assuming, AND must surface the gap even
+        # when it proceeds — a silent assumption is the failure mode
+        assert "ask" in body, f"{name}: must ask when context is unknown"
+        assert "not established" in body, \
+            f"{name}: must state unestablished context rather than assume it"
+        assert "context" in body, f"{name}: must open with a context line"
+        # advice boundary is stated
+        assert "not legal advice" in body, f"{name}: must state the advice boundary"
+        # never recall specifics from memory; verify live instead
+        assert "memory" in body and "web_fetch" in body, \
+            f"{name}: must require live verification over recalled rules"
+    print(f"OK jurisdiction_sensitive_skills_ask_before_asserting "
+          f"({len(_JURISDICTION_SENSITIVE)} skills)")
+
+
+def test_no_baked_in_jurisdiction_facts():
+    """Cheap guard against the specific failure mode: hardcoded statutory
+    numbers / durations presented as fact. Catches the obvious regressions."""
+    import re
+
+    bad = re.compile(
+        r"(?i)\b(?:must|shall|is required to)\s+(?:be\s+)?(?:filed|reported|"
+        r"paid)\s+within\s+\d+|\b\d+\s*(?:year|month|day)s?\s+(?:is|are)\s+"
+        r"(?:the\s+)?standard\b|\bstatute of limitations is\b"
+    )
+    for skill_dir in sorted(p for p in _BUILTIN_DIR.iterdir() if p.is_dir()):
+        for md in skill_dir.rglob("*.md"):
+            hit = bad.search(md.read_text())
+            assert not hit, f"{md.relative_to(_BUILTIN_DIR)}: baked-in fact {hit.group(0)!r}"
+    print("OK no_baked_in_jurisdiction_facts")
+
+
 def test_wheel_contains_skill_files():
     """REAL build. `packages.find` ships only *.py — without package-data the
     wheel would contain zero SKILL.md and every installed copy would have an
@@ -148,6 +194,8 @@ def main():
     test_kill_switch_removes_the_layer()
     test_project_skill_overrides_by_name_only()
     test_catalog_token_budget()
+    test_jurisdiction_sensitive_skills_ask_before_asserting()
+    test_no_baked_in_jurisdiction_facts()
     test_wheel_contains_skill_files()
     print("\nall built-in skill tests passed")
 

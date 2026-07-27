@@ -23,7 +23,7 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | I | 3. Verified platform facts (discovery, progressive disclosure, runtime) | ✅ 2026-07-26 |
 | II | W1 runtime — uv-managed analysis env | ✅ 2026-07-27 (unit + API + UI verified) |
 | II | W2 built-in skills plumbing | ✅ 2026-07-27 (incl. real wheel-packaging test) |
-| II | W3 the built-in set (~21) | 🔨 4/21 — `data-analyst` + authored R&D trio, live-verified |
+| II | W3 the built-in set (~21) | 🔨 6/21 — + legal pair under jurisdiction discipline |
 | II | W4 agent/tool layer | ⬜ |
 | II | W5 data layer (ingestion) | ⬜ |
 | II | W6 UI/UX frontend | ⬜ |
@@ -250,8 +250,36 @@ loaded all 3 references and produced a structured report whose lead finding —
 a recommendation; all 4 skills appeared in `list_skills` with usable
 descriptions.
 
-**Remaining 17**: finance (4), operations (3), data/BI (3), customers (3),
-people (2), legal (2, Tier C with non-advice framing), governance (2).
+**Legal pair shipped (Tier C)**: `contract-review`, `nda-triage` — authored,
+not adopted, under the jurisdiction discipline below.
+
+### Authoring rule: context, never facts (`skills/AUTHORING.md`)
+
+A built-in ships to everyone, so **no skill embeds jurisdiction-, entity- or
+time-bound facts** — no statutory limits, rates, deadlines, notice periods or
+"typical" terms. Those differ by country, entity form and year, and a skill
+stating them is confidently wrong for most readers with no signal that it is
+wrong. Skills encode instead: general knowledge of the field (methodology,
+categories, failure modes), a **context-establishing first step** (jurisdiction,
+entity type, size, industry, which side of the deal), and **live verification**
+(`web_fetch` with a cited source and date) whenever a specific rule matters.
+
+Enforced mechanically: `test_jurisdiction_sensitive_skills_ask_before_asserting`
+requires the context step, the advice boundary and live-verification language;
+`test_no_baked_in_jurisdiction_facts` greps every built-in for hardcoded
+statutory numbers.
+
+Live testing sharpened this. First run: the model caught every planted trap and
+referred to counsel *where governed*, but silently proceeded without the user's
+own jurisdiction. Forcing a question would delay a clear escalation, so both
+skills now require an opening **context line** that names what was established
+and what was not. Re-verified: output opens `Context — governing law: Delaware
+(§5) · your side: mutual · your jurisdiction & entity: NOT ESTABLISHED —
+analysis below is general, not localized.`
+
+**Remaining 15**: finance (4), operations (3), data/BI (3), customers (3),
+people (2 — jurisdiction-sensitive, same discipline), governance (2 — likewise
+for entity/board topics).
 
 Selection bars — all six must pass: **(1)** genuinely Tier A (no vendor data
 provider/API key); **(2)** license-clean MIT/Apache-2.0 with attribution
