@@ -5,6 +5,7 @@ from .authz import AuthzPlugin
 from .checkpoint import CheckpointPlugin
 from .confirmation_form_ui import ConfirmationFormUiPlugin
 from .handback_hygiene import HandbackHygienePlugin
+from .verify_nudge import VerifyNudgePlugin
 from .context_guard import ContextGuardPlugin
 from .mcp_export_artifact import McpExportArtifactPlugin
 from .memory import MemoryPlugin
@@ -35,6 +36,7 @@ __all__ = [
     "CheckpointPlugin",
     "ConfirmationFormUiPlugin",
     "HandbackHygienePlugin",
+    "VerifyNudgePlugin",
     "ContextGuardPlugin",
     "McpExportArtifactPlugin",
     "MemoryPlugin",

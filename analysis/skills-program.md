@@ -29,7 +29,7 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | II | W6 UI/UX frontend | ⬜ |
 | II | W7 verification | ⬜ |
 | II | **W8 skill enable/disable from the UI** (all scopes) | ⬜ **unblocked — shippable now** |
-| II | **W9 verification in the agentic loop** (general; soft → hard) | ⬜ planned |
+| II | **W9 verification in the agentic loop** | 🔨 S0–S2 shipped 2026-07-27; S3+ pending measurement |
 
 **Nothing in Part II is implemented yet** — no code has been written for this
 program. Part I is complete research, and its findings are what shaped Part II.
@@ -520,6 +520,34 @@ exactly one transfer, none on a no-op turn, and a `FAIL` blocks the answer
 (scripted-LLM harness). Kill switch honored at each level. Live: a deliberately
 false claim ("I fixed it" with no change) must be caught; a clean turn must not
 pay for a verification pass.
+
+### Status (2026-07-27): S0–S2 shipped
+
+`verification/signals.py` (pure detectors), `verification/contract.py`
+(`x-adk-cc/verify`), `plugins/verify_nudge.py`, `ADK_CC_VERIFY=off|soft|hard`
+(default soft), and verify contracts on all 6 built-in skills (4 checks each).
+16 tests.
+
+**Live testing corrected the design twice** — neither was reachable by unit
+tests:
+
+1. **Detector gaps.** A real turn answered a bare `"Done."` (claim missed) and
+   verified with `python - <<PY` (evidence missed). The second is the worse
+   bug: it would have nudged a turn that *did* check. Both patterns added.
+2. **A timing flaw in S2 itself.** `claim_without_evidence` can never fire at
+   `before_model` time, because the claim only exists in the response being
+   generated. Fixed with a **predictive** signal — "changed something, checked
+   nothing" — which is what is knowable beforehand. The reactive claim signal
+   is retained for measurement and for S3.
+
+**Measured effect (small sample, honest):** on the turn that previously wrote a
+file and answered `"Done."` with no verification, the nudge fired
+(`files=1 cmds=0 checks=0`) and the model added a read-back of the file it had
+written before answering. So the mechanism fires at the right moment and does
+change behaviour — but the answer was still a bare `"Done."` rather than a
+stated verification, and a read-back is weak evidence. **A larger sample is
+needed before concluding whether S3 is required**; that measurement is the next
+step, not more mechanism.
 
 ### Sequencing
 

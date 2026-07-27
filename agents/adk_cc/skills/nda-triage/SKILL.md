@@ -5,6 +5,9 @@ description: >
   escalate-to-counsel, with the specific clauses driving that call. Establishes
   jurisdiction and which side you are on first. Preparation for counsel, not
   legal advice.
+metadata:
+  x-adk-cc/verify: |
+    {"mode": "self", "checks": ["output opens with the Context line", "the verdict is GREEN/YELLOW/RED with the driving clauses quoted", "no enforceability ruling is made", "IP assignment and restraint clauses were explicitly checked for"]}
 ---
 
 # NDA triage

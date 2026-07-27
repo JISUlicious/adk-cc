@@ -691,6 +691,10 @@ FIELDS: list[Var] = [
         "Generate tool/session titles (costs extra model tokens).", default=False, parse=as_bool),
     Var("ADK_CC_TASK_REMINDER", Tier.ADVANCED, "Behavior",
         "Periodic task-list nudge (set 0 to disable).", default=True, parse=as_bool),
+    Var("ADK_CC_VERIFY", Tier.ADVANCED, "Behavior",
+        "Verification in the loop: 'soft' nudges when a result is asserted "
+        "without an executed check, 'off' disables, 'hard' reserved for the "
+        "forced verifier pass.", default="soft"),
     Var("ADK_CC_BUILTIN_SKILLS", Tier.ADVANCED, "Behavior",
         "Load adk-cc's built-in skills (base layer; project/env skills of the "
         "same name still override individually).", default=True, parse=as_bool),

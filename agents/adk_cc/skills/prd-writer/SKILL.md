@@ -5,6 +5,9 @@ description: >
   product — problem, users, goals and non-goals, requirements, success metrics,
   and open questions. Use when specifying a feature, writing a PRD or spec, or
   turning a rough idea into something a team can build.
+metadata:
+  x-adk-cc/verify: |
+    {"mode": "self", "checks": ["existing related code was read and is cited", "non-goals are written", "every requirement is testable (no 'fast', 'easy', 'intuitive')", "success metrics are measurable with what exists today"]}
 ---
 
 # PRD writer

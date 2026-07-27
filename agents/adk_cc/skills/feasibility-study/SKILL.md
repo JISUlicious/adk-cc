@@ -6,6 +6,9 @@ description: >
   model, risks, and a build/buy/defer recommendation. Use before committing to
   significant work, for R&D planning, or when someone asks "how long would this
   take?"
+metadata:
+  x-adk-cc/verify: |
+    {"mode": "self", "checks": ["the estimate is calibrated against named comparable commits in THIS repo", "a range is given with the driver of the spread named", "assumptions are listed explicitly", "integration, testing, migration, review and rollout are accounted for"]}
 ---
 
 # Feasibility study

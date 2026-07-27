@@ -4,6 +4,9 @@ description: >
   Expert data analyst using pandas >= 2.3. Use for any data analysis, EDA,
   cleaning, transformation, merging, time series, statistics, visualization,
   or performance optimization task.
+metadata:
+  x-adk-cc/verify: |
+    {"mode": "self", "checks": ["row counts in vs out are reported for any filtering or join", "every stated figure was computed in this turn, not estimated", "null handling and dtype decisions are stated", "a collinearity/diagnostic check accompanies any feature-importance claim"]}
 ---
 
 # Expert Data Analyst — pandas >= 2.3

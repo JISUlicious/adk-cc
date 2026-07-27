@@ -5,6 +5,9 @@ description: >
   checklist — what it obligates you to, where the risk sits, what to negotiate,
   and what needs a lawyer. Establishes your jurisdiction and company context
   first. Preparation for counsel, not legal advice.
+metadata:
+  x-adk-cc/verify: |
+    {"mode": "self", "checks": ["output opens with the Context line (governing law / side / jurisdiction)", "every finding quotes the clause with its number", "no enforceability ruling is made", "items are marked general practice vs verify-locally"]}
 ---
 
 # Contract review

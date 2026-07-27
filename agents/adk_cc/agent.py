@@ -74,6 +74,7 @@ from .plugins import (
     ProjectContextPlugin,
     ConfirmationFormUiPlugin,
     HandbackHygienePlugin,
+    VerifyNudgePlugin,
     ContextGuardPlugin,
     McpExportArtifactPlugin,
     MicrocompactPlugin,
@@ -1266,6 +1267,11 @@ _app_kwargs = dict(
         # coordinator's contents and aborts the turn. Strip it. See
         # plugins/handback_hygiene.py.
         HandbackHygienePlugin(),
+        # Verification in the loop (W9 S2): when a turn asserts a result
+        # without executing any check, remind the model to prove it or label
+        # it unverified. Rides the existing model call — no extra cost.
+        # ADK_CC_VERIFY=off disables.
+        VerifyNudgePlugin(),
         # Microcompaction (opt-in, ADK_CC_MICROCOMPACT=1): stub old, large
         # tool-result content in the outgoing request — the cheap, no-model
         # tier. Runs BEFORE ContextGuard so the shrink is reflected in its

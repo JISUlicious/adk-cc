@@ -5,6 +5,9 @@ description: >
   test and CI reality, architecture, key-person and maintenance risk — producing
   an evidence-backed report. Use for acquisition/investment diligence, vendor or
   open-source evaluation, inheriting a codebase, or a pre-mortem on your own.
+metadata:
+  x-adk-cc/verify: |
+    {"mode": "self", "checks": ["every finding cites a command output or file:line", "the 'what I could not determine' section is present and honest", "severity is by consequence (deal/months/quarters/hygiene), not by taste", "at least two cited commands were actually run this turn"]}
 ---
 
 # Technical due diligence
