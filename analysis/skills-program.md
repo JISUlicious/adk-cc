@@ -619,6 +619,39 @@ was over-claimed from a single sample. S3 is worth having on its own merits —
 it demonstrably catches a bad change — but the claim that S2 is insufficient is
 **not established**; a larger sample is still owed.
 
+### Verifier-under-load trial (2026-07-28)
+
+Three substantial builds in one project — Tetris, a StarCraft-like RTS, and an
+analytics dashboard — driven by gpt-5.4-mini under `ADK_CC_VERIFY=hard`, then a
+fourth (the same dashboard) under `soft` in a separate project. Every artifact
+was then independently exercised in a real browser to check the verdicts
+against reality, because a verifier whose verdicts do not match reality is
+worse than none.
+
+| Build | Mode | Nudge | Gate | Verifier | Verdict seen | Post-verdict edits | Reality (independent test) |
+|---|---|---|---|---|---|---|---|
+| Tetris | hard | 1 | **0** | ran | FAIL → re-sent | — | Playable; `clearLines()` correct on inspection |
+| RTS | hard | 1 | **0** | ran ×3 | — | 1 | Renders, minerals shown, canvas alive |
+| Dashboard | hard | 1 | **0** | ran | FAIL | **6** | Charts render; date filter updates charts |
+| Dashboard | soft | 1 | 0 | ran | **PASS** | — | Charts + KPIs both update on filter |
+
+**The gate never fired on real work.** In all four builds the coordinator ran
+its own checks *and* transferred to `verification` unprompted, so
+`has_evidence` was true and the gate correctly stayed silent. That is the
+ladder behaving as designed — and, importantly, **zero false positives on
+substantial work**, which was the main risk of an automatic gate.
+
+**The verifier earns its place.** Both hard-mode FAILs drove real repair
+(the dashboard got six further edits after its FAIL; Tetris was fixed and
+re-submitted). The soft-mode PASS was independently confirmed correct. No
+verdict contradicted reality.
+
+**Finding — verdicts can arrive after the answer.** In the hard-mode Tetris and
+RTS builds the turn ended with a transfer to `verification` still pending, so
+the user's answer did not reflect the final verdict (the FAIL captured in the
+transcript was the *pre-fix* one). The loop repairs correctly, but the reported
+outcome can lag it. Worth closing before `hard` becomes a default.
+
 ### Sequencing
 
 S0/S1 first (free). Then **S2, and measure**: does the nudge alone move the
