@@ -54,12 +54,20 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
-from ..verification.signals import _CLAIM_RE, _LEAD_CLAIM_RE, collect, nudge_text
+from ..verification.signals import (
+    _CLAIM_RE,
+    _LEAD_CLAIM_RE,
+    collect,
+    noop_subagent_reentry,
+    nudge_text,
+    reentry_note,
+)
 
 _log = logging.getLogger(__name__)
 
 _STATE_NUDGED = "temp:verify_nudged_invocation"
 _STATE_GATED = "temp:verify_gated_invocation"
+_STATE_REENTRY = "temp:verify_reentry_invocation"
 _VERIFIER = "verification"
 
 
@@ -90,6 +98,20 @@ class VerifyNudgePlugin(BasePlugin):
         turn = [e for e in events if getattr(e, "invocation_id", None) == inv]
         if not turn:
             return None
+
+        # A silently no-op'd re-verification outranks the ordinary nudge: the
+        # coordinator is about to report a verdict that cannot exist.
+        if noop_subagent_reentry(turn, agent=_VERIFIER):
+            state0 = getattr(callback_context, "state", None)
+            if state0 is None or state0.get(_STATE_REENTRY) != inv:
+                if state0 is not None:
+                    try:
+                        state0[_STATE_REENTRY] = inv
+                    except Exception:  # noqa: BLE001
+                        pass
+                _log.info("verification re-entry was a no-op; telling the coordinator")
+                _append_to_system_instruction(llm_request, reentry_note(_VERIFIER))
+                return None
 
         sig = collect(turn, author=agent)
         # Predictive: at before_model the final answer (and its claim) does not

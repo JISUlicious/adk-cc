@@ -253,3 +253,52 @@ def nudge_text(
         "result as done."
     )
     return "\n".join(lines)
+
+
+# --- no-op sub-agent re-entry ----------------------------------------------
+
+_HANDBACK = "_handback_to_coordinator"
+
+
+def noop_subagent_reentry(events: Iterable[Any], *, agent: str) -> bool:
+    """True when `agent` was transferred to again in this turn and did NOTHING.
+
+    ADK marks a sub-agent `end_of_agent` when it finishes. A SECOND transfer to
+    the same sub-agent inside one invocation therefore resolves to an
+    already-ended agent and emits only the after-agent handback marker — no
+    tools, no report, no verdict. Observed live: verification run 1 made 27 tool
+    calls and returned VERDICT: FAIL; after the coordinator fixed the code and
+    transferred again, run 2 produced ONLY the handback, and the coordinator
+    told the user it had "sent it back to verification for the final verdict"
+    — a verdict that could never arrive.
+
+    Detecting it lets the coordinator be told the truth instead of promising a
+    result the architecture cannot deliver in this turn.
+    """
+    runs: list[int] = []          # tool calls per contiguous run of `agent`
+    in_run = False
+    for ev in events or []:
+        if getattr(ev, "author", None) != agent:
+            in_run = False
+            continue
+        if not in_run:
+            runs.append(0)
+            in_run = True
+        for p in _parts(ev):
+            fc = getattr(p, "function_call", None)
+            if fc is not None and getattr(fc, "name", "") != _HANDBACK:
+                runs[-1] += 1
+    return len(runs) > 1 and runs[-1] == 0
+
+
+def reentry_note(agent: str) -> str:
+    """What to tell the coordinator when a re-verification silently no-op'd."""
+    return (
+        "=== VERIFICATION RE-ENTRY (adk-cc) ===\n"
+        f"You transferred to `{agent}` again in this same turn, but a sub-agent "
+        "that already completed cannot run twice in one turn — it returned "
+        "immediately without checking anything. There is NO second verdict.\n"
+        "Do not tell the user a verdict is pending or claim it passed. Either "
+        "verify the fix yourself now with a command, or state plainly that the "
+        "fix is unverified and that re-running verification needs a new turn."
+    )

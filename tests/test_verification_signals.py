@@ -231,6 +231,28 @@ def test_builtin_skill_contracts_parse():
     print(f"OK builtin_skill_contracts_parse ({n} active)")
 
 
+def test_noop_verification_reentry_detected():
+    """LIVE STRUCTURAL BUG: a second transfer to the same sub-agent inside one
+    invocation resolves to an already-ended agent and emits only the handback —
+    no tools, no report, no verdict. Observed: run 1 made 27 tool calls and
+    returned VERDICT: FAIL; after the fix, run 2 produced ONLY the handback and
+    the coordinator told the user a verdict was pending that could never come."""
+    from adk_cc.verification.signals import noop_subagent_reentry, reentry_note
+
+    real = [_call("run_bash", author="verification", command="pytest"),
+            _call("_handback_to_coordinator", author="verification")]
+    noop = [_call("_handback_to_coordinator", author="verification")]
+    fix = [_call("edit_file", path="a.py")]
+
+    assert not noop_subagent_reentry(real, agent="verification"), "one real run"
+    assert noop_subagent_reentry(real + fix + noop, agent="verification"), "real then no-op"
+    assert not noop_subagent_reentry(real + fix + real, agent="verification"), "two real runs"
+    assert not noop_subagent_reentry([], agent="verification")
+    note = reentry_note("verification")
+    assert "NO second verdict" in note and "unverified" in note
+    print("OK noop_verification_reentry_detected")
+
+
 # --- S3: the hard gate -----------------------------------------------------
 
 def _gate(answer, turn_events, mode="hard", agent="coordinator", gated=None):
@@ -375,6 +397,7 @@ def main():
     test_contract_parsing()
     test_criteria_appear_in_the_nudge()
     test_builtin_skill_contracts_parse()
+    test_noop_verification_reentry_detected()
     test_gate_blocks_unverified_claim()
     test_gate_emits_no_user_facing_text()
     test_gate_transfer_carries_an_id()

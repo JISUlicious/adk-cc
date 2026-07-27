@@ -646,11 +646,25 @@ substantial work**, which was the main risk of an automatic gate.
 re-submitted). The soft-mode PASS was independently confirmed correct. No
 verdict contradicted reality.
 
-**Finding — verdicts can arrive after the answer.** In the hard-mode Tetris and
-RTS builds the turn ended with a transfer to `verification` still pending, so
-the user's answer did not reflect the final verdict (the FAIL captured in the
-transcript was the *pre-fix* one). The loop repairs correctly, but the reported
-outcome can lag it. Worth closing before `hard` becomes a default.
+**Finding — re-verification inside one turn is a silent no-op (FIXED).** The
+symptom looked like "the verdict arrives after the answer"; the cause is
+structural. ADK marks a sub-agent `end_of_agent` when it finishes, so a SECOND
+transfer to the same sub-agent within one invocation resolves to an
+already-ended agent and emits **only** the handback marker — no tools, no
+report, no verdict. Measured on a reproduction: verification tool-call counts
+per run were **[7, 0, 0]**. The coordinator then told the user it had "sent it
+back to verification for the final verdict" — a verdict that could never
+arrive.
+
+Fix: `verification.signals.noop_subagent_reentry` detects it and the plugin
+tells the coordinator the truth — there is no second verdict, so either verify
+directly or say the fix is unverified. Live after the fix, on the same
+scenario, the answer became *"Verified with runtime checks and `py_compile`;
+both passed"* and the code was genuinely correct.
+
+The deeper limitation stands and is worth knowing: **the verify → fix →
+re-verify loop cannot complete within a single turn.** Re-verification needs a
+new turn. That is an ADK-level constraint, not a prompt problem.
 
 ### Sequencing
 
