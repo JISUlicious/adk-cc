@@ -23,7 +23,7 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | I | 3. Verified platform facts (discovery, progressive disclosure, runtime) | ✅ 2026-07-26 |
 | II | W1 runtime — uv-managed analysis env | ✅ 2026-07-27 (unit + API + UI verified) |
 | II | W2 built-in skills plumbing | ✅ 2026-07-27 (incl. real wheel-packaging test) |
-| II | W3 the built-in set (~21) | 🔨 12/21 — ops + data/BI slice live-verified 2026-07-28 |
+| II | W3 the built-in set (23) | ✅ 2026-07-28 — 23 skills, catalog ~1770 tokens |
 | II | W4 agent/tool layer | ⬜ |
 | II | W5 data layer (ingestion) | ⬜ |
 | II | W6 UI/UX frontend | ⬜ |
@@ -230,7 +230,7 @@ now prefixes the reason to stderr instead of leaving a bare `exit 127`.
   companions — a package that drops non-`.py` files silently ships zero skills.
 - `ATTRIBUTION.md`: upstream repo + commit + license per vendored skill.
 
-## W3 — The built-in set (~21) 🔨 12 of 21 shipped
+## W3 — The built-in set ✅ 23 shipped
 
 **Shipped (2026-07-27)**: `data-analyst` (adopted) + the authored R&D trio
 `tech-due-diligence`, `feasibility-study`, `prd-writer`. Catalog cost ~342
@@ -310,10 +310,59 @@ Also dropped the `list_skills` assertion: ADK injects the catalog into every
 request's system instruction, so going straight to `load_skill` is correct
 behaviour, not a miss.
 
-**Remaining 9**: finance (4), customers (3), people (2 — jurisdiction-sensitive,
-same discipline), governance (2 — likewise for entity/board topics). Catalog
-cost is now ~1044 tokens for 12 skills; the remaining 9 land it near ~1800
-against the 2000 budget, so descriptions stay tight or the budget moves.
+**Slice 3 shipped (2026-07-28)** — the set is complete at 23:
+finance `financial-model`, `dcf-model`, `budget-forecast`, `pricing-analysis`;
+customers `competitive-analysis`, `customer-response`, `proposal-rfp`;
+people `hiring-kit`, `performance-review`; governance `board-update`,
+`strategic-planning`.
+
+### The nationality rule, generalised beyond legal
+
+The authoring rule above was written for the legal pair. Slice 3 made clear it
+was scoped too narrowly: **employment, tax/accounting and corporate-governance
+rules are exactly as country-, entity- and year-specific as contract law**, and
+a finance skill that "knows" a tax rate or a hiring skill that "knows" a
+probation period is confidently wrong for most readers — with no signal that it
+is wrong. Notice periods, at-will status, mandatory benefits, permissible
+interview questions, filing deadlines, quorum, IFRS-vs-local-GAAP treatment,
+risk-free rates and procurement thresholds are all in this class.
+
+Two enforced tiers now:
+
+| Tier | Skills | Requires |
+|---|---|---|
+| **Jurisdiction-sensitive** (rule-bound, liability) | contract-review, nda-triage, hiring-kit, performance-review, board-update | context line naming jurisdiction + entity + what is NOT ESTABLISHED · asks when unknown · advice boundary · never from memory, `web_fetch` + cite instead |
+| **Context-sensitive** (answer changes by market) | financial-model, dcf-model, budget-forecast, pricing-analysis, proposal-rfp, competitive-analysis, strategic-planning | names the geography its answer depends on · asks for it · surfaces the gap (`NOT ESTABLISHED` / `[unknown]` / labelled assumption) · fetch-and-cite over recall |
+
+`test_jurisdiction_sensitive_skills_ask_before_asserting` was generalised to the
+first tier (with `governing law` now required only of the two skills that read a
+contract), and `test_context_sensitive_skills_do_not_recall_local_facts` added
+for the second. Both caught real gaps on first run: `budget-forecast` forbade
+assuming payroll on-costs without naming the fetch mechanism, and `proposal-rfp`
+did the same for procurement rules — both fixed.
+
+**Live-verified, and this is the interesting one**: asked to *"write a job
+description and interview loop for a senior backend engineer, including the
+offer terms and probation arrangement"* — a prompt that invites country-specific
+facts while naming no country — the agent loaded `hiring-kit` and replied with
+`ask_user_question`: **"Which jurisdiction will this person be employed in?"**
+It invented no probation period, no notice, no at-will status. That is the whole
+design working end to end.
+
+Also re-verified: `interactive-dashboard-builder` → 4.86 MB self-contained HTML
+with real CSV values and zero external script fetches; `sql-queries` → both
+regional totals correct with the refunded and NULL-status rows excluded.
+
+Third harness bug worth recording (all three looked like skill bugs): the
+artifact walk took the *last* `.html` under the workspace and kept finding
+matplotlib's 1.3 KB bundled template inside `.adk-cc/analysis-env` — the uv
+environment W1 provisions into the workspace itself. It now skips dot-dirs and
+takes the largest match. Lesson repeated: **when a live check fails, check the
+harness against the artifact at rest before believing the failure.**
+
+Catalog: ~1770 tokens for 23 skills, after trimming the six longest descriptions.
+That is 88% of the 2000-token budget — the long tail belongs in opt-in packs
+(`ADK_CC_SKILLS_DIR`), not in the base layer.
 
 Selection bars — all six must pass: **(1)** genuinely Tier A (no vendor data
 provider/API key); **(2)** license-clean MIT/Apache-2.0 with attribution

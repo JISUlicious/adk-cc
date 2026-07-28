@@ -1,11 +1,9 @@
 ---
 name: feasibility-study
 description: >
-  Assess whether a proposed feature or project is buildable here — technical
-  approach options, an evidence-calibrated effort estimate with uncertainty, cost
-  model, risks, and a build/buy/defer recommendation. Use before committing to
-  significant work, for R&D planning, or when someone asks "how long would this
-  take?"
+  Assess whether a proposed feature or project is buildable here — approach
+  options, an effort estimate calibrated on this repo's own history, risks,
+  and a build/buy/defer call. Use before committing to significant work.
 metadata:
   x-adk-cc/verify: |
     {"mode": "self", "checks": ["the estimate is calibrated against named comparable commits in THIS repo", "a range is given with the driver of the spread named", "assumptions are listed explicitly", "integration, testing, migration, review and rollout are accounted for"]}

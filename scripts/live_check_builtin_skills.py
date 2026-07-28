@@ -128,22 +128,147 @@ def run_turn(sid, prompt):
     return st, tools, texts
 
 
-def _read_settled(path, tries=10):
-    """Read only once the file stops growing. A 4.8MB dashboard write raced the
-    first version of this check and it reported 'no real data' about a file that
-    had it — a harness bug that looked exactly like a skill bug."""
-    last = -1
+def _read_settled(path, tries=120):
+    """Read only once the file is COMPLETE — a stable size across two polls AND
+    a closing </html>.
+
+    Size-stability alone was not enough: a 4.8MB dashboard write raced this
+    check twice, and it then reported "no real data" about a file that
+    demonstrably contained it. A harness bug that looks exactly like a skill bug
+    is worse than having no check at all.
+    """
+    last, stable, waited = -1, 0, 0.0
     for _ in range(tries):
         size = os.path.getsize(path)
-        if size == last:
-            break
+        stable = stable + 1 if size == last else 0
         last = size
+        if stable >= 2:
+            body = open(path, encoding="utf-8", errors="ignore").read()
+            if body.rstrip().endswith("</html>"):
+                print(f"    (artifact settled after {waited:.1f}s at {size:,} bytes)")
+                return body
         time.sleep(0.5)
-    return open(path, encoding="utf-8", errors="ignore").read()
+        waited += 0.5
+    body = open(path, encoding="utf-8", errors="ignore").read()
+    print(f"    (artifact NEVER settled in {waited:.0f}s: {len(body):,} bytes, "
+          f"ends-with-</html>={body.rstrip().endswith('</html>')})")
+    return body
+
+
+def case_dashboard(check, truth):
+    """interactive-dashboard-builder: a checkable artifact."""
+    st, tools, _ = run_turn(
+        f"dash-{int(time.time())}",
+        "Build me an interactive dashboard from sales.csv showing revenue over "
+        "time by region and how the regions compare. Save it in analysis/.")
+    print(f"\n  dashboard turn: {st['status']}, {len(tools)} tool calls")
+    names = [n for n, _ in tools]
+    # NOT asserting list_skills: ADK injects the catalog into every request's
+    # system instruction, so going straight to load_skill is correct behaviour.
+    # Requiring the tool call would test the model's habits, not the skill.
+    loaded = [a for n, a in tools if n == "load_skill"]
+    check("interactive-dashboard-builder was selected",
+          any("dashboard" in a for a in loaded), loaded or names[:10])
+    # Skip dot-dirs: W1 provisions a uv analysis-env into `.adk-cc/`, and
+    # matplotlib ships template .html files inside site-packages. Taking the
+    # "last .html found" picked up a 1.3KB library template and reported the
+    # dashboard as data-less — three runs in a row, on a correct artifact.
+    html = None
+    for root, dirs, files in os.walk(WS):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for f in files:
+            if f.endswith(".html"):
+                cand = os.path.join(root, f)
+                if html is None or os.path.getsize(cand) > os.path.getsize(html):
+                    html = cand
+    check("an HTML dashboard was written", html is not None)
+    if not html:
+        return
+    body = _read_settled(html)
+    # An inlined plotly bundle CONTAINS the string "cdn.plot.ly" (a default
+    # topojson URL for geo charts). Self-contained means no external
+    # <script src>, which is what actually breaks offline.
+    ext = re.findall(r'<script[^>]+src=["\']https?://[^"\']+', body)
+    check("self-contained (no external script fetch)", not ext,
+          f"{len(body)} bytes, {ext[:1]}")
+    hits = [v for v in ("1200", "1500", "1750", "1400", "900", "700", "1100", "1600")
+            if v in body]
+    check("charts contain real data from the CSV", len(hits) >= 3, hits)
+
+
+def case_sql(check, truth):
+    """sql-queries: the answer must exclude the refunded and NULL-status rows."""
+    st, tools, texts = run_turn(
+        f"sql-{int(time.time())}",
+        "Using shop.db, what is total paid revenue by customer region? "
+        "Give me the query and the numbers.")
+    print(f"\n  sql turn: {st['status']}, {len(tools)} tool calls")
+    names = [n for n, _ in tools]
+    loaded = [a for n, a in tools if n == "load_skill"]
+    check("sql-queries was selected", any("sql" in a for a in loaded), loaded or names[:10])
+    answer = "\n".join(texts[-6:])
+    north, south = truth["north"], truth["south"]
+    check(f"north total is right ({north:g})", str(int(north)) in answer, answer[-300:])
+    check(f"south total is right ({south:g})", str(int(south)) in answer, answer[-300:])
+    check("did not silently include refunded/NULL rows",
+          "165" not in answer and "1240" not in answer, answer[-200:])
+
+
+def case_hiring(check, truth):
+    """hiring-kit: the jurisdiction discipline, under pressure.
+
+    The prompt deliberately invites country-specific facts (offer terms,
+    probation) WITHOUT naming a country. The skill must establish or flag the
+    context instead of silently picking one.
+    """
+    st, tools, texts = run_turn(
+        f"hire-{int(time.time())}",
+        "Write a job description and interview loop for a senior backend "
+        "engineer, including the offer terms and probation arrangement.")
+    print(f"\n  hiring turn: {st['status']}, {len(tools)} tool calls")
+    loaded = [a for n, a in tools if n == "load_skill"]
+    # ASKING counts. The skill tells the model to establish jurisdiction/entity
+    # before writing offer terms, and the correct response to an underspecified
+    # request is a question — which arrives as an ask_user_question TOOL CALL,
+    # not as text. The first version of this check read only text and scored a
+    # correctly-asking run as a failure.
+    asked = " ".join(a for n, a in tools if n == "ask_user_question")
+    answer = "\n".join(texts[-8:])
+    evidence = (answer + "\n" + asked)
+    open("/tmp/w3-hiring-answer.txt", "w").write(
+        f"--- tool calls ---\n" + "\n".join(f"{n} {a}" for n, a in tools)
+        + f"\n--- text ---\n{answer}\n")   # kept for review
+    low = evidence.lower()
+    check("hiring-kit was selected", any("hiring" in a for a in loaded),
+          loaded or [n for n, _ in tools][:8])
+    check("context gap is surfaced (asked or flagged), not silently assumed",
+          any(w in low for w in ("not established", "jurisdiction", "which country",
+                                 "where will", "employing entity", "location")),
+          evidence[:300])
+    # (?i) must be at the START of the pattern — Python 3.11+ raises "global
+    # flags not at the start", which silently killed this check on its first run.
+    invented = re.findall(
+        r"(?i)\b\d+\s*(?:month|week|day)s?\s+(?:of\s+)?(?:probation|notice)"
+        r"|\bprobation(?:ary)?\s+period\s+(?:is|of)\s+\d+"
+        r"|\bat-will\b|\bstatutory\s+(?:notice|minimum)\s+is\b", evidence)
+    check("no statutory employment fact invented", not invented, invented[:3])
+    check("routes local specifics to a human/counsel, or has not asserted any yet",
+          any(w in low for w in ("counsel", "hr ", "legal review", "verify locally",
+                                 "local ", "jurisdiction")), evidence[-300:])
+
+
+CASES = {"dashboard": case_dashboard, "sql": case_sql, "hiring": case_hiring}
 
 
 def main():
     global PROJ
+    # Each case costs a live turn on a rate-limited endpoint; --only=NAME runs one.
+    only = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--only=")), None)
+    cases = [(n, f) for n, f in CASES.items() if only in (None, n)]
+    if not cases:
+        print(f"unknown case {only!r}; choose from {list(CASES)}")
+        return 2
+
     truth = workspace()
     proc = boot()
     PROJ = api("/desktop/projects", {"path": WS})["project"]["id"]
@@ -152,64 +277,18 @@ def main():
 
     def check(name, cond, detail=""):
         nonlocal ok, fails
-        print(f"  [{'PASS' if cond else 'FAIL'}] {name}" + (f" — {detail}" if detail and not cond else ""))
+        print(f"  [{'PASS' if cond else 'FAIL'}] {name}"
+              + (f" — {detail}" if detail and not cond else ""))
         if cond:
             ok += 1
         else:
             fails += 1
 
     try:
-        # --- 1. interactive-dashboard-builder ---------------------------------
-        st, tools, texts = run_turn(
-            f"dash-{int(time.time())}",
-            "Build me an interactive dashboard from sales.csv showing revenue over "
-            "time by region and how the regions compare. Save it in analysis/.")
-        print(f"\n  dashboard turn: {st['status']}, {len(tools)} tool calls")
-        names = [n for n, _ in tools]
-        # NOT asserting list_skills: ADK injects the catalog into every request's
-        # system instruction, so a model can (and here does) go straight to
-        # load_skill. Requiring the tool call would test the model's habits, not
-        # the skill.
-        loaded = [a for n, a in tools if n == "load_skill"]
-        check("interactive-dashboard-builder was selected",
-              any("dashboard" in a for a in loaded), loaded or names[:10])
-        html = None
-        for root, _, files in os.walk(WS):
-            for f in files:
-                if f.endswith(".html"):
-                    html = os.path.join(root, f)
-        check("an HTML dashboard was written", html is not None)
-        if html:
-            body = _read_settled(html)
-            # An inlined plotly bundle CONTAINS the string "cdn.plot.ly" (a
-            # default topojson URL for geo charts). Self-contained means no
-            # external <script src>, which is what actually breaks offline.
-            ext = re.findall(r'<script[^>]+src=["\']https?://[^"\']+', body)
-            check("self-contained (no external script fetch)", not ext,
-                  f"{len(body)} bytes, {ext[:1]}")
-            hits = [v for v in ("1200", "1500", "1750", "1400", "900", "700", "1100", "1600")
-                    if v in body]
-            check("charts contain real data from the CSV", len(hits) >= 3, hits)
-
-        time.sleep(12)  # pace the rate-limited endpoint
-
-        # --- 2. sql-queries ---------------------------------------------------
-        st2, tools2, texts2 = run_turn(
-            f"sql-{int(time.time())}",
-            "Using shop.db, what is total paid revenue by customer region? "
-            "Give me the query and the numbers.")
-        print(f"\n  sql turn: {st2['status']}, {len(tools2)} tool calls")
-        names2 = [n for n, _ in tools2]
-        loaded2 = [a for n, a in tools2 if n == "load_skill"]
-        check("sql-queries was selected", any("sql" in a for a in loaded2),
-              loaded2 or names2[:10])
-        answer = "\n".join(texts2[-6:])
-        # refunded (90) and NULL-status (75) rows must be excluded
-        want_north, want_south = truth["north"], truth["south"]
-        check(f"north total is right ({want_north:g})", str(int(want_north)) in answer, answer[-300:])
-        check(f"south total is right ({want_south:g})", str(int(want_south)) in answer, answer[-300:])
-        check("did not silently include refunded/NULL rows",
-              "165" not in answer and "1240" not in answer, answer[-200:])
+        for i, (name, fn) in enumerate(cases):
+            if i:
+                time.sleep(12)      # pace the rate-limited endpoint
+            fn(check, truth)
     finally:
         proc.terminate()
     print(f"\n{ok} passed, {fails} failed")

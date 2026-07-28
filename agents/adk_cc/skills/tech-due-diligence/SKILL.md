@@ -1,10 +1,9 @@
 ---
 name: tech-due-diligence
 description: >
-  Technical due diligence on a real codebase — dependency and license risk,
-  test and CI reality, architecture, key-person and maintenance risk — producing
-  an evidence-backed report. Use for acquisition/investment diligence, vendor or
-  open-source evaluation, inheriting a codebase, or a pre-mortem on your own.
+  Assess a codebase's real state — architecture, quality, security, licences,
+  operational and key-person risk — citing command output and file:line. Use
+  for acquisition diligence, vendor review, or inheriting a system.
 metadata:
   x-adk-cc/verify: |
     {"mode": "self", "checks": ["every finding cites a command output or file:line", "the 'what I could not determine' section is present and honest", "severity is by consequence (deal/months/quarters/hygiene), not by taste", "at least two cited commands were actually run this turn"]}

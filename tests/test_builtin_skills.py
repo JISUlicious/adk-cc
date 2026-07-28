@@ -116,7 +116,25 @@ def test_catalog_token_budget():
 
 
 # Skills whose subject matter is bound to jurisdiction / entity / current rules.
-_JURISDICTION_SENSITIVE = {"contract-review", "nda-triage"}
+# NOT just the legal pair: employment, tax/accounting and corporate-governance
+# rules are every bit as country-, entity- and year-specific, and a built-in
+# that states one country's version is confidently wrong for most readers.
+_JURISDICTION_SENSITIVE = {
+    "contract-review", "nda-triage",        # legal
+    "hiring-kit", "performance-review",     # employment law
+    "board-update",                         # entity form, governance, filings
+}
+# `governing law` is a contract-document concept; it only makes sense for the
+# skills that read one. The rest must still establish jurisdiction and entity.
+_READS_A_CONTRACT = {"contract-review", "nda-triage"}
+
+# Skills that are not rule-bound but whose ANSWER changes by country/market:
+# rates, benchmarks, procurement regimes, market structure. These must not
+# recall such facts from memory either, but they carry no advice boundary.
+_CONTEXT_SENSITIVE = {
+    "financial-model", "dcf-model", "budget-forecast", "pricing-analysis",
+    "proposal-rfp", "strategic-planning", "competitive-analysis",
+}
 
 
 def test_jurisdiction_sensitive_skills_ask_before_asserting():
@@ -127,7 +145,8 @@ def test_jurisdiction_sensitive_skills_ask_before_asserting():
     for name in _JURISDICTION_SENSITIVE:
         body = (_BUILTIN_DIR / name / "SKILL.md").read_text().lower()
         assert "jurisdiction" in body, f"{name}: must establish jurisdiction"
-        assert "governing law" in body, f"{name}: must locate governing law"
+        if name in _READS_A_CONTRACT:
+            assert "governing law" in body, f"{name}: must locate governing law"
         assert "entity" in body, f"{name}: must establish entity type"
         # explicitly asks rather than assuming, AND must surface the gap even
         # when it proceeds — a silent assumption is the failure mode
@@ -142,6 +161,32 @@ def test_jurisdiction_sensitive_skills_ask_before_asserting():
             f"{name}: must require live verification over recalled rules"
     print(f"OK jurisdiction_sensitive_skills_ask_before_asserting "
           f"({len(_JURISDICTION_SENSITIVE)} skills)")
+
+
+def test_context_sensitive_skills_do_not_recall_local_facts():
+    """The weaker cousin of the rule above. A finance or market skill is not
+    giving legal advice, but a tax rate, a risk-free rate, a 'typical' margin or
+    a procurement regime recalled from memory is still a fact about one country
+    at one time — stated to a reader who may be in neither. These must ask for
+    the context and fetch anything specific."""
+    for name in _CONTEXT_SENSITIVE:
+        body = (_BUILTIN_DIR / name / "SKILL.md").read_text().lower()
+        # accept any phrasing of "do not state this from recollection"
+        assert any(w in body for w in ("memory", "recall", "recollection")), \
+            f"{name}: must warn against stating local specifics from recollection"
+        assert "web_fetch" in body, \
+            f"{name}: must name the fetch-and-cite mechanism, not just forbid guessing"
+        assert "ask" in body, f"{name}: must ask for the user's context"
+        # the gap must be VISIBLE in the output — either as unestablished
+        # context, a labelled assumption, or a per-claim [unknown]/[inferred]
+        # marker (competitive-analysis uses the last form).
+        assert any(w in body for w in
+                   ("not established", "assumption", "[unknown]", "[inferred]")), \
+            f"{name}: must surface the gap rather than quietly assume it"
+        assert any(w in body for w in ("country", "jurisdiction", "market", "region")), \
+            f"{name}: must name the geography its answer depends on"
+    print(f"OK context_sensitive_skills_do_not_recall_local_facts "
+          f"({len(_CONTEXT_SENSITIVE)} skills)")
 
 
 def test_no_baked_in_jurisdiction_facts():
@@ -195,6 +240,7 @@ def main():
     test_project_skill_overrides_by_name_only()
     test_catalog_token_budget()
     test_jurisdiction_sensitive_skills_ask_before_asserting()
+    test_context_sensitive_skills_do_not_recall_local_facts()
     test_no_baked_in_jurisdiction_facts()
     test_wheel_contains_skill_files()
     print("\nall built-in skill tests passed")

@@ -1,10 +1,9 @@
 ---
 name: statistical-testing
 description: >
-  Answer "is this difference real?" — pick the right test for the design, check
-  its assumptions, report effect size with a confidence interval, and correct for
-  multiple comparisons. Use for A/B and experiment analysis, before/after
-  comparisons, and any claim that one group differs from another.
+  Answer "is this difference real?" — the right test for the design, measured
+  assumptions, effect size with a confidence interval, and multiple-comparison
+  correction. Use for A/B and experiment analysis.
 metadata:
   x-adk-cc/verify: |
     {"mode": "self", "checks": ["the test choice is justified by the data's design and measured assumptions, not assumed", "an effect size with a confidence interval is reported alongside any p-value", "multiple comparisons are counted and corrected, or their absence is stated", "sample size / power is addressed before concluding 'no difference'"]}

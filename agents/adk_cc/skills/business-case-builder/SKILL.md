@@ -1,10 +1,9 @@
 ---
 name: business-case-builder
 description: >
-  Build a decision-ready business case — options including do-nothing, costs and
-  benefits with stated assumptions, sensitivity on the assumptions that actually
-  move the answer, and a recommendation. Use for buy/build/defer calls, budget
-  requests, vendor selection, or justifying a project.
+  Build a decision-ready business case — options including do-nothing, costs
+  and benefits with stated assumptions, sensitivity on what flips the answer,
+  and a recommendation. Use for buy/build/defer or budget requests.
 metadata:
   x-adk-cc/verify: |
     {"mode": "self", "checks": ["a do-nothing baseline is costed, not just described", "every number traces to a stated assumption or a cited source", "sensitivity identifies which assumption flips the recommendation", "the recommendation names what would change it"]}

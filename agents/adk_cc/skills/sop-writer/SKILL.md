@@ -1,10 +1,9 @@
 ---
 name: sop-writer
 description: >
-  Turn a real process into a runnable standard operating procedure — derived from
-  the actual commands, code and config that perform it, with preconditions,
-  verification after each consequential step, failure handling and rollback. Use
-  to document a process, onboard someone, or make a manual routine repeatable.
+  Turn a real process into a runnable SOP — derived from the scripts and
+  config that actually perform it, with preconditions, a verification per
+  step, and rollback. Use to document a process or make a routine repeatable.
 metadata:
   x-adk-cc/verify: |
     {"mode": "self", "checks": ["every command in the SOP was read from real scripts/config/history rather than invented", "each consequential step has a verification the reader can run", "failure and rollback paths exist for steps that change state", "preconditions and required access are listed before step 1"]}

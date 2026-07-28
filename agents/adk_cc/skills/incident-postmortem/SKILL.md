@@ -1,10 +1,10 @@
 ---
 name: incident-postmortem
 description: >
-  Write a blameless postmortem from actual evidence — reconstruct the timeline
-  from logs, commits and deploys, separate trigger from cause, and produce action
-  items that would have prevented it. Use after an outage, data loss, failed
-  deploy, or any "how did this happen?" review.
+  Write a blameless postmortem from real evidence — timeline rebuilt from
+  logs, commits and deploys, trigger separated from causes, and action items
+  that would have prevented this incident. Use after an outage or failed
+  deploy.
 metadata:
   x-adk-cc/verify: |
     {"mode": "self", "checks": ["every timeline entry cites a real source (log line, commit, deploy record) rather than recollection", "trigger and contributing causes are stated separately", "each action item names an owner-shaped role and would have prevented or shortened THIS incident", "detection and recovery times are derived from evidence, not estimated"]}
