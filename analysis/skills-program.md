@@ -23,7 +23,7 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | I | 3. Verified platform facts (discovery, progressive disclosure, runtime) | ✅ 2026-07-26 |
 | II | W1 runtime — uv-managed analysis env | ✅ 2026-07-27 (unit + API + UI verified) |
 | II | W2 built-in skills plumbing | ✅ 2026-07-27 (incl. real wheel-packaging test) |
-| II | W3 the built-in set (~21) | 🔨 6/21 — + legal pair under jurisdiction discipline |
+| II | W3 the built-in set (~21) | 🔨 12/21 — ops + data/BI slice live-verified 2026-07-28 |
 | II | W4 agent/tool layer | ⬜ |
 | II | W5 data layer (ingestion) | ⬜ |
 | II | W6 UI/UX frontend | ⬜ |
@@ -230,7 +230,7 @@ now prefixes the reason to stderr instead of leaving a bare `exit 127`.
   companions — a package that drops non-`.py` files silently ships zero skills.
 - `ATTRIBUTION.md`: upstream repo + commit + license per vendored skill.
 
-## W3 — The built-in set (~21) 🔨 4 of 21 shipped
+## W3 — The built-in set (~21) 🔨 12 of 21 shipped
 
 **Shipped (2026-07-27)**: `data-analyst` (adopted) + the authored R&D trio
 `tech-due-diligence`, `feasibility-study`, `prd-writer`. Catalog cost ~342
@@ -278,9 +278,42 @@ and what was not. Re-verified: output opens `Context — governing law: Delaware
 (§5) · your side: mutual · your jurisdiction & entity: NOT ESTABLISHED —
 analysis below is general, not localized.`
 
-**Remaining 15**: finance (4), operations (3), data/BI (3), customers (3),
-people (2 — jurisdiction-sensitive, same discipline), governance (2 — likewise
-for entity/board topics).
+**Slice 2 shipped (2026-07-28)** — operations (3) + data/BI (3):
+`incident-postmortem`, `business-case-builder`, `sop-writer`,
+`statistical-testing`, `interactive-dashboard-builder`, `sql-queries`. All
+authored, all evidence-first: the postmortem sources every timeline row and
+marks `[unsourced]` rows rather than smoothing them over; the SOP is derived
+from the scripts/Makefile/CI that actually run the process and marks
+`[UNVERIFIED]` anything it could not read; the business case costs do-nothing
+and refuses to invent figures.
+
+**Deviation from the table, deliberate**: shipped `statistical-testing` instead
+of `data-analysis`. Selection bar 6 forbids near-synonym pairs, and
+`data-analysis` next to the existing `data-analyst` is exactly that — two
+catalog lines the model must disambiguate on every turn. Inference is a
+genuinely different job (test choice, assumption checks, effect size + CI,
+multiple comparisons) with different failure modes, so it earns its line;
+generic "analysis" does not.
+
+**Live-verified** (`scripts/live_check_builtin_skills.py`, gpt-5.4-mini through
+the real API): `interactive-dashboard-builder` was selected from the catalog and
+produced `analysis/dashboard.html` — 4.86 MB, **zero external script fetches**,
+carrying the real CSV values. `sql-queries` got both regional totals right
+(775 / 300) while excluding the refunded row AND the NULL-status row — the exact
+trap the skill is built around, and the one a plausible-looking query fails.
+
+Two harness bugs worth recording, because both looked like skill failures:
+a naive `"cdn.plot.ly" not in body` check fails on a *correctly inlined* bundle
+(the string is a default topojson URL inside plotly itself), and reading a
+4.8 MB artifact races its write — the fixed harness waits for the size to settle.
+Also dropped the `list_skills` assertion: ADK injects the catalog into every
+request's system instruction, so going straight to `load_skill` is correct
+behaviour, not a miss.
+
+**Remaining 9**: finance (4), customers (3), people (2 — jurisdiction-sensitive,
+same discipline), governance (2 — likewise for entity/board topics). Catalog
+cost is now ~1044 tokens for 12 skills; the remaining 9 land it near ~1800
+against the 2000 budget, so descriptions stay tight or the budget moves.
 
 Selection bars — all six must pass: **(1)** genuinely Tier A (no vendor data
 provider/API key); **(2)** license-clean MIT/Apache-2.0 with attribution
