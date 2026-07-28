@@ -425,14 +425,36 @@ reachable via the existing `ADK_CC_SKILLS_DIR`. No new code.
   built-in has 0–3 small references, where paging linearly is cheaper than a
   search round trip.
 
-## W5 — Data layer ⬜
+## W5 — Data layer ✅ 2026-07-29 (ingestion)
 
-- **Ingestion**: today a dataset must already be in the workspace. Add upload
-  (desktop: picker → workspace; web: multipart → tenant workspace) with
-  type/size limits and a visible datasets location.
-- Formats: csv/tsv/parquet/xlsx/json (pyarrow already present).
-- Privacy: datasets stay inside the workspace boundary; only sampled
-  schema/head enters prompts.
+Every analysis skill starts with "load the data", and the answer used to be "go
+copy it into the project yourself first". `service/datasets.py` + the
+`/desktop/datasets/*` routes close that.
+
+- **Ingestion** — desktop picks a local file (native Tauri file picker, typed
+  path when there is no IPC) and the server copies it in; a PUT body uploads
+  raw bytes for the web path. Both share one validator.
+- **Where** — `data/` under the SESSION'S workspace, resolved with the same
+  `_resolve_within` the Files panel uses. That matters more than it sounds: a
+  dataset parked in a server-side upload area is invisible to the agent, which
+  reads the bound project root.
+- **Limits** — allow-list of formats (csv/tsv/parquet/xlsx/json/jsonl/feather,
+  plus `.csv.gz` and friends, longest-extension-first so `.csv.gz` is not read
+  as an unsupported `.gz`), a size cap (`ADK_CC_DATASET_UPLOAD_MAX_MB`, default
+  500) whose refusal names the size and the way round it, filenames that cannot
+  escape the directory, and atomic writes via a `.part` file that the listing
+  hides.
+- **Privacy** — bytes stay in the workspace. Listing is deliberately cheap
+  (name/size/mtime/format): shape and dtypes need the analysis runtime and
+  belong to the dataset browser (W6.2), where one sandbox round trip per file
+  is affordable and here it would not be.
+- **UI** — a Datasets strip at the top of the Files panel: count, the files in
+  `data/` with sizes, and `+ Add`. The panel that shows the workspace is the
+  honest place to put data into it.
+
+Tests: `tests/test_datasets.py` (validation + the real routes through a
+TestClient), `tests/e2e_datasets_ui.py` (browser: strip renders, counts what is
+already there, and a live ingest lands in the project).
 
 ## W6 — UI/UX frontend ⬜
 

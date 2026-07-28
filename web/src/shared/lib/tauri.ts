@@ -24,3 +24,25 @@ export async function pickDirectory(): Promise<string | null | undefined> {
   })
   return typeof picked === "string" ? picked : null
 }
+
+/**
+ * Native FILE picker (datasets). Same null-vs-undefined contract as
+ * `pickDirectory`: `undefined` = no IPC (caller falls back to a typed path),
+ * `null` = the user cancelled, so do nothing.
+ */
+export async function pickFile(
+  extensions?: string[],
+): Promise<string | null | undefined> {
+  const invoke = tauriInvoke()
+  if (!invoke) return undefined
+  const picked = await invoke("plugin:dialog|open", {
+    options: {
+      directory: false,
+      multiple: false,
+      filters: extensions?.length
+        ? [{ name: "Data", extensions: extensions.map((e) => e.replace(/^\./, "")) }]
+        : undefined,
+    },
+  })
+  return typeof picked === "string" ? picked : null
+}

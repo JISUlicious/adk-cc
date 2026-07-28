@@ -418,3 +418,77 @@ def mount_desktop_files_routes(app) -> None:  # noqa: ANN001
             "text": text,
             "binary": binary,
         }
+
+
+# --- datasets (W5 ingestion) ------------------------------------------------
+
+def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
+    """Mount /desktop/datasets/* when ADK_CC_DESKTOP=1; otherwise a no-op.
+
+    Lives beside the file routes because it shares their workspace resolution:
+    a dataset must land where the AGENT reads, which on desktop is the bound
+    project root, not a server-side upload area.
+    """
+    from .desktop_routes import desktop_enabled
+
+    if not desktop_enabled():
+        return
+
+    from . import datasets as ds
+
+    def _root(request: Request) -> Path:
+        q = request.query_params
+        project_id = q.get("project_id") or ""
+        session_id = q.get("session_id") or ""
+        if not project_id or not session_id:
+            raise HTTPException(status_code=400,
+                                detail="project_id and session_id required")
+        root = _resolve_within(project_id, session_id, "")
+        if root is None:
+            raise HTTPException(status_code=409, detail="no workspace bound to this project")
+        return root
+
+    @app.get("/desktop/datasets", include_in_schema=False)
+    async def list_datasets(request: Request):  # noqa: ANN202
+        root = _root(request)
+        return {
+            "datasets": ds.listing(root),
+            "location": ds.DATA_DIR,
+            "supported": list(ds.supported()),
+            "max_bytes": ds.max_bytes(),
+        }
+
+    @app.post("/desktop/datasets/from-path", include_in_schema=False)
+    async def add_dataset_from_path(request: Request):  # noqa: ANN202
+        """Ingest a LOCAL file the user picked (desktop is single-user loopback,
+        so the server may read the chosen path — same trust model as adding a
+        project folder)."""
+        root = _root(request)
+        body = await request.json() or {}
+        try:
+            row = ds.ingest_local_path(root, str(body.get("path") or ""),
+                                       name=str(body.get("name") or ""))
+        except ds.DatasetError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"status": "ok", "dataset": row}
+
+    @app.put("/desktop/datasets/{name}", include_in_schema=False)
+    async def upload_dataset(name: str, request: Request):  # noqa: ANN202
+        root = _root(request)
+        blob = await request.body()
+        if not blob:
+            raise HTTPException(status_code=400, detail="empty body")
+        try:
+            row = ds.write_bytes(root, name, blob)
+        except ds.DatasetError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"status": "ok", "dataset": row}
+
+    @app.delete("/desktop/datasets/{name}", include_in_schema=False)
+    async def delete_dataset(name: str, request: Request):  # noqa: ANN202
+        root = _root(request)
+        try:
+            gone = ds.remove(root, name)
+        except ds.DatasetError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"status": "deleted" if gone else "not_found", "name": name}

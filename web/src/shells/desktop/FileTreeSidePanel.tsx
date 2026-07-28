@@ -31,6 +31,11 @@ import {
 } from "@/shared/api/desktop-checkpoint"
 import { RightPanelShell, type RightPanelProps } from "@/shared/components/RightPanelShell"
 import { SandboxedHtml } from "@/shared/components/SandboxedHtml"
+import { Database } from "lucide-react"
+import { pickFile } from "@/shared/lib/tauri"
+import {
+  listDatasets, addDatasetFromPath, type Dataset,
+} from "@/shared/api/desktop-settings"
 import { CodeView } from "@/shared/components/CodeView"
 import { Markdown } from "@/shared/lib/markdown"
 import { isHtml, isMarkdown, langFromPath } from "@/shared/lib/filetypes"
@@ -89,6 +94,11 @@ export function FileTreeSidePanel({
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  // Datasets (W5): the agent can only analyse what is IN the workspace, so the
+  // panel that shows the workspace is also where you put data into it.
+  const [datasets, setDatasets] = useState<Dataset[]>([])
+  const [dsBusy, setDsBusy] = useState(false)
+  const [dsError, setDsError] = useState<string | null>(null)
   const [canUndo, setCanUndo] = useState(false)
   // Non-null when checkpointing can't work for this project (remote device
   // without git) — shown as the Undo tooltip so the dead button explains itself.
@@ -266,6 +276,32 @@ export function FileTreeSidePanel({
     setExpanded(next)
   }
 
+  const reloadDatasets = useCallback(() => {
+    if (!projectId || !sessionId) return
+    listDatasets(projectId, sessionId)
+      .then((r) => setDatasets(r.datasets))
+      .catch(() => setDatasets([]))   // no workspace bound yet — not an error
+  }, [projectId, sessionId])
+  useEffect(reloadDatasets, [reloadDatasets, refreshKey])
+
+  async function addDataset() {
+    setDsError(null)
+    const picked = await pickFile(["csv", "tsv", "parquet", "xlsx", "json", "jsonl"])
+    if (picked === null) return                     // cancelled
+    const path = picked ?? window.prompt("Path to the data file")  // no native IPC
+    if (!path) return
+    setDsBusy(true)
+    try {
+      await addDatasetFromPath(path, projectId, sessionId)
+      reloadDatasets()
+      void reload()
+    } catch (e) {
+      setDsError((e as Error).message)
+    } finally {
+      setDsBusy(false)
+    }
+  }
+
   const headerRight = (
     <div className="flex items-center gap-0.5">
       {/* span carries the tooltip — a disabled button has pointer-events off */}
@@ -389,6 +425,39 @@ export function FileTreeSidePanel({
 
   return (
     <RightPanelShell title="Files" open={open} onClose={onClose} headerRight={headerRight}>
+      <div className="mb-2 border-b border-border/50 pb-2">
+        <div className="flex items-center gap-1.5 px-1">
+          <Database className="h-3.5 w-3.5 text-muted-foreground" />
+          <span className="text-xs font-medium">Datasets</span>
+          <span className="text-[10px] text-muted-foreground">
+            {datasets.length ? `${datasets.length} in data/` : "none in data/"}
+          </span>
+          <button
+            type="button"
+            onClick={() => void addDataset()}
+            disabled={dsBusy}
+            title="Copy a data file into this project's data/ folder"
+            className="ml-auto rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent disabled:opacity-40"
+          >
+            {dsBusy ? "Adding…" : "+ Add"}
+          </button>
+        </div>
+        {datasets.length > 0 && (
+          <div className="mt-1 space-y-0.5 px-1">
+            {datasets.slice(0, 6).map((d) => (
+              <div key={d.name} className="flex items-center gap-2 text-[11px]">
+                <span className="truncate font-mono" title={d.path}>{d.name}</span>
+                <span className="ml-auto shrink-0 text-muted-foreground">
+                  {d.bytes > 1024 * 1024
+                    ? `${(d.bytes / 1024 / 1024).toFixed(1)}MB`
+                    : `${Math.max(1, Math.round(d.bytes / 1024))}KB`}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        {dsError && <p className="px-1 text-[11px] text-destructive">{dsError}</p>}
+      </div>
       {historyOpen && (
         <>
           {/* click-away backdrop */}

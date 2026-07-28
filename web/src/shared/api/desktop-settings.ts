@@ -291,3 +291,39 @@ export function setSandbox(
 export function pullSandboxImage(): Promise<SandboxStatus> {
   return apiFetch("/desktop/settings/sandbox/pull", { method: "POST" })
 }
+
+// ---- datasets (W5 ingestion) ----
+// Datasets live in `data/` under the session's workspace — the same directory
+// the agent reads — so project_id + session_id are required, not optional.
+export type Dataset = {
+  name: string
+  path: string
+  bytes: number
+  modified: number
+  format: string
+}
+function dsq(projectId: string, sessionId: string) {
+  return `project_id=${encodeURIComponent(projectId)}&session_id=${encodeURIComponent(sessionId)}`
+}
+export function listDatasets(
+  projectId: string,
+  sessionId: string,
+): Promise<{ datasets: Dataset[]; location: string; supported: string[]; max_bytes: number }> {
+  return apiFetch(`/desktop/datasets?${dsq(projectId, sessionId)}`)
+}
+export function addDatasetFromPath(
+  path: string,
+  projectId: string,
+  sessionId: string,
+): Promise<{ status: string; dataset: Dataset }> {
+  return apiFetch(`/desktop/datasets/from-path?${dsq(projectId, sessionId)}`, {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  })
+}
+export function deleteDataset(name: string, projectId: string, sessionId: string) {
+  return apiFetch(
+    `/desktop/datasets/${encodeURIComponent(name)}?${dsq(projectId, sessionId)}`,
+    { method: "DELETE" },
+  )
+}
