@@ -713,9 +713,20 @@ verification branch, scripted coordinator forcing the re-entry) had run 2 do
 real work in BOTH arms — 6 and 3 tool calls with the fix off, 7 and 4 with it
 on, zero empty responses. This endpoint tolerates the dangling call. The fix
 removes a genuinely malformed request; whether the original live no-op had a
-further cause (a resumed invocation carrying `end_of_agents`, or microcompaction
-of a 27-tool-call run) is still open. Driving a re-entry through the broker's
-resumed path is the next probe.
+further cause is still open — but the two suspects were tested and both came
+back clean. Driven through the Turn Broker (the only path that continues a run
+ended on a dangling handback), a re-entry AFTER a resumed confirmation pause
+executes normally: verification runs `[glob+read+confirm]`, `[report]`,
+`[glob+report]`, all 8 scripted responses consumed, coordinator answers. So
+`end_of_agents` does not block re-entry on the resumed path either.
+
+Generalised instead of chased further: `test_no_request_carries_an_unanswered_call`
+asserts that NO model request on either path (direct runner, broker resume)
+contains a function call without a matching response — the shape behind all
+three empty-response incidents here. Both paths scan clean (7 and 8 requests);
+removing the strip fails it at verification request #5. A scripted model answers
+a malformed request regardless, so this structural check is the only thing that
+can catch the class at all.
 
 The shipped mitigation stands regardless: detect the no-op and tell the
 coordinator the truth rather than let it promise a verdict that never arrives.

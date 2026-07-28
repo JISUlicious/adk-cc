@@ -435,6 +435,92 @@ def test_handback_marker_never_reaches_a_request() -> None:
     print("OK test_handback_marker_never_reaches_a_request")
 
 
+def _unanswered_calls(contents) -> dict:
+    """Function calls in a request with no matching response anywhere in it."""
+    opened, answered = {}, set()
+    for c in contents or []:
+        for p in (getattr(c, "parts", None) or []):
+            fc = getattr(p, "function_call", None)
+            fr = getattr(p, "function_response", None)
+            if fc is not None:
+                opened[fc.id or f"noid:{fc.name}"] = fc.name
+            if fr is not None:
+                answered.add(fr.id or f"noid:{fr.name}")
+    return {k: v for k, v in opened.items() if k not in answered}
+
+
+def test_no_request_carries_an_unanswered_call() -> None:
+    """INVARIANT, both re-entry paths: every model request is well-formed.
+
+    An unanswered function call in `contents` is the shape that has made real
+    models return EMPTY content three times in this project (id-less handback
+    marker, id-less gate transfer, and the handback marker surviving on a
+    re-entering specialist's own branch). A scripted model answers regardless,
+    so only a structural check catches it — hence this test rather than a
+    behavioural one. Covers the direct runner AND the broker's resumed
+    continuation, which is the only path that reaches a dangling handback.
+    """
+    from adk_cc.service.turns import TurnBroker
+
+    seen: list[tuple[str, dict]] = []
+    original = _ScriptedLlm.generate_content_async
+
+    async def scanning(self, req, stream: bool = False):
+        si = str(req.config.system_instruction or "").lower()
+        who = "verification" if "verification specialist" in si else "coordinator"
+        bad = _unanswered_calls(req.contents)
+        if bad:
+            seen.append((f"{who} request #{self.calls + 1}", bad))
+        async for r in original(self, req, stream=stream):
+            yield r
+
+    async def direct(A):
+        runner, svc, llm = _fresh([
+            _fc_resp("t1", "transfer_to_agent", {"agent_name": "verification"}),
+            _fc_resp("g1", "glob_files", {"pattern": "*.md"}),
+            _text_resp("VERDICT: FAIL"),
+            _fc_resp("t2", "transfer_to_agent", {"agent_name": "verification"}),
+            _fc_resp("g2", "glob_files", {"pattern": "*.py"}),
+            _text_resp("VERDICT: PASS"),
+            _text_resp("FINAL"),
+        ], resumable=True)
+        s = await svc.create_session(app_name=A.app.name, user_id="u1")
+        await asyncio.wait_for(_run(runner, s.id, _msg("verify it")), 60)
+        assert llm.calls == 7, llm.calls  # both verification runs really ran
+
+    async def via_broker(A):
+        runner, svc, llm, sid, cid, cname = await _f3_turn1(resumable=True)
+        # the specialist's report, then a SECOND transfer to it, then the answer
+        llm.responses.extend([
+            _fc_resp("t2", "transfer_to_agent", {"agent_name": "Explore"}),
+            _fc_resp("g2", "glob_files", {"pattern": "*.py"}),
+            _text_resp("second pass done"),
+            _text_resp("COORDINATOR FINAL"),
+        ])
+
+        async def get_runner(app_name):
+            return runner
+
+        broker = TurnBroker(get_runner=get_runner, session_service=svc)
+        turn = broker.start(app_name="adk_cc", user_id="u1", session_id=sid,
+                            new_message=_confirmation_answer(cid, cname))
+        await asyncio.wait_for(turn.task, timeout=120)
+        assert turn.status == "done", turn.snapshot()
+
+    async def main():
+        import adk_cc.agent as A
+
+        _ScriptedLlm.generate_content_async = scanning
+        try:
+            await direct(A)
+            await via_broker(A)
+        finally:
+            _ScriptedLlm.generate_content_async = original
+        assert not seen, f"unanswered calls reached the model: {seen}"
+    asyncio.run(main())
+    print("OK test_no_request_carries_an_unanswered_call")
+
+
 def main() -> None:
     import adk_cc.agent as A
 
@@ -447,6 +533,7 @@ def main() -> None:
         test_resumable_plain_turn_unchanged()
         test_resumable_coordinator_level_confirmation()
         test_handback_marker_never_reaches_a_request()
+        test_no_request_carries_an_unanswered_call()
     finally:
         A.app.resumability_config = prior
     print("\nall resumability tests passed")
