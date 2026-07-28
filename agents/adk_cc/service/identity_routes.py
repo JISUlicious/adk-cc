@@ -608,6 +608,47 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
                 return {"skills": []}
             return {"skills": sorted(p.name for p in base.iterdir() if p.is_dir())}
 
+        @router.get("/auth/skills/catalog")
+        async def user_skills_catalog(request: Request):
+            """Every skill this user's agent can see — personal, org, built-in —
+            with its source and on/off state. `GET /auth/skills` lists only the
+            personal uploads, which is a strict subset."""
+            from ..tools import skill_enablement
+
+            auth = _require_auth(request)
+            tenant = _safe_id(auth.tenant_id, "tenant_id")
+            return {
+                "skills": skill_enablement.catalog(
+                    tenant_id=auth.tenant_id,
+                    user_id=auth.user_id,
+                    scoped_dirs=[
+                        ("user", _user_skill_dir(auth)),
+                        ("org", _sroot / tenant),
+                    ],
+                )
+            }
+
+        @router.patch("/auth/skills/{skill_name}/enabled")
+        async def set_user_skill_enabled(skill_name: str, request: Request):
+            """A user may only toggle skills FOR THEMSELVES. Turning one off
+            org-wide is an admin action (see /admin/tenants/{tid}/skills)."""
+            from ..tools import skill_enablement
+
+            auth = _require_auth(request)
+            body = await request.json() or {}
+            if "enabled" not in body:
+                raise HTTPException(status_code=400, detail="'enabled' required")
+            s = _safe_id(skill_name, "skill_name")
+            enabled = bool(body["enabled"])
+            skill_enablement.set_enabled(
+                s, enabled, tenant_id=auth.tenant_id, user_id=auth.user_id
+            )
+            await identity.record(
+                auth.tenant_id, auth.user_id,
+                "skill.enabled" if enabled else "skill.disabled", target=s,
+            )
+            return {"status": "ok", "skill_name": s, "enabled": enabled}
+
         @router.put("/auth/skills/{skill_name}")
         async def put_user_skill(skill_name: str, request: Request):
             auth = _require_auth(request)

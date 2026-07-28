@@ -59,6 +59,36 @@ export function deleteDesktopMcp(name: string, scope: Scope, projectId?: string)
 export function listDesktopSkills(scope: Scope, projectId?: string): Promise<{ skills: string[] }> {
   return apiFetch(`/desktop/settings/skills?${qs(scope, projectId)}`)
 }
+/** Every skill the agent can SEE — built-in, project, installed — with its
+ * source and on/off state. `listDesktopSkills` above lists only what is
+ * installed into this store, which is a strict subset: built-ins ship in the
+ * wheel and can't be uninstalled, so a switch is the only way to stop them. */
+export type SkillCatalogEntry = {
+  name: string
+  description: string
+  source: string
+  path: string
+  enabled: boolean
+  disabled_by: "org" | "user" | null
+  shadows: { source: string; path: string }[]
+}
+export function getDesktopSkillCatalog(
+  scope: Scope,
+  projectId?: string,
+): Promise<{ skills: SkillCatalogEntry[] }> {
+  return apiFetch(`/desktop/settings/skills/catalog?${qs(scope, projectId)}`)
+}
+export function setDesktopSkillEnabled(
+  name: string,
+  enabled: boolean,
+  scope: Scope,
+  projectId?: string,
+) {
+  return apiFetch(
+    `/desktop/settings/skills/${encodeURIComponent(name)}/enabled?${qs(scope, projectId)}`,
+    { method: "PATCH", body: JSON.stringify({ enabled }) },
+  )
+}
 export function uploadDesktopSkill(name: string, zip: ArrayBuffer, scope: Scope, projectId?: string) {
   return apiFetch(`/desktop/settings/skills/${encodeURIComponent(name)}?${qs(scope, projectId)}`, {
     method: "PUT",

@@ -170,6 +170,37 @@ def mount_tenant_admin(
                 return {"skills": []}
             return {"skills": sorted(p.name for p in tenant_dir.iterdir() if p.is_dir())}
 
+        @router.get("/skills/catalog")
+        async def skills_catalog(tenant_id: str, request: Request):
+            """Every skill the tenant's agents can see (org uploads + built-ins)
+            with its org-level on/off state."""
+            from ..tools import skill_enablement
+
+            await _maybe_await(authorize(request, tenant_id))
+            t = _ensure_safe_id(tenant_id, "tenant_id")
+            return {
+                "skills": skill_enablement.catalog(
+                    tenant_id=tenant_id,
+                    scoped_dirs=[("org", skill_root_path / t)],
+                )
+            }
+
+        @router.patch("/skills/{skill_name}/enabled")
+        async def set_skill_enabled(tenant_id: str, skill_name: str, request: Request):
+            """Org-wide switch: applies to every user in the tenant, and is a
+            FLOOR — no per-user or per-chat setting can lift it (see
+            tools/skill_enablement.disabled_names)."""
+            from ..tools import skill_enablement
+
+            await _maybe_await(authorize(request, tenant_id))
+            s = _ensure_safe_id(skill_name, "skill_name")
+            body = await request.json() or {}
+            if "enabled" not in body:
+                raise HTTPException(status_code=400, detail="'enabled' required")
+            enabled = bool(body["enabled"])
+            skill_enablement.set_enabled(s, enabled, tenant_id=tenant_id)
+            return {"status": "ok", "skill_name": s, "enabled": enabled}
+
         @router.put("/skills/{skill_name}")
         async def put_skill(tenant_id: str, skill_name: str, request: Request):
             await _maybe_await(authorize(request, tenant_id))

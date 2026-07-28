@@ -10,6 +10,7 @@ import {
   listDesktopSecrets, setDesktopSecret, deleteDesktopSecret,
   listDesktopMcp, setDesktopMcp, deleteDesktopMcp, type DesktopMcpServer,
   listDesktopSkills, uploadDesktopSkill, deleteDesktopSkill, addDesktopSkillFromDir,
+  getDesktopSkillCatalog, setDesktopSkillEnabled, type SkillCatalogEntry,
   listWorkingDirs, addWorkingDir, removeWorkingDir,
 } from "@/shared/api/desktop-settings"
 
@@ -162,12 +163,16 @@ export function McpScope({ scope, projectId }: { scope: Scope; projectId?: strin
 
 // ============================ Skills ============================
 export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: string }) {
-  const [skills, setSkills] = useState<string[]>([])
+  // The CATALOG, not the install list: built-ins and project skills can't be
+  // uninstalled from here, so a switch is the only control that reaches them.
+  const [skills, setSkills] = useState<SkillCatalogEntry[]>([])
+  const [installed, setInstalled] = useState<string[]>([])
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
   const reload = useCallback(() => {
-    listDesktopSkills(scope, projectId).then((r) => setSkills(r.skills)).catch((e) => setErr(errMsg(e)))
+    getDesktopSkillCatalog(scope, projectId).then((r) => setSkills(r.skills)).catch((e) => setErr(errMsg(e)))
+    listDesktopSkills(scope, projectId).then((r) => setInstalled(r.skills)).catch(() => {})
   }, [scope, projectId])
   useEffect(reload, [reload])
   async function onFile(e: ChangeEvent<HTMLInputElement>) {
@@ -191,13 +196,45 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
     setErr(null)
     try { await deleteDesktopSkill(name, scope, projectId); reload() } catch (e) { setErr(errMsg(e)) }
   }
+  async function toggle(name: string, enabled: boolean) {
+    setErr(null)
+    // Optimistic: the switch must feel instant, and a failed write reloads back
+    // to the server's truth anyway.
+    setSkills((prev) => prev.map((s) => (s.name === name ? { ...s, enabled } : s)))
+    try { await setDesktopSkillEnabled(name, enabled, scope, projectId) } catch (e) { setErr(errMsg(e)) }
+    reload()
+  }
+  const enabledCount = skills.filter((s) => s.enabled).length
   return (
     <div className="space-y-1.5">
-      {skills.length === 0 && <p className="text-xs text-muted-foreground">None installed.</p>}
+      {skills.length === 0 && <p className="text-xs text-muted-foreground">No skills found.</p>}
+      {skills.length > 0 && (
+        <p className="text-xs text-muted-foreground">
+          {enabledCount} of {skills.length} enabled — only these are offered to the agent.
+        </p>
+      )}
       {skills.map((s) => (
-        <div key={s} className="flex items-center gap-2 text-sm">
-          <span className="font-mono">{s}</span>
-          <button onClick={() => del(s)} className="ml-auto text-muted-foreground hover:text-destructive" title="Remove"><Trash2 className="h-3.5 w-3.5" /></button>
+        <div key={s.name} className="flex items-center gap-2 text-sm" data-skill={s.name}>
+          <input
+            type="checkbox"
+            checked={s.enabled}
+            onChange={(e) => toggle(s.name, e.target.checked)}
+            title={s.enabled ? "Disable this skill" : "Enable this skill"}
+            aria-label={`Enable ${s.name}`}
+          />
+          <span className="font-mono">{s.name}</span>
+          <span className="rounded bg-muted px-1 text-[10px] text-muted-foreground">{s.source}</span>
+          {/* Shadowing is invisible until toggles exist, and then it is the
+              first thing that confuses: turning off "the built-in" does nothing
+              when a same-named project skill is what actually loads. */}
+          {s.shadows.length > 0 && (
+            <span className="text-[10px] text-muted-foreground" title={s.shadows.map((x) => x.path).join("\n")}>
+              shadows {s.shadows.map((x) => x.source).join(", ")}
+            </span>
+          )}
+          {installed.includes(s.name) && (
+            <button onClick={() => del(s.name)} className="ml-auto text-muted-foreground hover:text-destructive" title="Remove"><Trash2 className="h-3.5 w-3.5" /></button>
+          )}
         </div>
       ))}
       <div className="flex flex-wrap items-start gap-2 pt-1">

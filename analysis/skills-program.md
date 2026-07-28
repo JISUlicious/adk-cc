@@ -28,7 +28,7 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | II | W5 data layer (ingestion) | ⬜ |
 | II | W6 UI/UX frontend | ⬜ |
 | II | W7 verification | ⬜ |
-| II | **W8 skill enable/disable from the UI** (all scopes) | ⬜ **unblocked — shippable now** |
+| II | **W8 skill enable/disable from the UI** (all scopes) | ✅ 2026-07-28 (unit + API + live UI e2e) |
 | II | **W9 verification in the agentic loop** | ✅ S0–S3 shipped & live-verified 2026-07-27 (hard = opt-in) |
 
 **Nothing in Part II is implemented yet** — no code has been written for this
@@ -365,7 +365,7 @@ Build on it rather than inventing a viewer.
   confirming the non-advice header) and one authored skill
   (`tech-due-diligence` over a real repo).
 
-## W8 — Skill enable/disable from the UI ⬜
+## W8 — Skill enable/disable from the UI ✅
 
 Requirement: toggle skills on/off from the UI — **not only built-ins, but every
 installed skill** (built-in, project, per-user, org/tenant).
@@ -423,6 +423,36 @@ Unit: deny-list filtering; disabled skill absent from catalog **and** refused by
 name is a no-op. API: three mounts, authz (a user cannot disable org skills for
 others). **Live UI**: toggle a skill off in Settings → `list_skills` no longer
 lists it → toggle on → it returns; screenshot.
+
+### Built — what changed against the design
+
+`tools/skill_enablement.py` (deny-list + three scopes), enforcement in
+`tools/skills.py` + `tools/skills_tenant.py`, three API mounts, and the toggle
+list in Settings → Skills. Tests: `test_skill_enablement.py` (7),
+`test_skill_enablement_api.py`, `e2e_skill_toggle_ui.py` (10 checks, real
+browser, passing).
+
+Two corrections the design got wrong, both found while building:
+
+1. **`list_skills` is not the catalog that matters.** ADK's
+   `SkillToolset.process_llm_request` injects every skill's name + description
+   into the system instruction of EVERY request. Filtering only the tool would
+   have left a disabled skill costing tokens and visible to the model on every
+   turn — the two things the toggle exists to prevent. Fixed with
+   `_EnablementAwareSkillToolset`, which overrides `_list_skills`' consumers on
+   both paths; the e2e asserts absence from the injected instruction, not just
+   from the tool result.
+2. **Precedence needed a floor, and a floor needs a scope test.** "Session
+   override beats user default" is right for a user's own choices but wrong for
+   an admin's: an org-wide disable that any chat can lift is not a policy. The
+   org layer is now a floor — but ONLY where it belongs to someone else. On
+   desktop, and on any single-user server with no tenant context, the
+   tenant-scope list IS the user's own global setting, so "off globally, except
+   in this chat" keeps working there.
+
+Also enforced at `load_skill_resource` and `search_skill_resource`, not just
+`load_skill`/`run_skill_script` — a disabled skill's bundled files are just as
+reachable by name.
 
 ## W9 — Verification in the agentic loop ⬜
 

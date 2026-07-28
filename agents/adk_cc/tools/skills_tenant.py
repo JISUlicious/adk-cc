@@ -114,6 +114,7 @@ class TenantSkillToolset(BaseToolset):
 
         # Same bounded/lazy/guarded treatment as the single-tenant factory.
         from .skills import (
+            _EnablementAwareSkillToolset,
             _SkillResourceSearchTool,
             _build_skill_dir_index,
             _file_max_bytes,
@@ -126,7 +127,9 @@ class TenantSkillToolset(BaseToolset):
             _prune_oversized_resources(skill, max_bytes)
         pairs = [(skill, skill_dir.resolve()) for skill, skill_dir in sourced]
         skill_dirs = _build_skill_dir_index(pairs)
-        inner = SkillToolset(
+        # Enablement-aware: the deny-list must also filter the catalog ADK
+        # injects into every request's system instruction, not just list_skills.
+        inner = _EnablementAwareSkillToolset(
             skills=skills,
             code_executor=self._code_executor,
             script_timeout=self._script_timeout,

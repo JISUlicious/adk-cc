@@ -81,6 +81,7 @@ from google.adk.skills import (
 )
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.skill_toolset import (
+    ListSkillsTool,
     LoadSkillResourceTool,
     LoadSkillTool,
     RunSkillScriptTool,
@@ -89,6 +90,7 @@ from google.adk.tools.skill_toolset import (
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 from ..config.schema import env_bool
+from . import skill_enablement
 
 _log = logging.getLogger(__name__)
 
@@ -514,6 +516,9 @@ class _LenientLoadSkillResourceTool(LoadSkillResourceTool):
     async def run_async(
         self, *, args: dict[str, Any], tool_context: ToolContext
     ) -> Any:
+        name = args.get("skill_name") or ""
+        if name and _denied(name, tool_context):
+            return skill_enablement.refusal(name)
         offset = _coerce_int(args.get("offset"), 1)
         limit = min(
             _coerce_int(args.get("limit"), _resource_default_limit()),
@@ -656,6 +661,9 @@ class _BoundedLoadSkillTool(LoadSkillTool):
     async def run_async(
         self, *, args: dict[str, Any], tool_context: ToolContext
     ) -> Any:
+        name = args.get("skill_name") or ""
+        if name and _denied(name, tool_context):
+            return skill_enablement.refusal(name)
         result = await super().run_async(args=args, tool_context=tool_context)
         if isinstance(result, dict) and isinstance(result.get("instructions"), str):
             instr = result["instructions"]
@@ -727,6 +735,8 @@ class _SkillResourceSearchTool(BaseTool):
         self, *, args: dict[str, Any], tool_context: ToolContext
     ) -> Any:
         skill_name = args.get("skill_name") or ""
+        if skill_name and _denied(skill_name, tool_context):
+            return skill_enablement.refusal(skill_name)
         query = args.get("query") or ""
         max_results = _coerce_int(args.get("max_results"), 30)
         skill_dir = self._skill_dirs.get(skill_name)
@@ -785,7 +795,40 @@ class _SkillResourceSearchTool(BaseTool):
         return matches, truncated
 
 
-class _NoopGuardedRunSkillScriptTool(RunSkillScriptTool):
+def _state_of(tool_context: ToolContext) -> Any:
+    """Session state behind a ToolContext, or an empty mapping.
+
+    Enablement is resolved from state on EVERY skill call because the toolset
+    itself is a process-wide singleton (agent.py builds it once at import), so
+    there is nowhere else per-user to put it.
+    """
+    try:
+        return tool_context.state
+    except Exception:  # noqa: BLE001 — a missing state must not break a tool
+        return {}
+
+
+def _denied(name: str, tool_context: ToolContext) -> bool:
+    try:
+        return skill_enablement.is_disabled(name, _state_of(tool_context))
+    except Exception:  # noqa: BLE001 — fail OPEN: a broken deny-list file
+        _log.warning("skill enablement: check failed for %r", name, exc_info=True)
+        return False
+
+
+class _EnablementCheckedRunSkillScriptTool(RunSkillScriptTool):
+    """`run_skill_script` refuses a disabled skill."""
+
+    async def run_async(
+        self, *, args: dict[str, Any], tool_context: ToolContext
+    ) -> Any:
+        name = args.get("skill_name") or ""
+        if name and _denied(name, tool_context):
+            return skill_enablement.refusal(name)
+        return await super().run_async(args=args, tool_context=tool_context)
+
+
+class _NoopGuardedRunSkillScriptTool(_EnablementCheckedRunSkillScriptTool):
     """`run_skill_script` that refuses under the noop backend (host exec).
 
     Phase-2 guard (only installed when ADK_CC_SKILL_GUARDS=1): under noop a
@@ -817,6 +860,46 @@ class _NoopGuardedRunSkillScriptTool(RunSkillScriptTool):
         return await super().run_async(args=args, tool_context=tool_context)
 
 
+class _FilteredListSkillsTool(ListSkillsTool):
+    """`list_skills` minus the skills this session has turned off."""
+
+    async def run_async(
+        self, *, args: dict[str, Any], tool_context: ToolContext
+    ) -> Any:
+        from google.adk.skills import prompt as _skill_prompt
+
+        skills = skill_enablement.filter_skills(
+            self._toolset._list_skills(), _state_of(tool_context)
+        )
+        return _skill_prompt.format_skills_as_xml(skills)
+
+
+class _EnablementAwareSkillToolset(SkillToolset):
+    """SkillToolset that also honours the deny-list in the SYSTEM INSTRUCTION.
+
+    `list_skills` is not the only catalog: ADK's `process_llm_request` injects
+    every skill's name + description into each request. Filtering only the tool
+    would leave disabled skills costing tokens on every turn and still visible
+    to the model — the two things the toggle exists to prevent.
+    """
+
+    async def process_llm_request(
+        self, *, tool_context: ToolContext, llm_request: Any
+    ) -> None:
+        from google.adk.tools.skill_toolset import (
+            _DEFAULT_SKILL_SYSTEM_INSTRUCTION,
+        )
+        from google.adk.skills import prompt as _skill_prompt
+
+        skills = skill_enablement.filter_skills(
+            self._list_skills(), _state_of(tool_context)
+        )
+        llm_request.append_instructions([
+            _DEFAULT_SKILL_SYSTEM_INSTRUCTION,
+            _skill_prompt.format_skills_as_xml(skills),
+        ])
+
+
 def _patch_skill_tools(
     toolset: SkillToolset, skill_dirs: dict[str, str]
 ) -> None:
@@ -840,12 +923,20 @@ def _patch_skill_tools(
             tool, _BoundedLoadSkillTool
         ):
             toolset._tools[i] = _BoundedLoadSkillTool(toolset)
-        elif (
-            guards
-            and isinstance(tool, RunSkillScriptTool)
-            and not isinstance(tool, _NoopGuardedRunSkillScriptTool)
+        elif isinstance(tool, ListSkillsTool) and not isinstance(
+            tool, _FilteredListSkillsTool
         ):
-            toolset._tools[i] = _NoopGuardedRunSkillScriptTool(toolset)
+            toolset._tools[i] = _FilteredListSkillsTool(toolset)
+        elif isinstance(tool, RunSkillScriptTool) and not isinstance(
+            tool, _EnablementCheckedRunSkillScriptTool
+        ):
+            # The enablement check is unconditional; the host-exec guard is the
+            # opt-in layer on top of it.
+            toolset._tools[i] = (
+                _NoopGuardedRunSkillScriptTool(toolset)
+                if guards
+                else _EnablementCheckedRunSkillScriptTool(toolset)
+            )
 
 
 def make_skill_toolset(
@@ -885,7 +976,7 @@ def make_skill_toolset(
         from ..sandbox.code_executor import SandboxBackedCodeExecutor
 
         code_executor = SandboxBackedCodeExecutor()
-    toolset = SkillToolset(
+    toolset = _EnablementAwareSkillToolset(
         skills=[s for s, _ in pairs],
         code_executor=code_executor,
         script_timeout=script_timeout,

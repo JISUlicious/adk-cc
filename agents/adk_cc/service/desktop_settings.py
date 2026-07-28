@@ -196,6 +196,43 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
                 )
             }
 
+        @app.get("/desktop/settings/skills/catalog", include_in_schema=False)
+        async def skills_catalog(request: Request):  # noqa: ANN202
+            """EVERY discovered skill with source + on/off state.
+
+            Distinct from `GET /skills` above, which lists only what is
+            *installed into this store*. The toggle has to cover built-ins and
+            project skills too — those cannot be uninstalled from here, which is
+            exactly why they need a switch.
+            """
+            from ..tools import skill_enablement
+
+            uid = _scope_user(request)
+            return {
+                "skills": skill_enablement.catalog(
+                    tenant_id=_TENANT,
+                    user_id=uid,
+                    scoped_dirs=(
+                        ([("project", _skill_base(uid))] if uid else [])
+                        + [("installed", _skill_base(None))]
+                    ),
+                )
+            }
+
+        @app.patch("/desktop/settings/skills/{skill_name}/enabled", include_in_schema=False)
+        async def set_skill_enabled(skill_name: str, request: Request):  # noqa: ANN202
+            from ..tools import skill_enablement
+
+            uid = _scope_user(request)
+            body = await request.json() or {}
+            if "enabled" not in body:
+                raise HTTPException(status_code=400, detail="'enabled' required")
+            name = _safe(skill_name, "skill_name")
+            skill_enablement.set_enabled(
+                name, bool(body["enabled"]), tenant_id=_TENANT, user_id=uid
+            )
+            return {"status": "ok", "skill_name": name, "enabled": bool(body["enabled"])}
+
         @app.put("/desktop/settings/skills/{skill_name}", include_in_schema=False)
         async def put_skill(skill_name: str, request: Request):  # noqa: ANN202
             uid = _scope_user(request)
