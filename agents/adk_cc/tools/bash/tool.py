@@ -4,7 +4,7 @@ import re
 
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 from google.adk.tools.tool_context import ToolContext
 
@@ -85,11 +85,49 @@ class BashTool(AdkCcTool):
                          type(e).__name__, str(e)[:200])
             return args
 
+    async def _dataset_guard(self, backend, ws, args: RunBashArgs) -> Optional[str]:
+        """Refuse a python command that would load an oversized dataset.
+
+        Returns the refusal text, or None to proceed. Costs one `wc -c` round
+        trip, and ONLY when a python command names a data file it is not
+        already sampling — see sandbox/dataset_guard.py for why it is scoped
+        this narrowly.
+        """
+        from ...sandbox import dataset_guard as dg
+
+        cmd = args.command or ""
+        if not dg.enabled() or not _INVOKES_PYTHON.search(cmd):
+            return None
+        if dg.already_samples(cmd):
+            return None
+        paths = dg.data_paths(cmd)
+        if not paths:
+            return None
+        try:
+            probe = await backend.exec(
+                dg.size_probe(paths), fs_write=None, network=NetworkConfig(),
+                timeout_s=20, cwd=ws.abs_path,
+            )
+        except Exception:  # noqa: BLE001 — a guard must never break the tool
+            return None
+        over = dg.oversized(dg.parse_sizes(getattr(probe, "stdout", "") or ""))
+        return dg.refusal(over) if over else None
+
     async def _execute(self, args: RunBashArgs, ctx: ToolContext) -> dict[str, Any]:
         backend = get_backend(ctx)
         ws = get_workspace(ctx)
         self._env_note: str = ""
         args = await self._with_managed_python(backend, ws, args)
+        refusal = await self._dataset_guard(backend, ws, args)
+        if refusal:
+            _log.info("dataset guard refused: %s", args.command[:160])
+            return {
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": refusal,
+                "timed_out": False,
+                "error_code": "DATASET_TOO_LARGE",
+            }
         # Network policy is intentionally empty here — bash with no
         # explicit network allowlist gets no egress in real backends.
         # Operators wanting outbound for builds (apt, pip) configure

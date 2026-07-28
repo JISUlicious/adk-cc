@@ -392,14 +392,38 @@ selection precision, which is the real constraint.
 **Long tail** → opt-in packs (`packs/business-extended/`, `packs/data-analyst-ko/`)
 reachable via the existing `ADK_CC_SKILLS_DIR`. No new code.
 
-## W4 — Agent/tool layer ⬜
+## W4 — Agent/tool layer ✅ 2026-07-29
 
-- Artifact convention: analysis outputs land at a known workspace path the UI
-  can find.
-- Dataset size guard: refuse/sample above a threshold with a clear message
-  instead of OOM-ing the sandbox.
-- Point skills at `search_skill_resource` (arg: `query`) to grep large
-  companions rather than paging linearly.
+- **Artifact convention** — *superseded by W6.1, deliberately.* The plan wanted
+  analysis outputs at a fixed path so the UI could find them; the
+  `AnalysisArtifactPlugin` instead surfaces any previewable file the tool call
+  wrote, wherever it landed, so a rigid path is no longer load-bearing. The
+  producing skills still say "write into `analysis/`" for predictability, and
+  that is where a global prompt rule would have cost tokens on every turn for a
+  convention the plumbing no longer needs.
+
+- **Dataset size guard** ✅ `sandbox/dataset_guard.py` + the `run_bash` seam.
+  A python command that names a data file over the cap (default 100MB,
+  `ADK_CC_DATASET_MAX_MB`) is refused BEFORE it runs, with the file, its size
+  and the routes out (`nrows=`, `usecols=`, `chunksize=`, convert-to-parquet).
+  Previously that command was OOM-killed in the sandbox and came back as a
+  truncated stderr, which the model usually retried verbatim.
+
+  Scoped narrowly on purpose — python-invoking commands only, only files the
+  code NAMES (no directory scan), and skipped when the read is already limited.
+  Cost is one `wc -c` round trip, and only when a candidate exists.
+
+  A test caught a real semantic bug while writing it: `.head(50)` was in the
+  "already sampling" list, but `pd.read_csv(big).head(50)` loads the whole file
+  first and is exactly the case being guarded. Read-time limits only now.
+  `tests/test_dataset_guard.py` drives the real tool and asserts the python
+  command never executed.
+
+- **`search_skill_resource` pointers** — already satisfied where it matters.
+  Only `data-analyst` carries large companions (13 references, up to 44KB) and
+  its SKILL.md already points at the grep-within-resource tool; every other
+  built-in has 0–3 small references, where paging linearly is cheaper than a
+  search round trip.
 
 ## W5 — Data layer ⬜
 
