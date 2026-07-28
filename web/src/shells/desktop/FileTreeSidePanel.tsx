@@ -34,7 +34,8 @@ import { SandboxedHtml } from "@/shared/components/SandboxedHtml"
 import { Database } from "lucide-react"
 import { pickFile } from "@/shared/lib/tauri"
 import {
-  listDatasets, addDatasetFromPath, type Dataset,
+  listDatasets, addDatasetFromPath, profileDataset,
+  type Dataset, type DatasetProfile,
 } from "@/shared/api/desktop-settings"
 import { CodeView } from "@/shared/components/CodeView"
 import { Markdown } from "@/shared/lib/markdown"
@@ -99,6 +100,11 @@ export function FileTreeSidePanel({
   const [datasets, setDatasets] = useState<Dataset[]>([])
   const [dsBusy, setDsBusy] = useState(false)
   const [dsError, setDsError] = useState<string | null>(null)
+  // Profile of the dataset the user opened: shape, dtypes, nulls, head — the
+  // things an analyst checks before asking anything, so they cost no turn.
+  const [dsOpen, setDsOpen] = useState<string | null>(null)
+  const [dsProfile, setDsProfile] = useState<DatasetProfile | null>(null)
+  const [dsProfiling, setDsProfiling] = useState(false)
   const [canUndo, setCanUndo] = useState(false)
   // Non-null when checkpointing can't work for this project (remote device
   // without git) — shown as the Undo tooltip so the dead button explains itself.
@@ -284,6 +290,21 @@ export function FileTreeSidePanel({
   }, [projectId, sessionId])
   useEffect(reloadDatasets, [reloadDatasets, refreshKey])
 
+  async function openDataset(name: string) {
+    if (dsOpen === name) { setDsOpen(null); setDsProfile(null); return }
+    setDsOpen(name); setDsProfile(null); setDsError(null); setDsProfiling(true)
+    try {
+      const r = await profileDataset(name, projectId, sessionId)
+      setDsProfile(r.profile)
+    } catch (e) {
+      // The first profile provisions the analysis runtime; say so rather than
+      // showing a bare failure.
+      setDsError((e as Error).message)
+    } finally {
+      setDsProfiling(false)
+    }
+  }
+
   async function addDataset() {
     setDsError(null)
     const picked = await pickFile(["csv", "tsv", "parquet", "xlsx", "json", "jsonl"])
@@ -445,13 +466,79 @@ export function FileTreeSidePanel({
         {datasets.length > 0 && (
           <div className="mt-1 space-y-0.5 px-1">
             {datasets.slice(0, 6).map((d) => (
-              <div key={d.name} className="flex items-center gap-2 text-[11px]">
-                <span className="truncate font-mono" title={d.path}>{d.name}</span>
-                <span className="ml-auto shrink-0 text-muted-foreground">
-                  {d.bytes > 1024 * 1024
-                    ? `${(d.bytes / 1024 / 1024).toFixed(1)}MB`
-                    : `${Math.max(1, Math.round(d.bytes / 1024))}KB`}
-                </span>
+              <div key={d.name}>
+                <button
+                  type="button"
+                  onClick={() => void openDataset(d.name)}
+                  className="flex w-full items-center gap-2 rounded px-0.5 text-left text-[11px] hover:bg-accent"
+                  title="Show shape, dtypes, nulls and head"
+                >
+                  <span className="truncate font-mono">{d.name}</span>
+                  <span className="ml-auto shrink-0 text-muted-foreground">
+                    {d.bytes > 1024 * 1024
+                      ? `${(d.bytes / 1024 / 1024).toFixed(1)}MB`
+                      : `${Math.max(1, Math.round(d.bytes / 1024))}KB`}
+                  </span>
+                </button>
+                {dsOpen === d.name && (
+                  <div className="mb-1 mt-1 rounded-md border border-border/60 bg-card/40 p-1.5">
+                    {dsProfiling && (
+                      <p className="text-[10px] text-muted-foreground">
+                        profiling… (the first one provisions the analysis runtime)
+                      </p>
+                    )}
+                    {dsProfile && !dsProfile.error && (
+                      <div className="space-y-1">
+                        <p className="text-[10px] font-medium">
+                          {dsProfile.rows.toLocaleString()}
+                          {dsProfile.rows_exact ? "" : "+"} rows ×{" "}
+                          {dsProfile.columns.length} cols
+                          <span className="ml-1 font-normal text-muted-foreground">
+                            (dtypes/nulls from {dsProfile.sampled.toLocaleString()}-row sample)
+                          </span>
+                        </p>
+                        <div className="max-h-32 overflow-y-auto">
+                          {dsProfile.columns.map((c) => (
+                            <div key={c.name} className="flex items-center gap-1.5 text-[10px]">
+                              <span className="truncate font-mono">{c.name}</span>
+                              <span className="text-muted-foreground">{c.dtype}</span>
+                              {c.nulls > 0 && (
+                                <span className="ml-auto text-amber-600 dark:text-amber-500">
+                                  {c.null_pct}% null
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                        {dsProfile.head.rows.length > 0 && (
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-[9px]">
+                              <thead>
+                                <tr className="text-muted-foreground">
+                                  {dsProfile.head.columns.map((c) => (
+                                    <th key={c} className="px-1 text-left font-medium">{c}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {dsProfile.head.rows.slice(0, 5).map((r, i) => (
+                                  <tr key={i} className="border-t border-border/40">
+                                    {r.map((v, j) => (
+                                      <td key={j} className="max-w-[9rem] truncate px-1 font-mono">{v}</td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {dsProfile?.error && (
+                      <p className="text-[10px] text-destructive">{dsProfile.error}</p>
+                    )}
+                  </div>
+                )}
               </div>
             ))}
           </div>

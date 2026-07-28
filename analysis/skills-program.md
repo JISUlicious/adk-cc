@@ -493,8 +493,31 @@ Build on it rather than inventing a viewer.
    outlives the server process previews as `404 Not Found` (seen when a probe
    restarted the server against a sqlite-persisted session). Desktop artifact
    persistence is a separate piece of work — filed, not fixed here.
-2. **Dataset browser** — Files panel shows shape, dtypes, null counts, head:
-   what an analyst checks first, without asking the agent.
+2. **Dataset browser** ✅ 2026-07-29 — click a dataset in the Files panel and
+   get shape, dtypes, null counts and head, with no turn spent. That is not
+   only a latency win: `df.info()` transcripts are a surprisingly large share
+   of the tokens in an early analysis conversation.
+
+   Profiling runs in the SAME uv-managed env the agent uses (W1), so a profile
+   that works here works in the turn. Bounded by construction — parquet reads
+   metadata (exact row count, no scan), text formats read a 500-row sample and
+   count newlines for an exact total; nothing loads a dataset whole, matching
+   the rule the dataset guard enforces for the agent. Cached on
+   (path, mtime, size), because the first call may provision the runtime.
+
+   Sampled figures are LABELLED as sampled ("dtypes/nulls from a 500-row
+   sample") — an unqualified null percentage computed on the first 500 rows of
+   a sorted file is exactly the kind of confident-and-wrong number this program
+   keeps trying to avoid.
+
+   `openpyxl` joined the `core` tier while building this: pandas cannot open an
+   .xlsx without it, and a spreadsheet is the most common thing a non-engineer
+   hands this agent.
+
+   Verified against a real 500-row CSV through the real runtime
+   (`tests/e2e_dataset_profile.py`, 9 checks — exact row count, pandas dtypes,
+   50 counted nulls, real head rows, cache hit, 404/400 paths) and in the
+   browser (`tests/e2e_datasets_ui.py`).
 3. **Analysis run view** — group a run's outputs (EDA report, VIF table, SHAP
    plot, RCA timeline) instead of scattering files.
 4. **Table rendering** — dataframes as real tables (sortable, sticky header),

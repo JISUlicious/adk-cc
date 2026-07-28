@@ -51,7 +51,10 @@ _DEFAULT_PYTHON = "3.12"
 
 # Package tiers. "base" is the interpreter alone — always available, no install.
 TIERS: dict[str, tuple[str, ...]] = {
-    "core": ("pandas>=2.3", "numpy", "scipy", "pyarrow", "matplotlib", "plotly"),
+    # openpyxl: pandas cannot open an .xlsx without it, and spreadsheets are
+    # the most common thing a non-engineer hands this agent.
+    "core": ("pandas>=2.3", "numpy", "scipy", "pyarrow", "matplotlib", "plotly",
+             "openpyxl"),
     "modeling": ("scikit-learn", "xgboost", "shap"),
     "stats": ("statsmodels", "ruptures", "dowhy"),
 }

@@ -327,3 +327,23 @@ export function deleteDataset(name: string, projectId: string, sessionId: string
     { method: "DELETE" },
   )
 }
+
+export type DatasetProfile = {
+  rows: number
+  rows_exact: boolean
+  sampled: number
+  bytes: number
+  columns: { name: string; dtype: string; nulls: number; null_pct: number }[]
+  head: { columns: string[]; rows: string[][] }
+  error?: string
+}
+/** Shape/dtypes/nulls/head, computed in the same analysis env the agent uses. */
+export function profileDataset(
+  name: string,
+  projectId: string,
+  sessionId: string,
+): Promise<{ status: string; profile: DatasetProfile; cached: boolean }> {
+  return apiFetch(
+    `/desktop/datasets/${encodeURIComponent(name)}/profile?${dsq(projectId, sessionId)}`,
+  )
+}

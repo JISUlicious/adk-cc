@@ -182,3 +182,114 @@ def remove(workspace_root: Path, name: str) -> bool:
 
 def supported() -> Iterable[str]:
     return sorted(set(ALLOWED_EXT))
+
+
+# --- profiling (W6.2) -------------------------------------------------------
+#
+# What an analyst checks before asking anything: shape, dtypes, nulls, head.
+# Getting it from the UI rather than from a turn saves the round trip AND the
+# tokens — a `df.info()` transcript is a surprisingly large fraction of an early
+# analysis conversation.
+#
+# Bounded by construction: parquet reads metadata (exact row count, no scan),
+# text formats read `sample_rows` rows and count newlines. Nothing here loads a
+# dataset whole, which is the same rule `sandbox/dataset_guard.py` enforces for
+# the agent.
+
+PROFILE_SAMPLE_ROWS = 500
+HEAD_ROWS = 8
+_CELL_CHARS = 60
+
+PROFILE_SCRIPT = r"""
+import json, os, sys
+path, sample, head_n, cell = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+low = path.lower()
+out = {"path": path, "bytes": os.path.getsize(path), "rows_exact": False,
+       "sampled": 0, "columns": [], "head": {"columns": [], "rows": []}}
+
+def count_lines(p):
+    n = 0
+    with open(p, "rb") as f:
+        while True:
+            b = f.read(1 << 20)
+            if not b:
+                break
+            n += b.count(b"\n")
+    return n
+
+try:
+    import pandas as pd
+    if low.endswith(".parquet") or low.endswith(".feather"):
+        import pyarrow.parquet as pq
+        if low.endswith(".parquet"):
+            pf = pq.ParquetFile(path)
+            out["rows"] = pf.metadata.num_rows            # exact, no scan
+            out["rows_exact"] = True
+            batch = next(pf.iter_batches(batch_size=sample))
+            df = batch.to_pandas()
+        else:
+            import pyarrow.feather as fe
+            df = fe.read_table(path).to_pandas().head(sample)
+            out["rows"] = len(df); out["rows_exact"] = True
+    elif low.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(path, nrows=sample)
+        out["rows"] = len(df)
+        out["rows_exact"] = len(df) < sample
+    elif low.endswith((".jsonl", ".jsonl.gz")):
+        df = pd.read_json(path, lines=True, nrows=sample)
+        out["rows"] = count_lines(path) if not path.endswith(".gz") else len(df)
+        out["rows_exact"] = not path.endswith(".gz")
+    elif low.endswith(".json"):
+        df = pd.read_json(path)
+        out["rows"] = len(df); out["rows_exact"] = True
+        df = df.head(sample)
+    else:
+        sep = "\t" if ".tsv" in low else ","
+        df = pd.read_csv(path, nrows=sample, sep=sep)
+        if path.endswith(".gz"):
+            out["rows"] = len(df)
+        else:
+            lines = count_lines(path)
+            out["rows"] = max(0, lines - 1)               # header
+            out["rows_exact"] = True
+    out["sampled"] = int(len(df))
+    out["columns"] = [
+        {"name": str(c), "dtype": str(df[c].dtype),
+         "nulls": int(df[c].isna().sum()),
+         "null_pct": round(float(df[c].isna().mean()) * 100, 1)}
+        for c in df.columns
+    ]
+    head = df.head(head_n)
+    out["head"] = {
+        "columns": [str(c) for c in head.columns],
+        "rows": [[(str(v)[:cell]) for v in row] for row in head.itertuples(index=False)],
+    }
+except Exception as e:
+    out["error"] = f"{type(e).__name__}: {e}"
+print("__ADKCC_PROFILE__" + json.dumps(out))
+"""
+
+
+def profile_command(rel_path: str, *, sample_rows: int = PROFILE_SAMPLE_ROWS,
+                    python: str = "python3") -> str:
+    """Shell command that profiles one dataset with the managed interpreter."""
+    safe = rel_path.replace("'", "'\\''")
+    return (
+        "mkdir -p .adk-cc; "
+        f"cat <<'__ADKCC_PY__' > .adk-cc/_profile.py\n{PROFILE_SCRIPT}\n__ADKCC_PY__\n"
+        f"{python} .adk-cc/_profile.py '{safe}' {sample_rows} {HEAD_ROWS} {_CELL_CHARS}"
+    )
+
+
+def parse_profile(stdout: str) -> Optional[dict]:
+    """Pull the JSON line out of the script's stdout. Returns None if absent —
+    a profiler that half-worked must not be reported as a profile."""
+    import json as _json
+
+    for line in (stdout or "").splitlines():
+        if line.startswith("__ADKCC_PROFILE__"):
+            try:
+                return _json.loads(line[len("__ADKCC_PROFILE__"):])
+            except ValueError:
+                return None
+    return None

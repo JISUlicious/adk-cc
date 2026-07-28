@@ -436,6 +436,10 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
 
     from . import datasets as ds
 
+    # (path, mtime_ns, size) -> profile. Profiling costs a sandbox round trip
+    # and the first one may provision the env; re-listing a panel must not.
+    _PROFILE_CACHE: dict = {}
+
     def _root(request: Request) -> Path:
         q = request.query_params
         project_id = q.get("project_id") or ""
@@ -483,6 +487,61 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
         except ds.DatasetError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return {"status": "ok", "dataset": row}
+
+    @app.get("/desktop/datasets/{name}/profile", include_in_schema=False)
+    async def profile_dataset(name: str, request: Request):  # noqa: ANN202
+        """Shape, dtypes, null counts and head — what an analyst checks first.
+
+        Runs in the SAME uv-managed analysis env the agent uses (W1), so a
+        profile that works here works in the turn. Bounded: parquet reads
+        metadata, text formats read a sample and count newlines. Cached on
+        (path, mtime, size) because the first call may provision the env.
+        """
+        root = _root(request)
+        try:
+            dest = ds.target_path(root, name)
+        except ds.DatasetError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if not dest.is_file():
+            raise HTTPException(status_code=404, detail=f"no such dataset: {name}")
+
+        st = dest.stat()
+        key = (str(dest), st.st_mtime_ns, st.st_size)
+        hit = _PROFILE_CACHE.get(key)
+        if hit is not None:
+            return {"status": "ok", "profile": hit, "cached": True}
+
+        from ..sandbox import _get_default_backend
+        from ..sandbox.config import NetworkConfig
+        from ..sandbox.workspace import WorkspaceRoot
+        from ..sandbox.analysis_env import ensure_env
+
+        backend = _get_default_backend()
+        ws = WorkspaceRoot(tenant_id="local",
+                           session_id=request.query_params.get("session_id") or "profile",
+                           abs_path=str(root))
+        try:
+            env = await ensure_env(backend, ws, tiers=("core",))
+        except Exception as e:  # noqa: BLE001 — provisioning is the likely failure
+            raise HTTPException(status_code=503,
+                                detail=f"analysis runtime unavailable: {e}")
+        cmd = ds.profile_command(f"{ds.DATA_DIR}/{dest.name}", python=env.python)
+        try:
+            res = await backend.exec(cmd, fs_write=ws.fs_write_config(),
+                                     network=NetworkConfig(), timeout_s=240,
+                                     cwd=str(root))
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"profiling failed: {e}")
+        prof = ds.parse_profile(getattr(res, "stdout", "") or "")
+        if prof is None:
+            # Never report a half-run profiler as a profile.
+            raise HTTPException(
+                status_code=500,
+                detail=(getattr(res, "stderr", "") or "profiler produced no output")[-400:])
+        if len(_PROFILE_CACHE) > 64:
+            _PROFILE_CACHE.clear()
+        _PROFILE_CACHE[key] = prof
+        return {"status": "ok", "profile": prof, "cached": False}
 
     @app.delete("/desktop/datasets/{name}", include_in_schema=False)
     async def delete_dataset(name: str, request: Request):  # noqa: ANN202

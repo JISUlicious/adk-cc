@@ -38,6 +38,22 @@ try:
         check("it reports the dataset already in data/", "1 in data/" in text,
               [l for l in text.split("\n") if "data/" in l][:3])
         check("the dataset is listed by name", "sales.csv" in text, text[:300])
+
+        # Click it: shape/dtypes/nulls/head must appear WITHOUT asking the agent.
+        # The first profile provisions the analysis runtime, so allow for it.
+        page.get_by_text("sales.csv", exact=False).first.click(timeout=8000)
+        profile_text = ""
+        for _ in range(60):
+            page.wait_for_timeout(2000)
+            profile_text = page.inner_text("body")
+            if "rows ×" in profile_text or "cols" in profile_text:
+                break
+        check("profile shows shape without a turn", "cols" in profile_text,
+              profile_text[:300])
+        check("profile shows a dtype", "int64" in profile_text or "object" in profile_text
+              or "str" in profile_text, profile_text[:300])
+        check("profile shows the head row values", "1200" in profile_text,
+              profile_text[:400])
         # API round trip through the running server
         q = f"?project_id={pid}&session_id=probe"
         src = os.path.join(data, "extra.parquet"); open(src, "wb").write(b"PAR1")
