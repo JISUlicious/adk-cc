@@ -86,13 +86,18 @@ class _ScriptedLlm(BaseLlm):
     model: str = "fake/resumability"
     responses: list = Field(default_factory=list)
     calls: int = 0
+    seen_contents: list = Field(default_factory=list)
 
     async def generate_content_async(self, req, stream: bool = False):
         self.calls += 1
+        self.seen_contents.append(list(req.contents or []))
         if not self.responses:
             raise AssertionError(
                 f"scripted queue exhausted at model call #{self.calls}")
         yield self.responses.pop(0)
+
+
+_HANDBACK = "_handback_to_coordinator"
 
 
 def _msg(text: str) -> types.Content:
@@ -387,6 +392,49 @@ def test_resumable_coordinator_level_confirmation() -> None:
     print("OK test_resumable_coordinator_level_confirmation")
 
 
+def test_handback_marker_never_reaches_a_request() -> None:
+    """Re-entry: transferring to the SAME specialist twice in one turn.
+
+    The specialist's own handback CALL stays in history (the broker's
+    dangling-handback detector reads it, see test_turn_broker), but it is an
+    unanswered function call, and on the second run the specialist sees it on
+    its OWN branch — the malformed shape a real model answers with EMPTY
+    content, so run 2 did nothing at all while the coordinator promised a
+    verdict. Assert the marker reaches no request, and that history keeps it.
+    """
+    async def main():
+        import adk_cc.agent as A
+
+        runner, svc, llm = _fresh([
+            _fc_resp("t1", "transfer_to_agent", {"agent_name": "verification"}),
+            _text_resp("VERDICT: FAIL"),
+            _fc_resp("t2", "transfer_to_agent", {"agent_name": "verification"}),
+            _text_resp("VERDICT: PASS"),
+            _text_resp("FINAL"),
+        ], resumable=True)
+        s = await svc.create_session(app_name=A.app.name, user_id="u1")
+        await asyncio.wait_for(_run(runner, s.id, _msg("check it")), 60)
+
+        for i, contents in enumerate(llm.seen_contents, 1):
+            for c in contents:
+                for part in (getattr(c, "parts", None) or []):
+                    fc = getattr(part, "function_call", None)
+                    fr = getattr(part, "function_response", None)
+                    assert not (fc and fc.name == _HANDBACK), (
+                        f"handback CALL leaked into model call #{i}")
+                    assert not (fr and fr.name == _HANDBACK), (
+                        f"handback RESP leaked into model call #{i}")
+        # ...but history still carries the CALL for the broker.
+        full = await _session_events(svc, s.id)
+        assert sum(
+            1 for e in full for p in (getattr(e.content, "parts", None) or [])
+            if getattr(p, "function_call", None)
+            and p.function_call.name == _HANDBACK
+        ) >= 1, "handback CALL must survive in history for the turn broker"
+    asyncio.run(main())
+    print("OK test_handback_marker_never_reaches_a_request")
+
+
 def main() -> None:
     import adk_cc.agent as A
 
@@ -398,6 +446,7 @@ def main() -> None:
         test_resumable_plain_transfer_turn()
         test_resumable_plain_turn_unchanged()
         test_resumable_coordinator_level_confirmation()
+        test_handback_marker_never_reaches_a_request()
     finally:
         A.app.resumability_config = prior
     print("\nall resumability tests passed")

@@ -677,15 +677,45 @@ only the handback marker. The harness reproduces the *shape* (`runs=[2, 0]` by
 tool count) but not the emptiness, because a scripted LLM answers regardless of
 whether the request it received was well-formed.
 
-**Leading hypothesis** (untested, filed): `HandbackHygienePlugin` strips the
-auto-generated function_RESPONSE to the handback marker while the handback
-CALL remains in history. For the coordinator that is harmless — the call is a
-foreign event and gets narrated to text. But a re-entering `verification` sees
-its OWN unanswered call on its branch, which is exactly the malformed-content
-shape that produced empty model responses twice before in this project
-(id-less handback marker; id-less gate transfer). Next step is to capture the
-actual request sent on re-entry (ModelIOTracePlugin) and confirm before
-changing a load-bearing plugin.
+**Hypothesis CONFIRMED by capturing the request (2026-07-28).** A trace harness
+against the real app (scripted LLM, printing `LlmRequest.contents` per model
+call) shows the re-entering specialist receiving its own unanswered call:
+
+```
+model call #5  [verification] — RE-ENTRY, before the fix
+    model  CALL glob_files#g1
+    user   RESP glob_files#g1
+    model  text(42) "VERDICT: FAIL — index.html has no <can"
+    model  CALL _handback_to_coordinator#handback-9cd   <== UNANSWERED
+    user   text "For context: [coordinator] called tool `transfer_to_agent`…"
+```
+
+`HandbackHygienePlugin` strips the auto-generated function_RESPONSE while the
+CALL stays in history. For the coordinator that is harmless (foreign event →
+narrated to text). On the specialist's OWN branch it is the malformed shape
+that produced empty model responses twice before here (id-less handback marker;
+id-less gate transfer).
+
+**Fix — strip the marker from the REQUEST, not from history.** Deleting the
+CALL from persisted events also works for the model but breaks the turn broker,
+which detects a run that ended on an unanswered marker
+(`service.turns._is_dangling_handback`) and auto-continues the coordinator —
+`test_resumability_f3` fails outright. So `HandbackHygienePlugin` gained a
+`before_model_callback` that drops handback parts from `llm_request.contents`
+only. History keeps the marker (2 CALLs persisted, unchanged); no request
+contains it; the coordinator's own contents are byte-identical before and after
+(its view of the marker was always narrated text). Regression test:
+`test_handback_marker_never_reaches_a_request`, with a negative control that
+fails at model call #4 when the strip is removed.
+
+**Not proven: that this was the live emptiness.** A live A/B (real model on the
+verification branch, scripted coordinator forcing the re-entry) had run 2 do
+real work in BOTH arms — 6 and 3 tool calls with the fix off, 7 and 4 with it
+on, zero empty responses. This endpoint tolerates the dangling call. The fix
+removes a genuinely malformed request; whether the original live no-op had a
+further cause (a resumed invocation carrying `end_of_agents`, or microcompaction
+of a 27-tool-call run) is still open. Driving a re-entry through the broker's
+resumed path is the next probe.
 
 The shipped mitigation stands regardless: detect the no-op and tell the
 coordinator the truth rather than let it promise a verdict that never arrives.
