@@ -73,6 +73,7 @@ from .plugins import (
     ModelIOTracePlugin,
     ProjectContextPlugin,
     ConfirmationFormUiPlugin,
+    AnalysisArtifactPlugin,
     HandbackHygienePlugin,
     VerifyNudgePlugin,
     ContextGuardPlugin,
@@ -1272,6 +1273,11 @@ _app_kwargs = dict(
         # it unverified. Rides the existing model call — no extra cost.
         # ADK_CC_VERIFY=off disables.
         VerifyNudgePlugin(),
+        # W6.1: register previewable files a tool call just wrote (charts,
+        # reports) as session artifacts, so the existing ArtifactChip renders
+        # them inline instead of leaving the user to hunt the file tree.
+        # ADK_CC_ANALYSIS_ARTIFACTS=0 disables.
+        AnalysisArtifactPlugin(),
         # Microcompaction (opt-in, ADK_CC_MICROCOMPACT=1): stub old, large
         # tool-result content in the outgoing request — the cheap, no-model
         # tier. Runs BEFORE ContextGuard so the shrink is reflected in its

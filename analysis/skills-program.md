@@ -416,8 +416,37 @@ The substrate exists — `HtmlArtifactPreview` + `SandboxedHtml` (sandboxed
 iframe) + artifacts panel — so **Plotly interactive HTML renders today**.
 Build on it rather than inventing a viewer.
 
-1. **Chart-first rendering** — analysis HTML artifacts preview inline and
-   expand in the side panel *(wire the trigger)*.
+1. **Chart-first rendering** ✅ 2026-07-28 — a chart the agent writes now appears
+   IN THE CHAT, rendered, without the user hunting the file tree.
+
+   Two halves, and only one was missing. *Rendering* already worked: a
+   pixel-level e2e (`tests/e2e_chart_preview_ui.py`) opens a JS-drawn chart in
+   the preview iframe and measures non-blank pixels — 14% of the frame, chart
+   visible. Note the trap that nearly sent this the wrong way: `SandboxedHtml`
+   defaults to `sandbox=""` (scripts inert) and the enabling flag lives in the
+   **repo-root** `.env`, which vite reads via `envDir: ".."` — so grepping
+   `web/` says "scripts off" while the running app says `sandbox='allow-scripts'`.
+   Only the rendered pixels settled it.
+
+   The missing half was the *trigger*: a workspace file produces no
+   `actions.artifactDelta`, so nothing ever appeared in the conversation.
+   `plugins/analysis_artifact.py` registers previewable files a tool call just
+   wrote as session artifacts, which is exactly the signal `ArtifactChip`
+   already listens for — no new UI, and no dependence on the model remembering
+   to call `save_as_artifact`. Candidates come from the call's own args and
+   output (no directory scan), are contained to the workspace, skip dot-dirs
+   (`.adk-cc/analysis-env` ships matplotlib's own HTML templates), respect a
+   size cap, and dedupe by content hash. `ADK_CC_ANALYSIS_ARTIFACTS=0` disables.
+
+   Verified live end to end: gpt-5.4-mini asked for a canvas bar chart →
+   `write_file` → `artifactDelta: ['bars.html']` → chip in the conversation →
+   iframe painted with the [5,9,3,7] bars (27.6% non-blank). Unit coverage in
+   `tests/test_analysis_artifact.py`.
+
+   **Known caveat**: the artifact service is in-memory, so a chip whose session
+   outlives the server process previews as `404 Not Found` (seen when a probe
+   restarted the server against a sqlite-persisted session). Desktop artifact
+   persistence is a separate piece of work — filed, not fixed here.
 2. **Dataset browser** — Files panel shows shape, dtypes, null counts, head:
    what an analyst checks first, without asking the agent.
 3. **Analysis run view** — group a run's outputs (EDA report, VIF table, SHAP

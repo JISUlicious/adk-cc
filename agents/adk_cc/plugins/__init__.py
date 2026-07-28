@@ -4,6 +4,7 @@ from .audit import AuditPlugin
 from .authz import AuthzPlugin
 from .checkpoint import CheckpointPlugin
 from .confirmation_form_ui import ConfirmationFormUiPlugin
+from .analysis_artifact import AnalysisArtifactPlugin
 from .handback_hygiene import HandbackHygienePlugin
 from .verify_nudge import VerifyNudgePlugin
 from .context_guard import ContextGuardPlugin
@@ -35,6 +36,7 @@ __all__ = [
     "AuthzPlugin",
     "CheckpointPlugin",
     "ConfirmationFormUiPlugin",
+    "AnalysisArtifactPlugin",
     "HandbackHygienePlugin",
     "VerifyNudgePlugin",
     "ContextGuardPlugin",
