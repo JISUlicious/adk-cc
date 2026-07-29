@@ -490,10 +490,32 @@ export function ChatPage({
   const pinnedModel =
     pinnedEndpoint && typeof _st.model_id === "string" && _st.model_id ? _st.model_id : null
 
-  const permissionMode =
-    typeof session?.state?.permission_mode === "string"
+  // Live permission mode: the newest `permission_mode` state delta in the
+  // stream, falling back to the session record.
+  //
+  // Reading only `session.state` made the plan-mode frame appear when the TURN
+  // ended, not when `enter_plan_mode` succeeded — the session object is
+  // refetched after streaming completes, so for the whole plan the composer
+  // still looked like a normal one (and the same lag hid the frame's removal on
+  // exit). The tool writes ctx.state, which ADK emits as an event action, so
+  // the change is on screen the moment it happens.
+  //
+  // Both spellings: the SSE stream aliases to camelCase, session history keeps
+  // snake_case, and reading one silently misses half the sources.
+  const permissionMode = useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const actions = ((events[i] as { actions?: Record<string, unknown> }).actions
+        ?? {}) as Record<string, unknown>
+      const delta = (actions.stateDelta ?? actions.state_delta) as
+        | Record<string, unknown>
+        | undefined
+      const mode = delta?.permission_mode
+      if (typeof mode === "string" && mode) return mode
+    }
+    return typeof session?.state?.permission_mode === "string"
       ? (session.state.permission_mode as string)
       : undefined
+  }, [events, session])
 
   return (
     <div className="flex h-screen overflow-hidden">
