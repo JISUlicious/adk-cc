@@ -4,7 +4,7 @@ import {
   ChevronDown, ChevronRight, RefreshCw, ShieldCheck, Download,
 } from "lucide-react"
 import { SettingsFrame, type SettingsTab } from "@/shared/settings/SettingsFrame"
-import { ThemeSection } from "@/shared/settings/sections"
+import { ThemeSection, UiScaleSection } from "@/shared/settings/sections"
 import { Button } from "@/shared/components/ui/button"
 import { Input } from "@/shared/components/ui/input"
 import { ModelCombobox } from "@/shared/components/ModelCombobox"
@@ -372,7 +372,13 @@ function SandboxSection() {
  */
 export function DesktopSettings({ open, onClose, initialTab }: { open: boolean; onClose: () => void; initialTab?: string }) {
   const tabs: SettingsTab[] = [
-    { id: "appearance", label: "Appearance", icon: Palette, render: () => <ThemeSection /> },
+    { id: "appearance", label: "Appearance", icon: Palette,
+      render: () => (
+        <>
+          <ThemeSection />
+          <UiScaleSection />
+        </>
+      ) },
     {
       id: "secrets", label: "Secrets", icon: KeyRound,
       render: () => <LayeredTab blurb="Credentials + variables the agent can read (e.g. a token its run_bash uses, or a value a skill/MCP server needs)." render={(s, p) => <SecretsScope scope={s} projectId={p} />} />,

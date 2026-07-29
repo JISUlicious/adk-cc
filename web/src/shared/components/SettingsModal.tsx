@@ -19,7 +19,7 @@ import { ModelAdminTab } from "./admin/ModelAdminTab"
 import { TeamSection } from "@/shared/pages/OrgPage"
 import { listCredentialKeys, putCredential, deleteCredential } from "@/shared/api/admin"
 import { SettingsFrame, useSecretBadges, type SettingsTab } from "@/shared/settings/SettingsFrame"
-import { ThemeSection, AdminBlock } from "@/shared/settings/sections"
+import { ThemeSection, AdminBlock, UiScaleSection } from "@/shared/settings/sections"
 
 /**
  * Web settings: the full topic-centric tab set, with org/admin controls folded
@@ -33,7 +33,13 @@ export function SettingsModal({ open, onClose, initialTab }: { open: boolean; on
   const tabs: SettingsTab[] = [
     { id: "account", label: "Account", icon: User,
       render: () => (<><AccountInfoSections /><CustomVariablesSection /></>) },
-    { id: "appearance", label: "Appearance", icon: Palette, render: () => <ThemeSection /> },
+    { id: "appearance", label: "Appearance", icon: Palette,
+      render: () => (
+        <>
+          <ThemeSection />
+          <UiScaleSection />
+        </>
+      ) },
     { id: "mcp", label: "MCP", icon: Server, badge: miss.mcp,
       render: () => (<><UserMcpSection />{isAdmin && <AdminBlock title="Org MCP servers"><McpAdminTab /></AdminBlock>}</>) },
     { id: "skills", label: "Skills", icon: Boxes, badge: miss.skill,

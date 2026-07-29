@@ -2,10 +2,13 @@ import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 import "./index.css"
 import { initTheme } from "@/shared/lib/theme"
+import { initUiScale } from "@/shared/lib/uiScale"
 
 // Apply persisted theme before the React tree mounts so dark-preferring
-// users don't see a light flash on first paint.
+// users don't see a light flash on first paint. Same for the UI scale — set
+// after the tree mounts, the whole app would render at one size and jump.
 initTheme()
+initUiScale()
 
 // The ONLY platform branch. We read `import.meta.env.VITE_ADK_CC_DESKTOP`
 // DIRECTLY here (not the IS_DESKTOP re-export) so Vite statically replaces it
