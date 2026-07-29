@@ -71,6 +71,7 @@ has ONE entry (literal only).
 from __future__ import annotations
 
 import glob
+import re
 import os
 import shlex
 from typing import Optional
@@ -188,9 +189,11 @@ def compute_allow_always_rule_contents(
 ) -> list[str]:
     """Return rule_content strings to store for an Allow always click.
 
-    Returns a list — 2 entries when broadening applies (`run_bash`, or a
-    path tool whose target resolves inside `workspace_root`), 1 entry
-    otherwise (out-of-workspace path, malformed command, unknown tool).
+    Returns a list — the literal always first, followed by broadened entries
+    when broadening applies: one PER SEGMENT for `run_bash` (the matcher is
+    segment-aware), one workspace anchor for a path tool inside the workspace,
+    and nothing extra otherwise (out-of-workspace path, malformed command,
+    unknown tool).
 
     Always returns at least one entry (the literal extracted key),
     so callers can write at least one rule per click without
@@ -226,9 +229,11 @@ def compute_allow_always_rule_contents(
         if classify_command(literal) in ("dangerous", "catastrophic") or command_deletes(literal):
             return [literal]
         broadened = _broaden_run_bash(literal)
-        if broadened is None or broadened == literal:
+        if not broadened or broadened == [literal]:
             return [literal]
-        return [literal, broadened]
+        # literal first (an exact re-run stays one click even for a compound),
+        # then one pattern per segment for the segment-aware matcher.
+        return [literal] + [b for b in broadened if b != literal]
 
     # Path tools: anchor to the workspace root so one click covers the
     # whole bound project. Only when the target actually resolves inside
@@ -264,30 +269,47 @@ def _extractors_snapshot() -> dict:
     return _RULE_KEY_EXTRACTORS
 
 
-def _broaden_run_bash(command: str) -> Optional[str]:
-    """Return the broadened pattern for a `run_bash` command, or None
-    if broadening would be unsafe / unreliable (caller falls back to
-    literal-only)."""
+# Redirects that introduce no file write: fd duplication (`2>&1`, `1>&2`, `>&2`)
+# and the bit bucket. Stripping these before broadening is what lets an
+# "Allow always" on `npx tsc --noEmit 2>&1` cover the same command tomorrow —
+# without them the `>` bail meant only the exact string was granted and every
+# similar run re-prompted (user-reported).
+_BENIGN_REDIRECT_RE = re.compile(
+    r"\s*(?:\d?>&\d|\d?>>?\s*/dev/null|<\s*/dev/null)"
+)
+
+
+def _strip_benign_redirects(segment: str) -> str:
+    """Remove fd-duplication and /dev/null redirects. Any OTHER redirect is
+    left in place, so it still trips the metachar bail — broadening a command
+    that writes to a real file would hand the wildcard authority over that
+    write too."""
+    return _BENIGN_REDIRECT_RE.sub("", segment).strip()
+
+
+def _broaden_run_bash(command: str) -> Optional[list[str]]:
+    """Per-SEGMENT broadened patterns, or None when broadening is unsafe.
+
+    Returns one pattern per segment rather than a single re-joined string,
+    because allow-matching is now segment-aware (engine `_bash_allow_match`): a
+    joined `cd ~/p && npx tsc *` could never match the segment `cd ~/p`, so a
+    compound grant would silently cover nothing.
+    """
     segments_with_seps = _split_compound(command)
     if not segments_with_seps:
         return None
 
     broadened_segments: list[str] = []
     for segment, _sep in segments_with_seps:
-        if _has_unsafe_shell_metachars(segment):
-            return None  # subshells, redirects, expansion — bail
-        broadened = _broaden_segment(segment)
+        cleaned = _strip_benign_redirects(segment)
+        if not cleaned or _has_unsafe_shell_metachars(cleaned):
+            return None  # subshells, real redirects, expansion — bail
+        broadened = _broaden_segment(cleaned)
         if broadened is None:
             return None
-        broadened_segments.append(broadened)
-
-    # Rejoin with original delimiters.
-    pieces: list[str] = []
-    for (_segment_text, sep), broadened in zip(segments_with_seps, broadened_segments):
-        pieces.append(broadened)
-        if sep:
-            pieces.append(f" {sep} ")
-    return "".join(pieces)
+        if broadened not in broadened_segments:
+            broadened_segments.append(broadened)
+    return broadened_segments or None
 
 
 def _has_unsafe_shell_metachars(segment: str) -> bool:
