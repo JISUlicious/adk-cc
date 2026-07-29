@@ -68,7 +68,30 @@ _CHECK_CMD_RE = re.compile(
     r"curl|http|ruff|flake8|mypy|tsc|eslint|"
     r"python3?\s+-m\s+(?:pytest|unittest)|diff|grep\s+-c|"
     # inline interpreter probes — how a model most often checks its own work
-    r"python3?\s+-c|python3?\s+-\s*<<|node\s+-e|deno\s+eval|ruby\s+-e)"
+    r"python3?\s+-c|python3?\s+-\s*<<|node\s+-e|deno\s+eval|ruby\s+-e|"
+    # driving a real page IS a check, and one of the strongest available
+    r"playwright|puppeteer|cypress|selenium|jsdom)"
+)
+
+# A conventional test runner — evidence that need not name the file it covers.
+_TEST_RUNNER_RE = re.compile(
+    r"(?i)(^|[\s;&|(])"
+    r"(pytest|unittest|tox|nox|jest|vitest|mocha|go\s+test|cargo\s+test|"
+    r"npm\s+(?:run\s+)?test|yarn\s+test|pnpm\s+test|make\s+(?:test|check)|"
+    r"python3?\s+-m\s+(?:pytest|unittest))"
+)
+
+# Files whose behaviour only exists once a DOM runs them. A page is the one
+# artifact class where "I checked it" routinely means something that never
+# loaded the page: a syntax check, a grep for element ids, or a scratch script
+# that re-implements the logic. Each of those can pass while every button on
+# the real page is dead.
+_PAGE_SUFFIXES = (".html", ".htm")
+# Something that can actually load a page: a browser driver, a DOM shim, or a
+# server the page is then driven through.
+_PAGE_RUNTIME_RE = re.compile(
+    r"(?i)\b(playwright|puppeteer|selenium|jsdom|happy-dom|linkedom|"
+    r"chromium|chrome\s+--headless|webdriver|cypress|vitest\s+--browser)\b"
 )
 
 # Irreversible / outward-facing effects — the "hard gate" class.
@@ -93,11 +116,50 @@ class TurnSignals:
     risk_hits: tuple[str, ...] = field(default_factory=tuple)
     claims: tuple[str, ...] = field(default_factory=tuple)
     hedged: bool = False
+    mutated_paths: tuple[str, ...] = field(default_factory=tuple)
+    check_commands: tuple[str, ...] = field(default_factory=tuple)
+    commands: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def has_evidence(self) -> bool:
         """Did anything in this turn actually check something?"""
         return self.ran_checks > 0
+
+    @property
+    def built_a_page(self) -> bool:
+        """This turn produced something whose behaviour needs a DOM."""
+        return any(p.lower().endswith(_PAGE_SUFFIXES) for p in self.mutated_paths)
+
+    @property
+    def page_was_driven(self) -> bool:
+        """Did any check actually load the thing this turn built?
+
+        Two ways to qualify: a command naming a page runtime (browser driver or
+        DOM shim), or a conventional test runner, which covers files it does not
+        name. Naming the file alone is NOT enough — `node --check app.js` and
+        `grep -n id= index.html` both name it and neither runs it."""
+        for cmd in self.commands or self.check_commands:
+            if _PAGE_RUNTIME_RE.search(cmd) or _TEST_RUNNER_RE.search(cmd):
+                return True
+        return False
+
+    @property
+    def unexercised_page(self) -> bool:
+        """A behaviour claim about a page that was never loaded.
+
+        This is the gap that shipped a real bug: a generated browser game
+        verified itself with a syntax check, a grep proving the control ids
+        existed, and a scratch probe of its start flow — all green — while the
+        vote result was erased in the same tick it was written, so the game's
+        payoff was invisible to every player. `has_evidence` was true the whole
+        time, because evidence was counted as a scalar and never tied to the
+        artifact the claim was about."""
+        return (
+            bool(self.claims)
+            and self.built_a_page
+            and not self.page_was_driven
+            and not self.hedged
+        )
 
     @property
     def changed_anything(self) -> bool:
@@ -148,16 +210,27 @@ def _visible_text(event: Any) -> str:
     return "\n".join(out)
 
 
-def _command_of(fc: Any) -> str:
+def _args_of(fc: Any) -> dict:
     args = getattr(fc, "args", None) or {}
     if isinstance(args, str):
         try:
             args = json.loads(args)
         except ValueError:
-            return ""
-    if not isinstance(args, dict):
-        return ""
-    return str(args.get("command") or "")
+            return {}
+    return args if isinstance(args, dict) else {}
+
+
+def _command_of(fc: Any) -> str:
+    return str(_args_of(fc).get("command") or "")
+
+
+def _path_of(fc: Any) -> str:
+    args = _args_of(fc)
+    for key in ("path", "file_path", "filename", "name"):
+        v = args.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return ""
 
 
 def collect(events: Iterable[Any], *, author: Optional[str] = None) -> TurnSignals:
@@ -169,6 +242,9 @@ def collect(events: Iterable[Any], *, author: Optional[str] = None) -> TurnSigna
     mutated = commands = checks = 0
     risk: list[str] = []
     claims: list[str] = []
+    paths: list[str] = []
+    check_cmds: list[str] = []
+    all_cmds: list[str] = []
     hedged = False
 
     for ev in events or []:
@@ -178,11 +254,17 @@ def collect(events: Iterable[Any], *, author: Optional[str] = None) -> TurnSigna
                 name = getattr(fc, "name", "") or ""
                 if name in _MUTATING_TOOLS:
                     mutated += 1
+                    path = _path_of(fc)
+                    if path:
+                        paths.append(path)
                 elif name in _EXECUTING_TOOLS:
                     commands += 1
                     cmd = _command_of(fc)
+                    if cmd:
+                        all_cmds.append(cmd)
                     if _CHECK_CMD_RE.search(cmd):
                         checks += 1
+                        check_cmds.append(cmd)
                     m = _RISK_RE.search(cmd)
                     if m:
                         risk.append(m.group(2))
@@ -205,6 +287,9 @@ def collect(events: Iterable[Any], *, author: Optional[str] = None) -> TurnSigna
         risk_hits=tuple(dict.fromkeys(risk)),
         claims=tuple(dict.fromkeys(claims)),
         hedged=hedged,
+        mutated_paths=tuple(dict.fromkeys(paths)),
+        check_commands=tuple(check_cmds),
+        commands=tuple(all_cmds),
     )
 
 
@@ -218,6 +303,7 @@ def nudge_text(
     acceptable outcomes, and the second is far better than a confident guess.
     """
     fires = sig.claim_without_evidence or (sig.risky and not sig.has_evidence)
+    fires = fires or sig.unexercised_page
     if predictive:
         fires = fires or sig.unchecked_change
     if not fires:
@@ -241,6 +327,22 @@ def nudge_text(
         lines.append(
             f"It also performed irreversible or outward-facing actions "
             f"({', '.join(sig.risk_hits[:3])}) without a verifying check."
+        )
+    if sig.unexercised_page:
+        pages = ", ".join(p for p in sig.mutated_paths
+                          if p.lower().endswith(_PAGE_SUFFIXES))[:120]
+        lines.append(
+            f"This turn built a page ({pages}) and is asserting how it behaves, "
+            f"but no check loaded it. Ran {sig.ran_checks} check(s) — none used a "
+            f"browser, a DOM shim, or a test runner."
+        )
+        lines.append(
+            "For a page, these do NOT establish behaviour: a syntax check, a "
+            "grep proving element ids exist, or a scratch script that "
+            "re-implements the logic. Load the real page in a DOM runtime "
+            "(playwright/jsdom/happy-dom), drive the controls a player would "
+            "use, and assert on what they would see — including the state AFTER "
+            "the action settles, not just that a handler fired."
         )
     crit = [c for c in criteria if c]
     if crit:
