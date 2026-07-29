@@ -440,6 +440,35 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
     # and the first one may provision the env; re-listing a panel must not.
     _PROFILE_CACHE: dict = {}
 
+    def _workspace_is_local(request: Request) -> Optional[str]:
+        """Why this workspace is NOT on the server's filesystem, or None.
+
+        The datasets/profile/env routes all read the workspace with plain
+        `pathlib`, which is right for desktop's in-place local project and
+        WRONG the moment the workspace lives elsewhere: an SSH project's files
+        are on another machine, and a container backend's are inside the
+        sandbox. Reading the host path then reports "no datasets" / "env not
+        built" with total confidence — the worst kind of wrong. Say so instead.
+        """
+        pid = request.query_params.get("project_id") or ""
+        try:
+            if pid and _remote_ctx(_safe(pid, "project_id")) is not None:
+                return "this project runs over SSH; its files are on the remote host"
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001 — detection must not break the route
+            pass
+        try:
+            from ..sandbox import _get_default_backend, is_noop_backend
+
+            backend = _get_default_backend()
+            if not is_noop_backend(backend):
+                name = getattr(backend, "name", type(backend).__name__)
+                return f"the workspace lives inside the {name} sandbox"
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
     def _root(request: Request) -> Path:
         q = request.query_params
         project_id = q.get("project_id") or ""
@@ -454,6 +483,13 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
 
     @app.get("/desktop/datasets", include_in_schema=False)
     async def list_datasets(request: Request):  # noqa: ANN202
+        remote = _workspace_is_local(request)
+        if remote:
+            # An empty list here would read as "no datasets", which is a
+            # different and much more misleading statement.
+            return {"datasets": [], "location": ds.DATA_DIR,
+                    "supported": list(ds.supported()), "max_bytes": ds.max_bytes(),
+                    "unavailable": remote}
         root = _root(request)
         return {
             "datasets": ds.listing(root),
@@ -467,6 +503,10 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
         """Ingest a LOCAL file the user picked (desktop is single-user loopback,
         so the server may read the chosen path — same trust model as adding a
         project folder)."""
+        remote = _workspace_is_local(request)
+        if remote:
+            raise HTTPException(status_code=409,
+                                detail=f"cannot place a dataset from here: {remote}")
         root = _root(request)
         body = await request.json() or {}
         try:
@@ -478,6 +518,10 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
 
     @app.put("/desktop/datasets/{name}", include_in_schema=False)
     async def upload_dataset(name: str, request: Request):  # noqa: ANN202
+        remote = _workspace_is_local(request)
+        if remote:
+            raise HTTPException(status_code=409,
+                                detail=f"cannot place a dataset from here: {remote}")
         root = _root(request)
         blob = await request.body()
         if not blob:
@@ -496,6 +540,10 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
         """
         from ..sandbox.analysis_env import status as env_status
 
+        remote = _workspace_is_local(request)
+        if remote:
+            # "absent" would claim the env is not built; we simply cannot see it.
+            return {"state": "unknown", "detail": remote}
         return env_status(str(_root(request)))
 
     @app.get("/desktop/datasets/{name}/profile", include_in_schema=False)
@@ -507,6 +555,10 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
         metadata, text formats read a sample and count newlines. Cached on
         (path, mtime, size) because the first call may provision the env.
         """
+        remote = _workspace_is_local(request)
+        if remote:
+            raise HTTPException(status_code=409,
+                                detail=f"cannot profile from here: {remote}")
         root = _root(request)
         try:
             dest = ds.target_path(root, name)
@@ -555,6 +607,10 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
 
     @app.delete("/desktop/datasets/{name}", include_in_schema=False)
     async def delete_dataset(name: str, request: Request):  # noqa: ANN202
+        remote = _workspace_is_local(request)
+        if remote:
+            raise HTTPException(status_code=409,
+                                detail=f"cannot delete from here: {remote}")
         root = _root(request)
         try:
             gone = ds.remove(root, name)

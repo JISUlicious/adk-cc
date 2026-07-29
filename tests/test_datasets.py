@@ -141,7 +141,43 @@ def main() -> None:
     test_size_cap_message_is_actionable()
     test_target_path_cannot_escape()
     test_routes_land_the_file_in_the_project()
+    test_non_local_workspace_is_reported_not_guessed()
     print("\nall dataset-ingestion tests passed")
+
+
+
+
+def test_non_local_workspace_is_reported_not_guessed() -> None:
+    """A workspace the server cannot read (SSH project, container backend) must
+    say so. Reading the host path instead returns "no datasets" and "env not
+    built" with total confidence — the worst kind of wrong, and invisible."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import adk_cc.service.desktop_files as df
+
+    project = Path(tempfile.mkdtemp(prefix="ds-remote-"))
+    df._resolve_within = lambda pid, sid, rel: (project / rel).resolve() if rel else project
+    df._remote_ctx = lambda pid: ("transport", "/srv/app")     # pretend SSH
+
+    app = FastAPI()
+    df.mount_desktop_dataset_routes(app)
+    client = TestClient(app)
+    q = "?project_id=p1&session_id=s1"
+
+    body = client.get(f"/desktop/datasets{q}").json()
+    assert body["datasets"] == [] and "SSH" in body.get("unavailable", ""), body
+    env = client.get(f"/desktop/analysis-env{q}").json()
+    assert env["state"] == "unknown" and "SSH" in env["detail"], env
+    for call in (
+        lambda: client.post(f"/desktop/datasets/from-path{q}", json={"path": "/tmp/x.csv"}),
+        lambda: client.put(f"/desktop/datasets/a.csv{q}", content=b"x"),
+        lambda: client.delete(f"/desktop/datasets/a.csv{q}"),
+        lambda: client.get(f"/desktop/datasets/a.csv/profile{q}"),
+    ):
+        r = call()
+        assert r.status_code == 409, (r.status_code, r.text[:120])
+    print("OK non_local_workspace_is_reported_not_guessed")
 
 
 if __name__ == "__main__":

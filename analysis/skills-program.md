@@ -545,6 +545,30 @@ Build on it rather than inventing a viewer.
    because provisioning is usually triggered by a TURN, where a request-scoped
    spinner would never see it.
 
+   **Hardened after review (2026-07-29)** — three gaps, two of which made the
+   chip confidently WRONG rather than merely unhelpful:
+
+   1. *The failure state was unreachable.* A failed provision (`uv` missing, a
+      resolver error) leaves no interpreter and no marker — identical on disk
+      to a fresh project — so the chip said "not built yet" for the exact case
+      it was built to surface. `_provision` now records the reason to
+      `.adk-cc/.analysis-env-error` (cleared on the next success) and `status()`
+      reports `unavailable` with it.
+   2. *Every desktop dataset/env route assumed a LOCAL workspace.* They read the
+      host path with `pathlib`, which is right for desktop's in-place project
+      and wrong the moment the workspace is an SSH project or lives inside a
+      container — where it would report "no datasets" and "env not built" with
+      total confidence. The routes now detect that (per-project remote binding,
+      or a non-noop backend) and say so: the listing carries `unavailable`, the
+      env reports `unknown`, and every mutating route 409s instead of writing
+      into a path the agent never reads.
+   3. *The provisioning sentinel had no owner.* Two sessions in one project can
+      both reach `ensure_env`; whichever finished first cleared the marker while
+      the other install ran, flipping the chip to "ready" mid-install. The
+      writer now stamps a token and removes only its own. The stale window
+      dropped 30min → 5min and now reports `unavailable` with "a run started Nm
+      ago never finished" rather than silently reverting to "not built yet".
+
    One bug worth recording: the sentinel first lived INSIDE the env directory,
    which created `.adk-cc/analysis-env/` before `uv venv` ran — and uv refuses
    to build into an existing directory, so the status hint broke the very

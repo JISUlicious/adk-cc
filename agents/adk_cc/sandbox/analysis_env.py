@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import shlex
+import uuid
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Iterable, Optional
@@ -56,6 +57,11 @@ _MARKER_REL = f"{_ENV_REL}/.adk-cc-tiers"
 # existing directory ("Use --clear ... to replace it") — so the sentinel broke
 # the very provisioning it was reporting on.
 _BUSY_REL = ".adk-cc/.analysis-env-provisioning"
+# The LAST provisioning failure, kept until a later attempt succeeds. Without
+# it a failed provision is indistinguishable from a fresh project: both leave no
+# interpreter and no marker, so the UI said "not built yet" for "uv is missing"
+# — the exact case the status chip exists to surface.
+_ERROR_REL = ".adk-cc/.analysis-env-error"
 
 _DEFAULT_PYTHON = "3.12"
 
@@ -232,11 +238,43 @@ async def ensure_env(
     return env
 
 
-async def _clear_busy(backend: SandboxBackend, ws: WorkspaceRoot) -> None:
-    """Drop the provisioning sentinel. Best-effort: a stale one degrades the
-    chip to 'provisioning' forever, which is why `status()` also ages it out."""
+async def _record_error(backend: SandboxBackend, ws: WorkspaceRoot, msg: str) -> None:
+    """Persist why provisioning failed, for `status()` to report."""
     try:
-        await _exec(backend, ws, f"rm -f {shlex.quote(_BUSY_REL)}", timeout_s=15)
+        await backend.write_text(
+            os.path.join(ws.abs_path, _ERROR_REL),
+            (msg or "provisioning failed").strip()[:2000],
+            fs_write=ws.fs_write_config(),
+        )
+    except Exception:  # noqa: BLE001 — never mask the real failure
+        pass
+
+
+async def _clear_error(backend: SandboxBackend, ws: WorkspaceRoot) -> None:
+    try:
+        await _exec(backend, ws, f"rm -f {shlex.quote(_ERROR_REL)}", timeout_s=15)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _clear_busy(
+    backend: SandboxBackend, ws: WorkspaceRoot, token: str = ""
+) -> None:
+    """Drop the provisioning sentinel — but only if we wrote it.
+
+    `token=""` keeps the old unconditional behaviour for callers that never
+    wrote one. With a token, a concurrent provision's sentinel survives, so the
+    chip keeps reporting the install that is still running. Best-effort
+    throughout: a stale sentinel only mislabels a chip, and `status()` ages it
+    out anyway.
+    """
+    q = shlex.quote(_BUSY_REL)
+    cmd = (
+        f"rm -f {q}" if not token
+        else f'if [ -f {q} ] && grep -q {shlex.quote(token)} {q}; then rm -f {q}; fi'
+    )
+    try:
+        await _exec(backend, ws, cmd, timeout_s=15)
     except Exception:  # noqa: BLE001
         pass
 
@@ -259,6 +297,7 @@ async def _provision(
     """
     check = await _exec(backend, ws, "command -v uv || true", timeout_s=30)
     if not (check.stdout or "").strip():
+        await _record_error(backend, ws, "uv is not available in the execution environment")
         raise AnalysisEnvError(
             "uv is not available in the execution environment, so a managed "
             "Python cannot be provisioned. Install it "
@@ -293,12 +332,17 @@ async def _provision(
             f"install the {', '.join(sorted(set(tiers) - set(already)))} package tier(s)",
         ))
 
+    # OWNED sentinel: two sessions in the same project can both reach
+    # ensure_env, and an unowned marker let whichever finished FIRST clear it
+    # while the other install was still running — the chip flipped to "ready"
+    # mid-install. The writer stamps a token and only removes its own.
     busy = os.path.join(ws.abs_path, _BUSY_REL)
+    token = uuid.uuid4().hex[:12]
     if steps:
         try:
             await backend.write_text(
                 busy,
-                ",".join(sorted(set(tiers) - set(already))) or "base",
+                f"{token} {','.join(sorted(set(tiers) - set(already))) or 'base'}",
                 fs_write=ws.fs_write_config(),
             )
         except Exception:  # noqa: BLE001 — a status hint must never block work
@@ -309,18 +353,20 @@ async def _provision(
         try:
             res = await _exec(backend, ws, cmd, timeout_s=_install_timeout_s())
         except BaseException:
-            await _clear_busy(backend, ws)
+            await _clear_busy(backend, ws, token)
             raise
         if res.exit_code != 0:
-            await _clear_busy(backend, ws)
+            await _clear_busy(backend, ws, token)
             tail = ((res.stderr or res.stdout or "").strip() or "(no output)")[-1500:]
+            await _record_error(backend, ws, f"failed to {what}: {tail[-400:]}")
             raise AnalysisEnvError(
                 f"Failed to {what} for the analysis environment.\n\n{tail}\n\n"
                 "Retry, or set ADK_CC_ANALYSIS_ENV=<path-to-python> to use an "
                 "interpreter you control."
             )
 
-    await _clear_busy(backend, ws)
+    await _clear_busy(backend, ws, token)
+    await _clear_error(backend, ws)      # a success clears the last failure
     # Marker last: a crash mid-install must not look like a complete env.
     await backend.write_text(
         os.path.join(ws.abs_path, _MARKER_REL),
@@ -332,7 +378,10 @@ async def _provision(
 
 # --- read-only status (W6.5) ------------------------------------------------
 
-_BUSY_STALE_S = 30 * 60
+# A killed process leaves the sentinel behind. 30 minutes of "preparing…" was
+# far longer than any real install, so age it out sooner and SAY it is stale
+# rather than silently reverting to "not built yet".
+_BUSY_STALE_S = 5 * 60
 
 
 def status(workspace_root: str) -> dict:
@@ -357,20 +406,40 @@ def status(workspace_root: str) -> dict:
             import time as _time
 
             age = _time.time() - busy.stat().st_mtime
+            body = busy.read_text().strip().split(" ", 1)
+            tiers_txt = body[1] if len(body) > 1 else (body[0] if body else "")
             if age < _BUSY_STALE_S:
                 return {
                     "state": "provisioning",
-                    "tiers": [t for t in busy.read_text().strip().split(",") if t],
+                    "tiers": [t for t in tiers_txt.split(",") if t],
                     "seconds": int(age),
                     "detail": "installing packages — first use in this project",
                 }
+            return {
+                "state": "unavailable",
+                "detail": (
+                    f"a provisioning run started {int(age // 60)}m ago never "
+                    "finished (the process was probably killed); the next "
+                    "analysis will retry"
+                ),
+            }
     except OSError:
         pass
 
     marker = root / _MARKER_REL
     interpreter = root / _ENV_REL / "bin" / "python"
+    err = root / _ERROR_REL
     try:
         if not interpreter.exists():
+            # A FAILED provision and a fresh project look identical on disk
+            # (no interpreter, no marker) — the recorded error is the only
+            # thing that tells them apart.
+            try:
+                reason = err.read_text().strip() if err.is_file() else ""
+            except OSError:
+                reason = ""
+            if reason:
+                return {"state": "unavailable", "detail": reason[:400]}
             return {"state": "absent",
                     "detail": "provisions on first analysis in this project"}
         token = marker.read_text().strip() if marker.is_file() else ""
