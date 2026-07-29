@@ -14,6 +14,13 @@ Use **matplotlib + seaborn only when** you need:
 For everything else — exploratory analysis, dashboards, internal reports,
 notebooks, web apps — Plotly is the right call.
 
+## Contents
+
+- Plotly — default recipes (line, bar, scatter, distribution, maps, annotations)
+- Plotly dashboard (subplots)
+- Static figures — Matplotlib & Seaborn
+- Visualization best practices
+
 ## Plotly — Default Recipes
 
 ```python

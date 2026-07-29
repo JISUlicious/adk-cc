@@ -105,7 +105,23 @@ def _bash_allow_match(
     exactly. Appending anything ungranted now falls through to the normal floor.
     """
     command = str((args or {}).get("command") or "")
-    segments = [seg for seg, _sep in _split_compound(command)] if command else []
+    # `_split_compound` returns None on degenerate input — empty, a leading or
+    # trailing separator, or an unbalanced quote (`python -c "print(1)` while
+    # the model is still streaming). Iterating that None raised inside the
+    # permission plugin and killed the whole turn, which a live run caught.
+    # A command we cannot split is evaluated as ONE segment: the fallback is
+    # the pre-existing whole-string behaviour, never a bypass.
+    split = _split_compound(command) if command else None
+    if split is None and command:
+        # Unsplittable (unbalanced quote, trailing separator). If it nonetheless
+        # LOOKS compound, a broadened prefix must not match it — otherwise
+        # appending `&& echo "` to an allowed command evades segmentation
+        # entirely, which is the same escalation by another route. Require an
+        # exact or operator grant instead.
+        if any(sep in command for sep in ("&&", "||", ";", "|")):
+            return _whole_command_rule(rules, args, workspace_root)
+        return _first_match(rules, RuleBehavior.ALLOW, "run_bash", args, workspace_root)
+    segments = [seg for seg, _sep in split] if split else []
     if len(segments) <= 1:
         return _first_match(rules, RuleBehavior.ALLOW, "run_bash", args, workspace_root)
 

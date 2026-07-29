@@ -52,15 +52,45 @@ def test_builtins_load_by_default():
     print("OK builtins_load_by_default")
 
 
-def test_builtin_has_frontmatter_and_references():
+def test_builtin_companions_are_reachable():
+    """The methodology docs and probe scripts must be LOADABLE — asserted
+    through the tool, not through ADK's `references` index.
+
+    Upstream pd-skills moved its companions from `references/` to the skill
+    root (and added `scripts/`), which empties that index while the files are
+    perfectly reachable via the lenient loader's disk fallback. Pinning the
+    index shape made a vendor update look like a regression; pinning the
+    capability is what the agent actually depends on."""
+    import asyncio
+
+    from adk_cc.tools.skills import make_skill_toolset
+
     skills = {s.name: s for s, _ in discover_skills_with_sources()}
     s = skills["data-analyst"]
     assert s.description and len(s.description) > 40, s.description
-    refs = getattr(getattr(s, "resources", None), "references", None) or {}
-    # the methodology companions must be reachable, not just SKILL.md
-    assert len(refs) >= 10, list(refs)[:5]
-    assert any("root-cause" in k for k in refs), list(refs)[:5]
-    print(f"OK builtin_has_frontmatter_and_references ({len(refs)} refs)")
+
+    files = sorted(p.name for p in (_BUILTIN_DIR / "data-analyst").rglob("*.md"))
+    assert len(files) >= 10, files
+    assert any("root-cause" in f for f in files), files
+    scripts = sorted(p.name for p in (_BUILTIN_DIR / "data-analyst" / "scripts").glob("*.py"))
+    assert len(scripts) >= 4, scripts
+
+    toolset = make_skill_toolset()
+    by_name = {t.name: t for t in toolset._tools}
+
+    class _Ctx:
+        agent_name = "coordinator"
+        state: dict = {}
+
+    async def _load(path):
+        return await by_name["load_skill_resource"].run_async(
+            args={"skill_name": "data-analyst", "file_path": path}, tool_context=_Ctx())
+
+    for path in ("root-cause-analysis.md", "scripts/premodel_audit.py"):
+        res = asyncio.run(_load(path))
+        assert isinstance(res, dict) and (res.get("content") or res.get("lines")), \
+            f"{path} not loadable: {res}"
+    print(f"OK builtin_companions_are_reachable ({len(files)} docs, {len(scripts)} scripts)")
 
 
 def test_kill_switch_removes_the_layer():
@@ -227,15 +257,23 @@ def test_wheel_contains_skill_files():
         with zipfile.ZipFile(wheels[0]) as z:
             names = z.namelist()
         skill_md = [n for n in names if n.endswith("skills/data-analyst/SKILL.md")]
-        refs = [n for n in names if "skills/data-analyst/references/" in n]
+        docs = [n for n in names
+                if "skills/data-analyst/" in n and n.endswith(".md")
+                and not n.endswith("SKILL.md")]
+        # Scripts are EXECUTED (`run_skill_script`), so a wheel that ships the
+        # prose but not the probes gives an agent instructions it cannot follow.
+        scripts = [n for n in names
+                   if "skills/data-analyst/scripts/" in n and n.endswith(".py")]
         assert skill_md, "wheel has no built-in SKILL.md — package-data missing"
-        assert len(refs) >= 10, f"wheel has {len(refs)} reference files"
-        print(f"OK wheel_contains_skill_files (SKILL.md + {len(refs)} references)")
+        assert len(docs) >= 10, f"wheel has {len(docs)} companion docs"
+        assert len(scripts) >= 4, f"wheel has {len(scripts)} probe scripts"
+        print(f"OK wheel_contains_skill_files (SKILL.md + {len(docs)} docs "
+          f"+ {len(scripts)} scripts)")
 
 
 def main():
     test_builtins_load_by_default()
-    test_builtin_has_frontmatter_and_references()
+    test_builtin_companions_are_reachable()
     test_kill_switch_removes_the_layer()
     test_project_skill_overrides_by_name_only()
     test_catalog_token_budget()

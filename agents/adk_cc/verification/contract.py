@@ -28,6 +28,11 @@ from typing import Any, Iterable
 _log = logging.getLogger(__name__)
 
 VERIFY_METADATA_KEY = "x-adk-cc/verify"
+# Upstream skill authors adopted the idea under a plain key — pd-skills'
+# data-analyst declares `metadata.verify` as a YAML list of checks. Requiring
+# an adk-cc-specific namespace of a first-party skill we merely vendor would
+# mean rewriting its frontmatter on every update, so read both.
+FALLBACK_METADATA_KEY = "verify"
 
 MODES = ("none", "self", "verifier")
 
@@ -76,6 +81,10 @@ def parse(raw: Any, *, source: str = "") -> VerifyContract:
         else:
             # bare mode, e.g. `x-adk-cc/verify: self`
             data = {"mode": s}
+    if isinstance(data, (list, tuple)):
+        # A bare LIST of checks — the shape upstream pd-skills uses. Mode
+        # defaults to "self": the author stated criteria, not who enforces them.
+        return VerifyContract(mode="self", checks=_as_list(data), source=source)
     if not isinstance(data, dict):
         return VerifyContract(source=source)
 
@@ -98,7 +107,10 @@ def contract_for_skill(skill: Any) -> VerifyContract:
     name = getattr(fm, "name", "") or getattr(skill, "name", "") or "?"
     if not isinstance(meta, dict):
         return VerifyContract(source=f"skill:{name}")
-    return parse(meta.get(VERIFY_METADATA_KEY), source=f"skill:{name}")
+    raw = meta.get(VERIFY_METADATA_KEY)
+    if raw is None:
+        raw = meta.get(FALLBACK_METADATA_KEY)
+    return parse(raw, source=f"skill:{name}")
 
 
 def criteria_from_skills(skill_names: Iterable[str], skills: Iterable[Any]) -> list[str]:

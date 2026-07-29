@@ -5,7 +5,7 @@ vendored from. Skills authored for adk-cc are marked `first-party`.
 
 | Skill | Upstream | License | Vendored |
 |---|---|---|---|
-| `data-analyst` | [JISUlicious/pd-skills](https://github.com/JISUlicious/pd-skills) — `.claude/skills/data-analyst` | first-party | 2026-07-27 |
+| `data-analyst` | [JISUlicious/pd-skills](https://github.com/JISUlicious/pd-skills) — `.claude/skills/data-analyst` | first-party | 2026-07-29 (re-vendored: + `scripts/` probes, RCA/SPC docs) |
 | `tech-due-diligence` | authored for adk-cc | first-party | 2026-07-27 |
 | `feasibility-study` | authored for adk-cc | first-party | 2026-07-27 |
 | `prd-writer` | authored for adk-cc | first-party | 2026-07-27 |

@@ -1,12 +1,27 @@
 ---
 name: data-analyst
 description: >
-  Expert data analyst using pandas >= 2.3. Use for any data analysis, EDA,
-  cleaning, transformation, merging, time series, statistics, visualization,
-  or performance optimization task.
+  Expert data analyst using pandas >= 2.3 for EDA, cleaning, transformation,
+  time series, statistics, and visualization — plus specialized workflows
+  for root-cause analysis, defect/yield excursion investigation, change-point
+  detection, SPC (Shewhart / EWMA / Cp / Cpk), XGBoost/SHAP feature importance,
+  multicollinearity (VIF) audits, causal inference (DiD, propensity
+  matching, dowhy), designed experiments (DOE / ANOVA), qualitative RCA
+  (Pareto / Fishbone / 5-Why), wafer-map / spatial defect patterns, and
+  8D / CAPA reporting. Use this skill whenever the user mentions dataframes,
+  CSV/Parquet/Excel analysis, feature importance, driver analysis, yield or
+  defect investigations, process excursions, change-points, control charts,
+  wafer maps, Pareto or Fishbone or 5-Why, DOE, 8D, or any Python
+  data-science task — even when they don't explicitly say "pandas" or
+  "analysis".
 metadata:
-  x-adk-cc/verify: |
-    {"mode": "self", "checks": ["row counts in vs out are reported for any filtering or join", "every stated figure was computed in this turn, not estimated", "null handling and dtype decisions are stated", "a collinearity/diagnostic check accompanies any feature-importance claim"]}
+  verify:
+    - "All four Pre-Modeling Diagnostics ran before any modeling or driver claim (scripts/premodel_audit.py, or the equivalent inline)"
+    - "Row counts in vs out are reported for any filtering, join, or dropna"
+    - "Multicollinearity was audited and any VIF > 10 is either resolved or disclosed alongside the coefficients it affects"
+    - "Null handling is per-column with a stated reason; no blanket dropna() on a dataset with informative missingness"
+    - "Driver rankings from a linear method are cross-checked against SHAP or permutation importance when R² < 0.4 or the methods disagree"
+    - "Every reported effect carries its sample size and uncertainty"
 ---
 
 # Expert Data Analyst — pandas >= 2.3
@@ -14,24 +29,6 @@ metadata:
 You are an expert data analyst with deep mastery of pandas, NumPy, SciPy,
 and the Python data science ecosystem. You think rigorously, code precisely,
 and communicate findings clearly.
-
-## adk-cc runtime
-
-The companion methodology files referenced below live in `references/` and are
-loaded with `load_skill_resource` (a bare filename resolves too). Large ones are
-paginated — follow `next_offset`, or use `search_skill_resource` to grep a
-specific technique instead of reading a 40KB file end to end.
-
-Python runs on a **uv-managed interpreter** that adk-cc provisions on demand
-(`.adk-cc/analysis-env`), NOT the system python. pandas/numpy/scipy/matplotlib/
-plotly are installed as the `core` tier; importing `sklearn`/`xgboost`/`shap`
-(modeling) or `statsmodels`/`ruptures`/`dowhy` (stats) provisions those tiers
-automatically on first use — just import what you need. First provisioning of a
-tier takes a minute; afterwards it is cached per project.
-
-Write charts and reports into the workspace (e.g. `analysis/`) as files —
-interactive Plotly HTML renders in the UI. Prefer saving an artifact over
-dumping large tables into chat.
 
 ## Environment Setup
 
@@ -60,6 +57,7 @@ quality static output.
 
 | When working on… | Read this file |
 |---|---|
+| Running the mandatory diagnostics — probe usage, exit codes, caveats | `scripts/README.md` |
 | Loading CSV, Excel, JSON, Parquet, SQL, HDF5 | `data-loading.md` |
 | EDA, profiling, summary stats, data overview | `data-exploration.md` |
 | Missing values, deduplication, type conversion | `data-cleaning.md` |
@@ -71,17 +69,32 @@ quality static output.
 | Dtypes, PyArrow, memory, vectorization, CoW | `performance-optimization.md` |
 | Plotly (default), Matplotlib & Seaborn (static), dashboards | `visualization.md` |
 | Categorical, Styler, eval, nullable types, pipe | `advanced-pandas.md` |
-| XGBoost, SHAP, permutation importance, interactions, non-linear drivers | `feature-importance.md` |
-| Root-cause / defect / yield excursion / change-point / SPC / causal | `root-cause-analysis.md` |
+| VIF / multicollinearity / mixed-type binding / cluster-representative selection | `collinearity-diagnostics.md` |
+| Feature-importance escalation + diagnostics (skew, null) + leakage + reporting | `feature-importance.md` |
+| XGBoost recipe + SHAP / permutation / gain + cross-method + interactions | `importance-methods.md` |
+| RCA framework + change-point (PELT/CUSUM) + SPC (Shewhart/EWMA/Cp/Cpk) + decision cheatsheet + anti-patterns | `root-cause-analysis.md` |
+| RCA commonality — Fisher / BH-FDR / cluster collapse / frequent-itemset | `rca-commonality.md` |
+| RCA causal inference — DAG / DiD / propensity / dowhy / DOE / ANOVA | `rca-causal-analysis.md` |
+| RCA qualitative — Pareto (80/20), Fishbone (6M), 5-Why + falsification | `rca-qualitative.md` |
+| RCA D5 verification — did the fix work (power / pre-post / rule stability) | `rca-d5-verification.md` |
+| RCA wafer-map / spatial defect patterns (KDE, Ripley's K, taxonomy) | `rca-wafer-spatial.md` |
+| RCA reporting — Tier 2 template + form guide + self-contained HTML output | `rca-reporting.md` |
 
 ### Task-Specific File Loading
 
 For **EDA / data profiling**: read `data-loading.md`, `data-exploration.md`, `visualization.md`
+For **VIF / multicollinearity / choosing which correlated feature to keep**: read `collinearity-diagnostics.md`
 For **data cleaning**: read `data-cleaning.md`, `indexing-selection.md`
 For **feature engineering**: read `data-transformation.md`, `time-series.md`
 For **statistical analysis**: read `statistical-analysis.md`, `visualization.md`
-For **feature importance / non-linear drivers**: read `feature-importance.md`, `statistical-analysis.md`
-For **root-cause / yield / defect / process-excursion analysis**: read `root-cause-analysis.md`, `time-series.md`, `feature-importance.md`
+For **feature importance / non-linear drivers**: read `feature-importance.md`, `importance-methods.md`, `statistical-analysis.md`
+For **RCA — change-point / SPC / anti-patterns / end-to-end workflow**: read `root-cause-analysis.md`
+For **RCA commonality (which sensors / factors shifted)**: read `root-cause-analysis.md`, `rca-commonality.md`
+For **RCA causal analysis or DOE**: read `rca-causal-analysis.md`
+For **RCA qualitative (Pareto / Fishbone / 5-Why)**: read `rca-qualitative.md`
+For **RCA D5 verification (did the fix work)**: read `rca-d5-verification.md`
+For **RCA wafer-map / spatial defect patterns**: read `rca-wafer-spatial.md`
+For **RCA report writing (Tier 2 markdown or HTML)**: read `rca-reporting.md`
 For **performance issues**: read `performance-optimization.md`, `data-loading.md`
 
 ## Workflow
@@ -95,7 +108,7 @@ Load → Explore → Clean → Transform → Analyze → Visualize → Interpret
 After completing **Explore**, verify every item in the EDA checklist at the
 end of `data-exploration.md`. Report any unchecked items to the user.
 **VIF / multicollinearity inspection is part of Explore, not a deferred
-modeling step** — see `data-exploration.md` § 6 for the integrated audit.
+modeling step** — see `collinearity-diagnostics.md` for the integrated audit.
 
 ## Pre-Modeling Diagnostics (mandatory)
 
@@ -103,6 +116,25 @@ These audits run during **Explore**, before any modeling, driver analysis,
 or correlation interpretation. Each catches a class of silent failure that
 otherwise propagates into wrong conclusions. **Skipping any of them is the
 most common EDA failure mode.**
+
+**Run them, don't just cite them.** The four diagnostics ship as executable
+probes in `scripts/` — start there rather than re-implementing the checks
+inline, because the probes already handle the degenerate cases that make a
+hand-rolled version report confident nonsense (rank-deficient VIF, Cramér's V
+saturating on a ranked continuous target, 99%-null columns posting perfect
+associations off a dozen rows).
+
+```bash
+python scripts/premodel_audit.py <data> --target <col>     # all four, one verdict
+python scripts/collinearity_probe.py <data> --target <col> # or one at a time
+```
+
+Exit 0 = clear, 1 = a finding to act on, 2 = the probe could not run. Add
+`--json` when you want to consume the result rather than read it. Read
+`scripts/README.md` for what each probe asserts, the shared flags, and the
+caveats that change how the output should be read (ID columns, structural
+absence, n/p ratio). The reference files below explain the *methods*; the
+probes are the authoritative implementation of them.
 
 ### 1. Collinearity audit — three layers
 
@@ -120,7 +152,7 @@ when the dataset has both types.
 When VIF is severe and the downstream method can't tolerate it, use
 `select_cluster_representative()` (priority-ordered: aggregate → summary
 name → score-by-context → completeness → variance → ambiguous-flag) to
-pick which feature to keep. See `data-exploration.md` § 6.
+pick which feature to keep. See `collinearity-diagnostics.md`.
 
 ### 2. Null-handling audit (dtype-aware)
 

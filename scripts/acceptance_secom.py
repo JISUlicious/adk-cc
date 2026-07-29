@@ -219,6 +219,29 @@ def main() -> int:
                 check("it carries real data, not a placeholder",
                       len(body) > 5000 and ("fail" in body.lower() or "pass" in body.lower()),
                       f"{len(body)} bytes")
+        # --- W7: pd-skills' OWN probes, run by the agent -------------------
+        # The plan's acceptance item. Upstream shipped these as runnable
+        # scripts in the bundle (2026-07-29); before that adk-cc vendored the
+        # methodology without them, so the checks could be cited but not run.
+        print("\n== W7 · the skill's own diagnostic probes ==")
+        st3, tools3, texts3, _ = turn(pid, "acceptance",
+            "Run the data-analyst skill's own pre-modeling diagnostics "
+            "(scripts/premodel_audit.py) on data/secom_wafer_runs.csv with "
+            "target `result`, and tell me what it found.")
+        names3 = [n for n, _ in tools3]
+        answer3 = "\n".join(texts3[-8:]).lower()
+        print(f"    turn {st3['status']} · {len(tools3)} tool calls: {names3[:8]}")
+        check("the agent ran the skill's probe",
+              any(n in ("run_skill_script", "run_bash") for n in names3), names3[:10])
+        check("the probe's verdict reached the answer",
+              any(w in answer3 for w in ("fail", "informative missing", "collinear",
+                                          "leakage", "constant")),
+              answer3[-300:])
+        # ground truth from the probes run directly
+        check("it reports the leaking id/time columns",
+              "run_id" in answer3 or "timestamp" in answer3,
+              "leakage_probe flags run_id (assoc 1.00) and timestamp (0.99)")
+
     finally:
         proc.terminate()
         try:

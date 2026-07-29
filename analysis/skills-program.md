@@ -671,9 +671,36 @@ Build on it rather than inventing a viewer.
   (exact row count + 593 columns profiled on a wide file), W3 (skill selection
   and statistical discipline), W6.1/6.3 (outputs registered and rendering).
 
-- **Still open**: pd-skills' own probes (`null_collinearity_probe.py`,
-  `mixed_type_vif_test.py`) are NOT in the vendored copy — it ships SKILL.md +
-  13 references only. Running them needs the upstream repo.
+- **Probes: closed 2026-07-29.** Upstream shipped the generalized checks as
+  runnable scripts inside the skill bundle, so adk-cc re-vendored: 6 scripts
+  (`premodel_audit`, `null_audit_probe`, `collinearity_probe`, `leakage_probe`,
+  `cluster_representative`, `_probe_utils`) + 23 companion docs, replacing the
+  13-reference copy. Each script opens with an `ASSERTS: … PASS means … FAIL
+  means …` line and states its dependency tier.
+
+  Run directly against SECOM they are substantive, not decorative:
+  `collinearity_probe` independently reported **116 constant sensors** — the
+  same number computed for ground truth — and refused a 474-column VIF as
+  uninterpretable rather than producing one; `null_audit_probe` found 8 columns
+  with informative missingness and 28 above 50% null; `leakage_probe` flagged
+  `run_id` (assoc 1.00) and `timestamp` (0.99), which are exactly the ID/time
+  columns the fixture added and which would poison any driver ranking.
+  Acceptance is now 17/17 including a live turn where the agent runs
+  `premodel_audit.py` itself and reports the verdict.
+
+  Three adk-cc-side changes the update forced: the verify-contract parser now
+  accepts a plain `metadata.verify` list (upstream adopted the idea under its
+  own key — demanding an `x-adk-cc/` namespace of a vendored first-party skill
+  would mean rewriting frontmatter on every update); `test_builtin_companions_are_reachable`
+  asserts the docs LOAD rather than that they sit in ADK's `references` index
+  (upstream moved them to the skill root, which empties that index while the
+  lenient loader still serves them); and the wheel test now requires the probe
+  scripts to be packaged, since a wheel shipping the prose but not the scripts
+  gives an agent instructions it cannot follow.
+
+  Catalog cost rose to ~1943 of the 2000-token budget — upstream's description
+  is 117 words and earns them by listing the RCA/SPC/VIF/DOE workflows. The
+  next skill added needs that ceiling revisited rather than nudged.
 - **Live UI e2e** (standing practice): load a real CSV → ask for EDA → assert a
   Plotly artifact renders, VIF/SHAP output appears, no console errors,
   screenshot. Plus one adopted skill (contract review over a sample NDA,

@@ -145,7 +145,25 @@ def main() -> None:
     test_exact_compound_regrant_is_one_click()
     test_operator_wildcard_still_works()
     test_dangerous_command_grant_is_still_literal_only()
+    test_unsplittable_commands_do_not_break_the_turn()
     print("\nall grant-matching tests passed")
+
+
+
+
+def test_unsplittable_commands_do_not_break_the_turn() -> None:
+    """`_split_compound` returns None for degenerate input — an unbalanced
+    quote, a trailing separator, an empty string. Iterating that None raised
+    inside the permission plugin and ended the whole turn with
+    "'NoneType' object is not iterable"; a live acceptance run caught it.
+    Such a command is evaluated as one segment, i.e. the old behaviour."""
+    rules = _grant("npx tsc --noEmit")
+    for odd in ('echo "unbalanced', "ls &&", "", "   ", "|| true"):
+        got = _d(odd, rules)
+        assert got in ("allow", "ask", "deny"), (odd, got)
+    # …and an unsplittable command still cannot ride the broadened rule
+    assert _d('npx tsc --noEmit && echo "unbalanced', rules) != "allow"
+    print("OK unsplittable_commands_do_not_break_the_turn")
 
 
 if __name__ == "__main__":

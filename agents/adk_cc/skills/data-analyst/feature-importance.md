@@ -10,6 +10,18 @@ replacement. Always run linear analysis first — it is faster, more
 interpretable, and often sufficient. Escalate to ML importance only when
 the conditions below are met.
 
+## Contents
+
+- When to escalate (linear insufficient → ML importance)
+- Setup — optional dependencies
+- Pre-Modeling Diagnostics: VIF (§ 1) · representative (§ 1a) ·
+  target skew (§ 1b) · null-handling (§ 2)
+- **Computation methods → `importance-methods.md`** (XGBoost recipe,
+  gain / permutation / SHAP, cross-method check, interaction detection)
+- Anti-Patterns / Leakage
+- Reporting template
+- Performance + decision cheatsheets
+
 ## When to Escalate
 
 > **If the question is *what caused the shift?* (not *what predicts the
@@ -67,7 +79,10 @@ predictors, and ranking driven by which rows survived null-dropping.
 ### 1. Multicollinearity audit (VIF)
 
 VIF (Variance Inflation Factor) for column j is `1 / (1 − R²_j)` where
-`R²_j` is from regressing column j on every other predictor. Interpretation:
+`R²_j` is from regressing column j on every other predictor. The
+`vif_table()` helper (plus `mixed_type_vif()` and the cluster-representative
+selector) lives in **`collinearity-diagnostics.md`** — run it there once,
+then act on the tiers below. In modeling context the actions are:
 
 | VIF | Meaning | Action |
 |---:|---|---|
@@ -77,32 +92,7 @@ VIF (Variance Inflation Factor) for column j is `1 / (1 − R²_j)` where
 | > 10 | severe | drop one of the redundant pair, OR switch to Ridge/Lasso |
 
 ```python
-import numpy as np
-import pandas as pd
-
-def vif_table(X: pd.DataFrame) -> pd.DataFrame:
-    """VIF_j = 1 / (1 - R²_j), R²_j from regressing column j on the others."""
-    Xv = X.to_numpy(dtype=np.float64)
-    rows = []
-    for j, col in enumerate(X.columns):
-        y = Xv[:, j]
-        Xrest = np.delete(Xv, j, axis=1)
-        Xd = np.column_stack([np.ones(len(Xrest)), Xrest])
-        beta, *_ = np.linalg.lstsq(Xd, y, rcond=None)
-        yhat = Xd @ beta
-        ss_tot = ((y - y.mean()) ** 2).sum()
-        if ss_tot == 0:
-            vif = float("inf")
-        else:
-            r2 = 1 - ((y - yhat) ** 2).sum() / ss_tot
-            vif = float("inf") if r2 >= 0.9999 else 1 / (1 - r2)
-        rows.append({"feature": col, "R²_on_others": round(float(r2), 4),
-                     "VIF": round(float(vif), 2)})
-    return pd.DataFrame(rows).sort_values("VIF", ascending=False).reset_index(drop=True)
-
-vif = vif_table(X)
-print(vif.to_string(index=False))
-
+vif = vif_table(X)                      # defined in collinearity-diagnostics.md
 severe   = vif.query("VIF > 10")["feature"].tolist()
 moderate = vif.query("5 < VIF <= 10")["feature"].tolist()
 if severe:
@@ -133,7 +123,7 @@ reader whether the OLS β values are interpretable as independent effects.
 
 ### 1a. Picking the representative when you must drop
 
-Use the framework in `data-exploration.md` § 6 (5-priority selector +
+Use the framework in `collinearity-diagnostics.md` (5-priority selector +
 `select_cluster_representative()` helper).
 
 For feature-importance work, **Priority 3 is the default `|ρ(target)|`
@@ -254,6 +244,12 @@ audit = null_audit(X, y)
 print(audit.to_string(index=False))
 ```
 
+To run this audit rather than re-implement it:
+`python scripts/null_audit_probe.py <data> --target <col>` — same measure
+selection, plus the per-column action from the table below and a sample-size
+scaled threshold. The leakage check further down ships as
+`scripts/leakage_probe.py`.
+
 `miss_target_assoc` is Spearman ρ for numeric targets, point-biserial r
 for binary, and Cramér's V for multiclass. All three live on a comparable
 [-1, 1] / [0, 1] scale, so the same 0.05 threshold below applies.
@@ -322,287 +318,12 @@ for col in cols_with_nulls:
 X = X.fillna(X.median(numeric_only=True))
 ```
 
-## XGBoost Baseline Recipe
+## Computation methods → `importance-methods.md`
 
-Use sensible defaults — do not hyperparameter-tune unless explicitly
-asked. The goal is feature importance, not a production model.
-
-### Regression target
-
-```python
-import numpy as np
-import pandas as pd
-import xgboost as xgb
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score, mean_absolute_error
-
-# X: numeric features only (encode categoricals first — see below)
-# y: numeric target
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42
-)
-
-model = xgb.XGBRegressor(
-    n_estimators=400,
-    max_depth=6,
-    learning_rate=0.05,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    reg_lambda=1.0,
-    random_state=42,
-    tree_method="hist",      # fast on large data
-    n_jobs=-1,
-)
-model.fit(
-    X_train, y_train,
-    eval_set=[(X_test, y_test)],
-    verbose=False,
-)
-
-pred = model.predict(X_test)
-print(f"R²  on holdout: {r2_score(y_test, pred):.4f}")
-print(f"MAE on holdout: {mean_absolute_error(y_test, pred):.4f}")
-```
-
-### Binary classification target
-
-```python
-model = xgb.XGBClassifier(
-    n_estimators=400,
-    max_depth=6,
-    learning_rate=0.05,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    eval_metric="logloss",
-    random_state=42,
-    tree_method="hist",
-    n_jobs=-1,
-)
-model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
-
-from sklearn.metrics import roc_auc_score, average_precision_score
-proba = model.predict_proba(X_test)[:, 1]
-print(f"ROC-AUC: {roc_auc_score(y_test, proba):.4f}")
-print(f"PR-AUC : {average_precision_score(y_test, proba):.4f}")
-```
-
-### Categorical encoding before XGBoost
-
-XGBoost (>= 1.6) handles categoricals natively with `enable_categorical=True`,
-but for portability use explicit encoding:
-
-```python
-# Low-cardinality (< 20 unique) → one-hot
-X = pd.get_dummies(df[features], columns=cat_cols, drop_first=False, dtype="int8")
-
-# High-cardinality → ordinal (target encoding only inside CV folds)
-from sklearn.preprocessing import OrdinalEncoder
-oe = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
-X[high_card_cols] = oe.fit_transform(X[high_card_cols])
-```
-
-Never label-encode an *unordered* categorical — XGBoost will treat the
-codes as numeric and infer false orderings.
-
-## Three Importance Lenses
-
-Always compute **at least two**. Reporting only one is malpractice.
-
-### 1. Gain (XGBoost split-importance)
-
-Fast, free, biased. Reports total loss reduction attributed to each
-feature across all splits in the ensemble.
-
-```python
-gain = pd.Series(model.feature_importances_, index=X.columns) \
-         .sort_values(ascending=False)
-print(gain.head(15))
-```
-
-**Bias to know:** Gain inflates importance for high-cardinality and
-continuous features (more split candidates = more chances to win a split).
-A 10-level categorical can dominate a binary feature even if the binary
-feature is the true driver. **Never report gain in isolation.**
-
-### 2. Permutation importance (sklearn — model-agnostic)
-
-A model-agnostic baseline. Measures the drop in holdout score when a
-single feature's values are randomly shuffled.
-
-```python
-from sklearn.inspection import permutation_importance
-
-perm = permutation_importance(
-    model, X_test, y_test,
-    n_repeats=10,                            # 10–30 recommended; 5 is too noisy
-    random_state=42,
-    n_jobs=-1,
-    scoring="r2",                            # see below — pick by target shape
-)
-perm_df = (pd.DataFrame({
-        "feature": X_test.columns,
-        "importance_mean": perm.importances_mean,
-        "importance_std":  perm.importances_std,
-    })
-    .sort_values("importance_mean", ascending=False)
-    .reset_index(drop=True))
-print(perm_df.head(15).round(4))
-```
-
-**`scoring=` by target shape:**
-- Symmetric numeric target → `"r2"` (default)
-- Heavy-tailed / log-transformed target → `"neg_mean_absolute_error"`
-  (R² is dominated by the long tail; MAE represents the typical row)
-- Binary classification, balanced → `"roc_auc"`
-- Binary classification, imbalanced (positive < 10%) → `"average_precision"` (PR-AUC)
-
-Compute on the **holdout set**, not training data. On training data,
-permutation importance is meaningless (the model has memorized).
-
-**Known bias with correlated features (Strobl 2007, Hooker–Mentch 2021):**
-when X₁ and X₂ are correlated, permuting X₁ leaves the model able to recover
-the signal from X₂, so *both* look weak — importance gets diluted across
-the cluster. Always pair permutation with the VIF / cluster-collapse step
-from § 1; otherwise correlated features systematically rank below their
-independent peers regardless of true effect.
-
-For very large holdouts (> 100k rows), subsample to 50k for speed —
-permutation runs the model `n_repeats × n_features` times.
-
-### 3. SHAP (TreeExplainer)
-
-Gold standard for tree models. Each feature's contribution to each
-individual prediction, with theoretical guarantees (Shapley values from
-cooperative game theory). Use for both global (mean |SHAP|) and per-row
-explanations.
-
-**`feature_perturbation=` choice matters for correlated features:**
-- `"tree_path_dependent"` (default) — observational SHAP, fast, no
-  background needed. With correlated features, attributes some of the
-  partner's effect to each feature in a cluster.
-- `"interventional"` — causal/interventional SHAP, requires a background
-  dataset, slower. Cleaner for causal interpretation. Required when
-  using SHAP to argue about feature *effects* rather than predictions.
-
-```python
-import shap
-
-# CRITICAL: sample before SHAP on large data — TreeSHAP is O(n × trees × leaves²)
-X_shap = X_test.sample(min(50_000, len(X_test)), random_state=42)
-
-# Observational SHAP (default — fast, fine for prediction explanation)
-explainer = shap.TreeExplainer(model)
-
-# OR interventional SHAP (slower, cleaner for effect interpretation):
-# X_bg = X_train.sample(min(1000, len(X_train)), random_state=42)
-# explainer = shap.TreeExplainer(model, X_bg,
-#                                feature_perturbation="interventional")
-
-shap_values = explainer.shap_values(X_shap)
-# shap_values shape: (n_rows, n_features) for regression / binary
-
-# Global importance: mean |SHAP|
-shap_global = (pd.Series(np.abs(shap_values).mean(axis=0), index=X_shap.columns)
-                 .sort_values(ascending=False))
-print(shap_global.head(15).round(4))
-
-# Visual summary (do this in notebooks; for scripts, save to file)
-import matplotlib.pyplot as plt
-shap.summary_plot(shap_values, X_shap, show=False)
-plt.tight_layout()
-plt.savefig("shap_summary.png", dpi=120, bbox_inches="tight")
-plt.close()
-```
-
-**Sampling rules of thumb:**
-
-| Dataset rows | SHAP sample size | Expected runtime |
-|---:|---:|---:|
-| ≤ 10,000 | full | < 30 s |
-| 10k–100k | 20,000 | 1–3 min |
-| 100k–1M | 50,000 | 3–10 min |
-| > 1M | 50,000 (≤ 5%) | 5–15 min |
-
-Larger samples rarely change the ranking; they only tighten the visual
-density of `summary_plot`.
-
-## Cross-Method Agreement Check
-
-The signal that matters is **all three methods agreeing**. Disagreement
-is itself a finding — report it, do not silently pick the winner.
-
-```python
-def rank_compare(*, gain, perm_mean, shap_mean, spearman_rho):
-    """Build a side-by-side rank table. Inputs are pd.Series indexed by feature."""
-    df = pd.DataFrame({
-        "spearman_|rho|": spearman_rho.abs(),
-        "xgb_gain":       gain,
-        "perm_importance": perm_mean,
-        "shap_|mean|":     shap_mean,
-    })
-    ranks = df.rank(ascending=False, method="min").astype(int)
-    ranks.columns = [f"rank_{c}" for c in df.columns]
-    out = pd.concat([df.round(4), ranks], axis=1).sort_values("rank_shap_|mean|")
-    return out
-
-table = rank_compare(
-    gain=gain,
-    perm_mean=perm_df.set_index("feature")["importance_mean"],
-    shap_mean=shap_global,
-    spearman_rho=df[features].corrwith(df[target], method="spearman"),
-)
-print(table.head(15).to_string())
-
-# Quantify agreement: Spearman correlation across the four ranking columns
-agreement = (table.filter(like="rank_").corr(method="spearman")
-                .round(3))
-print("\nRank-method agreement (Spearman):")
-print(agreement)
-```
-
-Interpretation:
-- **Off-diagonal > 0.8:** methods agree → ranking is robust to method choice.
-- **0.5–0.8:** mostly agree → report the consensus top-K, flag disagreements.
-- **< 0.5:** methods disagree → suspect non-linearity, feature interaction,
-  or one of the methods is misled. Investigate before publishing a ranking.
-
-**What consensus does and doesn't tell you:** strong agreement across the
-four lenses means the **ranking** is robust to method choice — not that
-the underlying relationship is causal. All four methods are different
-views of the same fitted model on the same data; they are correlated
-witnesses, not independent. To claim causation, see
-`root-cause-analysis.md` § 4 (DAG, DiD, refutation).
-
-## Interaction Detection
-
-When SHAP and linear β disagree on a feature's importance, the most common
-cause is an interaction effect. Check with SHAP dependence plots:
-
-```python
-# Top feature dependence — does its SHAP value depend on another feature?
-top_feature = shap_global.index[0]
-shap.dependence_plot(top_feature, shap_values, X_shap, show=False)
-plt.tight_layout(); plt.savefig(f"shap_dep_{top_feature}.png", dpi=120); plt.close()
-```
-
-For an explicit interaction-strength matrix (only on small data):
-
-```python
-# WARNING: O(n × features²) — use only when features ≤ 30 and rows ≤ 10,000
-if X_shap.shape[1] <= 30 and len(X_shap) <= 10_000:
-    shap_inter = explainer.shap_interaction_values(X_shap)
-    # off-diagonal magnitude = pairwise interaction strength
-    inter_mat = np.abs(shap_inter).mean(axis=0)
-    np.fill_diagonal(inter_mat, 0)
-    pairs = (pd.DataFrame(inter_mat, index=X_shap.columns, columns=X_shap.columns)
-             .stack().reset_index()
-             .rename(columns={"level_0":"a","level_1":"b",0:"interaction"})
-             .query("a < b").sort_values("interaction", ascending=False))
-    print(pairs.head(10).round(4))
-```
-
-For larger data, infer interactions qualitatively from `dependence_plot`
-color spread, then verify on a 10k subsample.
+The XGBoost baseline recipe, the three importance lenses (gain /
+permutation / SHAP), the cross-method agreement check, and interaction
+detection have moved to `importance-methods.md`. Run the diagnostics
+above first, then compute importance there.
 
 ## Anti-Patterns / Leakage
 
@@ -622,7 +343,7 @@ worthless. Check for each one before reporting.
 | Dropping rows with nulls when missingness correlates with target | Sample becomes biased; β reflects only respondents who answered | Run `null_audit()`; if `miss_target_rho >= 0.05`, use indicator+impute, never drop |
 | Reporting OLS β when VIF > 10 | β values flip sign or change magnitude across re-runs | Drop one of the redundant pair, OR switch to RidgeCV |
 | "Most important feature" is itself a rating-summary | Top driver is `OverallQual`/`Score`/`Rating` while per-component ratings (`KitchenQual`, `ExterQual`, …) sit just behind | Surface the redundancy: report the rating cluster as one composite, or run an importance pass with the summary feature removed to see what fills its place |
-| Reporting numeric-only VIF when categoricals exist | A numeric column with VIF ≈ 1 is silently bound to a categorical (e.g. Ames `Garage Yr Blt` ↔ `Garage Finish` at η² = 0.998) — its β looks meaningful but is uninterpretable | Run `mixed_type_vif()` and `cross_type_binding()` from `data-exploration.md` § 6; treat any source with max design-matrix VIF > 10 OR pairwise η² > 0.7 as collinear |
+| Reporting numeric-only VIF when categoricals exist | A numeric column with VIF ≈ 1 is silently bound to a categorical (e.g. Ames `Garage Yr Blt` ↔ `Garage Finish` at η² = 0.998) — its β looks meaningful but is uninterpretable | Run `mixed_type_vif()` and `cross_type_binding()` from `collinearity-diagnostics.md`; treat any source with max design-matrix VIF > 10 OR pairwise η² > 0.7 as collinear |
 
 The **first** anti-pattern is the most common in EDA: when the target is
 a survey scale or composite (stress, satisfaction, NPS, mental health

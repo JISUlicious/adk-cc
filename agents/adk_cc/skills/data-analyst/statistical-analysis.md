@@ -3,6 +3,18 @@
 You are an expert data analyst. Apply the following statistical techniques
 precisely using pandas >= 2.3 and scipy/numpy where needed.
 
+## Contents
+
+- Descriptive statistics
+- Aggregation
+- Distribution analysis (moments, normality, fit, ECDF)
+- Correlation analysis (Pearson / Spearman / Kendall)
+- Hypothesis testing
+- A/B test analysis
+- Cohort analysis
+- Ranking and percentiles
+- Summary statistics table (report-ready)
+
 ## Descriptive Statistics
 
 ```python
