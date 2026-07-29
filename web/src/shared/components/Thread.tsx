@@ -1,4 +1,7 @@
-import { type ReactNode } from "react"
+import { useState, type ReactNode } from "react"
+import { Play } from "lucide-react"
+import { downloadArtifact, isHtmlArtifact } from "@/shared/api/artifacts"
+import { HtmlArtifactPreview } from "./HtmlArtifactPreview"
 import { type RunEvent } from "@/shared/api/sse"
 import { MessageBubble } from "./MessageBubble"
 import { ToolResponseCard } from "./ToolResponseCard"
@@ -221,6 +224,15 @@ function Row({
           sessionId={sessionId}
           filename={row.filename}
           version={row.version}
+        />
+      )
+    case "run":
+      return (
+        <RunOutputsCard
+          appName={appName}
+          userId={userId}
+          sessionId={sessionId}
+          outputs={row.outputs}
         />
       )
     case "compaction":
@@ -458,6 +470,16 @@ type ChatRow =
       eventId: string
       filename: string
       version: number
+      /** Which invocation produced it — the key the run fold groups on. */
+      invocationId?: string
+    }
+  | {
+      // 3+ outputs from ONE invocation. Below that they stay as individual
+      // chips: W6.1 made a single chart preview immediately, and putting a
+      // click in front of that case would undo it.
+      kind: "run"
+      eventId: string
+      outputs: { filename: string; version: number }[]
     }
   | {
       kind: "compaction"
@@ -636,7 +658,10 @@ function flattenEvents(
         if (typeof filename !== "string" || !filename) continue
         const version = typeof ver === "number" ? ver : Number(ver)
         if (!Number.isFinite(version)) continue
-        rows.push({ kind: "artifact", eventId, filename, version })
+        rows.push({
+          kind: "artifact", eventId, filename, version,
+          invocationId: (e.invocation_id as string | undefined) ?? eventId,
+        })
       }
     }
 
@@ -727,5 +752,100 @@ function flattenEvents(
       }
     }
   }
-  return rows
+  return foldRuns(rows)
+}
+
+/**
+ * Collapse an invocation's outputs into ONE run row once there are 3+ (W6.3).
+ *
+ * Below three they stay individual chips: W6.1 made a single chart preview
+ * immediately, and putting a click in front of that case would undo it. At
+ * three or more the chips bury the narration they are interleaved with, and a
+ * "4 outputs from this run" card reads as the result of one piece of work —
+ * which is what it is.
+ *
+ * The collapsed card takes the position of the FIRST output, so the run appears
+ * where the work started rather than jumping to the end of the turn.
+ */
+function foldRuns(rows: ChatRow[]): ChatRow[] {
+  const byInvocation = new Map<string, number[]>()
+  rows.forEach((r, i) => {
+    if (r.kind !== "artifact") return
+    const key = r.invocationId || r.eventId
+    byInvocation.set(key, [...(byInvocation.get(key) ?? []), i])
+  })
+
+  const drop = new Set<number>()
+  const replace = new Map<number, ChatRow>()
+  for (const [inv, idxs] of byInvocation) {
+    if (idxs.length < 3) continue
+    const outputs: { filename: string; version: number }[] = []
+    for (const i of idxs) {
+      const r = rows[i] as Extract<ChatRow, { kind: "artifact" }>
+      const at = outputs.findIndex((o) => o.filename === r.filename)
+      if (at >= 0) outputs[at] = { filename: r.filename, version: r.version }
+      else outputs.push({ filename: r.filename, version: r.version })
+    }
+    // A run that rewrote one chart three times is still ONE output — leave
+    // those as chips rather than announcing a run that produced nothing new.
+    if (outputs.length < 3) continue
+    replace.set(idxs[0], { kind: "run", eventId: inv, outputs })
+    idxs.slice(1).forEach((i) => drop.add(i))
+  }
+  if (!replace.size) return rows
+  return rows.flatMap((r, i) => (drop.has(i) ? [] : [replace.get(i) ?? r]))
+}
+
+/**
+ * The collapsed form of a multi-output run, in the transcript.
+ *
+ * Deliberately not a preview: at 3+ outputs there is no single "the" chart to
+ * show, and rendering four sandboxed iframes inline is how a conversation
+ * becomes unscrollable. Names open on click; the Runs panel holds the same set
+ * for later.
+ */
+function RunOutputsCard({
+  appName, userId, sessionId, outputs,
+}: {
+  appName: string
+  userId: string
+  sessionId: string
+  outputs: { filename: string; version: number }[]
+}) {
+  const [open, setOpen] = useState<string | null>(null)
+  const version = outputs.find((o) => o.filename === open)?.version
+  return (
+    <div className="my-1 rounded-md border border-border bg-card/40 p-2 text-xs">
+      <div className="mb-1 flex items-center gap-1.5">
+        <Play className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="font-medium">{outputs.length} outputs from this run</span>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {outputs.map((o) => (
+          <button
+            key={o.filename}
+            type="button"
+            onClick={() =>
+              isHtmlArtifact(o.filename)
+                ? setOpen(open === o.filename ? null : o.filename)
+                : void downloadArtifact(appName, userId, sessionId, o.filename, o.version)
+            }
+            className="rounded border border-border px-1.5 py-0.5 font-mono text-[10px] hover:bg-accent"
+            title={isHtmlArtifact(o.filename) ? "Preview" : "Download"}
+          >
+            {o.filename}
+          </button>
+        ))}
+      </div>
+      {open && (
+        <HtmlArtifactPreview
+          appName={appName}
+          userId={userId}
+          sessionId={sessionId}
+          filename={open}
+          version={version}
+        />
+      )}
+    </div>
+  )
 }

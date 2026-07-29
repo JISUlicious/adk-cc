@@ -100,6 +100,11 @@ def test_candidate_extraction() -> None:
                                             {"stdout": "saved reports/eda.png"})
     # nothing previewable → no work at all
     assert _candidates("run_bash", {"command": "pytest -q"}, {"stdout": "3 passed"}) == []
+    # a report is an OUTPUT inside analysis/, and noise everywhere else — a
+    # README edit must not become an artifact chip.
+    assert _candidates("write_file", {"path": "analysis/eda.md"}, {}) == ["analysis/eda.md"]
+    assert _candidates("write_file", {"path": "README.md"}, {}) == []
+    assert _candidates("write_file", {"path": "analysis/metrics.csv"}, {}) == ["analysis/metrics.csv"]
     print("OK candidate_extraction")
 
 

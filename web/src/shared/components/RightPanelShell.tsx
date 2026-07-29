@@ -19,6 +19,9 @@ export type RightPanelProps = {
   /** Called after the panel restores a checkpoint, so ChatPage can reload the
    * thread (a rewind rolls back the conversation too, not just files). */
   onRestored?: () => void
+  /** The session's events. The Runs section groups outputs by the invocation
+   * that produced them, which is derivable from these — no extra endpoint. */
+  events?: unknown[]
 }
 
 const COLLAPSE_KEY = "adk_cc.rightPanel.collapsed"

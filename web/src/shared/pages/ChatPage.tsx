@@ -636,6 +636,7 @@ export function ChatPage({
           appName={appName}
           userId={userId}
           sessionId={session.id}
+          events={events}
           open={rightPanelOpen}
           onClose={() => setRightPanelOpen(false)}
           refreshKey={refreshTick}

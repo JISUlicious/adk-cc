@@ -33,6 +33,8 @@ import { RightPanelShell, type RightPanelProps } from "@/shared/components/Right
 import { SandboxedHtml } from "@/shared/components/SandboxedHtml"
 import { Database } from "lucide-react"
 import { listProjects } from "@/shared/api/projects"
+import { RunsSection } from "@/shared/components/RunsSection"
+import { collectRuns } from "@/shared/lib/runs"
 import { pickFile } from "@/shared/lib/tauri"
 import {
   listDatasets, addDatasetFromPath, profileDataset,
@@ -91,12 +93,14 @@ function middleEllipsis(path: string, max = 46): string {
 }
 
 export function FileTreeSidePanel({
+  appName,
   userId: projectId,
   sessionId,
   open,
   onClose,
   refreshKey,
   onRestored,
+  events,
 }: RightPanelProps) {
   // Loaded directory listings, keyed by relative path ("" = root).
   const [dirs, setDirs] = useState<Record<string, DirEntry[]>>({})
@@ -121,6 +125,11 @@ export function FileTreeSidePanel({
   // tree is relative to it, and "which directory am I actually in" was
   // otherwise unanswerable from this panel.
   const [projectPath, setProjectPath] = useState<string | null>(null)
+  // Files sitting in analysis/ that belong to no run — over the artifact size
+  // cap, or written where the artifact plugin's candidate scan never looked.
+  // Counted by NAME set-difference: the tree API returns no mtime, so pairing
+  // them to a run by time would be invention, not evidence.
+  const [unlinkedOutputs, setUnlinkedOutputs] = useState(0)
   const [canUndo, setCanUndo] = useState(false)
   // Non-null when checkpointing can't work for this project (remote device
   // without git) — shown as the Undo tooltip so the dead button explains itself.
@@ -312,6 +321,19 @@ export function FileTreeSidePanel({
     return () => { live = false }
   }, [projectId])
 
+  useEffect(() => {
+    if (!projectId || !sessionId) return
+    const produced = new Set(
+      collectRuns((events ?? []) as never[]).flatMap((r) => r.outputs.map((o) => o.filename)),
+    )
+    listDir(projectId, sessionId, "analysis")
+      .then((r) => {
+        const files = (r.entries ?? []).filter((e) => e.type === "file")
+        setUnlinkedOutputs(files.filter((f) => !produced.has(f.name)).length)
+      })
+      .catch(() => setUnlinkedOutputs(0))   // no analysis/ dir yet — nothing to say
+  }, [projectId, sessionId, events, refreshKey])
+
   const reloadDatasets = useCallback(() => {
     if (!projectId || !sessionId) return
     listDatasets(projectId, sessionId)
@@ -494,6 +516,13 @@ export function FileTreeSidePanel({
       onClose={onClose}
       headerRight={headerRight}
     >
+      <RunsSection
+        appName={appName}
+        userId={projectId}
+        sessionId={sessionId}
+        events={events ?? []}
+        unlinkedCount={unlinkedOutputs}
+      />
       <div className="mb-2 border-b border-border/50 pb-2">
         <div className="flex items-center gap-1.5 px-1">
           <Database className="h-3.5 w-3.5 text-muted-foreground" />

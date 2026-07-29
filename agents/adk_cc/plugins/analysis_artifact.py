@@ -59,9 +59,18 @@ _WRITING_TOOLS = frozenset({
 
 _PREVIEWABLE = (".html", ".htm", ".png", ".svg", ".jpg", ".jpeg", ".webp", ".pdf")
 
+# Outputs that are not previewable but ARE results: an EDA write-up, a VIF
+# table, a metrics CSV. Registered ONLY under the outputs directory — extending
+# the list globally would turn every README or plan edit into an artifact chip,
+# which is noise. Inside `analysis/` the intent is unambiguous: the agent put a
+# result there.
+_RESULT_EXT = (".md", ".csv", ".tsv", ".json", ".txt")
+_OUTPUT_DIR = "analysis"
+
 # Paths as they appear in a command line or in stdout.
 _PATH_RE = re.compile(
-    r"[\w./\-]+\.(?:html?|png|svg|jpe?g|webp|pdf)\b", re.IGNORECASE
+    r"[\w./\-]+\.(?:html?|png|svg|jpe?g|webp|pdf|md|csv|tsv|json|txt)\b",
+    re.IGNORECASE,
 )
 
 _STATE_SEEN = "temp:analysis_artifacts_seen"
@@ -91,13 +100,21 @@ def _text_of(value: Any) -> str:
     return ""
 
 
+def _is_output(path: str) -> bool:
+    """Previewable anywhere, or a result file inside the outputs directory."""
+    low = path.lower()
+    if low.endswith(_PREVIEWABLE):
+        return True
+    return low.endswith(_RESULT_EXT) and f"{_OUTPUT_DIR}/" in low.replace("\\", "/")
+
+
 def _candidates(tool_name: str, args: dict, result: Any) -> list[str]:
     """Paths this call might have written, newest-looking first."""
     out: list[str] = []
     args = args or {}
     for key in ("path", "file_path", "output", "filename"):
         v = args.get(key)
-        if isinstance(v, str) and v.lower().endswith(_PREVIEWABLE):
+        if isinstance(v, str) and _is_output(v):
             out.append(v)
     haystack = " ".join([
         str(args.get("command") or ""),
@@ -105,7 +122,8 @@ def _candidates(tool_name: str, args: dict, result: Any) -> list[str]:
         _text_of(result),
     ])
     for m in _PATH_RE.finditer(haystack):
-        out.append(m.group(0))
+        if _is_output(m.group(0)):
+            out.append(m.group(0))
     # preserve order, drop duplicates
     seen, uniq = set(), []
     for p in out:

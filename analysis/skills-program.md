@@ -521,8 +521,36 @@ Build on it rather than inventing a viewer.
    (`tests/e2e_dataset_profile.py`, 9 checks — exact row count, pandas dtypes,
    50 counted nulls, real head rows, cache hit, 404/400 paths) and in the
    browser (`tests/e2e_datasets_ui.py`).
-3. **Analysis run view** — group a run's outputs (EDA report, VIF table, SHAP
-   plot, RCA timeline) instead of scattering files.
+3. **Analysis run view** ✅ 2026-07-29 — a turn's outputs read as one piece of
+   work instead of four unrelated chips scattered through its narration.
+
+   A **run** is one invocation that produced at least one output. Both facts
+   are already in the events the UI loads (`invocation_id` +
+   `actions.artifactDelta`), so this needed **no new endpoint** and cannot
+   drift from what the chat shows — it reads the same source. The run's LABEL
+   is the user's own message, which is what makes a list of outputs usable:
+   "revenue by region" tells you what `dashboard.html` is; the filename does
+   not.
+
+   - **In chat**: 1–2 outputs keep the inline chips with auto-preview (W6.1
+     made a single chart immediate; a click in front of that would undo it).
+     3+ collapse into one card. A run that rewrote the SAME chart three times
+     stays chips — three versions of one file is one output, not a run worth
+     announcing.
+   - **In the panel**: a Runs section above the file tree, newest first,
+     newest auto-expanded. It answers what the tree cannot: the tree knows
+     `analysis/dashboard.html` exists, not that it came from the turn where you
+     asked about revenue.
+   - **Unlinked files**: counted by NAME set-difference against `analysis/`,
+     shown as "N files not linked to a run". The tree API returns no mtime, so
+     pairing them to a run by time would be invention.
+
+   Scope change the live test forced: the artifact plugin only registered
+   *previewable* files, so a run's `.md` report and `.csv` table — half of what
+   W6.3 exists to group — were invisible. Result files now register too, but
+   ONLY under `analysis/`: widening the extension list globally would have made
+   every README edit an artifact chip. `tests/e2e_run_view_ui.py` (live, 4
+   checks) drives a real 4-output turn end to end.
 4. **Table rendering** ✅ 2026-07-29 — markdown tables render through
    `MarkdownTable`: click-to-sort (asc → desc → back to the agent's order,
    because for many tables the order IS the answer), a sticky header, numeric
