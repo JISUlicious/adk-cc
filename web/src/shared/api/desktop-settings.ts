@@ -347,3 +347,19 @@ export function profileDataset(
     `/desktop/datasets/${encodeURIComponent(name)}/profile?${dsq(projectId, sessionId)}`,
   )
 }
+
+// ---- analysis runtime (W6.5) ----
+export type AnalysisEnvStatus = {
+  state: "ready" | "provisioning" | "absent" | "off" | "external" | "unknown"
+  tiers?: string[]
+  python?: string
+  seconds?: number
+  detail?: string
+}
+/** Read-only: polling this must never trigger provisioning. */
+export function analysisEnvStatus(
+  projectId: string,
+  sessionId: string,
+): Promise<AnalysisEnvStatus> {
+  return apiFetch(`/desktop/analysis-env?${dsq(projectId, sessionId)}`)
+}

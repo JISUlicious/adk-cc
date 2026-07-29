@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import shlex
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -46,6 +47,15 @@ _log = logging.getLogger(__name__)
 # Env dir, relative to the workspace root (see module docstring on why).
 _ENV_REL = ".adk-cc/analysis-env"
 _MARKER_REL = f"{_ENV_REL}/.adk-cc-tiers"
+# Written while an install is in flight and removed after, so the UI can say
+# "provisioning" instead of showing a silent 20-60s stall. Provisioning is
+# triggered by whatever needs the env first — often a TURN, not the UI — so a
+# request-scoped spinner would miss it; the state has to live in the workspace.
+# NOTE the path: OUTSIDE the env dir. Writing the sentinel inside it created
+# `.adk-cc/analysis-env/` before `uv venv` ran, and uv refuses to build into an
+# existing directory ("Use --clear ... to replace it") — so the sentinel broke
+# the very provisioning it was reporting on.
+_BUSY_REL = ".adk-cc/.analysis-env-provisioning"
 
 _DEFAULT_PYTHON = "3.12"
 
@@ -222,6 +232,15 @@ async def ensure_env(
     return env
 
 
+async def _clear_busy(backend: SandboxBackend, ws: WorkspaceRoot) -> None:
+    """Drop the provisioning sentinel. Best-effort: a stale one degrades the
+    chip to 'provisioning' forever, which is why `status()` also ages it out."""
+    try:
+        await _exec(backend, ws, f"rm -f {shlex.quote(_BUSY_REL)}", timeout_s=15)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def _provision(
     backend: SandboxBackend,
     ws: WorkspaceRoot,
@@ -274,10 +293,26 @@ async def _provision(
             f"install the {', '.join(sorted(set(tiers) - set(already)))} package tier(s)",
         ))
 
+    busy = os.path.join(ws.abs_path, _BUSY_REL)
+    if steps:
+        try:
+            await backend.write_text(
+                busy,
+                ",".join(sorted(set(tiers) - set(already))) or "base",
+                fs_write=ws.fs_write_config(),
+            )
+        except Exception:  # noqa: BLE001 — a status hint must never block work
+            pass
+
     for cmd, what in steps:
         _log.info("analysis env: %s", what)
-        res = await _exec(backend, ws, cmd, timeout_s=_install_timeout_s())
+        try:
+            res = await _exec(backend, ws, cmd, timeout_s=_install_timeout_s())
+        except BaseException:
+            await _clear_busy(backend, ws)
+            raise
         if res.exit_code != 0:
+            await _clear_busy(backend, ws)
             tail = ((res.stderr or res.stdout or "").strip() or "(no output)")[-1500:]
             raise AnalysisEnvError(
                 f"Failed to {what} for the analysis environment.\n\n{tail}\n\n"
@@ -285,6 +320,7 @@ async def _provision(
                 "interpreter you control."
             )
 
+    await _clear_busy(backend, ws)
     # Marker last: a crash mid-install must not look like a complete env.
     await backend.write_text(
         os.path.join(ws.abs_path, _MARKER_REL),
@@ -292,3 +328,59 @@ async def _provision(
         fs_write=ws.fs_write_config(),
     )
     _log.info("analysis env ready (tiers: %s)", ", ".join(sorted(tiers)) or "base")
+
+
+# --- read-only status (W6.5) ------------------------------------------------
+
+_BUSY_STALE_S = 30 * 60
+
+
+def status(workspace_root: str) -> dict:
+    """What state the analysis env is in, WITHOUT provisioning anything.
+
+    Deliberately a plain filesystem read: the UI polls this, and a status call
+    that could trigger a 60s install (or block on a sandbox round trip) would be
+    worse than no chip at all. Reads the same marker `ensure_env` writes, so it
+    cannot drift from the truth it reports.
+    """
+    mode = _mode()
+    if mode == "off":
+        return {"state": "off", "detail": "using bare python3 (ADK_CC_ANALYSIS_ENV=off)"}
+    if mode not in ("auto",):
+        return {"state": "external", "python": mode,
+                "detail": "operator-supplied interpreter"}
+
+    root = Path(workspace_root)
+    busy = root / _BUSY_REL
+    try:
+        if busy.is_file():
+            import time as _time
+
+            age = _time.time() - busy.stat().st_mtime
+            if age < _BUSY_STALE_S:
+                return {
+                    "state": "provisioning",
+                    "tiers": [t for t in busy.read_text().strip().split(",") if t],
+                    "seconds": int(age),
+                    "detail": "installing packages — first use in this project",
+                }
+    except OSError:
+        pass
+
+    marker = root / _MARKER_REL
+    interpreter = root / _ENV_REL / "bin" / "python"
+    try:
+        if not interpreter.exists():
+            return {"state": "absent",
+                    "detail": "provisions on first analysis in this project"}
+        token = marker.read_text().strip() if marker.is_file() else ""
+    except OSError as e:
+        return {"state": "unknown", "detail": str(e)}
+
+    tiers = [t for t in token.split("|")[0].split(",") if t] if token else []
+    return {
+        "state": "ready",
+        "tiers": tiers or ["base"],
+        "python": f"{_ENV_REL}/bin/python",
+        "detail": ("ready: " + ", ".join(tiers)) if tiers else "interpreter only",
+    }

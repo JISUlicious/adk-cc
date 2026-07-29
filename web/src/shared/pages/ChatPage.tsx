@@ -42,6 +42,7 @@ import {
   type TurnError,
 } from "@/shared/api/turns"
 import { ModelChip } from "@/shared/components/ModelChip"
+import { AnalysisEnvChip } from "@/shared/components/AnalysisEnvChip"
 import { ModelPicker } from "@/shared/components/ModelPicker"
 import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/shared/lib/theme"
 
@@ -596,12 +597,23 @@ export function ChatPage({
           footer={session ? <ContextGauge current={ctxTokens} limits={ctxLimits} /> : undefined}
           taskStrip={session ? <TaskStrip events={events} /> : undefined}
           modelChip={IS_DESKTOP ? (
-            <ModelChip
-              pinnedModel={pinnedModel}
-              refreshKey={modelTick}
-              interactive={!!(session && appName)}
-              onClick={() => setModelPickerOpen(true)}
-            />
+            <>
+              <ModelChip
+                pinnedModel={pinnedModel}
+                refreshKey={modelTick}
+                interactive={!!(session && appName)}
+                onClick={() => setModelPickerOpen(true)}
+              />
+              {/* W1's analysis runtime, beside the model it runs alongside.
+                  Renders nothing unless there is something to say. */}
+              {session && (
+                <AnalysisEnvChip
+                  projectId={userId}
+                  sessionId={session.id}
+                  refreshKey={refreshTick}
+                />
+              )}
+            </>
           ) : undefined}
         />
       </div>

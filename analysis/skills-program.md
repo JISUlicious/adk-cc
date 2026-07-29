@@ -525,8 +525,32 @@ Build on it rather than inventing a viewer.
    plot, RCA timeline) instead of scattering files.
 4. **Table rendering** — dataframes as real tables (sortable, sticky header),
    not markdown blobs.
-5. **Env status chip** — analysis-env state (provisioning / ready / tier
-   missing) beside the model chip, so W1 failures are legible.
+5. **Env status chip** ✅ 2026-07-29 — the analysis runtime beside the model
+   chip, so W1's behaviour stops being invisible. The first analysis in a
+   project spends 20-60s installing packages (the dataset browser's cold
+   profile measured 14-23s) with nothing on screen explaining the wait, and a
+   FAILED provision — no `uv` on PATH, a resolver error — surfaced only as a
+   tool error deep inside a turn.
+
+   States: `absent` ("analysis env not built yet"), `provisioning` (spinner +
+   elapsed seconds), `ready` (names the installed tiers), `unknown`
+   (unavailable, in destructive red). Deliberately silent when there is nothing
+   to say — an operator-supplied interpreter, `ADK_CC_ANALYSIS_ENV=off`, or a
+   base-only env renders no chip; the composer row is not a dashboard.
+
+   `analysis_env.status()` is a plain filesystem read of the marker
+   `ensure_env` writes, so it cannot drift from the truth it reports and — the
+   contract the test pins — polling it never triggers the install it describes.
+   Provisioning is observable via a sentinel file written around the install,
+   because provisioning is usually triggered by a TURN, where a request-scoped
+   spinner would never see it.
+
+   One bug worth recording: the sentinel first lived INSIDE the env directory,
+   which created `.adk-cc/analysis-env/` before `uv venv` ran — and uv refuses
+   to build into an existing directory, so the status hint broke the very
+   provisioning it was reporting on. Caught by `test_analysis_env`, not by the
+   UI test. `tests/e2e_analysis_env_chip.py` covers all three visible states in
+   a browser.
 6. **Skill discoverability** — surface available skills in the UI; today the
    only path is the model calling `list_skills`.
 7. **KO/EN parity** — if the Korean variant ships, follow the UI locale.

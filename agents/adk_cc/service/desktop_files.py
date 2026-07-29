@@ -488,6 +488,16 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
             raise HTTPException(status_code=400, detail=str(e))
         return {"status": "ok", "dataset": row}
 
+    @app.get("/desktop/analysis-env", include_in_schema=False)
+    async def analysis_env_status(request: Request):  # noqa: ANN202
+        """State of the uv-managed analysis runtime for this workspace.
+
+        Read-only by construction — polling must never kick off a 60s install.
+        """
+        from ..sandbox.analysis_env import status as env_status
+
+        return env_status(str(_root(request)))
+
     @app.get("/desktop/datasets/{name}/profile", include_in_schema=False)
     async def profile_dataset(name: str, request: Request):  # noqa: ANN202
         """Shape, dtypes, null counts and head — what an analyst checks first.
