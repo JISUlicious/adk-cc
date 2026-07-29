@@ -253,8 +253,23 @@ MODEL = _make_model()
 # Default `bypassPermissions` preserves the dev experience: permissions
 # plugin is always loaded (so audit/quota/etc can layer on top) but only
 # enforces deny rules. Flip via env to exercise plan/default/acceptEdits/dontAsk.
+#
+# The DESKTOP app defaults to `acceptEdits` instead. Bypass is not the blanket
+# it sounds like — deny rules, secret material (1b), catastrophic commands (1c),
+# dangerous commands (1e) and bash writing outside the project (1f) all still
+# fire ahead of the bypass short-circuit. What it uniquely gives up is Step 2c:
+# protected shell/tool config (~/.zshrc, ~/.gitconfig, ~/.npmrc, .git/config)
+# yields instead of asking. Step 1f covers run_bash only, so `write_file` to a
+# shell rc lands silently while `echo >> ~/.zshrc` still prompts — a persistence
+# foothold worth one click in a packaged app. `acceptEdits` keeps in-project
+# edits and benign commands prompt-free, so the day-to-day feel is unchanged.
+_DEFAULT_PERMISSION_MODE = (
+    PermissionMode.ACCEPT_EDITS
+    if deployment.is_desktop()
+    else PermissionMode.BYPASS_PERMISSIONS
+)
 PERMISSION_MODE = PermissionMode(
-    os.environ.get("ADK_CC_PERMISSION_MODE", PermissionMode.BYPASS_PERMISSIONS.value)
+    os.environ.get("ADK_CC_PERMISSION_MODE", _DEFAULT_PERMISSION_MODE.value)
 )
 # Permission rules: honor ADK_CC_PERMISSIONS_YAML if set. Falls back to
 # empty hierarchy so operators can still drive everything through

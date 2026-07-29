@@ -220,7 +220,9 @@ FIELDS: list[Var] = [
 
     # --- Permissions -----------------------------------------------------
     Var("ADK_CC_PERMISSION_MODE", Tier.COMMON, "Permissions",
-        "default | plan | acceptEdits | bypassPermissions | dontAsk. Dev default: bypassPermissions.",
+        "default | plan | acceptEdits | bypassPermissions | dontAsk. Dev default: "
+        "bypassPermissions; the desktop app defaults to acceptEdits so protected "
+        "shell config (~/.zshrc, ~/.gitconfig, .git/config) still asks.",
         default="bypassPermissions",
         choices=("default","plan","acceptEdits","bypassPermissions","dontAsk")),
     Var("ADK_CC_PERMISSIONS_YAML", Tier.COMMON, "Permissions",

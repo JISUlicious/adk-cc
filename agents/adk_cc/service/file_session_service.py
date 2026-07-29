@@ -57,6 +57,26 @@ _log = logging.getLogger(__name__)
 _SCHEME = "adkccfiles"
 
 
+def _stamp_permission_mode(session_state: dict[str, Any]) -> None:
+    """Record the permission mode a new session starts in.
+
+    A fresh chat used to inherit whatever the process default was with nothing
+    in session state saying so, which had two costs: the composer could not show
+    the mode until some tool wrote it, and changing the env under a running
+    install silently moved every existing session. Stamping at creation makes it
+    visible and pins it, while an explicit mode in the create request still wins
+    (the caller asked for it on purpose).
+    """
+    if session_state.get("permission_mode"):
+        return
+    try:
+        from ..agent import PERMISSION_MODE
+
+        session_state["permission_mode"] = PERMISSION_MODE.value
+    except Exception:  # noqa: BLE001 — a session must never fail to create
+        _log.debug("could not stamp permission mode", exc_info=True)
+
+
 def _safe(value: str, label: str) -> str:
     """Reject an id that isn't plain alnum/-/_ — these become path segments, so a
     crafted app_name/user_id/session_id must never escape the base dir."""
@@ -203,7 +223,7 @@ class FileSessionService(BaseSessionService):
 
     # --- BaseSessionService contract ----------------------------------
 
-    async def create_session(
+    async def create_session(  # noqa: D401 — see _stamp_permission_mode
         self,
         *,
         app_name: str,
@@ -212,6 +232,7 @@ class FileSessionService(BaseSessionService):
         session_id: Optional[str] = None,
     ) -> Session:
         deltas = _session_util.extract_state_delta(state or {})
+        _stamp_permission_mode(deltas["session"])
         async with self._shared_lock:
             if deltas["app"]:
                 self._merge_app_state(deltas["app"])
