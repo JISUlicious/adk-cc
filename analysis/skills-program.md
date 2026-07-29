@@ -640,7 +640,7 @@ Build on it rather than inventing a viewer.
    built-ins and their descriptions are present.
 7. **KO/EN parity** — if the Korean variant ships, follow the UI locale.
 
-## W7 — Verification ⬜
+## W7 — Verification 🔨 acceptance done 2026-07-29
 
 - **Unit**: analysis-env resolution + tier install (mocked); dataset guard;
   discovery (built-ins load; project skill of the same name overrides;
@@ -648,9 +648,32 @@ Build on it rather than inventing a viewer.
 - **Budget regression**: `list_skills` payload stays under a pinned ceiling
   (~2K tokens) — the guard against skill sprawl.
 - **Packaging**: the installed package really contains the SKILL.md files.
-- **Acceptance**: run pd-skills' own diagnostics probes
-  (`null_collinearity_probe.py`, `mixed_type_vif_test.py`, …) — **first-party
-  tests already exist; use them.**
+- **Acceptance** ✅ 2026-07-29 — `scripts/acceptance_secom.py`, run end to end
+  against **UCI SECOM**: 1,567 semiconductor wafer runs × 590 process sensors,
+  41,951 missing readings, 116 constant sensors, 6.6% failures.
+
+  Chosen because it is nasty in the ways real fab data is nasty, and because it
+  contains a trap worth failing: testing 460 sensors at α=0.05 gives **80
+  "significant" results, of which 6 survive Bonferroni**. An agent that reports
+  the 80 is confidently wrong in exactly the way `statistical-testing` exists to
+  prevent.
+
+  **14/14, and the analysis survived independent reproduction.** The agent chose
+  Mann-Whitney U + Benjamini-Hochberg over the Welch + Bonferroni used for
+  ground truth — defensible for skewed sensor data — and reported 20 sensors at
+  q<0.05. Reproducing ITS method gave 21 (one boundary case), the same top-8
+  ordering, and missingness figures that matched exactly (538/590 sensors with
+  nulls; sensor_248/520 at 45.6%; sensor_112 at 65.0%). It volunteered the
+  missingness caveat unprompted, wrote per-sensor results to a CSV, and produced
+  a self-contained HTML chart. It never reported the naive 80.
+
+  Covered in one pass: W1 (env provisioned in 14s), W5 (5.3MB ingest), W6.2
+  (exact row count + 593 columns profiled on a wide file), W3 (skill selection
+  and statistical discipline), W6.1/6.3 (outputs registered and rendering).
+
+- **Still open**: pd-skills' own probes (`null_collinearity_probe.py`,
+  `mixed_type_vif_test.py`) are NOT in the vendored copy — it ships SKILL.md +
+  13 references only. Running them needs the upstream repo.
 - **Live UI e2e** (standing practice): load a real CSV → ask for EDA → assert a
   Plotly artifact renders, VIF/SHAP output appears, no console errors,
   screenshot. Plus one adopted skill (contract review over a sample NDA,

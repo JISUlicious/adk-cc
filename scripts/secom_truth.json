@@ -1,0 +1,38 @@
+{
+ "rows": 1567,
+ "sensors": 590,
+ "null_cells": 41951,
+ "constant_sensors": 116,
+ "fail_rate_pct": 6.64,
+ "tests_run": 460,
+ "bonferroni_alpha": 0.00010869565217391305,
+ "significant_uncorrected": 80,
+ "significant_bonferroni": 6,
+ "top5": [
+  {
+   "sensor": "sensor_130",
+   "p": 6.837902639643088e-08,
+   "cohens_d": 0.478
+  },
+  {
+   "sensor": "sensor_060",
+   "p": 2.627137969494079e-07,
+   "cohens_d": 0.59
+  },
+  {
+   "sensor": "sensor_104",
+   "p": 6.059669465978069e-07,
+   "cohens_d": 0.571
+  },
+  {
+   "sensor": "sensor_029",
+   "p": 1.8763301250648423e-05,
+   "cohens_d": -0.444
+  },
+  {
+   "sensor": "sensor_317",
+   "p": 8.276539318544991e-05,
+   "cohens_d": -0.384
+  }
+ ]
+}
