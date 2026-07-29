@@ -89,6 +89,14 @@ def main() -> int:
                   for f in ((e.get("actions") or {}).get("artifactDelta") or {})]
         check("the turn produced 3+ registered outputs", len(set(deltas)) >= 3,
               f"{sorted(set(deltas))}")
+        # How the outputs are distributed across events/invocations decides
+        # whether the chat can fold them — print it rather than guess later.
+        for e in sess["events"]:
+            d = (e.get("actions") or {}).get("artifactDelta") or {}
+            if d:
+                print(f"    event {str(e.get('id'))[:8]} "
+                      f"inv={str(e.get('invocationId') or e.get('invocation_id'))[:12]} "
+                      f"-> {list(d)}")
 
         with sync_playwright() as pw:
             b = pw.chromium.launch(headless=True)

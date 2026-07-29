@@ -45,6 +45,10 @@ export interface RunEvent {
   }
   partial?: boolean
   invocationId?: string
+  /** Same field, snake_case: the session-history API serialises it that way
+   *  while the SSE stream uses the camelCase alias. Readers must accept both —
+   *  taking only one silently ungrouped a run's outputs. */
+  invocation_id?: string
   actions?: Record<string, unknown>
   // ... ADK adds many more; we accept them.
   [key: string]: unknown

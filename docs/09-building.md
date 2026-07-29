@@ -115,7 +115,16 @@ done
   model-free and skip cleanly when a prerequisite is missing (`web/dist-desktop`
   absent, Playwright not installed).
 - `ADK_CC_LIVE=1 tests/e2e_*.py` — the subset that spends a real model turn.
-  Opt-in, because the endpoint is rate-limited: pace them, don't loop them.
+  Opt-in. Pacing depends on the ENDPOINT: the ChatGPT-subscription path these
+  tests pin (`chatgpt-codex/gpt-5.4-mini`) has no practical limit, so repeat
+  runs are fine; API-key endpoints do, and want `ADK_CC_MODEL_MAX_RPM` rather
+  than ad-hoc sleeps.
+
+  Run them repeatedly when a UI assertion depends on how the agent happens to
+  behave. The run-view test passed, failed, then passed on identical code —
+  because the model sometimes emits four artifacts in ONE event and sometimes
+  in four, and only the second shape exercised the grouping path. One green run
+  would have shipped the bug.
 
 ### The env trap that has bitten every live test here
 

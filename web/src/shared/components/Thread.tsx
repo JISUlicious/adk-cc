@@ -531,7 +531,10 @@ function dedupePartials(events: RunEvent[]): RunEvent[] {
   >()
 
   for (const e of events) {
-    const key = `${e.invocation_id ?? ""}::${e.author ?? ""}`
+    // Same both-spellings rule as above: with only snake_case this key
+    // collapsed to "::author" whenever the stream used camelCase, quietly
+    // degrading per-invocation dedupe to per-author.
+    const key = `${e.invocation_id ?? e.invocationId ?? ""}::${e.author ?? ""}`
 
     if (e.partial) {
       let deltaText = ""
@@ -660,7 +663,13 @@ function flattenEvents(
         if (!Number.isFinite(version)) continue
         rows.push({
           kind: "artifact", eventId, filename, version,
-          invocationId: (e.invocation_id as string | undefined) ?? eventId,
+          // BOTH spellings: the session API serialises snake_case while the
+          // SSE stream aliases to camelCase, and reading only one silently
+          // ungrouped the outputs — a live run whose four artifacts arrived in
+          // four events showed four chips instead of one run card, while a run
+          // that happened to emit them in ONE event folded correctly.
+          invocationId:
+            ((e.invocation_id ?? e.invocationId) as string | undefined) ?? eventId,
         })
       }
     }
