@@ -272,9 +272,13 @@ def test_extract_user_comment_helper() -> None:
 
 def test_approval_payload_has_approve_deny_with_comment() -> None:
     """`_approval_payload` returns a ConfirmPrompt-shaped dict with the
-    two approve/deny options + with_comment=True so the bundled form-UI
+    approve/revise/deny options + with_comment=True so the bundled form-UI
     plugin renders a textbox. Also carries `plan_summary` for any
-    frontend that wants to render it separately from `detail`."""
+    frontend that wants to render it separately from `detail`.
+
+    `revise` was added (2026-07-29) because approve/deny left no way to say
+    "close, but change this": denying to ask for a change reads as rejection
+    and tells the model to stop rather than iterate."""
     tool = ExitPlanModeTool(default_mode="plan")
     payload = tool._approval_payload(ExitPlanModeArgs(plan_summary="rewrite the auth middleware"))
     assert payload["style"] == "single_select", payload
@@ -282,7 +286,7 @@ def test_approval_payload_has_approve_deny_with_comment() -> None:
     assert payload["detail"] == "rewrite the auth middleware", payload
     assert payload["with_comment"] is True, payload
     ids = [opt["id"] for opt in payload["options"]]
-    assert ids == ["approve", "deny"], ids
+    assert ids == ["approve", "revise", "deny"], ids
     # Plan summary is also surfaced verbatim for frontends that want
     # to render the plan body distinct from `detail`.
     assert payload["plan_summary"] == "rewrite the auth middleware", payload

@@ -1,11 +1,12 @@
-import { Rocket, Ban, Info } from "lucide-react"
+import { Rocket, Ban, Info, PencilLine } from "lucide-react"
 
 /**
  * Renders the RESOLVED outcome of an `exit_plan_mode` call.
  *
  *   args:     { plan_summary: str }
  *   response: { status, plan_summary?, user_comment?, message? }
- *     status ∈ "awaiting_user_confirmation" | "approved" | "denied" | "noop"
+ *     status ∈ "awaiting_user_confirmation" | "approved" | "revision_requested"
+ *              | "denied" | "noop"
  *
  * A dedicated, NON-groupable card (see `isGroupableToolRow` in Thread.tsx) so
  * the plan-mode hand-off never folds into a "N tool calls" group and hides the
@@ -13,9 +14,9 @@ import { Rocket, Ban, Info } from "lucide-react"
  *
  * While the approval is still pending (`awaiting_user_confirmation`, or no
  * response yet) this renders NOTHING — the separate "Exit plan mode?"
- * ConfirmationCard owns that state (it carries the Approve/Deny buttons + the
- * summary). This card only shows the settled result, so there's no redundant
- * or wrongly-labelled card next to the confirmation.
+ * ConfirmationCard owns that state (it carries the Approve / Revise / Deny
+ * buttons + the summary). This card only shows the settled result, so there's
+ * no redundant or wrongly-labelled card next to the confirmation.
  */
 
 interface ExitResp {
@@ -44,6 +45,9 @@ export function ExitPlanCard({
   const summary = r?.plan_summary ?? a.plan_summary ?? ""
   const approved = status === "approved"
   const denied = status === "denied"
+  // "Revise" is neither: the plan stands, the user wants it changed, and the
+  // model is expected to come back with an updated one.
+  const revising = status === "revision_requested"
 
   const { Icon, label, accent, badge, badgeTone } = approved
     ? {
@@ -52,6 +56,14 @@ export function ExitPlanCard({
         accent: "text-primary",
         badge: "approved",
         badgeTone: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+      }
+    : revising
+    ? {
+        Icon: PencilLine,
+        label: "Revision requested — still in plan mode",
+        accent: "text-sky-600 dark:text-sky-400",
+        badge: "revising",
+        badgeTone: "bg-sky-500/15 text-sky-700 dark:text-sky-300",
       }
     : denied
       ? {

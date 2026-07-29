@@ -96,7 +96,35 @@ async def _run_all() -> None:
 
 def main() -> None:
     asyncio.run(_run_all())
+    test_title_is_not_doubled_when_the_delegate_repeats_itself()
     print("\nall session-title non-blocking tests passed")
+
+
+
+
+def test_title_is_not_doubled_when_the_delegate_repeats_itself() -> None:
+    """The chatgpt-codex delegate yields the COMPLETE response more than once
+    even at stream=False. `raw += p.text` then titled sessions "Plan XPlan X"
+    — visible in the rail and the chat header. Same failure the memory capture
+    hit; same fix (partials accumulate, complete responses replace)."""
+    import asyncio
+
+    from google.genai import types
+    from google.adk.models.llm_response import LlmResponse
+
+    from adk_cc.plugins.session_title import SessionTitlePlugin
+
+    class _EchoTwice:
+        async def generate_content_async(self, req, stream=False):
+            for _ in range(2):                      # the observed behaviour
+                yield LlmResponse(content=types.Content(
+                    role="model", parts=[types.Part(text="Plan Verbose CLI Flag")]),
+                    partial=False)
+
+    plugin = SessionTitlePlugin()
+    title = asyncio.run(plugin._generate(_EchoTwice(), "prompt"))
+    assert title == "Plan Verbose CLI Flag", repr(title)
+    print("OK title_is_not_doubled_when_the_delegate_repeats_itself")
 
 
 if __name__ == "__main__":

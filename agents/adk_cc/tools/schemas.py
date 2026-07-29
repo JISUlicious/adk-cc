@@ -154,6 +154,16 @@ class WritePlanArgs(BaseModel):
             "remain in the workspace under `.adk-cc/plans/`."
         )
     )
+    request_approval: bool = Field(
+        default=False,
+        description=(
+            "Set true when the plan is READY and you want the user to decide "
+            "now: they see Approve / Revise / Deny on this call. Approving "
+            "writes the plan AND exits plan mode, so no separate "
+            "exit_plan_mode call is needed. Leave false while drafting — a "
+            "draft save must not interrupt the user."
+        ),
+    )
     slug: Optional[str] = Field(
         default=None,
         description=(

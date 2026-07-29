@@ -15,7 +15,12 @@ from typing import Any
 from google.adk.tools.tool_context import ToolContext
 from pydantic import BaseModel, Field
 
-from ..permissions.confirmation import ConfirmOption, ConfirmPrompt
+from ..permissions.plan_approval import (
+    REVISE,
+    chose_id,
+    plan_confirm_prompt,
+    revision_response,
+)
 from .base import AdkCcTool, ToolMeta, _extract_user_comment
 
 # NOTE: `..plugins.audit.emit_state_mutation` is imported lazily inside
@@ -77,34 +82,31 @@ class ExitPlanModeTool(AdkCcTool):
         # feedback. `with_comment=True` adds the textbox; the operator
         # can pair Deny with "try smaller scope" and the model reads
         # it from the denied response's `user_comment` field.
-        prompt = ConfirmPrompt(
-            style="single_select",
+        prompt = plan_confirm_prompt(
             title="Exit plan mode?",
             detail=args.plan_summary,
-            options=[
-                ConfirmOption(
-                    id="approve",
-                    label="Approve",
-                    description=(
-                        "Exit plan mode and start implementing the plan."
-                    ),
-                ),
-                ConfirmOption(
-                    id="deny",
-                    label="Deny",
-                    description=(
-                        "Stay in plan mode. The model sees your comment "
-                        "(if any) and revises the plan."
-                    ),
-                ),
-            ],
-            with_comment=True,
+            approve_description="Exit plan mode and start implementing the plan.",
         )
         return prompt.model_dump() | {"plan_summary": args.plan_summary}
 
     async def _execute(
         self, args: ExitPlanModeArgs, ctx: ToolContext
     ) -> dict[str, Any]:
+        # THIRD OPTION: "Revise" — feedback without a verdict.
+        #
+        # It has to be intercepted here, because the confirmation layer decides
+        # approval with `confirmed = chose_id != "deny"` — so anything that is
+        # not a denial arrives looking exactly like an approval and would exit
+        # plan mode. Deny already carried a comment, but denying to say "good,
+        # but add rollback" reads as rejection to the user and tells the model
+        # to stop rather than iterate. Revise says: keep planning, here is my
+        # input, ask me again.
+        if chose_id(ctx) == REVISE:
+            return revision_response(
+                plan_summary=args.plan_summary,
+                comment=_extract_user_comment(getattr(ctx, "tool_confirmation", None)),
+            )
+
         # By the time we get here, AdkCcTool.run_async has confirmed user
         # approval. Just flip the mode and return.
         try:

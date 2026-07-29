@@ -291,7 +291,7 @@ _task_update = TaskUpdateTool()
 # state never flips to "default" — the session stays stuck in plan mode.
 _exit_plan_mode = ExitPlanModeTool(default_mode=PERMISSION_MODE.value)
 _enter_plan_mode = EnterPlanModeTool(default_mode=PERMISSION_MODE.value)
-_write_plan = WritePlanTool()
+_write_plan = WritePlanTool(default_mode=PERMISSION_MODE.value)
 _save_as_artifact = SaveAsArtifactTool()
 _load_artifact_to_sandbox = LoadArtifactToSandboxTool()
 _read_current_plan = ReadCurrentPlanTool()

@@ -117,6 +117,15 @@ class AdkCcTool(BaseTool):
             parameters_json_schema=schema,
         )
 
+    def _requires_approval(self, args: BaseModel) -> bool:
+        """Whether THIS call needs user approval.
+
+        Defaults to the class-level `ToolMeta.requires_user_approval`. A tool
+        overrides it when approval depends on the arguments — `write_plan` asks
+        only when the model marks a plan ready, so drafting stays free.
+        """
+        return self.meta.requires_user_approval
+
     async def run_async(
         self, *, args: dict[str, Any], tool_context: ToolContext
     ) -> Any:
@@ -129,7 +138,7 @@ class AdkCcTool(BaseTool):
         # Two-call pattern (mirrors google/adk/tools/bash_tool.py:163-174):
         # first call requests, ADK pauses, user responds, ADK re-invokes
         # with tool_confirmation populated.
-        if self.meta.requires_user_approval:
+        if self._requires_approval(validated):
             confirmation = getattr(tool_context, "tool_confirmation", None)
             if confirmation is None:
                 try:

@@ -33,8 +33,15 @@ from typing import Any
 
 from google.adk.tools.tool_context import ToolContext
 
+from ..permissions.plan_approval import (
+    REVISE,
+    chose_id,
+    exit_plan_mode_state,
+    plan_confirm_prompt,
+    revision_response,
+)
 from ..sandbox import SandboxViolation, get_backend, get_workspace
-from .base import AdkCcTool, ToolMeta
+from .base import AdkCcTool, ToolMeta, _extract_user_comment
 from .schemas import WritePlanArgs
 
 _PLANS_DIR = ".adk-cc/plans"
@@ -69,6 +76,38 @@ class WritePlanTool(AdkCcTool):
         is_concurrency_safe=False,
     )
     input_model = WritePlanArgs
+
+    def __init__(self, *, default_mode: str = "default") -> None:
+        super().__init__()
+        # Same fallback as exit_plan_mode: with ADK_CC_PERMISSION_MODE=plan a
+        # fresh session is in plan posture before state is ever written, and
+        # without this the exit would be read as "not in plan mode" and no-op.
+        self._default_mode = (default_mode or "default").lower()
+
+    def _requires_approval(self, args: WritePlanArgs) -> bool:
+        """Ask only when the model says the plan is ready.
+
+        Folding the approval into `write_plan` removes the second round trip
+        (`write_plan` → `exit_plan_mode`) and, more usefully, removes the
+        re-typed `plan_summary` that could drift from the plan actually
+        written: what the user approves here IS the file. Drafting still runs
+        unprompted, which is why this is per-call rather than a ToolMeta flag.
+        """
+        return bool(getattr(args, "request_approval", False))
+
+    def _approval_hint(self, args: WritePlanArgs) -> str:
+        return f"Approve this plan and exit plan mode?\n\n{args.content}"
+
+    def _approval_payload(self, args: WritePlanArgs) -> dict[str, Any]:
+        prompt = plan_confirm_prompt(
+            title="Approve plan?",
+            detail=args.content,
+            approve_description=(
+                "Save the plan, exit plan mode, and start implementing it."
+            ),
+        )
+        return prompt.model_dump() | {"plan_summary": args.content}
+
     description = (
         "Persist a plan as a Markdown file under the workspace. Each call "
         "creates a new file (timestamp + slug), so plan history grows over "
@@ -78,6 +117,16 @@ class WritePlanTool(AdkCcTool):
     )
 
     async def _execute(self, args: WritePlanArgs, ctx: ToolContext) -> dict[str, Any]:
+        # "Revise" reaches _execute looking like an approval (the confirmation
+        # layer computes `confirmed = chose_id != "deny"`), so intercept it
+        # BEFORE writing: the plan is going to change, and a file per rejected
+        # draft is noise in plan history.
+        if args.request_approval and chose_id(ctx) == REVISE:
+            return revision_response(
+                plan_summary=args.content,
+                comment=_extract_user_comment(getattr(ctx, "tool_confirmation", None)),
+            )
+
         ws = get_workspace(ctx)
         backend = get_backend(ctx)
 
@@ -109,10 +158,19 @@ class WritePlanTool(AdkCcTool):
         except Exception:
             pass
 
-        return {
+        out: dict[str, Any] = {
             "status": "ok",
             "path": plan_path,
             "title": title,
             "slug": slug,
             "bytes": len(args.content.encode("utf-8")),
         }
+        if not args.request_approval:
+            return out
+
+        # Approved: finish the job in one call. Leaving plan mode ON here would
+        # recreate the exact extra round trip this option exists to remove.
+        exited = exit_plan_mode_state(ctx, default_mode=self._default_mode)
+        out |= exited
+        out["status"] = "approved" if exited.get("status") == "approved" else out["status"]
+        return out

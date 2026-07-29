@@ -54,7 +54,6 @@ from google.adk.events.event import Event
 from google.adk.events.event_actions import EventActions
 from google.adk.models.llm_request import LlmRequest
 from google.adk.plugins.base_plugin import BasePlugin
-from google.adk.utils.context_utils import Aclosing
 from google.genai import types
 
 _log = logging.getLogger(__name__)
@@ -210,16 +209,15 @@ class SessionTitlePlugin(BasePlugin):
                 ],
                 config=types.GenerateContentConfig(),
             )
-            raw = ""
-            async with Aclosing(
-                model.generate_content_async(req, stream=False)
-            ) as agen:
-                async for resp in agen:
-                    content = getattr(resp, "content", None)
-                    for p in (getattr(content, "parts", None) or []):
-                        if not getattr(p, "thought", None) and getattr(p, "text", None):
-                            raw += p.text
-            return _clean_title(raw)
+            # `raw += p.text` doubled the title: the chatgpt-codex delegate
+            # yields the COMPLETE response more than once even at stream=False,
+            # so sessions were titled "Plan Verbose CLI FlagPlan Verbose CLI
+            # Flag" (seen in the rail and the chat header). Same bug, same fix
+            # as memory capture — partials accumulate, complete responses
+            # REPLACE. See memory/llm_text.py.
+            from ..memory.llm_text import final_response_text
+
+            return _clean_title(await final_response_text(model, req))
         except Exception as e:  # noqa: BLE001
             _log.warning(
                 "session_title: generation failed (%s: %s)", type(e).__name__, e
