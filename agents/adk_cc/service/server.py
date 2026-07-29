@@ -484,10 +484,32 @@ def make_app():
         if explicit:
             ui_dist_dir = explicit
         else:
-            # Default: <repo_root>/web/dist. server.py lives at
-            # agents/adk_cc/service/server.py, so repo_root is three
-            # parents up (service → adk_cc → agents → repo).
-            ui_dist_dir = str(Path(__file__).resolve().parents[3] / "web" / "dist")
+            # server.py lives at agents/adk_cc/service/server.py, so repo_root
+            # is three parents up (service → adk_cc → agents → repo).
+            web = Path(__file__).resolve().parents[3] / "web"
+            desktop_dist = web / "dist-desktop"
+            from ..deployment import is_desktop as _is_desktop
+
+            # Which SHELL the user sees is baked into the bundle at BUILD time
+            # (`VITE_ADK_CC_DESKTOP=1` → dist-desktop), not decided at runtime.
+            # Defaulting to web/dist therefore served the WEB shell to anyone
+            # who started the backend themselves with ADK_CC_DESKTOP=1 — the
+            # projects rail, file tree and model chip all missing, with nothing
+            # on screen explaining why. Serve the matching bundle instead.
+            if _is_desktop() and desktop_dist.is_dir():
+                ui_dist_dir = str(desktop_dist)
+            else:
+                ui_dist_dir = str(web / "dist")
+                if _is_desktop():
+                    import logging as _log_ui
+
+                    _log_ui.getLogger(__name__).warning(
+                        "ADK_CC_DESKTOP=1 but %s does not exist — serving the WEB "
+                        "UI bundle, which has no projects rail or file tree. "
+                        "Build the desktop bundle with "
+                        "`npm --prefix web run build:desktop`.",
+                        desktop_dist,
+                    )
 
     # build_fastapi_app mounts the admin panel (when enabled) before the UI.
     return build_fastapi_app(

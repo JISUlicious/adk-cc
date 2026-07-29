@@ -45,6 +45,46 @@ ADK_CC_MODEL=openai/z-ai/glm-5.1
 없으면 `~/.adk-cc-desktop/settings.env`. 키가 없어도 **부팅은 된다**(UI는 뜨고
 경고를 남김) — 키를 넣기 전까지는 모델 호출만 실패한다.
 
+## 지금 보고 있는 UI가 어느 쪽인가?
+
+**가장 흔한 혼동이므로 이것부터 읽는다.** adk-cc에는 UI 셸이 둘 있고, 어느 쪽을
+보게 되는지는 **어떤 번들이 서빙되는가**로 결정된다. 백엔드를 어떻게 띄웠는지가
+아니다:
+
+| 셸 | 빌드 산출물 | 화면 |
+|---|---|---|
+| **데스크톱** | `web/dist-desktop` (`npm --prefix web run build:desktop`) | 왼쪽에 **프로젝트** 레일, 프로젝트별 세션, 파일 트리가 있는 Files 패널, 모델 칩 |
+| **웹** | `web/dist` (`npm --prefix web run build`) | 일반 채팅, 로그인, 아티팩트 패널 — 프로젝트 레일도 파일 트리도 없음 |
+
+`VITE_ADK_CC_DESKTOP=1`은 **빌드 시점**에 `dist-desktop`에 박힌다. 백엔드의
+`ADK_CC_DESKTOP=1`은 **런타임** 설정으로 데스크톱 라우트·로컬 아티팩트 저장소·
+프로젝트 레지스트리를 켤 뿐, 어떤 번들이 서빙되는지는 바꾸지 않는다. 서로 다른
+두 개의 스위치다.
+
+**데스크톱 UI를 기대했는데 웹 UI가 보인다면** 다음 중 하나다:
+
+1. `web/dist-desktop`을 빌드한 적이 없다. `npm --prefix web run build`는 웹 번들만
+   만든다. `npm --prefix web run build:desktop`을 실행한다.
+2. `ADK_CC_UI_DIST`가 `web/dist`를 가리키고 있다. 이 값은 무엇보다 우선한다.
+3. Vite dev 서버(`npm --prefix web run dev`, 5173 포트)를 보고 있다. 여기서는
+   `VITE_ADK_CC_DESKTOP=1`을 주지 않는 한 웹 셸이 뜬다.
+4. 번들이 낡았다. 공용 UI 코드를 고치고 한쪽만 다시 빌드한 경우다 — 두 번들은
+   같은 소스를 각각 빌드한 별개 산출물이다.
+
+2026-07-29부터 백엔드는 `ADK_CC_DESKTOP=1`이고 해당 디렉터리가 있으면
+`web/dist-desktop`을 자동으로 고르고, 없으면 해결 방법을 적은 경고를 남긴다 —
+더 이상 `ADK_CC_UI_DIST`를 손으로 지정하지 않아도 된다. 확인 방법:
+
+```bash
+# 1. 서버가 무엇을 골랐는지 (경고도 함께 확인)
+grep -i "dist-desktop\|serving the WEB UI" <서버 로그>
+
+# 2. 실제로 받은 페이지를 디스크의 번들과 비교
+curl -s http://127.0.0.1:8000/ > /tmp/served.html
+diff -q /tmp/served.html web/dist-desktop/index.html && echo "데스크톱 번들"
+diff -q /tmp/served.html web/dist/index.html         && echo "웹 번들"
+```
+
 ## dev 실행 (repo에서)
 
 Python 환경(`uv sync`)과 데스크톱 프론트엔드 빌드가 필요하다.
@@ -56,16 +96,23 @@ cd src-tauri && cargo tauri dev     # beforeDevCommand가 dist-desktop을 빌드
                                     # main.rs가 repo/.venv에서 백엔드를 실행
 ```
 
-**서버만** (네이티브 창 없이 빠르게 확인 — 브라우저로 접속):
+**서버만** (네이티브 창 없이 빠르게 확인 — 브라우저로 접속). 사람들이 실수로
+웹 UI를 보게 되던 경로가 바로 이것이다:
 
 ```
-npm --prefix web run build:desktop
+npm --prefix web run build:desktop        # 필수 — 이 명령이 셸을 만든다
 ADK_CC_DESKTOP=1 ADK_CC_ALLOW_NO_AUTH=1 ADK_CC_SERVE_UI=1 \
-  ADK_CC_UI_DIST="$PWD/web/dist-desktop" ADK_CC_AGENTS_DIR="$PWD/agents" \
-  ADK_CC_SANDBOX_BACKEND=noop \
+  ADK_CC_AGENTS_DIR="$PWD/agents" ADK_CC_SANDBOX_BACKEND=noop \
   .venv/bin/uvicorn adk_cc.service.server:make_app --factory --port 8000
-# → http://127.0.0.1:8000
+# → http://127.0.0.1:8000   (web/dist-desktop을 자동으로 서빙)
 ```
+
+`ADK_CC_UI_DIST`는 다른 위치의 번들을 서빙할 때만 필요하다. 이 값을 `web/dist`로
+둔 것이 데스크톱 세션에서 웹 셸이 뜨던 원인이었다.
+
+창이나 페이지는 뜨는데 프로젝트 레일이 없다면 백엔드를 재시작할 게 아니라 번들을
+다시 빌드한다(`npm --prefix web run build:desktop`). 셸은 서버가 아니라 번들에
+들어 있다.
 
 ## 인스톨러 — 단일 파일 AppImage
 

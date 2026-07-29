@@ -71,6 +71,12 @@ adk run agents/adk_cc
 #   npm --prefix web run build:desktop && cargo run --manifest-path src-tauri/Cargo.toml
 ```
 
+> **Seeing the web UI when you wanted the desktop one?** The shell is decided by
+> the BUNDLE, not by how the backend was started: `web/dist-desktop` gives the
+> projects rail + file tree, `web/dist` gives the plain web app. Build it with
+> `npm --prefix web run build:desktop` — plain `npm run build` does not.
+> See [Which UI am I looking at?](docs/08-desktop-app.md#which-ui-am-i-looking-at).
+
 ## Web UI
 
 A custom React chat lives in [`web/`](./web/). It replaces the bundled `adk web` UI for end-user chat with adk-cc-aware widgets: confirmation prompts, structured `ask_user_question` forms, plan/edit/bash artifact renderers, task sidebar, slash commands, theme, and SSE token streaming.
@@ -146,6 +152,22 @@ What's different from the web app:
 - **Each session runs in its own git worktree** of the project repo (branch
   `adk-cc/<session-id>`), so parallel sessions are isolated working copies.
 - **Single-user, no auth**; per-project history under a local data dir.
+
+### Two bundles, one source
+
+The desktop shell is selected **at build time** by `VITE_ADK_CC_DESKTOP=1`, so
+there are two builds of the same UI source:
+
+| Command | Output | What you get |
+|---|---|---|
+| `npm --prefix web run build:desktop` | `web/dist-desktop` | projects rail, per-project sessions, Files panel |
+| `npm --prefix web run build` | `web/dist` | web app: sign-in, chat, artifacts panel |
+
+The backend's `ADK_CC_DESKTOP=1` is a separate, runtime switch (desktop routes,
+local artifact store, project registry). It does not change which bundle is
+served — that is `ADK_CC_UI_DIST`, which now defaults to `web/dist-desktop`
+whenever desktop mode is on and that build exists. If you change shared UI code,
+rebuild BOTH bundles or you will test a stale one.
 
 ### Prerequisites
 

@@ -47,6 +47,47 @@ Resolution order: `$ADK_CC_SETTINGS_FILE`, else `$ADK_CC_DESKTOP_DATA/settings.e
 else `~/.adk-cc-desktop/settings.env`. The app **boots without a key** (the UI
 loads and logs a warning); model calls fail until a key is set.
 
+## Which UI am I looking at?
+
+**The most common confusion, so read this first.** adk-cc has two UI shells, and
+which one you get is decided by **which bundle is served**, not by how you
+started the backend:
+
+| Shell | Built from | Looks like |
+|---|---|---|
+| **Desktop** | `web/dist-desktop` (`npm --prefix web run build:desktop`) | left rail of **projects**, per-project sessions, Files panel with the tree, model chip |
+| **Web** | `web/dist` (`npm --prefix web run build`) | plain chat, sign-in, artifacts panel — no projects rail, no file tree |
+
+`VITE_ADK_CC_DESKTOP=1` is baked into `dist-desktop` at **build** time. The
+backend's `ADK_CC_DESKTOP=1` is a **runtime** setting that turns on desktop
+routes, the local artifact store and the project registry — it does not change
+which bundle gets served. Two independent switches.
+
+**If you see the web UI when you expected the desktop one**, one of these is true:
+
+1. `web/dist-desktop` was never built. `npm --prefix web run build` builds only
+   the web bundle. Run `npm --prefix web run build:desktop`.
+2. You pointed `ADK_CC_UI_DIST` at `web/dist`. It overrides everything.
+3. You are on the Vite dev server (`npm --prefix web run dev`, port 5173) —
+   that serves the web shell unless you set `VITE_ADK_CC_DESKTOP=1`.
+4. The bundle is stale: shared UI code changed and only one of the two bundles
+   was rebuilt. They are separate builds of the same source.
+
+As of 2026-07-29 the backend picks `web/dist-desktop` automatically when
+`ADK_CC_DESKTOP=1` and that directory exists, and logs a warning naming the fix
+when it does not — you no longer have to set `ADK_CC_UI_DIST` by hand. Check
+which one you got:
+
+```bash
+# 1. what the server decided (look for the warning too)
+grep -i "dist-desktop\|serving the WEB UI" <server log>
+
+# 2. compare the page you were served against the bundles on disk
+curl -s http://127.0.0.1:8000/ > /tmp/served.html
+diff -q /tmp/served.html web/dist-desktop/index.html && echo "desktop bundle"
+diff -q /tmp/served.html web/dist/index.html         && echo "web bundle"
+```
+
 ## Running in dev (from the repo)
 
 Needs the Python env (`uv sync`) and the desktop frontend built.
@@ -58,16 +99,23 @@ cd src-tauri && cargo tauri dev     # beforeDevCommand builds dist-desktop;
                                     # main.rs spawns the backend from repo/.venv
 ```
 
-**Server-only** (quick check, no native window — open a browser at the port):
+**Server-only** (quick check, no native window — open a browser at the port).
+This is the path where people used to land on the web UI by accident:
 
 ```
-npm --prefix web run build:desktop
+npm --prefix web run build:desktop        # REQUIRED — this builds the shell
 ADK_CC_DESKTOP=1 ADK_CC_ALLOW_NO_AUTH=1 ADK_CC_SERVE_UI=1 \
-  ADK_CC_UI_DIST="$PWD/web/dist-desktop" ADK_CC_AGENTS_DIR="$PWD/agents" \
-  ADK_CC_SANDBOX_BACKEND=noop \
+  ADK_CC_AGENTS_DIR="$PWD/agents" ADK_CC_SANDBOX_BACKEND=noop \
   .venv/bin/uvicorn adk_cc.service.server:make_app --factory --port 8000
-# → http://127.0.0.1:8000
+# → http://127.0.0.1:8000   (serves web/dist-desktop automatically)
 ```
+
+`ADK_CC_UI_DIST` is only needed to serve a bundle from somewhere else — setting
+it to `web/dist` is what produced the web shell in a desktop session.
+
+If the window/page loads but the projects rail is missing, rebuild the bundle
+(`npm --prefix web run build:desktop`) rather than restarting the backend: the
+shell is in the bundle, not in the server.
 
 ## Installer — self-contained AppImage
 

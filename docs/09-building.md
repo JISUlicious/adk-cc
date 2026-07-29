@@ -18,9 +18,17 @@ changing it.
 | Python wheel | `uv build` | `dist/*.whl` |
 
 The two UI bundles are **separate builds of the same source**, differing only by
-`VITE_ADK_CC_DESKTOP=1`. The desktop app serves `dist-desktop`; the FastAPI
-server with `ADK_CC_SERVE_UI=1` serves `dist`. Changing shared UI code and
-rebuilding only one of them is the most common way to test a stale bundle.
+`VITE_ADK_CC_DESKTOP=1`. Changing shared UI code and rebuilding only one of them
+is the most common way to test a stale bundle.
+
+Which one gets served decides which SHELL the user sees, and that tripped real
+users: the backend's `ADK_CC_DESKTOP=1` is a runtime switch (desktop routes,
+local artifacts, project registry) while the shell is baked into the bundle at
+build time, so a desktop-mode backend used to serve the WEB app — no projects
+rail, no file tree, no explanation. `ADK_CC_UI_DIST` now defaults to
+`web/dist-desktop` when desktop mode is on and that build exists, and logs a
+warning naming `build:desktop` when it does not. See
+[08-desktop-app.md](./08-desktop-app.md#which-ui-am-i-looking-at).
 
 ## Prerequisites
 
