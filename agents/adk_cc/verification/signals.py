@@ -94,6 +94,18 @@ _PAGE_RUNTIME_RE = re.compile(
     r"chromium|chrome\s+--headless|webdriver|cypress|vitest\s+--browser)\b"
 )
 
+# The documented fallback when no runtime is installed: build a minimal DOM and
+# execute the page's OWN script under it. A live verifier does exactly this —
+# it probes for chromium, playwright and jsdom, finds none, and hand-rolls a
+# `vm` sandbox with a ClassList/document stub. That IS driving the page, and a
+# signal that ignored it would nag the one behaviour the prompt asks for while
+# demanding a runtime the workspace does not have.
+_DOM_SHIM_RE = re.compile(
+    r"(?i)(vm\.(?:createContext|runInNewContext|runInContext|Script)|"
+    r"require\([\"']vm[\"']\)|"
+    r"globalThis\.document\s*=|global\.document\s*=)"
+)
+
 # Irreversible / outward-facing effects — the "hard gate" class.
 _RISK_RE = re.compile(
     r"(?i)(^|[\s;&|(])"
@@ -139,7 +151,8 @@ class TurnSignals:
         name. Naming the file alone is NOT enough — `node --check app.js` and
         `grep -n id= index.html` both name it and neither runs it."""
         for cmd in self.commands or self.check_commands:
-            if _PAGE_RUNTIME_RE.search(cmd) or _TEST_RUNNER_RE.search(cmd):
+            if (_PAGE_RUNTIME_RE.search(cmd) or _TEST_RUNNER_RE.search(cmd)
+                    or _DOM_SHIM_RE.search(cmd)):
                 return True
         return False
 
@@ -340,9 +353,11 @@ def nudge_text(
             "For a page, these do NOT establish behaviour: a syntax check, a "
             "grep proving element ids exist, or a scratch script that "
             "re-implements the logic. Load the real page in a DOM runtime "
-            "(playwright/jsdom/happy-dom), drive the controls a player would "
-            "use, and assert on what they would see — including the state AFTER "
-            "the action settles, not just that a handler fired."
+            "(playwright/jsdom/happy-dom) — or, if none is installed, build a "
+            "minimal DOM and execute the page's OWN unmodified script under it, "
+            "saying which method you used. Drive the controls a player would "
+            "use and assert on what they would see AFTER the action settles, "
+            "not just that a handler fired."
         )
     crit = [c for c in criteria if c]
     if crit:

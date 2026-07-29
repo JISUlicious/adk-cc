@@ -93,6 +93,25 @@ def test_driving_the_real_page_satisfies_it() -> None:
     print("OK driving_the_real_page_satisfies_it")
 
 
+def test_the_hand_rolled_dom_shim_counts() -> None:
+    """The documented fallback, taken verbatim from a live verifier.
+
+    It probed for chromium, playwright and jsdom, found none, and hand-rolled a
+    `vm` sandbox with a ClassList/document stub to run the page's own script —
+    which is what prompts.py asks for when no runtime is installed. Flagging
+    that as unexercised would demand a runtime the workspace does not have and
+    train the model to ignore the nudge."""
+    sig = collect(_turn(
+        _write("index.html"), _write("app.js"),
+        _bash("node - <<'JS'\nconst fs=require('fs'); const vm=require('vm');\n"
+              "class ClassList { … }\nvm.createContext(sandbox);\nJS"),
+        _Part(text="Built it and verified the vote flow works."),
+    ))
+    assert sig.page_was_driven, sig.summary()
+    assert not sig.unexercised_page
+    print("OK the_hand_rolled_dom_shim_counts")
+
+
 def test_a_test_runner_counts_without_naming_the_file() -> None:
     """A suite covers files it never mentions — demanding the filename would
     make the signal fire on well-tested projects, which is worse than a miss."""
@@ -160,6 +179,7 @@ def test_no_claim_no_nudge() -> None:
 def main() -> None:
     test_the_shipped_failure_is_now_caught()
     test_driving_the_real_page_satisfies_it()
+    test_the_hand_rolled_dom_shim_counts()
     test_a_test_runner_counts_without_naming_the_file()
     test_naming_the_file_is_not_running_it()
     test_hedging_still_defuses_it()
