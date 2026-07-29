@@ -523,8 +523,26 @@ Build on it rather than inventing a viewer.
    browser (`tests/e2e_datasets_ui.py`).
 3. **Analysis run view** — group a run's outputs (EDA report, VIF table, SHAP
    plot, RCA timeline) instead of scattering files.
-4. **Table rendering** — dataframes as real tables (sortable, sticky header),
-   not markdown blobs.
+4. **Table rendering** ✅ 2026-07-29 — markdown tables render through
+   `MarkdownTable`: click-to-sort (asc → desc → back to the agent's order,
+   because for many tables the order IS the answer), a sticky header, numeric
+   columns detected and right-aligned with tabular figures, and a scroll box
+   past 14 rows so one group-by cannot push the conversation off screen.
+
+   It re-renders the table rather than decorating react-markdown's output,
+   since sorting needs the rows as a list — but passes cell CONTENT through
+   untouched, so inline code/links/emphasis inside a cell still render.
+   Extracting cells to plain strings would have been simpler and would have
+   silently flattened them.
+
+   The bug that cost the first run: `thead`/`tbody`/`tr`/`th`/`td` were also
+   mapped in `MARKDOWN_COMPONENTS`, so react-markdown handed down custom
+   COMPONENTS and the `child.type === "thead"` traversal matched nothing —
+   rendering a table with zero rows. Those renderers are gone; MarkdownTable
+   owns them now. Verified live (`tests/e2e_markdown_table_ui.py`, 11 checks)
+   on a real model-produced table: sort order verified numerically, third-click
+   restore, right-alignment via computed style, and containment measured
+   against the message column.
 5. **Env status chip** ✅ 2026-07-29 — the analysis runtime beside the model
    chip, so W1's behaviour stops being invisible. The first analysis in a
    project spends 20-60s installing packages (the dataset browser's cold

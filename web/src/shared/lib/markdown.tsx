@@ -4,6 +4,7 @@ import { Check, Copy } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { CodeView } from "@/shared/components/CodeView"
+import { MarkdownTable } from "@/shared/components/MarkdownTable"
 
 /**
  * Shared GFM markdown renderer + Tailwind component map.
@@ -66,36 +67,23 @@ export const MARKDOWN_COMPONENTS = {
     />
   ),
   // Tables: a rounded, fully-ruled frame with a tinted header row and
-  // zebra-striped body so dense data is easy to scan. The wrapper scrolls
-  // horizontally on narrow widths instead of overflowing the bubble.
+  // zebra-striped body so dense data is easy to scan. MarkdownTable owns the
+  // frame now — it re-renders the table so it can sort rows, pin the header
+  // and right-align numeric columns (W6.4). Cell CONTENT still comes from the
+  // renderers below, so inline code/links inside a cell are unaffected.
+  //
+  // bg-background gives the table its OWN surface (parchment/ivory), distinct
+  // from the agent bubble's bg-muted — critical because --border == --muted in
+  // this theme, so border lines are invisible ON the bubble but contrast
+  // clearly on this lighter surface.
   table: (props: React.TableHTMLAttributes<HTMLTableElement>) => (
-    // bg-background gives the table its OWN surface (parchment/ivory),
-    // distinct from the agent bubble's bg-muted — critical because
-    // --border == --muted in this theme, so border lines are invisible
-    // ON the bubble but contrast clearly on this lighter surface.
-    <div className="my-2 overflow-x-auto rounded-md border border-border bg-background">
-      <table className="w-full border-collapse text-xs" {...props} />
-    </div>
+    <MarkdownTable>{props.children}</MarkdownTable>
   ),
-  thead: (props: React.HTMLAttributes<HTMLTableSectionElement>) => (
-    <thead className="bg-brand-tint" {...props} />
-  ),
-  tbody: (props: React.HTMLAttributes<HTMLTableSectionElement>) => (
-    // Zebra striping via odd-row tint (muted reads against bg-background).
-    <tbody className="[&>tr:nth-child(odd)]:bg-muted/50" {...props} />
-  ),
-  tr: (props: React.HTMLAttributes<HTMLTableRowElement>) => (
-    <tr className="border-b border-border last:border-b-0" {...props} />
-  ),
-  th: (props: React.ThHTMLAttributes<HTMLTableCellElement>) => (
-    <th
-      className="border-r border-border last:border-r-0 px-2.5 py-1.5 text-left font-semibold text-foreground"
-      {...props}
-    />
-  ),
-  td: (props: React.TdHTMLAttributes<HTMLTableCellElement>) => (
-    <td className="border-r border-border last:border-r-0 px-2.5 py-1.5 align-top" {...props} />
-  ),
+  // NOTE: no thead/tbody/tr/th/td renderers. MarkdownTable renders those
+  // itself, and mapping them here made their elements custom COMPONENTS —
+  // so its `child.type === "thead"` checks never matched and it rendered a
+  // table with zero rows. Leaving them out keeps the children plain DOM tags,
+  // which is what the traversal reads.
   hr: () => <hr className="my-3 border-border" />,
   strong: (props: React.HTMLAttributes<HTMLElement>) => (
     <strong className="font-semibold" {...props} />
