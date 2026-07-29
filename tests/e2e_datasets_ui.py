@@ -6,6 +6,14 @@ data = tempfile.mkdtemp(prefix="ds-ui-")
 proj = os.path.join(data, "project"); os.makedirs(os.path.join(proj, "data"), exist_ok=True)
 subprocess.run(["git", "init", "-q", proj], capture_output=True)
 open(os.path.join(proj, "data", "sales.csv"), "w").write("month,revenue\n2026-01,1200\n")
+# A WIDE dataset with long values: the layout case most likely to blow the
+# panel out horizontally. A 2-column fixture proves nothing about that.
+_wide_cols = [f"column_with_a_long_name_{i}" for i in range(12)]
+with open(os.path.join(proj, "data", "wide.csv"), "w") as _f:
+    _f.write(",".join(_wide_cols) + "\n")
+    for _r in range(200):
+        _f.write(",".join(
+            [f"value-{_r}-{_c}-and-then-some-more-text" for _c in range(11)] + [""]) + "\n")
 env = dict(os.environ); env.update({
     "ADK_CC_AGENTS_DIR": f"{REPO}/agents", "ADK_CC_ALLOW_NO_AUTH": "1",
     "ADK_CC_DESKTOP": "1", "ADK_CC_DESKTOP_DATA": data,
@@ -35,7 +43,39 @@ try:
         page.wait_for_timeout(3000)
         text = page.inner_text("body")
         check("Datasets strip is shown in the Files panel", "Datasets" in text, text[:200])
-        check("it reports the dataset already in data/", "1 in data/" in text,
+        # The panel header names the workspace root once — every path below it
+        # is relative to that, and the panel could not answer "which directory?"
+        # Long paths are middle-ellipsised for the header, so assert the LEAF is
+        # readable and the FULL path is in the tooltip.
+        head_line = [l for l in text.split("\n") if "Files" in l][:2]
+        check("the workspace leaf is readable beside 'Files'",
+              os.path.basename(proj) in text, head_line)
+        path_el = page.locator(f"[title='{proj}']").first
+        check("the full path is available on hover", path_el.count() > 0, head_line)
+        # The header controls must survive a long path — a title that grows
+        # until it pushes Undo/History/Refresh off the edge is a regression.
+        # Counted geometrically: the Undo tooltip lives on a wrapping <span>,
+        # so title-based selectors see only some of the buttons.
+        pbox = page.locator("aside, [class*=RightPanel], body").last.bounding_box() or {}
+        panel_r = pbox.get("x", 0) + pbox.get("width", 0)
+        btns = page.locator("button")
+        header_btns, off = 0, 0
+        for i in range(btns.count()):
+            b = btns.nth(i).bounding_box()
+            if not b or b["y"] > 44 or b["x"] < pbox.get("x", 0):
+                continue                     # not in this panel's header row
+            header_btns += 1
+            if b["x"] + b["width"] > panel_r + 1:
+                off += 1
+        check("header controls stay on screen next to the path",
+              header_btns >= 3 and off == 0,
+              f"{header_btns} header buttons, {off} pushed off the edge")
+        del_icons = page.locator("button[title='Delete']")
+        check("the delete control is visible without hovering",
+              del_icons.count() > 0 and (del_icons.first.evaluate(
+                  "el => parseFloat(getComputedStyle(el).opacity)") or 0) > 0.2,
+              "delete icon is hover-only")
+        check("it reports the datasets already in data/", "2 in data/" in text,
               [l for l in text.split("\n") if "data/" in l][:3])
         check("the dataset is listed by name", "sales.csv" in text, text[:300])
 
@@ -54,6 +94,41 @@ try:
               or "str" in profile_text, profile_text[:300])
         check("profile shows the head row values", "1200" in profile_text,
               profile_text[:400])
+        # Text assertions cannot see a panel that renders but overflows or
+        # clips. Keep the pixels for review.
+        shot = os.path.join(data, "datasets-panel.png")
+        page.locator("aside, [class*=RightPanel], body").last.screenshot(path=shot)
+        page.screenshot(path=os.path.join(data, "datasets-full.png"), full_page=True)
+        print(f"    panel screenshot: {shot}")
+
+        # Wide dataset: the panel must not grow past its column, and the head
+        # table must scroll inside it.
+        panel_before = page.locator("aside, [class*=RightPanel], body").last.bounding_box()
+        page.get_by_text("wide.csv", exact=False).first.click(timeout=8000)
+        for _ in range(60):
+            page.wait_for_timeout(2000)
+            if "12 cols" in page.inner_text("body"):
+                break
+        wide_text = page.inner_text("body")
+        check("wide dataset profiles (12 cols)", "12 cols" in wide_text, wide_text[:200])
+        doc_w = page.evaluate("document.documentElement.scrollWidth")
+        check("the page does not scroll horizontally", doc_w <= 1280 + 2, f"scrollWidth={doc_w}")
+        panel_after = page.locator("aside, [class*=RightPanel], body").last.bounding_box()
+        check("the panel keeps its width",
+              abs((panel_after or {}).get("width", 0) - (panel_before or {}).get("width", 0)) < 2,
+              f"{panel_before} -> {panel_after}")
+        # Geometry, not eyeballing: the head table must stay INSIDE the panel.
+        panel_box = page.locator("aside, [class*=RightPanel], body").last.bounding_box() or {}
+        tbl = page.locator("table").first.bounding_box() or {}
+        wrap = page.locator("div.overflow-x-auto").last.bounding_box() or {}
+        panel_right = panel_box.get("x", 0) + panel_box.get("width", 0)
+        wrap_right = wrap.get("x", 0) + wrap.get("width", 0)
+        check("the head table scrolls inside the panel, not past it",
+              wrap_right <= panel_right + 1,
+              f"wrapper right={wrap_right:.0f} panel right={panel_right:.0f} "
+              f"table width={tbl.get('width', 0):.0f}")
+        page.screenshot(path=os.path.join(data, "datasets-wide.png"), full_page=True)
+        print(f"    wide screenshot: {os.path.join(data, 'datasets-wide.png')}")
         # API round trip through the running server
         q = f"?project_id={pid}&session_id=probe"
         src = os.path.join(data, "extra.parquet"); open(src, "wb").write(b"PAR1")

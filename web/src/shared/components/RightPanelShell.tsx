@@ -40,12 +40,18 @@ const DEFAULT_W = 352 // 22rem
  */
 export function RightPanelShell({
   title,
+  titleText,
   open,
   onClose,
   headerRight,
   children,
 }: {
-  title: string
+  /** Panel name. A ReactNode so a panel can hang context off it (the desktop
+   * file tree shows the project path) while collapse/expand labels still read
+   * from `titleText`. */
+  title: ReactNode
+  /** Plain-text form of `title`, for aria-labels and tooltips. */
+  titleText?: string
   open: boolean
   onClose: () => void
   headerRight?: ReactNode
@@ -141,8 +147,8 @@ export function RightPanelShell({
             type="button"
             onClick={() => setCollapsed(false)}
             className="adk-right-panel-expand hidden lg:flex items-center justify-center py-3 text-muted-foreground hover:bg-accent"
-            title={`Show ${title}`}
-            aria-label={`Show ${title}`}
+            title={`Show ${titleText ?? "panel"}`}
+            aria-label={`Show ${titleText ?? "panel"}`}
           >
             <PanelRightOpen className="h-4 w-4" />
           </button>
@@ -156,13 +162,16 @@ export function RightPanelShell({
               type="button"
               onClick={() => setCollapsed(true)}
               className="hidden lg:inline-flex rounded-md p-1 text-muted-foreground hover:bg-accent"
-              title={`Hide ${title}`}
-              aria-label={`Hide ${title}`}
+              title={`Hide ${titleText ?? "panel"}`}
+              aria-label={`Hide ${titleText ?? "panel"}`}
             >
               <PanelRightClose className="h-4 w-4" />
             </button>
-            <span className="text-xs font-medium">{title}</span>
-            <div className="ml-auto flex items-center gap-1">
+            {/* min-w-0 + truncate: a title that carries context (the desktop
+                file tree appends the project path) must yield space to the
+                header controls rather than pushing them off the edge. */}
+            <span className="min-w-0 flex-1 truncate text-xs font-medium">{title}</span>
+            <div className="ml-auto flex shrink-0 items-center gap-1">
               {headerRight}
               <button
                 type="button"

@@ -32,6 +32,7 @@ import {
 import { RightPanelShell, type RightPanelProps } from "@/shared/components/RightPanelShell"
 import { SandboxedHtml } from "@/shared/components/SandboxedHtml"
 import { Database } from "lucide-react"
+import { listProjects } from "@/shared/api/projects"
 import { pickFile } from "@/shared/lib/tauri"
 import {
   listDatasets, addDatasetFromPath, profileDataset,
@@ -78,6 +79,17 @@ function StatusBadge({ status }: { status: FileStatus }) {
 }
 
 
+/** Keep BOTH ends of a path readable in a narrow header.
+ *
+ * `dir="rtl"` is the usual trick for tail-visible truncation, but it reorders
+ * the leading separator and still clipped the tail here — so shorten
+ * deterministically instead. The full path stays in the tooltip. */
+function middleEllipsis(path: string, max = 46): string {
+  if (path.length <= max) return path
+  const tail = Math.max(12, Math.floor(max * 0.6))
+  return `${path.slice(0, max - tail - 1)}…${path.slice(-tail)}`
+}
+
 export function FileTreeSidePanel({
   userId: projectId,
   sessionId,
@@ -105,6 +117,10 @@ export function FileTreeSidePanel({
   const [dsOpen, setDsOpen] = useState<string | null>(null)
   const [dsProfile, setDsProfile] = useState<DatasetProfile | null>(null)
   const [dsProfiling, setDsProfiling] = useState(false)
+  // The workspace root, shown ONCE beside the panel title: every path in the
+  // tree is relative to it, and "which directory am I actually in" was
+  // otherwise unanswerable from this panel.
+  const [projectPath, setProjectPath] = useState<string | null>(null)
   const [canUndo, setCanUndo] = useState(false)
   // Non-null when checkpointing can't work for this project (remote device
   // without git) — shown as the Undo tooltip so the dead button explains itself.
@@ -282,6 +298,20 @@ export function FileTreeSidePanel({
     setExpanded(next)
   }
 
+  useEffect(() => {
+    let live = true
+    listProjects()
+      .then((r) => {
+        if (!live) return
+        const p = r.projects.find((x) => x.id === projectId)
+        setProjectPath(
+          p ? (p.remote ? `${p.remote.host}:${p.remote.path}` : p.repo_path ?? null) : null,
+        )
+      })
+      .catch(() => setProjectPath(null))
+    return () => { live = false }
+  }, [projectId])
+
   const reloadDatasets = useCallback(() => {
     if (!projectId || !sessionId) return
     listDatasets(projectId, sessionId)
@@ -445,7 +475,25 @@ export function FileTreeSidePanel({
   }
 
   return (
-    <RightPanelShell title="Files" open={open} onClose={onClose} headerRight={headerRight}>
+    <RightPanelShell
+      title={
+        <span className="flex min-w-0 items-baseline gap-1.5">
+          Files
+          {projectPath && (
+            <span
+              className="min-w-0 truncate text-[10px] font-normal text-muted-foreground"
+              title={projectPath}
+            >
+              {middleEllipsis(projectPath)}
+            </span>
+          )}
+        </span>
+      }
+      titleText="Files"
+      open={open}
+      onClose={onClose}
+      headerRight={headerRight}
+    >
       <div className="mb-2 border-b border-border/50 pb-2">
         <div className="flex items-center gap-1.5 px-1">
           <Database className="h-3.5 w-3.5 text-muted-foreground" />
@@ -481,23 +529,31 @@ export function FileTreeSidePanel({
                   </span>
                 </button>
                 {dsOpen === d.name && (
-                  <div className="mb-1 mt-1 rounded-md border border-border/60 bg-card/40 p-1.5">
+                  <div className="mb-1 mt-1 min-w-0 rounded-md border border-border/60 bg-card/40 p-1.5">
                     {dsProfiling && (
                       <p className="text-[10px] text-muted-foreground">
                         profiling… (the first one provisions the analysis runtime)
                       </p>
                     )}
                     {dsProfile && !dsProfile.error && (
-                      <div className="space-y-1">
+                      <div className="min-w-0 space-y-1">
                         <p className="text-[10px] font-medium">
                           {dsProfile.rows.toLocaleString()}
-                          {dsProfile.rows_exact ? "" : "+"} rows ×{" "}
-                          {dsProfile.columns.length} cols
+                          {dsProfile.rows_exact ? "" : "+"}{" "}
+                          {dsProfile.rows === 1 ? "row" : "rows"} ×{" "}
+                          {dsProfile.columns.length}{" "}
+                          {dsProfile.columns.length === 1 ? "col" : "cols"}
                           <span className="ml-1 font-normal text-muted-foreground">
-                            (dtypes/nulls from {dsProfile.sampled.toLocaleString()}-row sample)
+                            (dtypes/nulls from{" "}
+                            {dsProfile.sampled === dsProfile.rows
+                              ? "all rows"
+                              : `a ${dsProfile.sampled.toLocaleString()}-row sample`})
                           </span>
                         </p>
-                        <div className="max-h-32 overflow-y-auto">
+                        {/* Bordered scroll boxes: a bare max-height clips the
+                            last row mid-glyph and reads as a broken layout
+                            rather than "there is more, scroll". */}
+                        <div className="max-h-32 overflow-y-auto rounded border border-border/50 p-1">
                           {dsProfile.columns.map((c) => (
                             <div key={c.name} className="flex items-center gap-1.5 text-[10px]">
                               <span className="truncate font-mono">{c.name}</span>
@@ -510,9 +566,13 @@ export function FileTreeSidePanel({
                             </div>
                           ))}
                         </div>
+                        {/* min-w-0 + w-full on the wrapper: without it the table
+                            sizes to its content and pushes past the panel edge
+                            instead of scrolling inside it (a flex child's
+                            default min-width is `auto`). */}
                         {dsProfile.head.rows.length > 0 && (
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-[9px]">
+                          <div className="w-full min-w-0 overflow-x-auto rounded border border-border/50">
+                            <table className="text-[9px]">
                               <thead>
                                 <tr className="text-muted-foreground">
                                   {dsProfile.head.columns.map((c) => (

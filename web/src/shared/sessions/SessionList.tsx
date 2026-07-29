@@ -49,7 +49,7 @@ export function SessionList({
             </div>
             <button
               type="button"
-              className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+              className="opacity-50 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
               onClick={(e) => {
                 e.stopPropagation()
                 onDelete(s)

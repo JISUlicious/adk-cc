@@ -346,13 +346,13 @@ export function ProjectRail({
                   </button>
                   <button
                     type="button" onClick={() => newSession(p.id)} title="New session in this project"
-                    className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground"
+                    className="opacity-50 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-foreground"
                   >
                     <Plus className="h-3.5 w-3.5" />
                   </button>
                   <button
                     type="button" onClick={() => removeProj(p)} title="Remove project"
-                    className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+                    className="opacity-50 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
