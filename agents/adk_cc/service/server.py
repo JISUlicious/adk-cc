@@ -69,6 +69,21 @@ def build_fastapi_app(
     # of 1.31.1. The `save_as_artifact` tool relies on this service.
     artifact_uri = os.environ.get("ADK_CC_ARTIFACT_STORAGE_URI") or None
 
+    # Desktop defaults to DISK, not memory. An in-memory store loses every
+    # artifact when the app restarts while sessions survive (sqlite/JSONL), so a
+    # chart chip from yesterday's conversation previews as `404 Not Found` —
+    # observed with W6.1's chart-in-chat. ADK ships FileArtifactService; the
+    # desktop data dir is the natural home, beside the session store.
+    if not artifact_uri:
+        from ..deployment import data_dir, is_desktop
+
+        if is_desktop():
+            import logging as _log_mod
+
+            artifact_uri = f"file://{(data_dir() / 'artifacts').resolve()}"
+            _log_mod.getLogger(__name__).info(
+                "desktop artifacts persist at %s", artifact_uri)
+
     # adk-cc adds an `s3://` artifact scheme (AWS S3 + S3-compatible
     # stores: MinIO / R2 / Wasabi / B2 / Ceph) on top of ADK's built-in
     # memory:// / file:// / gs://. Register it before get_fast_api_app

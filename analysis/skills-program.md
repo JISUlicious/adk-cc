@@ -489,10 +489,13 @@ Build on it rather than inventing a viewer.
    iframe painted with the [5,9,3,7] bars (27.6% non-blank). Unit coverage in
    `tests/test_analysis_artifact.py`.
 
-   **Known caveat**: the artifact service is in-memory, so a chip whose session
-   outlives the server process previews as `404 Not Found` (seen when a probe
-   restarted the server against a sqlite-persisted session). Desktop artifact
-   persistence is a separate piece of work — filed, not fixed here.
+   **Fixed 2026-07-29**: desktop now defaults artifact storage to DISK
+   (`file://<desktop-data>/artifacts`, ADK's `FileArtifactService`) instead of
+   memory. Sessions already persisted, so an in-memory artifact store meant a
+   chart chip from an earlier run previewed as `404 Not Found` after any
+   restart. `tests/e2e_desktop_artifact_persistence.py` restarts the server for
+   real and reads the artifact back — nothing weaker would have caught it, and
+   the same test fails (404) on the pre-fix tree.
 2. **Dataset browser** ✅ 2026-07-29 — click a dataset in the Files panel and
    get shape, dtypes, null counts and head, with no turn spent. That is not
    only a latency win: `df.info()` transcripts are a surprisingly large share
