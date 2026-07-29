@@ -70,6 +70,35 @@ def test_env_still_wins_everywhere() -> None:
     print("OK env_still_wins_everywhere")
 
 
+def test_the_gate_this_default_exists_for() -> None:
+    """The whole point, asserted on the engine rather than inferred.
+
+    A live run under bypassPermissions had the agent call
+    `edit_file(path="~/.zshrc", …)` and the write landed with no prompt: Step 1f
+    covers run_bash only, so the file tool never met it, and Step 2c (protected
+    path → ask) yields to bypass. acceptEdits keeps 2c."""
+    import os
+
+    from adk_cc.permissions.engine import decide
+    from adk_cc.permissions.modes import PermissionMode as M
+    from adk_cc.permissions.settings import SettingsHierarchy
+    from adk_cc.tools.edit_file import EditFileTool
+
+    os.environ["ADK_CC_DESKTOP"] = "1"      # the protected floor is desktop-only
+    tool, zshrc = EditFileTool(), os.path.expanduser("~/.zshrc")
+
+    def behavior(mode):
+        return decide(tool=tool,
+                      args={"path": zshrc, "old_string": "a", "new_string": "b"},
+                      mode=mode, settings=SettingsHierarchy([]),
+                      workspace_root="/tmp/proj").behavior
+
+    assert behavior(M.BYPASS_PERMISSIONS) == "allow"   # the old default, silent
+    assert behavior(M.ACCEPT_EDITS) == "ask"           # the new one
+    assert behavior(M.DEFAULT) == "ask"
+    print("OK the_gate_this_default_exists_for")
+
+
 def test_a_new_session_records_its_mode() -> None:
     """The composer cannot show a mode that nothing wrote down."""
     from adk_cc.service.file_session_service import FileSessionService
@@ -97,6 +126,7 @@ def main() -> None:
     test_desktop_defaults_to_accept_edits()
     test_service_deployment_is_unchanged()
     test_env_still_wins_everywhere()
+    test_the_gate_this_default_exists_for()
     test_a_new_session_records_its_mode()
     test_an_explicit_mode_is_not_overwritten()
     print("\nall desktop permission-default tests passed")
