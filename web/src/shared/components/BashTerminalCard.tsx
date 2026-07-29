@@ -30,6 +30,9 @@ interface BashResponse {
   status?: string
   command?: string
   exit_code?: number
+  /** Set when the command was killed at its deadline — there is no exit code. */
+  timed_out?: boolean
+  timeout_seconds?: number
   stdout?: string
   stderr?: string
 }
@@ -105,7 +108,11 @@ export function BashTerminalCard({
                   : "bg-brand-tint text-primary",
               )}
             >
-              exit {exitCode ?? "?"}
+              {/* A timed-out command has no exit code; `exit ?` told the user
+                  nothing. Say what actually happened. */}
+              {r?.timed_out || r?.status === "timeout"
+                ? `timed out${r?.timeout_seconds ? ` after ${r.timeout_seconds}s` : ""}`
+                : `exit ${exitCode ?? "?"}`}
             </span>
           )}
           {callId && (

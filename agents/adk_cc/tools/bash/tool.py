@@ -155,11 +155,23 @@ class BashTool(AdkCcTool):
                     "outcome": "timeout",
                 },
             )
+            # `timed_out` + a plain-language note: without them the UI had
+            # only a missing exit_code to go on and rendered a bare `exit ?`,
+            # which says nothing about what happened or why. A background job
+            # holding the output pipe is the usual cause, so name it.
+            hint = (
+                f"command timed out after {args.timeout_seconds}s and was killed "
+                "(its process group too). Output above is what it printed before "
+                "then. If it starts a background process, redirect that process's "
+                "output (`cmd >/dev/null 2>&1 &`) or it keeps the pipe open."
+            )
             return {
                 "status": "timeout",
+                "timed_out": True,
+                "timeout_seconds": args.timeout_seconds,
                 "command": args.command,
                 "stdout": result.stdout,
-                "stderr": result.stderr,
+                "stderr": (result.stderr + "\n" + hint).strip(),
             }
         # Surface non-zero exits at WARNING — silent failures are
         # exactly what the user couldn't see before. Zero exits go to

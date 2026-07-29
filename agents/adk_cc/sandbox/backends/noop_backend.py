@@ -80,6 +80,36 @@ def _is_prod_shaped(cwd: str) -> bool:
     return not any(_is_under(p, prefix) for prefix in _safe_prefixes())
 
 
+# How long to wait for output after killing a timed-out process group. A child
+# that ignores SIGKILL is not a thing, but a shared pipe held by an unrelated
+# process is — so the drain is bounded rather than open-ended.
+_DRAIN_GRACE_S = 3
+
+
+def _kill_group(proc) -> None:
+    """SIGKILL the process group, falling back to the process itself.
+
+    Uses `proc.pid` AS the group id rather than looking it up: with
+    `start_new_session=True` the child is its own group leader, so pgid == pid,
+    and by the time we need to kill, the shell itself has usually already
+    exited — `os.getpgid(pid)` then raises and the orphaned background child
+    survives, still holding the pipe. That lookup cost the whole drain grace on
+    every timeout.
+    """
+    import os as _os
+    import signal as _signal
+
+    for target in (proc.pid, None):
+        try:
+            if target is not None:
+                _os.killpg(target, _signal.SIGKILL)
+            else:
+                proc.kill()
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+
+
 class NoopBackend(SandboxBackend):
     name = "noop"
 
@@ -124,29 +154,67 @@ class NoopBackend(SandboxBackend):
         runtime_env = await self._runtime_env()
         child_env = {**os.environ, **runtime_env} if runtime_env else None
 
+        # start_new_session: the command gets its OWN process group, so a
+        # backgrounded child (`npx tsx server.ts &`) can be killed with it.
+        # Without this, killing the shell left the grandchild alive holding the
+        # stdout PIPE — see the timeout branch.
         proc = await asyncio.create_subprocess_shell(
             cmd,
             cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=child_env,
+            start_new_session=True,
         )
+        # Accumulate output AS IT ARRIVES rather than via communicate().
+        # `wait_for(communicate())` cancels the read on timeout, and a second
+        # communicate() afterwards cannot recover what was already printed — a
+        # script that ran for 6s and printed 40 lines came back with an empty
+        # stdout and no exit code, which the UI could only render as `exit ?`.
+        # Reader tasks keep every byte, so a timeout still reports the work.
+        out_buf: list[bytes] = []
+        err_buf: list[bytes] = []
+
+        async def _drain(stream, buf):
+            if stream is None:
+                return
+            while True:
+                chunk = await stream.read(65536)
+                if not chunk:
+                    return
+                buf.append(chunk)
+
+        readers = [
+            asyncio.ensure_future(_drain(proc.stdout, out_buf)),
+            asyncio.ensure_future(_drain(proc.stderr, err_buf)),
+        ]
         try:
-            stdout_b, stderr_b = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_s
-            )
+            await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+            # The process is gone; give the readers a moment to see EOF. A
+            # backgrounded grandchild can hold the pipe open indefinitely, so
+            # this wait is bounded too — output already buffered is kept.
+            await asyncio.wait(readers, timeout=_DRAIN_GRACE_S)
         except asyncio.TimeoutError:
-            proc.kill()
-            try:
-                stdout_b, stderr_b = await proc.communicate()
-            except Exception:
-                stdout_b, stderr_b = b"", b""
+            # Kill the whole GROUP: killing only the shell left background
+            # children alive AND holding the pipe, which is what made a
+            # 6s-timeout command block for the full 20s of its `sleep 20 &`.
+            _kill_group(proc)
+            await asyncio.wait(readers, timeout=_DRAIN_GRACE_S)
+            for r in readers:
+                r.cancel()
             return ExecResult(
                 exit_code=-1,
-                stdout=stdout_b.decode("utf-8", errors="replace"),
-                stderr=stderr_b.decode("utf-8", errors="replace"),
+                stdout=b"".join(out_buf).decode("utf-8", errors="replace"),
+                stderr=b"".join(err_buf).decode("utf-8", errors="replace"),
                 timed_out=True,
             )
+        finally:
+            for r in readers:
+                if not r.done():
+                    r.cancel()
+
+        stdout_b = b"".join(out_buf)
+        stderr_b = b"".join(err_buf)
         return ExecResult(
             exit_code=proc.returncode if proc.returncode is not None else -1,
             stdout=stdout_b.decode("utf-8", errors="replace"),
