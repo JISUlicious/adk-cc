@@ -24,10 +24,10 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | II | W1 runtime — uv-managed analysis env | ✅ 2026-07-27 (unit + API + UI verified) |
 | II | W2 built-in skills plumbing | ✅ 2026-07-27 (incl. real wheel-packaging test) |
 | II | W3 the built-in set (23) | ✅ 2026-07-28 — 23 skills, catalog ~1770 tokens |
-| II | W4 agent/tool layer | ⬜ |
-| II | W5 data layer (ingestion) | ⬜ |
-| II | W6 UI/UX frontend | ⬜ |
-| II | W7 verification | ⬜ |
+| II | W4 agent/tool layer | ✅ 2026-07-29 (dataset guard; convention superseded by W6.1) |
+| II | W5 data layer (ingestion) | ✅ 2026-07-29 (routes + Datasets strip, unit + UI e2e) |
+| II | W6 UI/UX frontend | 🔨 6.1 ✅ chart-in-chat · 6.2 ✅ dataset browser · 6.3–6.7 ⬜ |
+| II | W7 verification | 🔨 unit/budget/packaging ✅ · pd-skills probes + standing live e2e ⬜ |
 | II | **W8 skill enable/disable from the UI** (all scopes) | ✅ 2026-07-28 (unit + API + live UI e2e) |
 | II | **W9 verification in the agentic loop** | ✅ S0–S3 shipped & live-verified 2026-07-27 (hard = opt-in) |
 
