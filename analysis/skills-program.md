@@ -26,7 +26,7 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | II | W3 the built-in set (23) | ✅ 2026-07-28 — 23 skills, catalog ~1770 tokens |
 | II | W4 agent/tool layer | ✅ 2026-07-29 (dataset guard; convention superseded by W6.1) |
 | II | W5 data layer (ingestion) | ✅ 2026-07-29 (routes + Datasets strip, unit + UI e2e) |
-| II | W6 UI/UX frontend | 🔨 6.1 ✅ chart-in-chat · 6.2 ✅ dataset browser · 6.3–6.7 ⬜ |
+| II | W6 UI/UX frontend | 🔨 6.1 ✅ · 6.2 ✅ · 6.4 ✅ · 6.5 ✅ · 6.6 ✅ · 6.3 ⬜ · 6.7 ⬜ (KO) |
 | II | W7 verification | 🔨 unit/budget/packaging ✅ · pd-skills probes + standing live e2e ⬜ |
 | II | **W8 skill enable/disable from the UI** (all scopes) | ✅ 2026-07-28 (unit + API + live UI e2e) |
 | II | **W9 verification in the agentic loop** | ✅ S0–S3 shipped & live-verified 2026-07-27 (hard = opt-in) |
@@ -593,8 +593,23 @@ Build on it rather than inventing a viewer.
    provisioning it was reporting on. Caught by `test_analysis_env`, not by the
    UI test. `tests/e2e_analysis_env_chip.py` covers all three visible states in
    a browser.
-6. **Skill discoverability** — surface available skills in the UI; today the
-   only path is the model calling `list_skills`.
+6. **Skill discoverability** ✅ 2026-07-29 — `/skills` opens the catalog:
+   23 built-ins ship with the app and the only way to learn one existed was the
+   model calling `list_skills` mid-turn.
+
+   Two parts. The command deep-links Settings to the Skills tab (the frame
+   already took `initialTab`, and the same seam now runs through both shells).
+   And the list shows each skill's DESCRIPTION — the same text the model reads
+   in its catalog, so the panel and the agent agree about what a skill is for.
+   A list of 23 names is a checklist; the descriptions are what make it
+   discovery.
+
+   Bug found by the test: `initialTab` fed `useState`, which reads it only at
+   FIRST mount — and the dialog stays mounted across opens, so the deep link
+   landed on whichever tab was last shown (Appearance). It is re-applied on
+   every open now. `tests/e2e_skill_discovery_ui.py` (7 checks) types the
+   command, asserts the catalog opens on the right tab, and checks named
+   built-ins and their descriptions are present.
 7. **KO/EN parity** — if the Korean variant ships, follow the UI locale.
 
 ## W7 — Verification ⬜

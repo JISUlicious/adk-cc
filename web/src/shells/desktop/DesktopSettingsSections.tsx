@@ -214,7 +214,8 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
         </p>
       )}
       {skills.map((s) => (
-        <div key={s.name} className="flex items-center gap-2 text-sm" data-skill={s.name}>
+        <div key={s.name} className="text-sm" data-skill={s.name}>
+        <div className="flex items-center gap-2">
           <input
             type="checkbox"
             checked={s.enabled}
@@ -235,6 +236,15 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
           {installed.includes(s.name) && (
             <button onClick={() => del(s.name)} className="ml-auto text-muted-foreground hover:text-destructive" title="Remove"><Trash2 className="h-3.5 w-3.5" /></button>
           )}
+        </div>
+        {/* The description is the discoverable part: a list of 23 names tells
+            you nothing about what the agent can now do. Same text the model
+            sees in its catalog, so the panel and the agent agree. */}
+        {s.description && (
+          <p className="mb-1 ml-6 mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+            {s.description}
+          </p>
+        )}
         </div>
       ))}
       <div className="flex flex-wrap items-start gap-2 pt-1">

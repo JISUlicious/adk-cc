@@ -34,6 +34,13 @@ export function SettingsFrame({
 }) {
   const [tabId, setTabId] = useState(initialTab ?? tabs[0]?.id)
 
+  // `useState(initialTab)` only reads it at FIRST mount, and this dialog stays
+  // mounted across opens — so a deep link (`/skills`) landed on whatever tab
+  // was shown last, usually the first one. Re-apply it each time it opens.
+  useEffect(() => {
+    if (open && initialTab) setTabId(initialTab)
+  }, [open, initialTab])
+
   useEffect(() => {
     if (!open) return
     function onKey(e: KeyboardEvent) {

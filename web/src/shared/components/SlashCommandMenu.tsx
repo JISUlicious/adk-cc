@@ -1,5 +1,6 @@
 import { useMemo } from "react"
 import {
+  Boxes,
   ClipboardList,
   Cpu,
   FolderPlus,
@@ -37,6 +38,7 @@ export type SlashAction =
   | "wiki"
   | "add-dir"
   | "model"
+  | "skills"
 
 export interface SlashCommand {
   /** What the user types after `/`. Match is prefix-insensitive. */
@@ -69,6 +71,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     icon: RotateCcw,
     kind: { type: "action", action: "rewind" },
     desktopOnly: true,
+  },
+  {
+    name: "skills",
+    description: "See the skills the agent can use, and turn them on or off",
+    icon: Boxes,
+    kind: { type: "action", action: "skills" },
   },
   {
     name: "model",

@@ -370,7 +370,7 @@ function SandboxSection() {
  * per-project MCP / Skills / Secrets (backed by /desktop/settings/*, mapped onto
  * the agent's tenant∪user credential union), plus global-only model endpoints.
  */
-export function DesktopSettings({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function DesktopSettings({ open, onClose, initialTab }: { open: boolean; onClose: () => void; initialTab?: string }) {
   const tabs: SettingsTab[] = [
     { id: "appearance", label: "Appearance", icon: Palette, render: () => <ThemeSection /> },
     {
@@ -392,5 +392,5 @@ export function DesktopSettings({ open, onClose }: { open: boolean; onClose: () 
     { id: "models", label: "Models", icon: Cpu, render: () => <ModelsSection /> },
     { id: "sandbox", label: "Sandbox", icon: ShieldCheck, render: () => <SandboxSection /> },
   ]
-  return <SettingsFrame open={open} onClose={onClose} tabs={tabs} />
+  return <SettingsFrame open={open} onClose={onClose} tabs={tabs} initialTab={initialTab} />
 }

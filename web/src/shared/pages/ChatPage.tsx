@@ -66,7 +66,12 @@ import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/shared/lib/the
  */
 /** The platform shells inject their own rail + settings; both default to the
  *  shared web implementations so the web build is unchanged. */
-export type SettingsModalProps = { open: boolean; onClose: () => void }
+export type SettingsModalProps = {
+  open: boolean
+  onClose: () => void
+  /** Tab to open on — `/skills` deep-links to the skill catalog. */
+  initialTab?: string
+}
 
 export function ChatPage({
   Rail = SessionRail,
@@ -107,6 +112,7 @@ export function ChatPage({
     noticeTimer.current = setTimeout(() => setNotice(null), 6000)
   }
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsTab, setSettingsTab] = useState<string | undefined>(undefined)
   const [rewindOpen, setRewindOpen] = useState(false)
   const [modelPickerOpen, setModelPickerOpen] = useState(false)
   // Bumped whenever the active model may have changed (palette pick, Settings
@@ -384,6 +390,14 @@ export function ChatPage({
           )
         return
       case "settings":
+        setSettingsTab(undefined)
+        setSettingsOpen(true)
+        return
+      case "skills":
+        // 23 built-ins ship with the app and the only way to learn they exist
+        // was the model calling list_skills mid-turn. `/skills` opens the
+        // catalog — every discovered skill, what it is for, and its switch.
+        setSettingsTab("skills")
         setSettingsOpen(true)
         return
       case "wiki":
@@ -630,6 +644,7 @@ export function ChatPage({
       )}
       <Settings
         open={settingsOpen}
+        initialTab={settingsTab}
         onClose={() => { setSettingsOpen(false); setModelTick((t) => t + 1) }}
       />
       {IS_DESKTOP && session && (

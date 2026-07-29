@@ -26,7 +26,7 @@ import { ThemeSection, AdminBlock } from "@/shared/settings/sections"
  * into per-topic tabs (role-gated by maybeAdmin). Composes the shared
  * SettingsFrame; the desktop shell composes the same frame with a subset.
  */
-export function SettingsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function SettingsModal({ open, onClose, initialTab }: { open: boolean; onClose: () => void; initialTab?: string }) {
   const isAdmin = maybeAdmin()
   const miss = useSecretBadges(open)
 
@@ -59,7 +59,7 @@ export function SettingsModal({ open, onClose }: { open: boolean; onClose: () =>
     </Button>
   )
 
-  return <SettingsFrame open={open} onClose={onClose} tabs={tabs} footer={footer} />
+  return <SettingsFrame open={open} onClose={onClose} tabs={tabs} footer={footer} initialTab={initialTab} />
 }
 
 function OrgCredentialsSection() {
