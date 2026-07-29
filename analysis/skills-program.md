@@ -23,11 +23,11 @@ Legend: ✅ done · 🔨 in progress · ⬜ not started
 | I | 3. Verified platform facts (discovery, progressive disclosure, runtime) | ✅ 2026-07-26 |
 | II | W1 runtime — uv-managed analysis env | ✅ 2026-07-27 (unit + API + UI verified) |
 | II | W2 built-in skills plumbing | ✅ 2026-07-27 (incl. real wheel-packaging test) |
-| II | W3 the built-in set (23) | ✅ 2026-07-28 — 23 skills, catalog ~1770 tokens |
+| II | W3 the built-in set (23) | ✅ 2026-07-28 — 23 skills; catalog ~1943/2000 after the pd-skills re-vendor |
 | II | W4 agent/tool layer | ✅ 2026-07-29 (dataset guard; convention superseded by W6.1) |
 | II | W5 data layer (ingestion) | ✅ 2026-07-29 (routes + Datasets strip, unit + UI e2e) |
-| II | W6 UI/UX frontend | 🔨 6.1 ✅ · 6.2 ✅ · 6.4 ✅ · 6.5 ✅ · 6.6 ✅ · 6.3 ⬜ · 6.7 ⬜ (KO) |
-| II | W7 verification | 🔨 unit/budget/packaging ✅ · pd-skills probes + standing live e2e ⬜ |
+| II | W6 UI/UX frontend | 🔨 6.1–6.6 ✅ · 6.7 ⬜ (KO — upstream now ships `data-analyst-ko`) |
+| II | W7 verification | ✅ 2026-07-29 — unit/budget/packaging + pd-skills probes + SECOM acceptance 17/17 |
 | II | **W8 skill enable/disable from the UI** (all scopes) | ✅ 2026-07-28 (unit + API + live UI e2e) |
 | II | **W9 verification in the agentic loop** | ✅ S0–S3 shipped & live-verified 2026-07-27 (hard = opt-in) |
 
