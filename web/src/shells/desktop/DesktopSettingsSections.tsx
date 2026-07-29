@@ -204,16 +204,14 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
     try { await setDesktopSkillEnabled(name, enabled, scope, projectId) } catch (e) { setErr(errMsg(e)) }
     reload()
   }
+  // Two audiences in one list. Skills you added are yours to upload, edit and
+  // delete; built-ins ship inside the app and can only be switched off. Mixing
+  // them buried a handful of your own skills under 23 you never installed.
+  const mine = skills.filter((s) => s.source !== "built-in")
+  const builtIn = skills.filter((s) => s.source === "built-in")
   const enabledCount = skills.filter((s) => s.enabled).length
-  return (
-    <div className="space-y-1.5">
-      {skills.length === 0 && <p className="text-xs text-muted-foreground">No skills found.</p>}
-      {skills.length > 0 && (
-        <p className="text-xs text-muted-foreground">
-          {enabledCount} of {skills.length} enabled — only these are offered to the agent.
-        </p>
-      )}
-      {skills.map((s) => (
+
+  const renderSkill = (s: SkillCatalogEntry) => (
         <div key={s.name} className="text-sm" data-skill={s.name}>
         <div className="flex items-center gap-2">
           <input
@@ -246,7 +244,33 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
           </p>
         )}
         </div>
-      ))}
+  )
+
+  const section = (title: string, hint: string, rows: SkillCatalogEntry[]) =>
+    rows.length === 0 ? null : (
+      <section className="space-y-1.5">
+        <h4 className="mt-2 flex items-baseline gap-1.5 border-b border-border/50 pb-1 text-xs font-medium first:mt-0">
+          {title}
+          <span className="font-normal text-muted-foreground">
+            {rows.filter((r) => r.enabled).length} of {rows.length} on · {hint}
+          </span>
+        </h4>
+        {rows.map(renderSkill)}
+      </section>
+    )
+
+  return (
+    <div className="space-y-1.5">
+      {skills.length === 0 && <p className="text-xs text-muted-foreground">No skills found.</p>}
+      {skills.length > 0 && (
+        <p className="text-xs text-muted-foreground">
+          {enabledCount} of {skills.length} enabled — only these are offered to the agent.
+        </p>
+      )}
+      {/* Yours first: it is the shorter list and the only one you can change
+          beyond a switch. */}
+      {section("Installed here", "added by you — upload, replace or remove", mine)}
+      {section("Built in", "ship with adk-cc — switch off, but not removable", builtIn)}
       <div className="flex flex-wrap items-start gap-2 pt-1">
         <input ref={fileRef} type="file" accept=".zip" onChange={onFile} className="hidden" />
         <FolderPickerButton label="Add skill folder" placeholder="/absolute/path/to/skill-folder" busy={busy} onPick={addFromDir} />

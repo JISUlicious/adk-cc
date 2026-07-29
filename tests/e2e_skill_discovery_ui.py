@@ -54,6 +54,12 @@ def main() -> int:
         "ADK_CC_TENANT_SKILLS_DIR": os.path.join(data, "skills"),
         "ADK_CC_SKIP_DOTENV": "1", "ADK_CC_API_KEY": "stub",
     })
+    # a skill the USER installed, so both sections are exercised
+    mine = os.path.join(data, "skills", "local", "my-own-skill")
+    os.makedirs(mine, exist_ok=True)
+    with open(os.path.join(mine, "SKILL.md"), "w") as f:
+        f.write("---\nname: my-own-skill\ndescription: A skill this user added themselves.\n---\n\nBody.\n")
+
     proc = subprocess.Popen(
         [os.path.join(REPO, ".venv/bin/uvicorn"), "adk_cc.service.server:make_app",
          "--factory", "--host", "127.0.0.1", "--port", str(PORT)],
@@ -97,6 +103,22 @@ def main() -> int:
                   "no description text found")
             n = page.locator("[data-skill]").count()
             check("the whole catalog is listed", n >= 20, f"{n} skills")
+
+            # Grouping: a user's own skills must not be buried under 23 built-ins.
+            check("the two groups are labelled",
+                  "Installed here" in text and "Built in" in text, text[:300])
+            check("built-ins say they cannot be removed",
+                  "not removable" in text, text[:300])
+            order_mine = text.find("Installed here")
+            order_builtin = text.find("Built in")
+            check("your own skills come first", 0 <= order_mine < order_builtin,
+                  f"mine@{order_mine} builtin@{order_builtin}")
+            own = page.locator('[data-skill="my-own-skill"]')
+            check("the user-installed skill is in the first group",
+                  own.count() == 1 and own.first.evaluate(
+                      "el => el.closest('section').querySelector('h4').textContent"
+                  ).startswith("Installed here"),
+                  "own skill not grouped under Installed here")
             page.screenshot(path=os.path.join(data, "skills.png"), full_page=True)
             print(f"    screenshot: {os.path.join(data, 'skills.png')}")
             b.close()
