@@ -91,7 +91,9 @@ _PAGE_SUFFIXES = (".html", ".htm")
 # server the page is then driven through.
 _PAGE_RUNTIME_RE = re.compile(
     r"(?i)\b(playwright|puppeteer|selenium|jsdom|happy-dom|linkedom|"
-    r"chromium|chrome\s+--headless|webdriver|cypress|vitest\s+--browser)\b"
+    r"chromium|chrome\s+--headless|webdriver|cypress|vitest\s+--browser|"
+    # the bundled runner (skills/web-smoke-check) — the supported way to do this
+    r"smoke_page\.mjs)\b"
 )
 
 # The documented fallback when no runtime is installed: build a minimal DOM and
