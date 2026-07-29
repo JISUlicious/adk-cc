@@ -59,7 +59,11 @@ export function BashTerminalCard({
   const callTitle = toolCallTitle(args)
   const exitCode = r?.exit_code
   const isTimeout = r?.status === "timeout"
-  const isFailure = !isPending && (isTimeout || (typeof exitCode === "number" && exitCode !== 0))
+  // A response that carries no exit code is abnormal, not a success: the turn
+  // ended before the command reported. Styling it like a clean exit 0 is how
+  // `exit ?` managed to look benign in two dogfooding reports.
+  const isFailure =
+    !isPending && (isTimeout || exitCode !== 0 || typeof exitCode !== "number")
 
   return (
     <div className="flex justify-start">
@@ -109,10 +113,18 @@ export function BashTerminalCard({
               )}
             >
               {/* A timed-out command has no exit code; `exit ?` told the user
-                  nothing. Say what actually happened. */}
+                  nothing. Say what actually happened.
+
+                  A response with no exit_code at all is a THIRD case: the turn
+                  ended before the command reported (server died, run aborted,
+                  session deleted mid-run). `exit ?` was reported twice from
+                  dogfooding as if the command itself had misbehaved, which sent
+                  the debugging in the wrong direction both times. */}
               {r?.timed_out || r?.status === "timeout"
                 ? `timed out${r?.timeout_seconds ? ` after ${r.timeout_seconds}s` : ""}`
-                : `exit ${exitCode ?? "?"}`}
+                : typeof exitCode === "number"
+                  ? `exit ${exitCode}`
+                  : "no result — turn ended first"}
             </span>
           )}
           {callId && (

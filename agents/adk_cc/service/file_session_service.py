@@ -109,6 +109,13 @@ class FileSessionService(BaseSessionService):
         # app/user state files. Single-process desktop, but async → serialize.
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._shared_lock = asyncio.Lock()
+        # Sessions deleted in this process. `append_event` re-creates its file
+        # (`mkdir(parents=True)` + `open("a")`), so a run still in flight when
+        # the user deleted its session wrote the session back into existence —
+        # it reappeared in the list and kept streaming. The broker is asked to
+        # abort on delete, but cancellation is not instantaneous and ADK may
+        # flush one more event, so storage refuses the write outright.
+        self._deleted: set[tuple[str, str]] = set()
 
     # --- paths ---------------------------------------------------------
 
@@ -233,6 +240,8 @@ class FileSessionService(BaseSessionService):
     ) -> Session:
         deltas = _session_util.extract_state_delta(state or {})
         _stamp_permission_mode(deltas["session"])
+        if session_id:
+            self._deleted.discard((user_id, session_id.strip()))
         async with self._shared_lock:
             if deltas["app"]:
                 self._merge_app_state(deltas["app"])
@@ -338,6 +347,7 @@ class FileSessionService(BaseSessionService):
     async def delete_session(
         self, *, app_name: str, user_id: str, session_id: str
     ) -> None:
+        self._deleted.add((user_id, session_id))
         try:
             self._session_file(user_id, session_id).unlink(missing_ok=True)
         except (OSError, ValueError):
@@ -417,6 +427,15 @@ class FileSessionService(BaseSessionService):
 
     async def append_event(self, session: Session, event: Event) -> Event:
         if event.partial:
+            return event
+        if (session.user_id, session.id) in self._deleted:
+            # The session was deleted under a running turn. Returning the event
+            # unwritten keeps the in-flight run from raising while it unwinds;
+            # what matters is that nothing lands on disk.
+            _log.info(
+                "dropping event for deleted session %s (run still unwinding)",
+                session.id,
+            )
             return event
         # Base does: apply temp to in-memory state, trim temp from the event,
         # update session.state with the (non-temp) delta, append to session.events.

@@ -124,18 +124,19 @@ def build_fastapi_app(
     # service as ADK's routes (extracted from the AdkWebServer the app was
     # built around). Degrades gracefully if ADK's internals shift: the legacy
     # /run_sse path is untouched either way.
-    from .turn_routes import mount_turn_routes
+    from .turn_routes import mount_delete_abort, mount_turn_routes
     from .turns import TurnBroker, extract_adk_web_server
 
     _adk_server = extract_adk_web_server(fastapi_app)
     if _adk_server is not None:
-        mount_turn_routes(
-            fastapi_app,
-            TurnBroker(
-                get_runner=_adk_server.get_runner_async,
-                session_service=_adk_server.session_service,
-            ),
+        _broker = TurnBroker(
+            get_runner=_adk_server.get_runner_async,
+            session_service=_adk_server.session_service,
         )
+        mount_turn_routes(fastapi_app, _broker)
+        # Deleting a session has to stop its runs first, or the run re-creates
+        # the session it was deleted from and keeps streaming.
+        mount_delete_abort(fastapi_app, _broker)
     else:  # pragma: no cover — ADK internals changed
         import logging as _logging
 

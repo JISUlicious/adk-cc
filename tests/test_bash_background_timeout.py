@@ -110,11 +110,53 @@ def test_ordinary_commands_are_unaffected() -> None:
     print("OK ordinary_commands_are_unaffected")
 
 
+def test_a_runaway_command_cannot_flood_the_turn() -> None:
+    """A second `exit ?` report, from a different cause than the first.
+
+    Dogfooding on Linux ran
+    `apt list --installed 2>/dev/null | grep -i psycopg; dpkg -l | grep ...;
+     find / -name "psycopg2" ...`. `find /` prints "Permission denied" across
+    /proc, /sys and /root — hundreds of MB, previously all buffered in the
+    server process.
+
+    Note what this test does NOT claim: the tool payload was already
+    tail-capped at 4000 chars, so the flood never reached the model, and the
+    `exit ?` symptom means the call got no response at all. A server dying under
+    memory pressure fits, but is unproven. The unbounded buffer is worth
+    removing regardless, and the cap now announces itself instead of handing
+    back a silently truncated log."""
+    # 8MB on stdout, well past the 256KB cap.
+    elapsed, res = _run("yes 0123456789012345678901234567890123456789 | head -c 8000000",
+                        timeout=30)
+    body = res.get("stdout") or ""
+    assert len(body) < 400_000, f"kept {len(body)} bytes — cap did not apply"
+    assert "truncated" in body, body[-200:]
+    assert "dropped" in body, body[-200:]
+    # It must still be a normal, successful command — capping is not failing.
+    assert res.get("exit_code") == 0, res
+    assert not res.get("timed_out"), res
+    print(f"OK a_runaway_command_cannot_flood_the_turn ({len(body)} bytes kept)")
+
+
+def test_a_flood_on_stderr_is_capped_too() -> None:
+    """The reported command flooded STDERR, not stdout — find's permission
+    errors. Capping only stdout would have missed it entirely."""
+    elapsed, res = _run(
+        "yes 0123456789012345678901234567890123456789 | head -c 8000000 1>&2",
+        timeout=30)
+    err = res.get("stderr") or ""
+    assert len(err) < 400_000, f"kept {len(err)} bytes of stderr"
+    assert "truncated" in err, err[-200:]
+    print(f"OK a_flood_on_stderr_is_capped_too ({len(err)} bytes kept)")
+
+
 def main() -> None:
     test_a_background_child_does_not_outlive_the_timeout()
     test_output_printed_before_the_deadline_survives()
     test_the_timeout_is_reported_as_a_timeout()
     test_the_reported_shape_still_completes_normally()
+    test_a_runaway_command_cannot_flood_the_turn()
+    test_a_flood_on_stderr_is_capped_too()
     test_ordinary_commands_are_unaffected()
     print("\nall bash background/timeout tests passed")
 

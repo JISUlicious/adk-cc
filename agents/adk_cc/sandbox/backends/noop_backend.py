@@ -85,6 +85,11 @@ def _is_prod_shaped(cwd: str) -> bool:
 # process is — so the drain is bounded rather than open-ended.
 _DRAIN_GRACE_S = 3
 
+# Per-stream cap on what is KEPT (reading continues past it, see _drain).
+# 256KB leaves plenty of head-room over the 4KB the tool actually forwards,
+# while bounding what one runaway command can hold in the server.
+_MAX_STREAM_BYTES = 256 * 1024
+
 
 def _kill_group(proc) -> None:
     """SIGKILL the process group, falling back to the process itself.
@@ -174,20 +179,64 @@ class NoopBackend(SandboxBackend):
         # Reader tasks keep every byte, so a timeout still reports the work.
         out_buf: list[bytes] = []
         err_buf: list[bytes] = []
+        dropped = {"stdout": 0, "stderr": 0}
 
-        async def _drain(stream, buf):
+        async def _drain(stream, buf, which):
+            """Read to EOF, but KEEP at most `_MAX_STREAM_BYTES`.
+
+Keeping every byte buffers the whole flood in the SERVER
+            process. A dogfooding session ran `find / -name psycopg2 ...` on
+            Linux, where find prints "Permission denied" across /proc, /sys and
+            /root — easily hundreds of MB held in memory for one command.
+
+            To be precise about what this does and does not explain: the tool
+            payload is already tail-capped (`result.stdout[-4000:]`), so the
+            flood never reached the model. What it threatens is the server
+            itself, and a server that dies mid-tool leaves the call with no
+            response — which the UI renders as `exit ?`, the symptom reported.
+            That chain is plausible and unproven; the memory hazard is real
+            either way, and it is cheap to remove.
+
+            Reading must CONTINUE past the cap even though the bytes are
+            discarded: a 64KB pipe fills, and a child blocked on write never
+            exits, so capping by breaking out of the loop would swap a huge
+            payload for a hang.
+            """
             if stream is None:
                 return
+            kept = 0
             while True:
                 chunk = await stream.read(65536)
                 if not chunk:
                     return
-                buf.append(chunk)
+                room = _MAX_STREAM_BYTES - kept
+                if room > 0:
+                    buf.append(chunk[:room])
+                    kept += min(room, len(chunk))
+                    if len(chunk) > room:
+                        dropped[which] += len(chunk) - room
+                else:
+                    dropped[which] += len(chunk)
 
         readers = [
-            asyncio.ensure_future(_drain(proc.stdout, out_buf)),
-            asyncio.ensure_future(_drain(proc.stderr, err_buf)),
+            asyncio.ensure_future(_drain(proc.stdout, out_buf, "stdout")),
+            asyncio.ensure_future(_drain(proc.stderr, err_buf, "stderr")),
         ]
+
+        def _text(buf, which):
+            """Decode, and say plainly when output was dropped — a silently
+            truncated log reads as a complete one and invites a wrong
+            conclusion from a partial result."""
+            text = b"".join(buf).decode("utf-8", errors="replace")
+            lost = dropped[which]
+            if lost:
+                text += (
+                    f"\n[adk-cc: {which} truncated — kept the first "
+                    f"{_MAX_STREAM_BYTES // 1024}KB, dropped {lost} more bytes. "
+                    "Narrow the command (a path instead of /, -maxdepth, "
+                    "2>/dev/null) or write to a file and read it back.]"
+                )
+            return text
         try:
             await asyncio.wait_for(proc.wait(), timeout=timeout_s)
             # The process is gone; give the readers a moment to see EOF. A
@@ -204,8 +253,8 @@ class NoopBackend(SandboxBackend):
                 r.cancel()
             return ExecResult(
                 exit_code=-1,
-                stdout=b"".join(out_buf).decode("utf-8", errors="replace"),
-                stderr=b"".join(err_buf).decode("utf-8", errors="replace"),
+                stdout=_text(out_buf, "stdout"),
+                stderr=_text(err_buf, "stderr"),
                 timed_out=True,
             )
         finally:
@@ -213,12 +262,10 @@ class NoopBackend(SandboxBackend):
                 if not r.done():
                     r.cancel()
 
-        stdout_b = b"".join(out_buf)
-        stderr_b = b"".join(err_buf)
         return ExecResult(
             exit_code=proc.returncode if proc.returncode is not None else -1,
-            stdout=stdout_b.decode("utf-8", errors="replace"),
-            stderr=stderr_b.decode("utf-8", errors="replace"),
+            stdout=_text(out_buf, "stdout"),
+            stderr=_text(err_buf, "stderr"),
         )
 
     async def read_text(self, path: str, *, fs_read: FsReadConfig) -> str:

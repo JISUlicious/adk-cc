@@ -13,10 +13,46 @@ same bearer/no-auth policy as every other route applies.
 
 from __future__ import annotations
 
+import logging
+import re
 from typing import Any
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+
+_log = logging.getLogger(__name__)
+
+
+_DELETE_SESSION_RE = re.compile(
+    r"^/apps/(?P<app>[^/]+)/users/(?P<user>[^/]+)/sessions/(?P<sid>[^/]+)/?$"
+)
+
+
+def mount_delete_abort(app: Any, broker: Any) -> None:
+    """Stop a session's runs before it is deleted.
+
+    Deleting a session mid-run left the run going: the file was unlinked, the
+    broker kept driving, and the next `append_event` re-created it — so the UI
+    carried on streaming and the "deleted" session came back in the list.
+
+    Middleware rather than a route: ADK registers its own DELETE handler inside
+    `get_fast_api_app`, and routes added afterwards do not shadow it. Middleware
+    runs ahead of routing, so this works without depending on registration
+    order or on which session service is configured.
+    """
+
+    @app.middleware("http")
+    async def _abort_before_delete(request, call_next):  # noqa: ANN001
+        if request.method == "DELETE":
+            m = _DELETE_SESSION_RE.match(request.url.path)
+            if m:
+                try:
+                    await broker.abort_session(
+                        m.group("app"), m.group("user"), m.group("sid")
+                    )
+                except Exception:  # noqa: BLE001 — deletion must still proceed
+                    _log.warning("abort_session failed before delete", exc_info=True)
+        return await call_next(request)
 
 
 def mount_turn_routes(app: Any, broker: Any) -> None:

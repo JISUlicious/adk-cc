@@ -238,6 +238,33 @@ class TurnBroker:
         t.task.cancel()
         return True
 
+    async def abort_session(
+        self, app_name: str, user_id: str, session_id: str
+    ) -> int:
+        """Cancel every running turn for a session. Returns how many.
+
+        Deleting a session used to leave its run going: the row/file went away,
+        the broker kept driving, and the next `append_event` re-created the
+        session — so the UI carried on streaming and the "deleted" session
+        reappeared in the list. Deletion has to stop the work first.
+
+        Scans all turns rather than using `_latest_by_session`, because a
+        confirmation retry can leave an earlier turn running for the same
+        session and only the latest is indexed."""
+        stopped = 0
+        for t in list(self._turns.values()):
+            if (t.app_name, t.user_id, t.session_id) != (app_name, user_id, session_id):
+                continue
+            if t.task is None or t.status != "running":
+                continue
+            t.task.cancel()
+            stopped += 1
+        if stopped:
+            _log.info(
+                "aborted %d running turn(s) for deleted session %s", stopped, session_id
+            )
+        return stopped
+
     def retry_last(self, *, app_name: str, user_id: str, session_id: str) -> Turn:
         """Re-run the latest turn's ORIGINAL message (F2b). Only for turns
         that ended in error. F2c: when the errored attempt produced zero
