@@ -10,3 +10,4 @@ Scope: 이 디렉터리는 **adk-cc 구현**만을 문서화합니다. Upstream 
 - [`06-confirmation-protocol.ko.md`](./06-confirmation-protocol.ko.md) — Tool-confirmation HITL prompt의 wire 프로토콜: outbound `ConfirmPrompt` 페이로드 모양, inbound `chose_id` 값, "Allow always" 세션 규칙 스코핑, payload 프로토콜을 말하지 않는 frontend를 위한 legacy `confirmed: bool` fallback.
 - [`07-web-ui.ko.md`](./07-web-ui.ko.md) — React 챗 UI 런북: stack, 소스 레이아웃, event flow, long-running tool resume 프로토콜, wire 형식 quirk, slash 명령어, 테마, dev + prod 실행 모드, env 변수.
 - [`08-desktop-app.ko.md`](./08-desktop-app.ko.md) — 단일 사용자 데스크톱 앱(Tauri + Python 사이드카): 데이터 디렉터리, `settings.env` 설정 파일, dev 실행 모드, 단일 파일 AppImage 인스톨러 빌드, relocatable 경로 레이아웃.
+- [`09-building.ko.md`](./09-building.ko.md) — 빌드 + 테스트 런북: 각 산출물이 무엇으로 빌드되는지, `VITE_*` 플래그가 왜 저장소 루트 `.env`에서 오는지, `tsc --noEmit`이 왜 빌드 검증이 아닌지, 테스트 세 부류(유닛 / e2e / 라이브)의 차이, 그리고 라이브 테스트를 양방향으로 깨뜨리는 `.env` 함정.

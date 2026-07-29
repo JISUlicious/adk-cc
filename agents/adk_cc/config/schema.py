@@ -650,8 +650,27 @@ FIELDS: list[Var] = [
         "Autosave only user-audience blobs (sub-knob).", default=True, parse=as_bool),
 
     # --- Skills ----------------------------------------------------------
+    # --- analysis outputs + datasets (W4/W5/W6) ---
+    Var("ADK_CC_ANALYSIS_ARTIFACTS", Tier.ADVANCED, "Behavior",
+        "Register previewable files a tool call wrote as session artifacts, so "
+        "charts and reports appear in the conversation.", default=True, parse=as_bool),
+    Var("ADK_CC_ANALYSIS_ARTIFACT_MAX_MB", Tier.ADVANCED, "Behavior",
+        "Largest analysis output auto-registered as an artifact.",
+        default=12.0, parse=as_float),
+    Var("ADK_CC_DATASET_GUARD", Tier.ADVANCED, "Behavior",
+        "Refuse a python command that would load a dataset over the cap, "
+        "instead of letting the sandbox OOM.", default=True, parse=as_bool),
+    Var("ADK_CC_DATASET_MAX_MB", Tier.ADVANCED, "Behavior",
+        "Dataset size above which an unsampled load is refused.",
+        default=100.0, parse=as_float),
+    Var("ADK_CC_DATASET_UPLOAD_MAX_MB", Tier.ADVANCED, "Behavior",
+        "Largest dataset accepted into the workspace's data/ directory.",
+        default=500.0, parse=as_float),
     Var("ADK_CC_SKILLS_DIR", Tier.COMMON, "Skills",
         "Explicit skills root (shadows project/install skills).", default=None, parse=as_path),
+    Var("ADK_CC_SKILL_ENABLEMENT_FILE", Tier.ADVANCED, "Skills",
+        "Where per-scope skill on/off lists live (deny-list by skill name).",
+        default=None, parse=as_path, default_display="<DATA_DIR>/skill-enablement.json"),
     Var("ADK_CC_SKILL_GUARDS", Tier.ADVANCED, "Skills",
         "Skill safety guards (untrusted-content wrapping + host-exec refusal).", default=False, parse=as_bool),
     Var("ADK_CC_SKILL_SCRIPTS_ACK_HOST_EXEC", Tier.DEV, "Skills",

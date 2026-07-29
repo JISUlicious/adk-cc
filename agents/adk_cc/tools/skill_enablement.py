@@ -134,8 +134,13 @@ def set_enabled(
 
 def _default_tenant() -> str:
     """Desktop and single-tenant deployments have no tenant context; give them a
-    stable key rather than a null one so the file has a single shape."""
-    return os.environ.get("ADK_CC_TENANT_ID") or "local"
+    stable key rather than a null one so the file has a single shape.
+
+    Reads the EXISTING `ADK_CC_GLOBAL_TENANT_ID` rather than inventing a second
+    name for the same idea — a synonym would have to be kept in sync forever,
+    and the config schema exists to stop exactly that.
+    """
+    return os.environ.get("ADK_CC_GLOBAL_TENANT_ID") or "local"
 
 
 def _scope_from_state(state: Any) -> tuple[Optional[str], Optional[str]]:
