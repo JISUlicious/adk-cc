@@ -67,6 +67,7 @@ explicit `code_executor=` to override.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import re
@@ -102,15 +103,23 @@ _log = logging.getLogger(__name__)
 _PROJECT_SKILLS_PICK_ONE = (".adk-cc/skills", ".claude/skills")
 
 
-def _resolve_skills_dirs() -> list[Path]:
+def _resolve_skills_dirs(project_root: Optional[Path] = None) -> list[Path]:
     """Ordered list of skills directories to scan. First-found skill
     name wins across all returned dirs.
 
     Order:
       1. `ADK_CC_SKILLS_DIR` (operator explicit, highest precedence).
       2. Project walk-up (`.adk-cc/skills/` or `.claude/skills/` per
-         directory, walked from cwd up to home / filesystem root).
+         directory, walked from `project_root` — or, with none given, from
+         the process cwd — up to home / filesystem root).
          Skipped entirely when `ADK_CC_DISABLE_PROJECT_SKILLS=1`.
+
+         `project_root` is what makes this correct in desktop mode. Anchoring
+         at the cwd meant the SERVER's launch directory: a desktop user got the
+         built-ins plus whatever happened to sit above wherever the app was
+         started from, identically for every project, and never their own
+         project's `.claude/skills`. The walk-up itself is kept (a skill in a
+         parent monorepo directory is still inherited).
       3. Built-in skills `<install>/adk_cc/skills/` — always included
          (base layer), unless `ADK_CC_BUILTIN_SKILLS=0`.
 
@@ -140,7 +149,11 @@ def _resolve_skills_dirs() -> list[Path]:
     # 2. Project walk-up — unless opted out.
     if not env_bool("ADK_CC_DISABLE_PROJECT_SKILLS"):
         try:
-            cwd = Path.cwd().resolve()
+            cwd = (
+                Path(project_root).resolve()
+                if project_root is not None
+                else Path.cwd().resolve()
+            )
         except OSError:
             cwd = None
         if cwd is not None:
@@ -564,7 +577,7 @@ class _LenientLoadSkillResourceTool(LoadSkillResourceTool):
         return result
 
     def _scan(self, skill_name: str, file_path: str) -> Optional[dict]:
-        skill_dir = self._skill_dirs.get(skill_name)
+        skill_dir = _skill_dir_for(skill_name, self._skill_dirs)
         if not skill_dir or not file_path:
             return None
         base = Path(skill_dir).resolve()
@@ -739,7 +752,7 @@ class _SkillResourceSearchTool(BaseTool):
             return skill_enablement.refusal(skill_name)
         query = args.get("query") or ""
         max_results = _coerce_int(args.get("max_results"), 30)
-        skill_dir = self._skill_dirs.get(skill_name)
+        skill_dir = _skill_dir_for(skill_name, self._skill_dirs)
         if not skill_dir:
             return {"error": f"Skill '{skill_name}' not found.", "error_code": "SKILL_NOT_FOUND"}
         if not query:
@@ -874,6 +887,76 @@ class _FilteredListSkillsTool(ListSkillsTool):
         return _skill_prompt.format_skills_as_xml(skills)
 
 
+# The project root of the session being served right now.
+#
+# ADK's skill lookups (`_list_skills`, `_get_skill`) take no context — they are
+# plain accessors on the toolset, which is built ONCE for the agent and shared
+# by every session. A contextvar carries the per-request answer into them,
+# mirroring how the model selection already reaches SelectableLlm.
+_ACTIVE_PROJECT_ROOT: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "adk_cc_active_project_root", default=None
+)
+
+# root → (skills, name→dir index). Built on first use per project and reused:
+# the built-ins are the bulk of it and re-reading them per request would be
+# wasteful, but a project layer is small.
+_SKILLS_BY_ROOT: dict[str, tuple[list[Skill], dict[str, str]]] = {}
+
+
+def _skill_dir_for(skill_name: str, fallback: dict[str, str]) -> Optional[str]:
+    """On-disk dir for a skill, preferring the active session's index.
+
+    The resource/search tools were handed ONE index at construction. A project
+    skill discovered per session is not in it, so its references/ and scripts/
+    would resolve to nothing (or, worse, to a same-named built-in's copy)."""
+    root = _ACTIVE_PROJECT_ROOT.get()
+    resolved = _skills_for_root(root) if root else None
+    if resolved and skill_name in resolved[1]:
+        return resolved[1][skill_name]
+    return fallback.get(skill_name)
+
+
+def _root_of(ctx: Any) -> Optional[str]:
+    """The workspace root for this session, or None when it cannot be told.
+
+    Desktop works in the project directory in place, so the workspace root IS
+    the project root. Returning None falls back to the process-wide skills,
+    which is the old behaviour — never an error."""
+    try:
+        from ..sandbox import get_workspace
+
+        ws = get_workspace(ctx)
+        return str(getattr(ws, "abs_path", "") or "") or None
+    except Exception:  # noqa: BLE001 — no workspace (tests, odd contexts)
+        return None
+
+
+def _skills_for_root(root: Optional[str]) -> Optional[tuple[list[Skill], dict[str, str]]]:
+    """Skills visible to a session rooted at `root`, or None to use the
+    process-wide set."""
+    if not root or env_bool("ADK_CC_DISABLE_PROJECT_SKILLS"):
+        return None
+    cached = _SKILLS_BY_ROOT.get(root)
+    if cached is not None:
+        return cached
+    try:
+        pairs = discover_skills_with_sources(_resolve_skills_dirs(Path(root)))
+    except Exception:  # noqa: BLE001 — a bad project dir must not break the turn
+        _log.debug("project skill discovery failed for %r", root, exc_info=True)
+        return None
+    max_bytes = _file_max_bytes()
+    for skill, _ in pairs:
+        _prune_oversized_resources(skill, max_bytes)
+    resolved = ([s for s, _ in pairs], _build_skill_dir_index(pairs))
+    _SKILLS_BY_ROOT[root] = resolved
+    return resolved
+
+
+def clear_project_skill_cache() -> None:
+    """Drop the per-root cache (tests, and a skills-changed signal)."""
+    _SKILLS_BY_ROOT.clear()
+
+
 class _EnablementAwareSkillToolset(SkillToolset):
     """SkillToolset that also honours the deny-list in the SYSTEM INSTRUCTION.
 
@@ -883,6 +966,41 @@ class _EnablementAwareSkillToolset(SkillToolset):
     to the model — the two things the toggle exists to prevent.
     """
 
+    # --- per-session resolution ------------------------------------------
+
+    # Set by `make_skill_toolset`: False when the caller pinned ONE directory.
+    # Per-session resolution must not override an explicit choice — a test (or
+    # an operator) that says "use exactly this dir" means it, and silently
+    # swapping in the built-ins plus a walk-up made the pinned skills vanish
+    # from the catalogue.
+    _project_scoped: bool = True
+
+    def _project_skills(self) -> Optional[tuple[list[Skill], dict[str, str]]]:
+        if not self._project_scoped:
+            return None
+        return _skills_for_root(_ACTIVE_PROJECT_ROOT.get())
+
+    def _list_skills(self):  # noqa: ANN201 — matches ADK's signature
+        resolved = self._project_skills()
+        return resolved[0] if resolved else super()._list_skills()
+
+    def _get_skill(self, name: str):  # noqa: ANN201
+        resolved = self._project_skills()
+        if resolved:
+            for skill in resolved[0]:
+                if getattr(getattr(skill, "frontmatter", None), "name", None) == name:
+                    return skill
+            # Fall through: a project root that does not define the name should
+            # still see the built-ins, which the base set holds.
+        return super()._get_skill(name)
+
+    async def get_tools(self, readonly_context: Any = None) -> list[Any]:
+        # `get_tools` runs per request, before the model sees anything, so this
+        # is the earliest point the session's root is knowable.
+        if readonly_context is not None:
+            _ACTIVE_PROJECT_ROOT.set(_root_of(readonly_context))
+        return await super().get_tools(readonly_context)
+
     async def process_llm_request(
         self, *, tool_context: ToolContext, llm_request: Any
     ) -> None:
@@ -891,6 +1009,7 @@ class _EnablementAwareSkillToolset(SkillToolset):
         )
         from google.adk.skills import prompt as _skill_prompt
 
+        _ACTIVE_PROJECT_ROOT.set(_root_of(tool_context))
         skills = skill_enablement.filter_skills(
             self._list_skills(), _state_of(tool_context)
         )
@@ -981,6 +1100,7 @@ def make_skill_toolset(
         code_executor=code_executor,
         script_timeout=script_timeout,
     )
+    toolset._project_scoped = skills_dir is None
     # Phase 1.5: always-on grep-within-resource retrieval tool. Appended to
     # `_tools` directly — `additional_tools=` would gate it behind a skill's
     # adk_additional_tools metadata (it lands in _provided_tools_by_name).

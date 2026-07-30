@@ -381,10 +381,13 @@ class TurnBroker:
                 # resumable (ADK ends a resumed parent right after the
                 # sub-agent — the marker is followed only by its auto-response
                 # and end-of-agent checkpoints, never a reply).
+                # F3, unchanged and deliberately LAST-SIGNAL-WINS: a handback
+                # marker arms the continuation, later model text disarms it. The
+                # specialist can speak before handing back, so "any text in the
+                # round" is not the same question — reading it that way silently
+                # dropped the F3 continue.
+                dangling = False
                 saw_any = False
-                produced_text = False
-                saw_handback = False       # for the log line only
-                pending: set[str] = set()
                 async for event in runner.run_async(
                     user_id=turn.user_id,
                     session_id=turn.session_id,
@@ -392,53 +395,34 @@ class TurnBroker:
                     state_delta=turn.state_delta if round_ == 0 else None,
                 ):
                     saw_any = True
-                    pending |= _pending_long_running(event)
-                    pending -= _answered_ids(event)
                     if _is_dangling_handback(event):
-                        saw_handback = True
-                    if _has_model_text(event):
-                        produced_text = True
+                        dangling = True
+                    elif _has_model_text(event):
+                        dangling = False
                     authored = getattr(event, "author", "user") != "user"
                     await turn.push(
                         event.model_dump_json(exclude_none=True, by_alias=True),
                         model_authored=authored,
                     )
-                if produced_text:
-                    break
-                if not saw_any:
-                    # The run yielded NOTHING. That is what answering a
-                    # long-running tool looks like: ADK appends the
-                    # functionResponse to the session and the resumed
-                    # invocation ends without going back to the model, so the
-                    # loop saw no events at all and the old `not saw_any`
-                    # short-circuit ended the turn silently.
+                if not dangling:
+                    # The other way a turn can end with nothing said: the round
+                    # yielded NO events at all. That is what answering a
+                    # long-running tool looks like — ADK records the
+                    # functionResponse and the resumed invocation ends without
+                    # going back to the model, so the old `not saw_any` break
+                    # ended the turn silently and the agent appeared to halt on
+                    # the user's answer (reported from desktop dogfooding).
                     #
-                    # With no events to read, the session is the only witness to
-                    # whether this is "answered, needs a reply" or "still parked
-                    # waiting for the user".
-                    if not await self._answer_needs_reply(turn):
+                    # Nothing in the round to judge from, so the SESSION decides:
+                    # an answered call with no reply since means the user is owed
+                    # one; an unanswered call means the run is parked on purpose
+                    # and must not be nudged.
+                    if saw_any or not await self._answer_needs_reply(turn):
                         break
-                elif pending:
-                    # Parked ON PURPOSE: a long-running call is waiting for the
-                    # user (a confirmation, a plan approval, a question). There
-                    # is nothing to continue and nudging here would answer on
-                    # the user's behalf.
-                    break
-                # The round produced no reply and is not waiting for anyone.
-                # Two known shapes reach here:
-                #   * the specialist's dangling `_handback_to_coordinator` (F3)
-                #   * a resumed long-running tool: answering `ask_user_question`
-                #     starts a turn carrying the functionResponse, ADK records it
-                #     and ends the run without ever going back to the model, so
-                #     the agent looked like it halted on the user's answer —
-                #     reported from desktop dogfooding and reproduced with 0 tool
-                #     calls and 0 messages after the answer.
-                # Keyed on "no reply" rather than on the handback marker, since
-                # the marker was only ever a proxy for it.
                 _log.info(
-                    "turn %s: round produced no reply (%s) — auto-continuing (%d)",
+                    "turn %s: no reply (%s) — auto-continuing (%d)",
                     turn.id,
-                    "dangling handback" if saw_handback else "resumed tool",
+                    "dangling handback" if dangling else "answered long-running tool",
                     round_ + 1,
                 )
                 from google.genai import types as _t
