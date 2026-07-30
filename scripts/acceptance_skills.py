@@ -16,9 +16,11 @@ Run: ADK_CC_LIVE=1 .venv/bin/python scripts/acceptance_skills.py
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import random
+import shutil
 import subprocess
 import tempfile
 import time
@@ -87,6 +89,31 @@ def _node_skill(proj: str) -> None:
         fh.write("export const banner = (v) => `### RELEASE ${v} ###`;\n")
 
 
+_PUBLISHED = os.path.expanduser(
+    "~/.claude/plugins/cache/anthropic-agent-skills/example-skills")
+
+
+def _published_skills(proj: str) -> None:
+    """Install skills written by someone else, exactly as they ship.
+
+    Everything else here uses skills written for adk-cc, which only proves the
+    loader agrees with its own authors. Against the published corpus four
+    things broke silently — a skill dropped for an over-long description, a
+    binary resource dropped by a UTF-8-only loader, a bare ModuleNotFoundError,
+    and 1.1 MB materialised per invocation. Copied rather than referenced so a
+    live run cannot write into the user's real skill cache.
+    """
+    src = sorted(p for p in glob.glob(_PUBLISHED + "/*/skills") if os.path.isdir(p))
+    if not src:
+        return
+    dest = os.path.join(proj, ".adk-cc", "skills")
+    os.makedirs(dest, exist_ok=True)
+    for name in ("pdf", "docx", "web-artifacts-builder", "claude-api"):
+        s = os.path.join(src[-1], name)
+        if os.path.isdir(s) and not os.path.exists(os.path.join(dest, name)):
+            shutil.copytree(s, os.path.join(dest, name))
+
+
 TASKS = [
     {
         "tag": "data-analyst",
@@ -114,6 +141,17 @@ TASKS = [
         # the script ran with its neighbours materialised — not that the model
         # guessed a plausible format.
         "want_output": "### RELEASE 1.4.0 ###",
+    },
+    {
+        "tag": "published-3p",
+        # `claude-api` is the one the loader used to drop outright, so if the
+        # description repair regresses this task cannot pass by luck: the skill
+        # is not in the catalogue at all and the model cannot name it.
+        "expect": "claude-api",
+        "setup": _published_skills,
+        "prompt": ("How should I use prompt caching with the Anthropic API, "
+                   "and what are the pitfalls? Answer from the reference "
+                   "material you have available rather than from memory."),
     },
 ]
 

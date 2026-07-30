@@ -71,6 +71,10 @@ export type SkillCatalogEntry = {
   enabled: boolean
   disabled_by: "org" | "user" | null
   shadows: { source: string; path: string }[]
+  /** Present only when the skill is installed but could not be loaded (bad
+   * frontmatter, over-long description). It has no tools and no catalogue
+   * entry; showing it is the only way the user learns why it is missing. */
+  problem?: string
 }
 export function getDesktopSkillCatalog(
   scope: Scope,

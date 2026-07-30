@@ -81,12 +81,17 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+import yaml
 from google.adk.code_executors.base_code_executor import BaseCodeExecutor
 from google.adk.skills import (
     Skill,
     list_skills_in_dir,
     load_skill_from_dir,
 )
+from google.adk.skills.models import Frontmatter as _FrontmatterModel
+from google.adk.skills.models import Resources as _ResourcesModel
+from google.adk.skills.models import Script as _ScriptModel
+from google.adk.skills.models import Skill as _SkillModel
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools import skill_toolset as _adk_skill_toolset
 from google.adk.tools.skill_toolset import (
@@ -261,6 +266,150 @@ def discover_skills_with_sources(
     return out
 
 
+# A binary re-attached to a skill is embedded into the launcher payload on
+# every run of that skill's scripts, so a huge one is a per-invocation cost
+# (worse over SSH/Daytona than locally). Real ones are small — the tarball that
+# exposed this is 20 KB — so cap and say what was left out.
+_MAX_BINARY_RESOURCE_BYTES = 2 * 1024 * 1024
+
+
+# ADK's own cap (`Frontmatter._validate_description`), restated because the
+# repair below has to know the target length.
+_MAX_DESCRIPTION_CHARS = 1024
+
+_UNLOADABLE: dict[str, dict[str, str]] = {}
+
+
+def _note_unloadable(name: str, skill_dir: Path, reason: str) -> None:
+    """Remember a skill that is installed but could not be loaded.
+
+    Silence here is the worst outcome: the skill is on disk, absent from the
+    catalogue, and nothing anywhere says why. Measured on a published skill —
+    `claude-api` ships a description over ADK's 1024-character limit, so it was
+    dropped with a warning on the ROOT logger and never appeared again.
+    """
+    short = " ".join(str(reason).split())
+    if len(short) > 300:
+        short = short[:300] + "…"
+    _UNLOADABLE[name] = {"name": name, "dir": str(skill_dir), "reason": short}
+    _log.warning("skills: '%s' in %s could not be loaded: %s",
+                 name, skill_dir, short)
+
+
+def unloadable_skills() -> list[dict[str, str]]:
+    """Installed skills that failed to load, most recent discovery wins.
+
+    Exposed so the skills UI can show an installed-but-broken skill instead of
+    leaving the user to wonder where it went.
+    """
+    return [dict(v) for v in _UNLOADABLE.values()]
+
+
+def _repair_skill(skill_dir: Path) -> Optional[Skill]:
+    """Load a skill ADK rejected, when the defect is only its description.
+
+    ADK caps `description` at 1024 characters and refuses the whole skill past
+    that. The description is catalogue text — it is injected into every request
+    so the model can choose the skill — so an over-long one is a reason to
+    shorten the text, not to lose a working skill. Anthropic's own published
+    `claude-api` skill trips it.
+
+    Anything else stays rejected: this repairs presentation, not substance.
+    """
+    md = skill_dir / "SKILL.md"
+    try:
+        text = md.read_text(encoding="utf-8")
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            return None
+        data = yaml.safe_load(parts[1]) or {}
+        desc = str(data.get("description") or "")
+        if not isinstance(data, dict) or len(desc) <= _MAX_DESCRIPTION_CHARS:
+            return None
+        # Budget the marker BEFORE cutting: an earlier version reserved a
+        # round 40 characters for a 52-character marker, so the "repaired"
+        # description came out at 1036 and failed the very validator this
+        # exists to satisfy — silently, since a failed repair just means no
+        # repair.
+        marker = " …(truncated to fit the catalogue limit)"
+        data["description"] = (
+            desc[: _MAX_DESCRIPTION_CHARS - len(marker)].rstrip() + marker)
+        skill = _SkillModel(
+            frontmatter=_FrontmatterModel.model_validate(data),
+            instructions=parts[2],
+            resources=_ResourcesModel(),
+        )
+        _attach_missing_resources(skill, skill_dir)
+    except Exception:  # noqa: BLE001 — a repair that fails is just no repair
+        return None
+    _log.warning(
+        "skills: '%s' has a %d-character description (limit %d); loaded it "
+        "with the description truncated — shorten it in SKILL.md",
+        skill.frontmatter.name, len(desc), _MAX_DESCRIPTION_CHARS)
+    return skill
+
+
+def _attach_missing_resources(skill: Skill, skill_dir: Path) -> None:
+    """Re-attach files ADK's loader dropped because they are not UTF-8.
+
+    `_load_dir` does `read_text(encoding="utf-8")` and skips whatever raises
+    UnicodeDecodeError, for scripts, references AND assets alike. So a skill
+    that ships a tarball, a font, an image or a sample .xlsx loses it silently,
+    and the breakage surfaces much later inside the script as a missing file.
+
+    Measured on a published skill: `web-artifacts-builder` ships
+    `scripts/init-artifact.sh` next to `scripts/shadcn-components.tar.gz`, and
+    running it through `run_skill_script` printed its own
+    "❌ Error: shadcn-components.tar.gz not found in script directory".
+
+    Both launchers materialise from `skill.resources`, and ADK's extraction
+    loop already writes bytes with mode 'wb' — so putting the bytes back here
+    fixes every path at once rather than at one of them.
+    """
+    for sub, store, wrap in (
+        ("scripts", skill.resources.scripts, True),
+        ("references", skill.resources.references, False),
+        ("assets", skill.resources.assets, False),
+    ):
+        root = skill_dir / sub
+        if not _is_dir_silently(root):
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            rel = str(path.relative_to(root))
+            if rel in store:
+                continue
+            try:
+                size = path.stat().st_size
+                if size > _MAX_BINARY_RESOURCE_BYTES:
+                    _log.warning(
+                        "skills: '%s' ships %s/%s (%d bytes), too large to "
+                        "attach — scripts needing it will not find it",
+                        skill.frontmatter.name, sub, rel, size)
+                    continue
+                raw = path.read_bytes()
+            except OSError:
+                continue
+            try:
+                # Text stays text: `load_skill_resource` hands these to the
+                # model, and only genuinely binary files should arrive as bytes.
+                data: Any = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                data = raw
+            if not wrap:
+                store[rel] = data
+            elif isinstance(data, str):
+                store[rel] = _ScriptModel(src=data)
+            else:
+                # `Script.src` is annotated `str`, so bytes cannot go through
+                # validation — and ADK's materialiser already branches on
+                # `isinstance(content, bytes)` to write mode 'wb'. Construct
+                # without validation rather than lose the file, which is what
+                # happened first: pydantic raised and the tarball stayed gone.
+                store[rel] = _ScriptModel.model_construct(src=data)
+
+
 def _load_skills_from_dir(base: Path) -> list[tuple[Skill, Path]]:
     """Load every skill under one directory. Returns (skill, dir)
     pairs so callers can build a name→path index across multiple
@@ -272,13 +421,37 @@ def _load_skills_from_dir(base: Path) -> list[tuple[Skill, Path]]:
         names = list(list_skills_in_dir(base).keys())
     except Exception:
         return out
-    for name in names:
+
+    # Directories that hold a SKILL.md but did not survive validation. ADK
+    # filters them out inside `list_skills_in_dir` with a warning on the root
+    # logger, so without this they are invisible to us and to the user.
+    rejected: list[str] = []
+    try:
+        for d in sorted(base.iterdir()):
+            if (d.is_dir() and d.name not in names
+                    and (d / "SKILL.md").is_file()):
+                rejected.append(d.name)
+    except OSError:
+        pass
+
+    for name in names + rejected:
         skill_dir = (base / name).resolve()
+        _UNLOADABLE.pop(name, None)
         try:
-            out.append((load_skill_from_dir(skill_dir), skill_dir))
-        except Exception:
-            # Skip malformed skills rather than refusing to start.
-            continue
+            skill = load_skill_from_dir(skill_dir)
+        except Exception as exc:  # noqa: BLE001
+            skill = _repair_skill(skill_dir)
+            if skill is None:
+                # Skip a malformed skill rather than refusing to start — but
+                # say so: a skill that is simply absent is the hardest kind of
+                # bug to notice from the outside.
+                _note_unloadable(name, skill_dir, str(exc))
+                continue
+        try:
+            _attach_missing_resources(skill, skill_dir)
+        except Exception:  # noqa: BLE001 — never let this cost us the skill
+            _log.warning("skills: could not attach binaries for '%s'", name)
+        out.append((skill, skill_dir))
     return out
 
 
@@ -996,6 +1169,43 @@ class _EnablementCheckedRunSkillScriptTool(RunSkillScriptTool):
         return await super().run_async(args=args, tool_context=tool_context)
 
 
+_MODULE_MISSING_RE = re.compile(r"No module named '([^']+)'")
+
+
+def _explain_missing_package(res: dict, skill: Skill) -> dict:
+    """Name the dependency when a skill script dies on an import.
+
+    Third-party skills declare their dependencies in prose (or a
+    `requirements.txt` we do not install), so their scripts hit the analysis
+    environment as it happens to be provisioned. Measured on Anthropic's
+    published `pdf` skill: `extract_form_field_info.py` failed with a bare
+    `ModuleNotFoundError: No module named 'pypdf'` at the end of a traceback —
+    accurate, and easy to read as "this script is broken" rather than "this
+    machine lacks one package".
+
+    A SIBLING module missing is a different fault (materialisation), so it is
+    left alone rather than mislabelled as a package.
+    """
+    err = res.get("stderr") or ""
+    m = _MODULE_MISSING_RE.search(err)
+    if not m:
+        return res
+    missing = m.group(1).split(".")[0]
+    try:
+        siblings = {n.rsplit("/", 1)[-1][:-3]
+                    for n in skill.resources.list_scripts() if n.endswith(".py")}
+    except Exception:  # noqa: BLE001
+        siblings = set()
+    if missing in siblings:
+        return res
+    return {**res, "stderr": err.rstrip() + (
+        f"\n\n[adk-cc] this script needs the '{missing}' package, which is not "
+        f"installed in the environment skill scripts run in. Install it there "
+        f"(uv pip install {missing}) and re-run, or report the step as NOT RUN "
+        f"— do not re-implement the script's job inline and present it as the "
+        f"script's result.")}
+
+
 class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
     """ADK's script launcher, taught the interpreters in `_EXTRA_INTERPRETERS`.
 
@@ -1022,6 +1232,8 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
         res = await super().execute_script_async(
             invocation_context, skill, file_path, script_args, short_options,
             positional_args)
+        if isinstance(res, dict):
+            res = _explain_missing_package(res, skill)
         ext = _script_ext(file_path)
         if ext not in _EXTRA_INTERPRETERS or not isinstance(res, dict):
             return res
@@ -1289,6 +1501,9 @@ def _skills_for_root(root: Optional[str]) -> Optional[tuple[list[Skill], dict[st
 def clear_project_skill_cache() -> None:
     """Drop the per-root cache (tests, and a skills-changed signal)."""
     _SKILLS_BY_ROOT.clear()
+    # Whatever was broken last time may have been fixed; the next discovery
+    # re-records it if not.
+    _UNLOADABLE.clear()
 
 
 class _EnablementAwareSkillToolset(SkillToolset):

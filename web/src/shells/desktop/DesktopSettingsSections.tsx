@@ -218,7 +218,14 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
             type="checkbox"
             checked={s.enabled}
             onChange={(e) => toggle(s.name, e.target.checked)}
-            title={s.enabled ? "Disable this skill" : "Enable this skill"}
+            disabled={!!s.problem}
+            title={
+              s.problem
+                ? "This skill could not be loaded, so it cannot be enabled"
+                : s.enabled
+                  ? "Disable this skill"
+                  : "Enable this skill"
+            }
             aria-label={`Enable ${s.name}`}
           />
           <span className="font-mono">{s.name}</span>
@@ -241,6 +248,14 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
         {s.description && (
           <p className="mb-1 ml-6 mt-0.5 line-clamp-2 text-xs text-muted-foreground">
             {s.description}
+          </p>
+        )}
+        {/* Installed, on disk, and not loadable. Saying nothing here is what
+            makes it baffling: the folder is right there and the skill simply
+            never appears. */}
+        {s.problem && (
+          <p className="mb-1 ml-6 mt-0.5 text-xs text-destructive" data-skill-problem={s.name}>
+            not loaded — {s.problem}
           </p>
         )}
         </div>

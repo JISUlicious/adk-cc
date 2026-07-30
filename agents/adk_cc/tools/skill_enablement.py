@@ -258,7 +258,11 @@ def catalog(
     the moment toggles exist: a project skill silently replacing a built-in of
     the same name means turning "the built-in" off does nothing visible.
     """
-    from .skills import _resolve_skills_dirs, _load_skills_from_dir
+    from .skills import (
+        _load_skills_from_dir,
+        _resolve_skills_dirs,
+        unloadable_skills,
+    )
 
     org, user = disabled_for(tenant_id, user_id)
     rows: list[dict] = []
@@ -291,6 +295,25 @@ def catalog(
             }
             seen[name] = row
             rows.append(row)
+
+    # Installed but unloadable. Without this the skill is simply absent from
+    # the list, which reads as "not installed" — measured on a published skill
+    # (`claude-api`, whose description exceeds ADK's 1024-character cap): it
+    # was dropped with a warning on the root logger and nothing else.
+    for broken in unloadable_skills():
+        name = broken.get("name") or ""
+        if not name or name in seen:
+            continue
+        rows.append({
+            "name": name,
+            "description": "",
+            "source": _classify_source(Path(broken.get("dir") or ".").parent),
+            "path": broken.get("dir") or "",
+            "enabled": False,
+            "disabled_by": None,
+            "shadows": [],
+            "problem": broken.get("reason") or "could not be loaded",
+        })
     rows.sort(key=lambda r: (r["source"], r["name"]))
     return rows
 
