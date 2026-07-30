@@ -93,6 +93,28 @@ const PLAN_PAIR_KINDS = new Set(["plan_read", "plan_write", "plan_exit"])
  * a response and isn't user-relevant. */
 const HIDDEN_TOOL_NAMES = new Set(["_handback_to_coordinator"])
 
+/** The broker's internal continuation nudge (turns.py `_CONTINUE_TEXT`).
+ *
+ *  When a resumed run produces no reply — a specialist's dangling handback, or
+ *  an answered long-running tool — the server sends this as a user message so
+ *  the coordinator speaks. It is machinery, but it is stored like any other user
+ *  turn, so the thread showed the person a "Continue." bubble they never typed,
+ *  right after answering a question. Hidden only when it sits immediately after
+ *  a function response or a handback, which is the only place the broker emits
+ *  it — someone who genuinely types "Continue." still sees their message. */
+const BROKER_CONTINUE = "Continue."
+
+function isBrokerContinue(events: RunEvent[], i: number, text: string): boolean {
+  if (text.trim() !== BROKER_CONTINUE) return false
+  const prev = events[i - 1]
+  if (!prev) return false
+  for (const p of prev.content?.parts ?? []) {
+    if (p.functionResponse) return true
+    if (p.functionCall && HIDDEN_TOOL_NAMES.has(p.functionCall.name ?? "")) return true
+  }
+  return false
+}
+
 export function Thread({
   events,
   isStreaming,
@@ -643,7 +665,7 @@ function flattenEvents(
   // skip emitting their standalone functionResponse row below.
   const consumedResponseIds = new Set<string>()
 
-  for (const e of events) {
+  for (const [eventIndex, e] of events.entries()) {
     const eventId = (e.id as string | undefined) ?? ""
     const author = e.author ?? "agent"
     const parts = e.content?.parts ?? []
@@ -711,6 +733,9 @@ function flattenEvents(
       }
 
       if (typeof part.text === "string" && part.text.trim().length > 0) {
+        if (author === "user" && isBrokerContinue(events, eventIndex, part.text)) {
+          continue
+        }
         rows.push({
           kind: "text",
           eventId,
