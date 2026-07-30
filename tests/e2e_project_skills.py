@@ -39,7 +39,8 @@ def check(name, ok, detail=""):
 
 
 def _make_skill(root: Path, name: str) -> None:
-    d = root / ".claude" / "skills" / name
+    # `.adk-cc/skills` is the project scope; `.claude/skills` is no longer read.
+    d = root / ".adk-cc" / "skills" / name
     d.mkdir(parents=True, exist_ok=True)
     (d / "SKILL.md").write_text(
         f"---\nname: {name}\ndescription: >\n  Project-local test skill {name}.\n"
@@ -55,8 +56,9 @@ def main() -> int:
         print("SKIP: no model endpoint registry to borrow."); return 0
 
     data = tempfile.mkdtemp(prefix="projskills-")
-    # The server is started from a directory that has its OWN skill, so a
-    # cwd-anchored walk-up would offer `cwd-ghost` to both projects.
+    # The server's run dir has its own skill. That is GLOBAL scope now, so it
+    # SHOULD reach both projects — what must not happen is a project's own skill
+    # going missing, or one project seeing another's.
     server_cwd = Path(data) / "launch-dir"
     server_cwd.mkdir(parents=True)
     _make_skill(server_cwd, "cwd-ghost")
@@ -127,9 +129,9 @@ def main() -> int:
                   f"{skill} never appeared in {tag}'s turn")
             check(f"{tag} is not offered the other project's skill",
                   other not in body, f"{other} leaked into {tag}")
-            check(f"{tag} is not offered the launch directory's skill",
-                  "cwd-ghost" not in body,
-                  "cwd-ghost leaked from the server's working directory")
+            check(f"{tag} also gets the global (run-dir) skill",
+                  "cwd-ghost" in body,
+                  "the run dir's skill is global and should reach every project")
         with open(os.path.join(data, "seen.json"), "w") as fh:
             json.dump({k: len(v or "") for k, v in seen.items()}, fh, indent=2)
         print(f"    artifacts: {data}")

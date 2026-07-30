@@ -202,3 +202,28 @@ key works.
 Changing a saved password creates a new connection rather than reusing the old
 authenticated one. **Test** works before the project is saved, so you can check
 host, port and password together and only then add it.
+
+## Where skills come from
+
+Four scopes, most specific first. When the same skill NAME appears twice, the
+more specific one wins and the rest of the layer is untouched.
+
+| scope | location | applies to |
+|---|---|---|
+| configured | `$ADK_CC_SKILLS_DIR` | everything, overrides all |
+| **project** | `<project>/.adk-cc/skills`, walked up to `$HOME` | that project's sessions |
+| **global** | `<run dir>/.adk-cc/skills` and `<data dir>/skills` (e.g. `~/.adk-cc-desktop/skills`) | every project |
+| built-in | shipped inside the package | every project |
+
+The project layer is resolved **per session** from the bound project root, so
+two projects open in one app see different skills. The global layer belongs to
+the installation: the run dir's skills apply everywhere, which is what makes
+them global rather than that directory's own.
+
+`.claude/skills` is **not** a source. It used to be accepted as project scope
+(whichever of `.adk-cc/skills` / `.claude/skills` existed first, per walked
+directory), which conflated a Claude Code folder with an adk-cc scope. Move such
+skills to `.adk-cc/skills` — or point `$ADK_CC_SKILLS_DIR` at them.
+
+Set `ADK_CC_DISABLE_PROJECT_SKILLS=1` to drop the project layer entirely;
+`ADK_CC_BUILTIN_SKILLS=0` drops the built-ins.

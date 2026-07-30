@@ -193,3 +193,29 @@ pip install 불필요).
 저장된 비밀번호를 바꾸면 기존 인증 연결을 재사용하지 않고 새 연결을 만든다.
 **Test**는 프로젝트를 저장하기 전에 동작하므로, host·port·password를 함께 확인한
 뒤에 추가할 수 있다.
+
+
+## 스킬은 어디에서 오는가
+
+네 개의 스코프이며, 구체적인 것이 앞선다. 같은 스킬 **이름**이 두 번 나오면 더
+구체적인 쪽이 이기고, 그 레이어의 나머지는 그대로 남는다.
+
+| 스코프 | 위치 | 적용 범위 |
+|---|---|---|
+| configured | `$ADK_CC_SKILLS_DIR` | 전체, 모든 것을 덮어씀 |
+| **project** | `<project>/.adk-cc/skills` — `$HOME`까지 상위 탐색 | 그 프로젝트의 세션 |
+| **global** | `<실행 디렉터리>/.adk-cc/skills` 와 `<데이터 디렉터리>/skills` (예: `~/.adk-cc-desktop/skills`) | 모든 프로젝트 |
+| built-in | 패키지에 포함되어 배포 | 모든 프로젝트 |
+
+project 레이어는 바인딩된 프로젝트 루트에서 **세션마다** 해석되므로, 한 앱에서
+열어 둔 두 프로젝트는 서로 다른 스킬을 본다. global 레이어는 설치본에 속한다 —
+실행 디렉터리의 스킬이 모든 프로젝트에 적용되며, 그래서 그 디렉터리만의 것이
+아니라 global이다.
+
+`.claude/skills`는 **소스가 아니다**. 이전에는 project 스코프로 받아들였는데
+(디렉터리별로 `.adk-cc/skills` / `.claude/skills` 중 먼저 존재하는 것), 이는 Claude
+Code 폴더와 adk-cc 스코프를 뒤섞는 것이었다. 그런 스킬은 `.adk-cc/skills`로
+옮기거나 `$ADK_CC_SKILLS_DIR`로 지정한다.
+
+`ADK_CC_DISABLE_PROJECT_SKILLS=1`은 project 레이어를 완전히 끄고,
+`ADK_CC_BUILTIN_SKILLS=0`은 내장 스킬을 끈다.

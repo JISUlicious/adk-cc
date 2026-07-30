@@ -1,4 +1,8 @@
-"""Project skills come from the PROJECT, not from wherever the server started.
+"""Skill SCOPES: project vs global vs built-in.
+
+Layering (most specific first): `ADK_CC_SKILLS_DIR`, then PROJECT
+(`<project>/.adk-cc/skills`, walked up), then GLOBAL (the run dir's
+`.adk-cc/skills` and `<desktop data>/skills`), then the built-ins.
 
 Reported from desktop dogfooding: project skills appeared to load from the
 global built-ins plus the directory the server was launched from, never from the
@@ -30,8 +34,9 @@ os.environ.setdefault("ADK_CC_API_KEY", "sk-dummy-for-tests")
 from adk_cc.tools import skills as sk  # noqa: E402
 
 
-def _make_skill(root: Path, name: str, body: str = "Do the thing.") -> Path:
-    d = root / ".claude" / "skills" / name
+def _make_skill(root: Path, name: str, body: str = "Do the thing.",
+                sub: str = ".adk-cc/skills") -> Path:
+    d = root.joinpath(*sub.split("/")) / name
     d.mkdir(parents=True, exist_ok=True)
     (d / "SKILL.md").write_text(
         f"---\nname: {name}\ndescription: >\n  Test skill {name}.\n---\n\n{body}\n",
@@ -74,25 +79,60 @@ def test_built_ins_come_along() -> None:
     print("OK built_ins_come_along")
 
 
-def test_the_servers_cwd_does_not_leak_in() -> None:
-    """The actual bug. A skill sitting above the server's working directory
-    must NOT appear for a project that has nothing to do with it."""
-    server_cwd = Path(tempfile.mkdtemp(prefix="serverdir-"))
-    _make_skill(server_cwd, "cwd-ghost")
-    project = Path(tempfile.mkdtemp(prefix="projD-"))
-    _make_skill(project, "delta-only")
+def test_the_run_dir_is_global_not_the_projects() -> None:
+    """The run dir's skills apply to EVERY project — that is what makes them
+    global. What must not happen is them arriving as if they were this
+    project's, which is how a desktop user ended up with the launch
+    directory's skills and none of their own."""
+    run_dir = Path(tempfile.mkdtemp(prefix="rundir-"))
+    _make_skill(run_dir, "global-from-run-dir")
+    p1 = Path(tempfile.mkdtemp(prefix="projD1-"))
+    p2 = Path(tempfile.mkdtemp(prefix="projD2-"))
+    _make_skill(p1, "delta-only")
 
     prev = os.getcwd()
-    os.chdir(server_cwd)          # as if uvicorn were started here
+    os.chdir(run_dir)                 # as if uvicorn were started here
     try:
-        names = _names(str(project))
-        assert "delta-only" in names
-        assert "cwd-ghost" not in names, (
-            "the server's launch directory still leaks into a project's skills"
-        )
+        n1, n2 = _names(str(p1)), _names(str(p2))
+        assert "delta-only" in n1
+        assert "delta-only" not in n2, "a project's skill reached another project"
+        # Global reaches both, including the project that has no skills at all.
+        assert "global-from-run-dir" in n1 and "global-from-run-dir" in n2
     finally:
         os.chdir(prev)
-    print("OK the_servers_cwd_does_not_leak_in")
+    print("OK the_run_dir_is_global_not_the_projects")
+
+
+def test_the_desktop_data_dir_is_global() -> None:
+    """`<desktop data>/skills` — e.g. ~/.adk-cc-desktop/skills — applies
+    everywhere, so a user can install a skill once for all projects."""
+    data = Path(tempfile.mkdtemp(prefix="dataroot-"))
+    (data / "skills").mkdir()
+    _make_skill(data, "global-from-data-dir", sub="skills")
+    project = Path(tempfile.mkdtemp(prefix="projD3-"))
+
+    os.environ["ADK_CC_DATA_DIR"] = str(data)
+    try:
+        names = _names(str(project))
+        assert "global-from-data-dir" in names, sorted(names)[:8]
+    finally:
+        del os.environ["ADK_CC_DATA_DIR"]
+    print("OK the_desktop_data_dir_is_global")
+
+
+def test_a_claude_skills_folder_is_not_project_scope() -> None:
+    """Deliberate: `.claude/skills` used to be accepted as project scope, which
+    conflated a Claude Code folder with an adk-cc scope. Only `.adk-cc/skills`
+    counts now."""
+    project = Path(tempfile.mkdtemp(prefix="projCL-"))
+    _make_skill(project, "claude-style", sub=".claude/skills")
+    _make_skill(project, "adkcc-style")
+    names = _names(str(project))
+    assert "adkcc-style" in names
+    assert "claude-style" not in names, (
+        ".claude/skills is still being read as a project skill source"
+    )
+    print("OK a_claude_skills_folder_is_not_project_scope")
 
 
 def test_a_parent_directory_skill_is_still_inherited() -> None:
@@ -214,7 +254,9 @@ def test_the_real_toolset_switches_with_the_active_root() -> None:
 def main() -> None:
     test_each_project_sees_its_own_skill()
     test_built_ins_come_along()
-    test_the_servers_cwd_does_not_leak_in()
+    test_the_run_dir_is_global_not_the_projects()
+    test_the_desktop_data_dir_is_global()
+    test_a_claude_skills_folder_is_not_project_scope()
     test_a_parent_directory_skill_is_still_inherited()
     test_a_project_skill_shadows_a_built_in_by_name()
     test_resources_resolve_to_the_projects_copy()

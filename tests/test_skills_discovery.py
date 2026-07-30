@@ -3,11 +3,11 @@
 Covers `_resolve_skills_dirs()` and `discover_skills_with_sources()`:
 
   - `ADK_CC_SKILLS_DIR` is included first when set.
-  - Project walk-up finds `.adk-cc/skills/` in cwd / parents.
-  - Per-dir pick-one rule: when both `.adk-cc/skills/` and
-    `.claude/skills/` exist in the same dir, `.adk-cc/skills/` wins.
-  - `.claude/skills/` is loaded when `.adk-cc/skills/` is absent in
-    that dir.
+  - PROJECT walk-up finds `.adk-cc/skills/` at the project root / parents.
+  - `.claude/skills/` is NOT a source (it was, as project scope, until the
+    scopes were split — a Claude Code folder is not an adk-cc project scope).
+  - GLOBAL dirs (`<run dir>/.adk-cc/skills`, `<data>/skills`) are included
+    for every session, exactly, with no walk-up.
   - `ADK_CC_DISABLE_PROJECT_SKILLS=1` skips the walk-up entirely.
   - Multi-dir aggregation: same skill name in two sources → the
     higher-precedence source wins (first-found dedup).
@@ -27,7 +27,7 @@ from typing import Optional
 os.environ.setdefault("ADK_CC_API_KEY", "sk-dummy-for-tests")
 
 from adk_cc.tools.skills import (
-    _PROJECT_SKILLS_PICK_ONE,
+    _PROJECT_SKILLS_SUBDIR,
     _resolve_skills_dirs,
     discover_skills_with_sources,
 )
@@ -99,8 +99,7 @@ def test_env_var_skills_dir_wins() -> None:
         (proj_dir / ".adk-cc" / "skills").mkdir(parents=True)
         with _scrub_env("ADK_CC_SKILLS_DIR", "ADK_CC_DISABLE_PROJECT_SKILLS"):
             os.environ["ADK_CC_SKILLS_DIR"] = str(env_dir)
-            with _chdir(proj_dir):
-                dirs = _resolve_skills_dirs()
+            dirs = _resolve_skills_dirs(proj_dir)
         # Env var dir first; project dir second.
         assert dirs[0] == env_dir.resolve()
         # Project's .adk-cc/skills is also in the list (just not first).
@@ -109,7 +108,8 @@ def test_env_var_skills_dir_wins() -> None:
 
 
 def test_project_walk_up_finds_adk_cc_skills() -> None:
-    """Walk-up from cwd surfaces `.adk-cc/skills/` in a parent dir."""
+    """Walk-up from the PROJECT ROOT surfaces `.adk-cc/skills/` in a parent
+    dir — the monorepo case. The anchor is the project, not the cwd."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp).resolve()
         skills_dir = root / ".adk-cc" / "skills"
@@ -117,42 +117,58 @@ def test_project_walk_up_finds_adk_cc_skills() -> None:
         sub = root / "src" / "deep"
         sub.mkdir(parents=True)
         with _scrub_env("ADK_CC_SKILLS_DIR", "ADK_CC_DISABLE_PROJECT_SKILLS"):
-            with _chdir(sub):
-                dirs = _resolve_skills_dirs()
+            dirs = _resolve_skills_dirs(sub)
         assert skills_dir.resolve() in dirs
     print("OK test_project_walk_up_finds_adk_cc_skills")
 
 
-def test_pick_one_adk_cc_priority_over_claude() -> None:
-    """When BOTH `.adk-cc/skills/` and `.claude/skills/` exist in the
-    same dir, only `.adk-cc/skills/` is included. The pick-one rule
-    prevents double-registration of identical skills."""
+def test_a_claude_skills_dir_is_not_a_source() -> None:
+    """`.claude/skills/` used to be accepted as project scope (pick-one with
+    `.adk-cc/skills/` per walked dir). Scopes are explicit now, so a Claude Code
+    folder is not read at all — including when the project has no
+    `.adk-cc/skills/` of its own, which is where it used to be the fallback."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp).resolve()
-        adk_skills = root / ".adk-cc" / "skills"
-        claude_skills = root / ".claude" / "skills"
-        adk_skills.mkdir(parents=True)
-        claude_skills.mkdir(parents=True)
+        claude = root / ".claude" / "skills"
+        claude.mkdir(parents=True)
+        adk = root / ".adk-cc" / "skills"
+        adk.mkdir(parents=True)
         with _scrub_env("ADK_CC_SKILLS_DIR", "ADK_CC_DISABLE_PROJECT_SKILLS"):
-            with _chdir(root):
-                dirs = _resolve_skills_dirs()
-        assert adk_skills.resolve() in dirs
-        assert claude_skills.resolve() not in dirs
-    print("OK test_pick_one_adk_cc_priority_over_claude")
+            dirs = _resolve_skills_dirs(root)
+        assert adk.resolve() in dirs
+        assert claude.resolve() not in dirs
+
+        only_claude = Path(tempfile.mkdtemp()).resolve()
+        (only_claude / ".claude" / "skills").mkdir(parents=True)
+        with _scrub_env("ADK_CC_SKILLS_DIR", "ADK_CC_DISABLE_PROJECT_SKILLS"):
+            dirs2 = _resolve_skills_dirs(only_claude)
+        assert (only_claude / ".claude" / "skills").resolve() not in dirs2
+    print("OK test_a_claude_skills_dir_is_not_a_source")
 
 
-def test_claude_skills_loaded_when_adk_cc_absent() -> None:
-    """In a dir with only `.claude/skills/` (no `.adk-cc/skills/`),
-    `.claude/skills/` is loaded — the fallback half of pick-one."""
+def test_the_run_dir_and_data_dir_are_global() -> None:
+    """Both apply to EVERY session, exactly (no walk-up): the run dir's
+    `.adk-cc/skills` and `<data>/skills`. Reading the run dir as project scope
+    is what gave a desktop user the launch directory's skills for every
+    project."""
     with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp).resolve()
-        claude_skills = root / ".claude" / "skills"
-        claude_skills.mkdir(parents=True)
+        run = Path(tmp).resolve()
+        (run / ".adk-cc" / "skills").mkdir(parents=True)
+        data = Path(tempfile.mkdtemp()).resolve()
+        (data / "skills").mkdir(parents=True)
+        project = Path(tempfile.mkdtemp()).resolve()
         with _scrub_env("ADK_CC_SKILLS_DIR", "ADK_CC_DISABLE_PROJECT_SKILLS"):
-            with _chdir(root):
-                dirs = _resolve_skills_dirs()
-        assert claude_skills.resolve() in dirs
-    print("OK test_claude_skills_loaded_when_adk_cc_absent")
+            os.environ["ADK_CC_DATA_DIR"] = str(data)
+            try:
+                with _chdir(run):
+                    dirs = _resolve_skills_dirs(project)
+            finally:
+                os.environ.pop("ADK_CC_DATA_DIR", None)
+        assert (run / ".adk-cc" / "skills").resolve() in dirs
+        assert (data / "skills").resolve() in dirs
+        # No walk-up for global: a parent of the run dir contributes nothing.
+        assert len([d for d in dirs if "skills" in str(d)]) >= 2
+    print("OK test_the_run_dir_and_data_dir_are_global")
 
 
 def test_disable_env_var_skips_walk_up() -> None:
@@ -164,32 +180,26 @@ def test_disable_env_var_skips_walk_up() -> None:
         skills_dir.mkdir(parents=True)
         with _scrub_env("ADK_CC_SKILLS_DIR", "ADK_CC_DISABLE_PROJECT_SKILLS"):
             os.environ["ADK_CC_DISABLE_PROJECT_SKILLS"] = "1"
-            with _chdir(root):
-                dirs = _resolve_skills_dirs()
+            dirs = _resolve_skills_dirs(root)
         assert skills_dir.resolve() not in dirs
     print("OK test_disable_env_var_skips_walk_up")
 
 
-def test_per_dir_decisions_are_independent() -> None:
-    """Parent has only `.claude/skills/`; child has only
-    `.adk-cc/skills/`. Walk-up emits CHILD's `.adk-cc/skills/` and
-    PARENT's `.claude/skills/` — pick-one is per directory, not
-    global."""
+def test_walk_up_collects_every_level_child_first() -> None:
+    """Both levels' `.adk-cc/skills/` are collected, child before parent, so a
+    package can override a monorepo-wide skill by name."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp).resolve()
-        parent_claude = root / ".claude" / "skills"
-        parent_claude.mkdir(parents=True)
+        parent_adk = root / ".adk-cc" / "skills"
+        parent_adk.mkdir(parents=True)
         child = root / "sub"
         child_adk = child / ".adk-cc" / "skills"
         child_adk.mkdir(parents=True)
         with _scrub_env("ADK_CC_SKILLS_DIR", "ADK_CC_DISABLE_PROJECT_SKILLS"):
-            with _chdir(child):
-                dirs = _resolve_skills_dirs()
-        assert child_adk.resolve() in dirs
-        assert parent_claude.resolve() in dirs
-        # Child's dir appears BEFORE parent's (walked first).
-        assert dirs.index(child_adk.resolve()) < dirs.index(parent_claude.resolve())
-    print("OK test_per_dir_decisions_are_independent")
+            dirs = _resolve_skills_dirs(child)
+        assert child_adk.resolve() in dirs and parent_adk.resolve() in dirs
+        assert dirs.index(child_adk.resolve()) < dirs.index(parent_adk.resolve())
+    print("OK test_walk_up_collects_every_level_child_first")
 
 
 def test_missing_dirs_silently_skipped() -> None:
@@ -270,29 +280,25 @@ def test_aggregate_returns_skill_source_pairs() -> None:
     print("OK test_aggregate_returns_skill_source_pairs")
 
 
-def test_pick_one_constant_priority_order() -> None:
-    """The pick-one constant declares `.adk-cc/skills` first. Tests
-    pin the priority so a re-order would surface as a behavior
-    change rather than a silent regression."""
-    assert _PROJECT_SKILLS_PICK_ONE == (".adk-cc/skills", ".claude/skills")
-    print("OK test_pick_one_constant_priority_order")
-
-
-# --- Driver -------------------------------------------------------
+def test_the_project_subdir_constant() -> None:
+    """One project location, named once. The old constant was a two-entry
+    pick-one tuple including `.claude/skills`."""
+    assert _PROJECT_SKILLS_SUBDIR == ".adk-cc/skills"
+    print("OK test_the_project_subdir_constant")
 
 
 def main() -> None:
     test_env_var_skills_dir_wins()
     test_project_walk_up_finds_adk_cc_skills()
-    test_pick_one_adk_cc_priority_over_claude()
-    test_claude_skills_loaded_when_adk_cc_absent()
+    test_a_claude_skills_dir_is_not_a_source()
+    test_the_run_dir_and_data_dir_are_global()
     test_disable_env_var_skips_walk_up()
-    test_per_dir_decisions_are_independent()
+    test_walk_up_collects_every_level_child_first()
     test_missing_dirs_silently_skipped()
     test_aggregate_first_source_wins_on_duplicate_names()
     test_discover_with_explicit_dirs_argument()
     test_aggregate_returns_skill_source_pairs()
-    test_pick_one_constant_priority_order()
+    test_the_project_subdir_constant()
     print("\nall skills-discovery tests passed")
 
 

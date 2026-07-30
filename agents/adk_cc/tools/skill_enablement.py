@@ -296,15 +296,42 @@ def catalog(
 
 
 def _classify_source(base: Path) -> str:
-    """built-in / project / configured — from WHERE the dir was resolved, since
-    that is exactly what decides precedence in `_resolve_skills_dirs`."""
+    """built-in / global / project / configured — from WHERE the dir was
+    resolved, since that is exactly what decides precedence in
+    `_resolve_skills_dirs`.
+
+    `global` has to be checked BEFORE the `.adk-cc` test: the run dir's
+    `.adk-cc/skills` is global (it applies to every project), and labelling it
+    "project" is what made the launch directory look like the user's project in
+    the toggle list."""
     builtin = Path(__file__).resolve().parent.parent / "skills"
     try:
         if base.resolve() == builtin.resolve():
             return "built-in"
     except OSError:
         pass
-    parts = base.parts
-    if ".adk-cc" in parts or ".claude" in parts:
+    for g in _global_skill_dirs():
+        try:
+            if base.resolve() == g.resolve():
+                return "global"
+        except OSError:
+            continue
+    if ".adk-cc" in base.parts:
         return "project"
     return "configured"
+
+
+def _global_skill_dirs() -> list[Path]:
+    """The install-scoped locations: the process run dir and the data dir."""
+    out: list[Path] = []
+    try:
+        out.append(Path.cwd() / ".adk-cc" / "skills")
+    except OSError:
+        pass
+    try:
+        from .. import deployment
+
+        out.append(Path(deployment.data_dir()) / "skills")
+    except Exception:  # noqa: BLE001
+        pass
+    return out

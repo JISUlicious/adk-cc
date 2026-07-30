@@ -23,24 +23,30 @@ skill name appears in multiple dirs, the FIRST discovered wins
 
   1. **`ADK_CC_SKILLS_DIR`** (operator explicit) — if set and the
      dir exists, included first.
-  2. **Project walk-up** (cwd up to home / filesystem root):
-       - Per directory, ONE OF (priority order):
-         `.adk-cc/skills/`, `.claude/skills/`. First existing wins
-         for that dir.
-       - Skipped entirely when `ADK_CC_DISABLE_PROJECT_SKILLS=1`.
-  3. **Built-in skills** `<install>/adk_cc/skills/` — the dir
-     co-located with the agent module. ALWAYS included (it is a base
-     layer, not a fallback): a project/env skill of the same name
-     simply wins by the first-found rule above, so users override
-     built-ins by name without losing the rest. Disable the whole
-     layer with `ADK_CC_BUILTIN_SKILLS=0`.
+  2. **PROJECT** — `.adk-cc/skills/`, walked up from the SESSION's
+     project root to `$HOME`, so a monorepo can share skills a level
+     above the package. Needs a project root; skipped entirely when
+     `ADK_CC_DISABLE_PROJECT_SKILLS=1`.
+  3. **GLOBAL** — belongs to the install, applies to every project:
+       - `<run dir>/.adk-cc/skills/` — the directory the server process
+         runs in (in dev, the adk-cc checkout).
+       - `<desktop data>/skills/` — e.g. `~/.adk-cc-desktop/skills/`.
+     Exact locations, no walk-up, so "global" stays predictable.
+  4. **BUILT-IN** `<install>/adk_cc/skills/` — the dir co-located with
+     the agent module. ALWAYS included (a base layer, not a fallback):
+     a project/global/env skill of the same name wins by the
+     first-found rule above, so users override built-ins by name
+     without losing the rest. Disable with `ADK_CC_BUILTIN_SKILLS=0`.
 
-Why the pick-one rule for `.adk-cc/skills` vs `.claude/skills`:
-projects adopting both conventions would otherwise double-register
-the same skills (same SKILL.md files copied or symlinked). Picking
-one per directory keeps the tool surface clean; `.adk-cc/skills/`
-wins so adk-cc-specific overrides take precedence over generic
-Claude Code skills in mixed projects.
+`.claude/skills/` is NOT a source. It was accepted as project scope
+(first-existing-wins per walked dir, alongside `.adk-cc/skills/`), which
+conflated a Claude Code folder with an adk-cc project scope. Scopes are
+now explicit and `.adk-cc/skills/` is what "project skill" means.
+
+The run dir being GLOBAL rather than project is the point of the split:
+resolving it as project scope meant a desktop user got whatever sat above
+wherever the app was launched from — for every project, and instead of
+their own project's skills.
 
 Mirrors the file-discovery + per-dir pick-one rule from
 `ProjectContextPlugin` (PR #24) — same precedence shape for
@@ -96,32 +102,45 @@ from . import skill_enablement
 _log = logging.getLogger(__name__)
 
 
-# Per-directory pick-one rule. Walk-up checks these in priority order;
-# the first existing subdir for a given walked dir is added, the other
-# is skipped. `.adk-cc/skills/` wins so adk-cc-specific overrides take
-# precedence over generic Claude Code skills when both are present.
-_PROJECT_SKILLS_PICK_ONE = (".adk-cc/skills", ".claude/skills")
+# The one project-scoped location. `.claude/skills` used to be accepted here
+# too (first-existing-wins per walked directory); scopes are now explicit and
+# `.adk-cc/skills` is what "project skill" means, so a Claude Code skills folder
+# is no longer picked up as one.
+_PROJECT_SKILLS_SUBDIR = ".adk-cc/skills"
+
+# GLOBAL locations — tied to the adk-cc INSTALL, not to any bound project:
+#   * `<run dir>/.adk-cc/skills` — the directory the server process runs in. In
+#     dev that is the adk-cc checkout; whatever project happens to be the run
+#     dir, its skills apply everywhere, which is what makes them global rather
+#     than that project's.
+#   * `<desktop data>/skills`   — e.g. `~/.adk-cc-desktop/skills`.
+_GLOBAL_RUN_DIR_SUBDIR = ".adk-cc/skills"
+_GLOBAL_DATA_SUBDIR = "skills"
 
 
 def _resolve_skills_dirs(project_root: Optional[Path] = None) -> list[Path]:
     """Ordered list of skills directories to scan. First-found skill
     name wins across all returned dirs.
 
-    Order:
-      1. `ADK_CC_SKILLS_DIR` (operator explicit, highest precedence).
-      2. Project walk-up (`.adk-cc/skills/` or `.claude/skills/` per
-         directory, walked from `project_root` — or, with none given, from
-         the process cwd — up to home / filesystem root).
-         Skipped entirely when `ADK_CC_DISABLE_PROJECT_SKILLS=1`.
+    Four scopes, most specific first:
 
-         `project_root` is what makes this correct in desktop mode. Anchoring
-         at the cwd meant the SERVER's launch directory: a desktop user got the
-         built-ins plus whatever happened to sit above wherever the app was
-         started from, identically for every project, and never their own
-         project's `.claude/skills`. The walk-up itself is kept (a skill in a
-         parent monorepo directory is still inherited).
-      3. Built-in skills `<install>/adk_cc/skills/` — always included
-         (base layer), unless `ADK_CC_BUILTIN_SKILLS=0`.
+      1. `ADK_CC_SKILLS_DIR` — operator explicit, wins over everything.
+      2. PROJECT — `.adk-cc/skills` walked up from `project_root` to
+         `$HOME` (so a monorepo can share skills a level above the package).
+         Only meaningful with a project root; skipped entirely when
+         `ADK_CC_DISABLE_PROJECT_SKILLS=1`.
+      3. GLOBAL — `<run dir>/.adk-cc/skills` and `<desktop data>/skills`.
+         These belong to the INSTALL: the run dir's skills apply to every
+         project, which is what makes them global rather than that
+         directory's own. No walk-up — exact locations, so "global" stays
+         predictable.
+      4. BUILT-INS — `<install>/adk_cc/skills`, always the base layer unless
+         `ADK_CC_BUILTIN_SKILLS=0`.
+
+    The scope split matters because the run dir used to be read as PROJECT
+    scope: anchoring the walk-up at the cwd meant a desktop user got whatever
+    sat above wherever the app was launched from, for every project, and never
+    their own project's skills.
 
     Each dir is included at most once (dedup by resolved path). A dir
     that doesn't exist or isn't a directory is silently dropped.
@@ -146,28 +165,31 @@ def _resolve_skills_dirs(project_root: Optional[Path] = None) -> list[Path]:
     if raw:
         _add(Path(raw).expanduser())
 
-    # 2. Project walk-up — unless opted out.
-    if not env_bool("ADK_CC_DISABLE_PROJECT_SKILLS"):
+    # 2. PROJECT — walk up from the bound project only.
+    if project_root is not None and not env_bool("ADK_CC_DISABLE_PROJECT_SKILLS"):
         try:
-            cwd = (
-                Path(project_root).resolve()
-                if project_root is not None
-                else Path.cwd().resolve()
-            )
+            cursor = Path(project_root).resolve()
         except OSError:
-            cwd = None
-        if cwd is not None:
+            cursor = None
+        if cursor is not None:
             home = Path.home()
-            cursor = cwd
             while True:
-                for sub in _PROJECT_SKILLS_PICK_ONE:
-                    candidate = cursor / sub
-                    if _is_dir_silently(candidate):
-                        _add(candidate)
-                        break  # pick-one per directory
+                _add(cursor / _PROJECT_SKILLS_SUBDIR)
                 if cursor == home or cursor == cursor.parent:
                     break
                 cursor = cursor.parent
+
+    # 3. GLOBAL — the install's own skills, wherever it runs and stores data.
+    try:
+        _add(Path.cwd() / _GLOBAL_RUN_DIR_SUBDIR)
+    except OSError:
+        pass
+    try:
+        from .. import deployment
+
+        _add(Path(deployment.data_dir()) / _GLOBAL_DATA_SUBDIR)
+    except Exception:  # noqa: BLE001 — no data dir configured (bare tests)
+        pass
 
     # 3. Built-in skills — a base layer, always added (never a "fallback"):
     # higher-precedence sources override BY NAME via the first-found rule,
