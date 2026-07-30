@@ -55,6 +55,22 @@ def _is_dangling_handback(event: Any) -> bool:
     return False
 
 
+def _pending_long_running(event: Any) -> set[str]:
+    """Ids this event PAUSES on — a long-running tool call awaiting the user."""
+    return set(getattr(event, "long_running_tool_ids", None) or ())
+
+
+def _answered_ids(event: Any) -> set[str]:
+    """Ids this event ANSWERS (function responses it carries)."""
+    out: set[str] = set()
+    content = getattr(event, "content", None)
+    for p in getattr(content, "parts", None) or []:
+        fr = getattr(p, "function_response", None)
+        if fr is not None and getattr(fr, "id", None):
+            out.add(fr.id)
+    return out
+
+
 def _has_model_text(event: Any) -> bool:
     """A model-authored, non-partial event with visible (non-thought) text —
     i.e. an actual reply the user sees."""
@@ -282,6 +298,38 @@ class TurnBroker:
                           session_id=session_id, new_message=last.new_message,
                           state_delta=last.state_delta)
 
+    async def _answer_needs_reply(self, turn: "Turn") -> bool:
+        """True when the session is sitting on an ANSWERED long-running call
+        with no reply after it — i.e. the user answered and deserves a response.
+
+        False when a long-running call is still unanswered: the run is parked on
+        purpose (a permission confirmation, a plan approval, an unanswered
+        question) and nudging it would be answering on the user's behalf.
+        """
+        try:
+            session = await self.session_service.get_session(
+                app_name=turn.app_name, user_id=turn.user_id,
+                session_id=turn.session_id)
+        except Exception:  # noqa: BLE001 — never let a probe end a turn
+            _log.debug("could not read session to classify empty round",
+                       exc_info=True)
+            return False
+        if session is None:
+            return False
+
+        pending: set[str] = set()
+        answered_last = False
+        for event in getattr(session, "events", None) or []:
+            ids = _pending_long_running(event)
+            answers = _answered_ids(event)
+            pending |= ids
+            pending -= answers
+            if answers:
+                answered_last = True
+            elif _has_model_text(event):
+                answered_last = False
+        return answered_last and not pending
+
     # -- the run itself -------------------------------------------------
 
     async def _prune_orphan(self, turn: Turn) -> None:
@@ -333,8 +381,10 @@ class TurnBroker:
                 # resumable (ADK ends a resumed parent right after the
                 # sub-agent — the marker is followed only by its auto-response
                 # and end-of-agent checkpoints, never a reply).
-                dangling = False
                 saw_any = False
+                produced_text = False
+                saw_handback = False       # for the log line only
+                pending: set[str] = set()
                 async for event in runner.run_async(
                     user_id=turn.user_id,
                     session_id=turn.session_id,
@@ -342,21 +392,55 @@ class TurnBroker:
                     state_delta=turn.state_delta if round_ == 0 else None,
                 ):
                     saw_any = True
+                    pending |= _pending_long_running(event)
+                    pending -= _answered_ids(event)
                     if _is_dangling_handback(event):
-                        dangling = True
-                    elif _has_model_text(event):
-                        dangling = False
+                        saw_handback = True
+                    if _has_model_text(event):
+                        produced_text = True
                     authored = getattr(event, "author", "user") != "user"
                     await turn.push(
                         event.model_dump_json(exclude_none=True, by_alias=True),
                         model_authored=authored,
                     )
-                if not saw_any or not dangling:
+                if produced_text:
                     break
-                # F3 (server half): the resumed run ended on the specialist's
-                # dangling handback — continue so the coordinator replies.
-                _log.info("turn %s: dangling handback — auto-continuing (%d)",
-                          turn.id, round_ + 1)
+                if not saw_any:
+                    # The run yielded NOTHING. That is what answering a
+                    # long-running tool looks like: ADK appends the
+                    # functionResponse to the session and the resumed
+                    # invocation ends without going back to the model, so the
+                    # loop saw no events at all and the old `not saw_any`
+                    # short-circuit ended the turn silently.
+                    #
+                    # With no events to read, the session is the only witness to
+                    # whether this is "answered, needs a reply" or "still parked
+                    # waiting for the user".
+                    if not await self._answer_needs_reply(turn):
+                        break
+                elif pending:
+                    # Parked ON PURPOSE: a long-running call is waiting for the
+                    # user (a confirmation, a plan approval, a question). There
+                    # is nothing to continue and nudging here would answer on
+                    # the user's behalf.
+                    break
+                # The round produced no reply and is not waiting for anyone.
+                # Two known shapes reach here:
+                #   * the specialist's dangling `_handback_to_coordinator` (F3)
+                #   * a resumed long-running tool: answering `ask_user_question`
+                #     starts a turn carrying the functionResponse, ADK records it
+                #     and ends the run without ever going back to the model, so
+                #     the agent looked like it halted on the user's answer —
+                #     reported from desktop dogfooding and reproduced with 0 tool
+                #     calls and 0 messages after the answer.
+                # Keyed on "no reply" rather than on the handback marker, since
+                # the marker was only ever a proxy for it.
+                _log.info(
+                    "turn %s: round produced no reply (%s) — auto-continuing (%d)",
+                    turn.id,
+                    "dangling handback" if saw_handback else "resumed tool",
+                    round_ + 1,
+                )
                 from google.genai import types as _t
 
                 message = _t.Content(role="user",
