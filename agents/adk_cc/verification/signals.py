@@ -108,6 +108,12 @@ _DOM_SHIM_RE = re.compile(
     r"globalThis\.document\s*=|global\.document\s*=)"
 )
 
+# The bash tool's own redirect message, reused as the signal. One detection
+# point (tools/bash/tool.py::_skill_script_hint) feeds both the model-facing
+# correction and this turn-level signal, so the two cannot drift apart.
+_BYPASSED_SKILL_RE = re.compile(r"belongs to the `([^`]+)` skill")
+
+
 # Irreversible / outward-facing effects — the "hard gate" class.
 _RISK_RE = re.compile(
     r"(?i)(^|[\s;&|(])"
@@ -133,6 +139,10 @@ class TurnSignals:
     mutated_paths: tuple[str, ...] = field(default_factory=tuple)
     check_commands: tuple[str, ...] = field(default_factory=tuple)
     commands: tuple[str, ...] = field(default_factory=tuple)
+    # Skill scripts the turn tried to run as plain files (and failed), and the
+    # ones it ran properly through the tool.
+    bypassed_skill_scripts: tuple[str, ...] = field(default_factory=tuple)
+    ran_skill_scripts: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def has_evidence(self) -> bool:
@@ -157,6 +167,25 @@ class TurnSignals:
                     or _DOM_SHIM_RE.search(cmd)):
                 return True
         return False
+
+    @property
+    def skipped_a_shipped_script(self) -> bool:
+        """A skill's script was attempted as a plain file, failed, and the turn
+        then asserted a result without ever running it through the tool.
+
+        Measured: asked for the driver in a CSV, the agent loaded data-analyst,
+        read seven of its reference docs, ran `python scripts/premodel_audit.py`
+        (which cannot work — skill files are not in the workspace), and wrote its
+        own analysis instead. The answer was right and nothing said that none of
+        the six vetted diagnostics had run.
+
+        Deliberately narrow: it fires only when the turn ATTEMPTED the script, so
+        a skill whose scripts are genuinely optional never triggers it. Hedging
+        still defuses it — saying "I used my own analysis, not the probe" is the
+        outcome this is asking for."""
+        if not self.claims or self.hedged:
+            return False
+        return bool(set(self.bypassed_skill_scripts) - set(self.ran_skill_scripts))
 
     @property
     def unexercised_page(self) -> bool:
@@ -260,13 +289,28 @@ def collect(events: Iterable[Any], *, author: Optional[str] = None) -> TurnSigna
     paths: list[str] = []
     check_cmds: list[str] = []
     all_cmds: list[str] = []
+    bypassed: list[str] = []
+    ran_scripts: list[str] = []
     hedged = False
 
     for ev in events or []:
         for p in _parts(ev):
+            fr = getattr(p, "function_response", None)
+            if fr is not None and getattr(fr, "name", "") == "run_bash":
+                resp = getattr(fr, "response", None)
+                blob = ""
+                if isinstance(resp, dict):
+                    blob = str(resp.get("stderr") or "")
+                for m in _BYPASSED_SKILL_RE.finditer(blob):
+                    bypassed.append(m.group(1))
             fc = getattr(p, "function_call", None)
             if fc is not None:
                 name = getattr(fc, "name", "") or ""
+                if name == "run_skill_script":
+                    args_d = _args_of(fc)
+                    skill = str(args_d.get("skill_name") or "")
+                    if skill:
+                        ran_scripts.append(skill)
                 if name in _MUTATING_TOOLS:
                     mutated += 1
                     path = _path_of(fc)
@@ -299,6 +343,8 @@ def collect(events: Iterable[Any], *, author: Optional[str] = None) -> TurnSigna
         mutated_files=mutated,
         ran_commands=commands,
         ran_checks=checks,
+        bypassed_skill_scripts=tuple(dict.fromkeys(bypassed)),
+        ran_skill_scripts=tuple(dict.fromkeys(ran_scripts)),
         risk_hits=tuple(dict.fromkeys(risk)),
         claims=tuple(dict.fromkeys(claims)),
         hedged=hedged,
@@ -318,7 +364,7 @@ def nudge_text(
     acceptable outcomes, and the second is far better than a confident guess.
     """
     fires = sig.claim_without_evidence or (sig.risky and not sig.has_evidence)
-    fires = fires or sig.unexercised_page
+    fires = fires or sig.unexercised_page or sig.skipped_a_shipped_script
     if predictive:
         fires = fires or sig.unchecked_change
     if not fires:
@@ -342,6 +388,16 @@ def nudge_text(
         lines.append(
             f"It also performed irreversible or outward-facing actions "
             f"({', '.join(sig.risk_hits[:3])}) without a verifying check."
+        )
+    if sig.skipped_a_shipped_script:
+        skipped = ", ".join(
+            sorted(set(sig.bypassed_skill_scripts) - set(sig.ran_skill_scripts))
+        )
+        lines.append(
+            f"A script shipped by the `{skipped}` skill was attempted as a plain "
+            f"file, failed, and never ran through `run_skill_script`. If the "
+            f"answer rests on your own version of that work, say so — the "
+            f"shipped script is the reviewed one."
         )
     if sig.unexercised_page:
         pages = ", ".join(p for p in sig.mutated_paths
