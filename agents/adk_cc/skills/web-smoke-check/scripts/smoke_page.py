@@ -53,16 +53,7 @@ def main(argv: list[str]) -> int:
     page, check = Path(argv[0]).resolve(), Path(argv[1]).resolve()
     for label, p in (("page", page), ("check", check)):
         if not p.is_file():
-            # Skill scripts execute in a TEMP cwd, not the workspace, so a
-            # relative arg resolves against the wrong directory. A live run hit
-            # exactly this and spent an extra round trip on `pwd && realpath`
-            # to work it out — so say it here instead of only reporting the
-            # path that was not found.
-            return _fail(
-                f"{label} not found: {p}\n"
-                "Skill scripts run in a temporary directory, so RELATIVE paths "
-                "do not resolve against your workspace. Pass absolute paths — "
-                "`run_bash: realpath index.html check.mjs` gives them.")
+            return _fail(f"{label} not found: {p}")
 
     proc = subprocess.run(
         ["node", str(_RUNNER), str(page), str(check), *argv[2:]],

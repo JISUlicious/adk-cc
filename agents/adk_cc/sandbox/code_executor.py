@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shlex
 import threading
 from typing import Optional
@@ -38,33 +39,29 @@ from .backends.base import SandboxBackend
 from .workspace import WorkspaceRoot
 
 
-# ADK's `RunSkillScriptTool` builds a self-contained wrapper around this
-# helper name; matching on it keeps the sys.path fix below off every other
-# execution path.
-_SKILL_WRAPPER_MARKER = "_materialize_and_run"
-
-
-def _is_skill_script_wrapper(code: str) -> bool:
-    return _SKILL_WRAPPER_MARKER in (code or "")
+# The skill-script launcher states the imports of the skill it is about to run,
+# because the script's source is NOT in the code sent here — it is materialised
+# in the workspace and run as a subprocess, and a warm run ships no source at
+# all. Sizing the environment from what happens to be inline would provision
+# `base` and the script would die on its first import.
+_SKILL_TIERS_RE = re.compile(r"^# adk-cc-skill-tiers:(.*)$", re.M)
 
 
 def _tiers_for(code: str) -> frozenset[str]:
-    """Package tiers the code needs, seeing INSIDE a skill-script wrapper.
+    """Package tiers the code needs, including a skill script's own imports.
 
-    `required_tiers` matches `^import x` per line. ADK's wrapper embeds every
-    script's source as a one-line `repr`, so those imports sit behind escaped
-    newlines and match nothing: a data-analyst probe importing numpy, pandas and
-    sklearn resolved to ZERO tiers, the environment was provisioned without
-    them, and the probe died on "No module named 'numpy'" — after the sibling
-    imports had just been fixed.
-
-    Decoding the escapes puts the embedded imports back at line starts. Only
-    done for the wrapper, so ordinary code cannot have a tier inferred from a
-    string that merely mentions an import.
+    Worth being explicit about why the header exists: `required_tiers` matches
+    `^import x` per line, and a data-analyst probe importing numpy, pandas and
+    sklearn resolved to ZERO tiers when its source was only present as an
+    escaped one-line repr — the environment came up without them and the probe
+    died on "No module named 'numpy'".
     """
     tiers = required_tiers(code)
-    if _is_skill_script_wrapper(code):
-        tiers = tiers | required_tiers((code or "").replace("\\n", "\n"))
+    m = _SKILL_TIERS_RE.search(code or "")
+    if m:
+        names = [n for n in m.group(1).split() if n.isidentifier()]
+        if names:
+            tiers = tiers | required_tiers("\n".join(f"import {n}" for n in names))
     return tiers
 
 
@@ -149,50 +146,12 @@ class SandboxBackedCodeExecutor(BaseCodeExecutor):
                 backend, ws, tiers=_tiers_for(code_execution_input.code)
             )
             cmd = f"{shlex.quote(env.python)} {shlex.quote(rel_tmpfile)}"
-            if _is_skill_script_wrapper(code_execution_input.code):
-                # A skill's scripts are all materialised into a temp dir as
-                # `scripts/<name>`, and ADK runs the requested one with
-                # `runpy.run_path('scripts/x.py')` — which does NOT put
-                # `scripts/` on sys.path. Any script importing a sibling fails
-                # even though the sibling is right there: data-analyst's
-                # `premodel_audit.py` orchestrates three probe modules and died
-                # with "No module named 'collinearity_probe'", then
-                # `collinearity_probe.py` with "No module named '_probe_utils'".
-                #
-                # A RELATIVE entry inserted into sys.path is resolved against
-                # the cwd at IMPORT time, and the wrapper chdirs into its temp
-                # dir before running — so `scripts` lands on the materialised
-                # directory without us knowing its path. PYTHONPATH cannot do
-                # this: CPython absolutises those entries at startup (measured),
-                # so `scripts` would resolve against the workspace instead.
-                #
-                # Scoped to the wrapper, so ordinary analysis code cannot pick up
-                # a project's own `scripts/` by accident.
-                # Hook `os.chdir` so that the moment the wrapper enters its
-                # temp dir, the REAL `<td>/scripts` goes on sys.path.
-                #
-                # A relative entry ('scripts') is not enough, and that was worth
-                # measuring: the import system caches path-entry finders BY
-                # STRING in sys.path_importer_cache, and the wrapper's own
-                # `import json/subprocess/runpy` populate that cache while the
-                # cwd is still the workspace — where `scripts` does not exist.
-                # The stale "nothing here" entry then survives the chdir.
-                # `invalidate_caches()` clears it; an absolute path avoids the
-                # question entirely.
-                boot = (
-                    "import sys, os, importlib\n"
-                    "_cd = os.chdir\n"
-                    "def _chdir(p):\n"
-                    "    _cd(p)\n"
-                    "    d = os.path.join(os.getcwd(), 'scripts')\n"
-                    "    if os.path.isdir(d) and d not in sys.path:\n"
-                    "        sys.path.insert(0, d)\n"
-                    "        importlib.invalidate_caches()\n"
-                    "os.chdir = _chdir\n"
-                    f"_f = {rel_tmpfile!r}\n"
-                    "exec(compile(open(_f).read(), _f, 'exec'))\n"
-                )
-                cmd = f"{shlex.quote(env.python)} -c {shlex.quote(boot)}"
+            # NOTE: a skill script used to be run by `runpy` inside a wrapper
+            # process, which does NOT put the script's own directory on
+            # sys.path — sibling imports failed and were repaired here with an
+            # `os.chdir` hook. The launcher now runs the script as a real
+            # subprocess, and Python puts a script's directory at sys.path[0]
+            # by itself, so the hook is gone rather than merely disabled.
             res = await backend.exec(
                 cmd,
                 fs_write=ws.fs_write_config(),

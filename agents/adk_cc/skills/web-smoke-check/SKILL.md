@@ -21,17 +21,15 @@ Use `run_skill_script` with **`scripts/smoke_page.py`** and the args as a list:
 ```
 run_skill_script(skill_name="web-smoke-check",
                  file_path="scripts/smoke_page.py",
-                 args=["/abs/path/index.html", "/abs/path/check.mjs", "--json"])
+                 args=["index.html", "check.mjs", "--json"])
 ```
 
-**Absolute paths.** Skill scripts run in a temporary directory, not your
-workspace, so `["index.html", …]` resolves against the wrong place and fails
-with "page not found". Get the real paths first: `run_bash: realpath index.html
-check.mjs`.
+Paths are relative to your workspace, the same as in `run_bash` — the script
+runs there.
 
 Not `node scripts/smoke_page.mjs`. A skill's files are not in your workspace —
 they are served through the skill tools — so that relative path does not exist
-where your commands run, and `run_skill_script` cannot launch a `.mjs` at all.
+where your commands run.
 The Python entrypoint is the supported way in; it locates the Node runner beside
 itself.
 

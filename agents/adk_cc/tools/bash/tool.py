@@ -75,10 +75,11 @@ def _skill_script_hint(command: str, stderr: str) -> Optional[str]:
             "files are NOT in your workspace — no filesystem path reaches them. "
             "Run it through the skill tool instead:\n"
             f'  run_skill_script(skill_name="{skill}", file_path="{rel}", '
-            'args=["<abs-path-arg>", ...])\n'
-            "Pass ABSOLUTE paths for file arguments (skill scripts execute in a "
-            "temp directory). Do not re-implement the script inline — it is "
-            "shipped because its behaviour is the vetted one."
+            'args=["<arg>", ...])\n'
+            "It runs with your workspace as its working directory, so paths in "
+            "the arguments work the same as they do here. Do not re-implement "
+            "the script inline — it is shipped because its behaviour is the "
+            "vetted one."
         )
     return None
 

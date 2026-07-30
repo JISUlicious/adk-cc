@@ -55,8 +55,10 @@ def test_the_verbatim_live_failure_is_explained() -> None:
     assert "data-analyst" in hint, hint
     assert "run_skill_script" in hint and 'file_path="scripts/premodel_audit.py"' in hint, hint
     # It must also head off the two follow-on mistakes.
-    assert "ABSOLUTE" in hint, hint          # temp cwd for skill scripts
-    assert "re-implement" in hint, hint      # what it actually did instead
+    # It must also head off the follow-on mistakes: where the script will run,
+    # and what the agent actually did instead of running it.
+    assert "working directory" in hint, hint
+    assert "re-implement" in hint, hint
     print("OK the_verbatim_live_failure_is_explained")
 
 

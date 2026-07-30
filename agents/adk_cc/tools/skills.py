@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -83,6 +84,7 @@ from typing import Any, Optional
 
 import yaml
 from google.adk.code_executors.base_code_executor import BaseCodeExecutor
+from google.adk.code_executors.code_execution_utils import CodeExecutionInput
 from google.adk.skills import (
     Skill,
     list_skills_in_dir,
@@ -1169,6 +1171,12 @@ class _EnablementCheckedRunSkillScriptTool(RunSkillScriptTool):
         return await super().run_async(args=args, tool_context=tool_context)
 
 
+# Skills are materialised HERE, not in a temp dir: a script that creates files
+# has to leave them somewhere real. Deliberately not under `.adk-cc/skills`,
+# which is where a project's OWN skills live — a cache inside that tree would
+# look like a skill.
+_SKILL_RUNTIME_SUBDIR = ".adk-cc/skill-runtime"
+
 _MODULE_MISSING_RE = re.compile(r"No module named '([^']+)'")
 
 
@@ -1206,145 +1214,240 @@ def _explain_missing_package(res: dict, skill: Skill) -> dict:
         f"script's result.")}
 
 
+def _skill_files(skill: Skill) -> dict[str, Any]:
+    """Every file of a skill, laid out the way the script expects to find it."""
+    files: dict[str, Any] = {}
+    try:
+        res = skill.resources
+        for n in res.list_scripts():
+            scr = res.get_script(n)
+            if scr is not None and scr.src is not None:
+                files[f"scripts/{n}"] = scr.src
+        for n in res.list_references():
+            c = res.get_reference(n)
+            if c is not None:
+                files[f"references/{n}"] = c
+        for n in res.list_assets():
+            c = res.get_asset(n)
+            if c is not None:
+                files[f"assets/{n}"] = c
+    except Exception:  # noqa: BLE001 — a skill with no resources is fine
+        pass
+    return files
+
+
+def _files_digest(files: dict[str, Any]) -> str:
+    """Content address for a materialised skill, so an edited skill re-writes
+    itself and an unchanged one never does."""
+    h = hashlib.sha256()
+    h.update(b"v1\n")                       # bump when the layout changes
+    for rel in sorted(files):
+        content = files[rel]
+        h.update(rel.encode("utf-8") + b"\0")
+        h.update(content if isinstance(content, bytes) else content.encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
+def _skill_import_tiers(files: dict[str, Any]) -> list[str]:
+    """Top-level modules the skill's Python scripts import.
+
+    The sandbox executor sizes the analysis environment from the imports it can
+    see in the code it is given. It used to read them out of ADK's wrapper,
+    which embedded every script's source inline; now that a warm run ships no
+    sources at all, the names travel as an explicit header instead. More
+    accurate too — it no longer depends on `repr` escaping.
+    """
+    mods: set[str] = set()
+    for rel, content in files.items():
+        if not rel.endswith(".py") or not isinstance(content, str):
+            continue
+        for line in content.splitlines():
+            line = line.strip()
+            for prefix in ("import ", "from "):
+                if line.startswith(prefix):
+                    name = line[len(prefix):].split()[0].split(".")[0].strip(",")
+                    if name.isidentifier():
+                        mods.add(name)
+    return sorted(mods)
+
+
 class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
-    """ADK's script launcher, taught the interpreters in `_EXTRA_INTERPRETERS`.
+    """Runs a skill's script from a durable directory in the WORKSPACE.
 
     This has to live on the EXECUTOR rather than on the tool: `run_skill_script`
-    constructs a `_SkillScriptCodeExecutor` inside its own `run_async` and calls
-    `_build_wrapper_code` on that, so an override on the tool is never reached
-    (it silently wasn't — `.js` kept returning ADK's "Unsupported script type").
-    Installed by swapping the module attribute ADK reads, which is also what
-    makes it apply to the tool ADK builds rather than only to ours.
+    constructs a `_SkillScriptCodeExecutor` inside its own `run_async`, so an
+    override on the tool is never reached (it silently wasn't — `.js` kept
+    returning ADK's "Unsupported script type"). Installed by swapping the module
+    attribute ADK reads.
+
+    ADK materialises the WHOLE skill into a `TemporaryDirectory`, chdirs there,
+    and runs the target with `runpy`. Three things follow from that, all
+    measured against published skills:
+
+      * anything the script CREATES is deleted when the call returns. The
+        published `web-artifacts-builder` scaffolds a project — it cannot work
+        at all under a temp cwd, and `cd "$PROJECT_NAME"` failed either way.
+      * the payload is re-sent on every invocation. docx/pptx/xlsx carry
+        ~1.1 MB of schemas each, which crosses the wire per call on a remote
+        backend.
+      * `runpy.run_path` does not put the script's own directory on `sys.path`,
+        so sibling imports failed and needed a chdir hook to repair.
+
+    So: materialise once into `.adk-cc/skill-runtime/<skill>/<digest>/` beside
+    the workspace, run the script as a real SUBPROCESS with cwd = the
+    workspace, and keep ADK's result shape. Running it as a subprocess is what
+    retires the sibling-import hack — Python puts a script's own directory at
+    `sys.path[0]` when it runs a file, which is exactly what was being
+    simulated. A warm run ships a few hundred bytes.
     """
 
     async def execute_script_async(  # noqa: ANN201 — mirrors ADK's signature
         self, invocation_context, skill, file_path, script_args,
         short_options=None, positional_args=None,
     ):
-        """Unwrap the `__shell_result__` envelope for our interpreters too.
+        if not file_path.startswith("scripts/"):
+            file_path = f"scripts/{file_path}"
+        files = _skill_files(skill)
+        digest = _files_digest(files)
+        name = getattr(skill.frontmatter, "name", "skill") or "skill"
+        cache = f"{_SKILL_RUNTIME_SUBDIR}/{re.sub(r'[^A-Za-z0-9._-]', '_', name)}/{digest}"
+        argv = _flatten_script_args(script_args, short_options, positional_args)
 
-        ADK parses that envelope only when the extension is `sh`/`bash`, so a
-        `.mjs` came back with the raw JSON as its stdout and — worse — a FAILING
-        script reported `status: success`, because the real returncode was still
-        inside the envelope. Post-processing super()'s result keeps ADK's
-        materialisation, timeout and error handling intact.
-        """
-        res = await super().execute_script_async(
-            invocation_context, skill, file_path, script_args, short_options,
-            positional_args)
-        if isinstance(res, dict):
-            res = _explain_missing_package(res, skill)
-        ext = _script_ext(file_path)
-        if ext not in _EXTRA_INTERPRETERS or not isinstance(res, dict):
-            return res
-        out = res.get("stdout")
-        if not out:
-            return res
+        def _shaped(payload: dict) -> dict:
+            stdout = payload.get("stdout", "")
+            stderr = payload.get("stderr", "")
+            rc = payload.get("returncode", 0)
+            if rc != 0 and not stderr:
+                stderr = f"Exit code {rc}"
+            # ADK's own three-way status, kept identical so a caller cannot
+            # tell the two launchers apart.
+            if rc != 0 or (stderr and not stdout):
+                status = "error"
+            elif stderr:
+                status = "warning"
+            else:
+                status = "success"
+            return _explain_missing_package({
+                "skill_name": skill.name, "file_path": file_path,
+                "stdout": stdout, "stderr": stderr, "status": status}, skill)
+
         try:
-            parsed = json.loads(out)
-        except (TypeError, ValueError):
-            return res
-        if not isinstance(parsed, dict) or not parsed.get("__shell_result__"):
-            return res
-        stdout = parsed.get("stdout", "")
-        stderr = parsed.get("stderr", "")
-        rc = parsed.get("returncode", 0)
-        if rc != 0 and not stderr:
-            stderr = f"Exit code {rc}"
-        # ADK's own three-way status, kept identical so callers cannot tell the
-        # two launchers apart.
-        if rc != 0:
-            status = "error"
-        elif stderr and not stdout:
-            status = "error"
-        elif stderr:
-            status = "warning"
-        else:
-            status = "success"
-        return {**res, "stdout": stdout, "stderr": stderr, "status": status}
+            tiers = _skill_import_tiers(files)
+            # Ask first, carry nothing: if this workspace already holds the
+            # skill at this digest, that one exchange also runs the script and
+            # the payload never moves. An in-process "already materialised" set
+            # would save only the cold round trip, and keying it is exactly
+            # where the first attempt went wrong — `id(self._base_executor)`
+            # changes per call, so every run looked cold and shipped 1.1 MB.
+            res = await self._exec(invocation_context, self._wrapper(
+                cache, file_path, argv, None, tiers))
+            if res.get("__needs_materialize__"):
+                res = await self._exec(invocation_context, self._wrapper(
+                    cache, file_path, argv, files, tiers))
+        except Exception as e:  # noqa: BLE001 — same shape as ADK's catch
+            _log.exception("skill script '%s' of '%s' failed", file_path, name)
+            return {"error": f"Failed to execute script '{file_path}':"
+                             f" {type(e).__name__}: {str(e)[:200]}",
+                    "error_code": "EXECUTION_ERROR"}
+        if res.get("__error__"):
+            return {"error": f"Failed to execute script '{file_path}':"
+                             f" {res['__error__'][:400]}",
+                    "error_code": "EXECUTION_ERROR"}
+        return _shaped(res)
 
-    def _build_wrapper_code(  # noqa: ANN202 — mirrors ADK's signature
-        self, skill, file_path, script_args, short_options=None,
-        positional_args=None,
-    ):
-        """Extend ADK's launcher to the interpreters in `_EXTRA_INTERPRETERS`.
+    async def _exec(self, invocation_context, code: str) -> dict:
+        """Run wrapper code through the configured executor, return its payload."""
+        result = await asyncio.to_thread(
+            self._base_executor.execute_code,
+            invocation_context,
+            CodeExecutionInput(code=code),
+        )
+        out = (result.stdout or "").strip()
+        for line in reversed(out.splitlines()):
+            try:
+                parsed = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict) and (
+                    parsed.get("__shell_result__") or parsed.get("__needs_materialize__")):
+                return parsed
+        # No envelope at all means the wrapper itself did not run — a sandbox
+        # or environment failure, which must not be reported as the script's
+        # own empty output.
+        return {"__error__": (result.stderr or out or "no output from the "
+                              "skill-script launcher")}
 
-        ADK builds a wrapper that materialises ALL of a skill's files into a
-        temp dir, chdirs there, and either runpy's a `.py` or subprocess-runs a
-        `.sh`, printing a `__shell_result__` envelope it then parses. Anything
-        else returns None → "Unsupported script type".
+    def _wrapper(self, cache: str, file_path: str, argv: list[str],
+                 files: Optional[dict[str, Any]], tiers: list[str]) -> str:
+        """The code that runs in the sandbox.
 
-        Emitting that same envelope for other interpreters reuses every
-        surrounding piece — materialisation, argv conventions, timeout, result
-        parsing — instead of forking the tool. Siblings work because the whole
-        skill is materialised together and each runtime resolves relative
-        imports from the script's own directory.
+        Sent without `files` first: if this workspace already has the skill at
+        this digest, that run needs nothing else and the 1.1 MB never moves.
+        Otherwise it reports back and the caller re-sends with the payload.
         """
         ext = _script_ext(file_path)
-        if ext in _ADK_SCRIPT_EXTS or ext not in _EXTRA_INTERPRETERS:
-            return super()._build_wrapper_code(
-                skill, file_path, script_args, short_options, positional_args)
-
-        interp = list(_EXTRA_INTERPRETERS[ext])
-        argv = interp + [file_path] + _flatten_script_args(
-            script_args, short_options, positional_args)
-        files: dict[str, Any] = {}
-        try:
-            res = skill.resources
-            for n in res.list_scripts():
-                scr = res.get_script(n)
-                if scr is not None and scr.src is not None:
-                    files[f"scripts/{n}"] = scr.src
-            for n in res.list_references():
-                c = res.get_reference(n)
-                if c is not None:
-                    files[f"references/{n}"] = c
-            for n in res.list_assets():
-                c = res.get_asset(n)
-                if c is not None:
-                    files[f"assets/{n}"] = c
-        except Exception:  # noqa: BLE001 — a skill with no resources is fine
-            pass
-
+        interp = list(_EXTRA_INTERPRETERS.get(ext, ()))
+        if ext in ("sh", "bash"):
+            interp = ["bash"]
         timeout = getattr(self, "_script_timeout", 300)
         return "\n".join([
-            "import os, sys, tempfile, shutil, subprocess, json as _json",
-            f"_files = {files!r}",
+            # Read by the sandbox executor to size the analysis environment.
+            f"# adk-cc-skill-tiers: {' '.join(tiers)}",
+            "import os, sys, json as _json, shutil, subprocess",
+            f"_cache = {cache!r}",
+            f"_rel = {file_path!r}",
             f"_argv = {argv!r}",
-            "def _run():",
-            "  _orig = os.getcwd()",
-            "  with tempfile.TemporaryDirectory() as td:",
-            "    for rel, content in _files.items():",
-            "      full = os.path.join(td, rel)",
-            "      os.makedirs(os.path.dirname(full), exist_ok=True)",
-            "      mode = 'wb' if isinstance(content, bytes) else 'w'",
-            "      with open(full, mode) as f:",
-            "        f.write(content)",
-            "    os.chdir(td)",
-            "    try:",
-            "      _exe = shutil.which(_argv[0])",
-            "      if not _exe:",
-            # Actionable, in the same shape as a real result, so the model reads
-            # a reason rather than a bare non-zero exit.
-            "        print(_json.dumps({'__shell_result__': True, 'stdout': '',",
-            "          'stderr': ('this skill script needs ' + _argv[0] +",
-            "            ', which is not installed here. Install it, or report "
-            "the step as not run — do not substitute a different method "
-            "silently.'), 'returncode': 127}))",
-            "        return",
-            "      _r = subprocess.run([_exe] + _argv[1:], capture_output=True,",
-            f"        text=True, timeout={timeout!r}, cwd=td)",
-            "      print(_json.dumps({'__shell_result__': True,",
-            "        'stdout': _r.stdout, 'stderr': _r.stderr,",
-            "        'returncode': _r.returncode}))",
-            "    except subprocess.TimeoutExpired as _e:",
-            "      print(_json.dumps({'__shell_result__': True,",
-            "        'stdout': (_e.stdout or ''),",
-            f"        'stderr': 'Timed out after {timeout}s',",
-            "        'returncode': -1}))",
-            "    finally:",
-            "      os.chdir(_orig)",
-            "_run()",
+            f"_interp = {interp!r}",
+            f"_files = {files!r}" if files is not None else "_files = None",
+            "_ready = os.path.join(_cache, '.ready')",
+            "def _emit(**kw): print(_json.dumps(dict(__shell_result__=True, **kw)))",
+            "if not os.path.isfile(_ready):",
+            "    if _files is None:",
+            "        print(_json.dumps({'__needs_materialize__': True}))",
+            "        raise SystemExit(0)",
+            "    _parent = os.path.dirname(_cache)",
+            # Older versions of the same skill are dead the moment this one
+            # exists; leaving them would grow without bound in the project.
+            "    if os.path.isdir(_parent):",
+            "        for _old in os.listdir(_parent):",
+            "            if os.path.join(_parent, _old) != _cache:",
+            "                shutil.rmtree(os.path.join(_parent, _old), ignore_errors=True)",
+            "    for _r, _c in _files.items():",
+            "        _f = os.path.join(_cache, _r)",
+            "        os.makedirs(os.path.dirname(_f), exist_ok=True)",
+            "        with open(_f, 'wb' if isinstance(_c, bytes) else 'w') as _fh:",
+            "            _fh.write(_c)",
+            "    for _r in _files:",
+            "        if _r.startswith('scripts/'):",
+            "            try: os.chmod(os.path.join(_cache, _r), 0o755)",
+            "            except OSError: pass",
+            "    open(_ready, 'w').write('1')",
+            "_abs = os.path.abspath(os.path.join(_cache, _rel))",
+            "if not os.path.isfile(_abs):",
+            "    _emit(stdout='', stderr='materialised skill is missing ' + _rel,",
+            "          returncode=1)",
+            "    raise SystemExit(0)",
+            # sys.executable is the analysis-env interpreter this wrapper runs
+            # under, so a .py script gets the same packages as the rest of the
+            # session rather than whatever `python` means on PATH.
+            "_cmd = ([sys.executable] if not _interp else None)",
+            "if _interp:",
+            "    _exe = shutil.which(_interp[0])",
+            "    if not _exe:",
+            "        _emit(stdout='', stderr=('this skill script needs ' + _interp[0] +",
+            "              ', which is not installed here. Install it, or report the "
+            "step as not run — do not substitute a different method silently.'),",
+            "              returncode=127)",
+            "        raise SystemExit(0)",
+            "    _cmd = [_exe] + _interp[1:]",
+            "try:",
+            "    _r = subprocess.run(_cmd + [_abs] + _argv, capture_output=True,",
+            f"        text=True, timeout={timeout!r}, cwd=os.getcwd())",
+            "    _emit(stdout=_r.stdout, stderr=_r.stderr, returncode=_r.returncode)",
+            "except subprocess.TimeoutExpired as _e:",
+            "    _emit(stdout=(_e.stdout or ''),",
+            f"          stderr='Timed out after {timeout}s', returncode=-1)",
         ])
 
 
