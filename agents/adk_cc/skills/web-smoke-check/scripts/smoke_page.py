@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """Entrypoint for the page smoke check — run this, not the .mjs directly.
 
-Why a Python wrapper around a Node runner:
+Originally this existed because `run_skill_script` could only launch
+.py/.sh/.bash, so a bare `.mjs` was unreachable ("Unsupported script type
+'.mjs'" on a live run). That limit is gone — the launcher now handles `.mjs`
+directly — but this wrapper stays, for the reasons the live runs turned up:
 
-  * `run_skill_script` only executes .py/.sh/.bash (ADK's `_build_wrapper_code`
-    returns None for anything else), so a bare `.mjs` cannot be launched
-    through the skill tool at all. A live run proved it: the agent loaded this
-    skill, tried `run_skill_script(... smoke_page.mjs)` and got
-    "Unsupported script type '.mjs'".
-  * Its fallback — `run_bash "node scripts/smoke_page.mjs …"` — exited 1,
-    because a skill's files are NOT in the workspace: they are served through
-    the skill tools, so that relative path does not exist where commands run.
+  * a RELATIVE page/check path silently resolves against the temp cwd skill
+    scripts run in, and the failure said only "not found" (one live run burned
+    a round trip on `pwd && realpath` to work it out);
+  * jsdom lives in a shared cache outside the project, so the runner needs
+    ADK_CC_WEB_RUNTIME_DIR pointed at it;
+  * "no DOM runtime" has exactly one useful answer, and it needs a permission
+    prompt — better said here than inferred.
 
-This file sits next to the runner, so it can find it by `__file__` no matter
-where it is invoked from, and hands off to node.
+It sits next to the runner, so it finds it by `__file__` however it is invoked,
+and hands off to node.
 
 Usage (through run_skill_script, args as a list):
     ["<page.html>", "<check.mjs>", "--json"]

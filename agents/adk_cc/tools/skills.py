@@ -74,6 +74,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import logging
 import os
 import re
@@ -87,12 +88,14 @@ from google.adk.skills import (
     load_skill_from_dir,
 )
 from google.adk.tools.base_tool import BaseTool
+from google.adk.tools import skill_toolset as _adk_skill_toolset
 from google.adk.tools.skill_toolset import (
     ListSkillsTool,
     LoadSkillResourceTool,
     LoadSkillTool,
     RunSkillScriptTool,
     SkillToolset,
+    _SkillScriptCodeExecutor,
 )
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
@@ -904,6 +907,68 @@ def _anchor_script_args(args: dict[str, Any], tool_context: ToolContext) -> dict
     return out
 
 
+# Extensions ADK itself can launch (`_build_wrapper_code` returns None for
+# anything else, and the tool then reports "Supported types: .py, .sh, .bash").
+_ADK_SCRIPT_EXTS = frozenset({"py", "sh", "bash"})
+
+# What adk-cc adds. A skill is a folder of files, and there is no reason its
+# author must write Python: the first skill to ship a Node runner could not be
+# launched at all, and the workaround — a .py shim next to it — taxes every
+# author for a limitation of the launcher.
+#
+# `argv` prefix per extension; the script path and args follow.
+_EXTRA_INTERPRETERS: dict[str, tuple[str, ...]] = {
+    "js": ("node",),
+    "mjs": ("node",),
+    "cjs": ("node",),
+    # Type stripping rather than a toolchain: no tsc, no tsx to install.
+    "ts": ("node", "--experimental-strip-types"),
+    "ps1": ("pwsh", "-NoProfile", "-File"),
+    "rb": ("ruby",),
+    "pl": ("perl",),
+    "php": ("php",),
+    "lua": ("lua",),
+    "R": ("Rscript",),
+    "r": ("Rscript",),
+}
+
+
+def launchable_script_exts() -> frozenset[str]:
+    """Extensions `run_skill_script` can launch (no leading dot).
+
+    Exported so the "you ran a skill's script as a plain file" redirect in the
+    bash tool keys off the same set — the two drifted the moment this one grew,
+    and a skill shipping a `.ps1` would have failed with no hint at all.
+    """
+    return frozenset(_ADK_SCRIPT_EXTS | set(_EXTRA_INTERPRETERS))
+
+
+def _script_ext(file_path: str) -> str:
+    return file_path.rsplit(".", 1)[-1] if "." in (file_path or "") else ""
+
+
+def _flatten_script_args(
+    script_args: Any, short_options: Any, positional_args: Any
+) -> list[str]:
+    """argv tail, matching ADK's own conventions so the two launchers behave
+    identically: a list is the complete argv; a dict becomes `--key value`;
+    short options `-k value`; positionals after a `--` separator."""
+    out: list[str] = []
+    if isinstance(script_args, list):
+        out.extend(str(v) for v in script_args)
+        return out
+    if isinstance(script_args, dict):
+        for k, v in script_args.items():
+            out.extend([f"--{k}", str(v)])
+    if isinstance(short_options, dict):
+        for k, v in short_options.items():
+            out.extend([f"-{k}", str(v)])
+    if isinstance(positional_args, list) and positional_args:
+        out.append("--")
+        out.extend(str(v) for v in positional_args)
+    return out
+
+
 class _EnablementCheckedRunSkillScriptTool(RunSkillScriptTool):
     """`run_skill_script` refuses a disabled skill, and anchors relative paths."""
 
@@ -913,8 +978,162 @@ class _EnablementCheckedRunSkillScriptTool(RunSkillScriptTool):
         name = args.get("skill_name") or ""
         if name and _denied(name, tool_context):
             return skill_enablement.refusal(name)
+        ext = _script_ext(str(args.get("file_path") or ""))
+        if ext and ext not in _ADK_SCRIPT_EXTS and ext not in _EXTRA_INTERPRETERS:
+            # Own the message: ADK's says "Supported types: .py, .sh, .bash",
+            # which is no longer the truth for this tool.
+            supported = sorted(_ADK_SCRIPT_EXTS | set(_EXTRA_INTERPRETERS))
+            return {
+                "error": (
+                    f"Cannot run a '.{ext}' script. Supported: "
+                    + ", ".join(f".{e}" for e in supported)
+                    + ". Ship a launchable entrypoint beside it, or invoke it "
+                    "from one."
+                ),
+                "error_code": "UNSUPPORTED_SCRIPT_TYPE",
+            }
         args = _anchor_script_args(args, tool_context)
         return await super().run_async(args=args, tool_context=tool_context)
+
+
+class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
+    """ADK's script launcher, taught the interpreters in `_EXTRA_INTERPRETERS`.
+
+    This has to live on the EXECUTOR rather than on the tool: `run_skill_script`
+    constructs a `_SkillScriptCodeExecutor` inside its own `run_async` and calls
+    `_build_wrapper_code` on that, so an override on the tool is never reached
+    (it silently wasn't — `.js` kept returning ADK's "Unsupported script type").
+    Installed by swapping the module attribute ADK reads, which is also what
+    makes it apply to the tool ADK builds rather than only to ours.
+    """
+
+    async def execute_script_async(  # noqa: ANN201 — mirrors ADK's signature
+        self, invocation_context, skill, file_path, script_args,
+        short_options=None, positional_args=None,
+    ):
+        """Unwrap the `__shell_result__` envelope for our interpreters too.
+
+        ADK parses that envelope only when the extension is `sh`/`bash`, so a
+        `.mjs` came back with the raw JSON as its stdout and — worse — a FAILING
+        script reported `status: success`, because the real returncode was still
+        inside the envelope. Post-processing super()'s result keeps ADK's
+        materialisation, timeout and error handling intact.
+        """
+        res = await super().execute_script_async(
+            invocation_context, skill, file_path, script_args, short_options,
+            positional_args)
+        ext = _script_ext(file_path)
+        if ext not in _EXTRA_INTERPRETERS or not isinstance(res, dict):
+            return res
+        out = res.get("stdout")
+        if not out:
+            return res
+        try:
+            parsed = json.loads(out)
+        except (TypeError, ValueError):
+            return res
+        if not isinstance(parsed, dict) or not parsed.get("__shell_result__"):
+            return res
+        stdout = parsed.get("stdout", "")
+        stderr = parsed.get("stderr", "")
+        rc = parsed.get("returncode", 0)
+        if rc != 0 and not stderr:
+            stderr = f"Exit code {rc}"
+        # ADK's own three-way status, kept identical so callers cannot tell the
+        # two launchers apart.
+        if rc != 0:
+            status = "error"
+        elif stderr and not stdout:
+            status = "error"
+        elif stderr:
+            status = "warning"
+        else:
+            status = "success"
+        return {**res, "stdout": stdout, "stderr": stderr, "status": status}
+
+    def _build_wrapper_code(  # noqa: ANN202 — mirrors ADK's signature
+        self, skill, file_path, script_args, short_options=None,
+        positional_args=None,
+    ):
+        """Extend ADK's launcher to the interpreters in `_EXTRA_INTERPRETERS`.
+
+        ADK builds a wrapper that materialises ALL of a skill's files into a
+        temp dir, chdirs there, and either runpy's a `.py` or subprocess-runs a
+        `.sh`, printing a `__shell_result__` envelope it then parses. Anything
+        else returns None → "Unsupported script type".
+
+        Emitting that same envelope for other interpreters reuses every
+        surrounding piece — materialisation, argv conventions, timeout, result
+        parsing — instead of forking the tool. Siblings work because the whole
+        skill is materialised together and each runtime resolves relative
+        imports from the script's own directory.
+        """
+        ext = _script_ext(file_path)
+        if ext in _ADK_SCRIPT_EXTS or ext not in _EXTRA_INTERPRETERS:
+            return super()._build_wrapper_code(
+                skill, file_path, script_args, short_options, positional_args)
+
+        interp = list(_EXTRA_INTERPRETERS[ext])
+        argv = interp + [file_path] + _flatten_script_args(
+            script_args, short_options, positional_args)
+        files: dict[str, Any] = {}
+        try:
+            res = skill.resources
+            for n in res.list_scripts():
+                scr = res.get_script(n)
+                if scr is not None and scr.src is not None:
+                    files[f"scripts/{n}"] = scr.src
+            for n in res.list_references():
+                c = res.get_reference(n)
+                if c is not None:
+                    files[f"references/{n}"] = c
+            for n in res.list_assets():
+                c = res.get_asset(n)
+                if c is not None:
+                    files[f"assets/{n}"] = c
+        except Exception:  # noqa: BLE001 — a skill with no resources is fine
+            pass
+
+        timeout = getattr(self, "_script_timeout", 300)
+        return "\n".join([
+            "import os, sys, tempfile, shutil, subprocess, json as _json",
+            f"_files = {files!r}",
+            f"_argv = {argv!r}",
+            "def _run():",
+            "  _orig = os.getcwd()",
+            "  with tempfile.TemporaryDirectory() as td:",
+            "    for rel, content in _files.items():",
+            "      full = os.path.join(td, rel)",
+            "      os.makedirs(os.path.dirname(full), exist_ok=True)",
+            "      mode = 'wb' if isinstance(content, bytes) else 'w'",
+            "      with open(full, mode) as f:",
+            "        f.write(content)",
+            "    os.chdir(td)",
+            "    try:",
+            "      _exe = shutil.which(_argv[0])",
+            "      if not _exe:",
+            # Actionable, in the same shape as a real result, so the model reads
+            # a reason rather than a bare non-zero exit.
+            "        print(_json.dumps({'__shell_result__': True, 'stdout': '',",
+            "          'stderr': ('this skill script needs ' + _argv[0] +",
+            "            ', which is not installed here. Install it, or report "
+            "the step as not run — do not substitute a different method "
+            "silently.'), 'returncode': 127}))",
+            "        return",
+            "      _r = subprocess.run([_exe] + _argv[1:], capture_output=True,",
+            f"        text=True, timeout={timeout!r}, cwd=td)",
+            "      print(_json.dumps({'__shell_result__': True,",
+            "        'stdout': _r.stdout, 'stderr': _r.stderr,",
+            "        'returncode': _r.returncode}))",
+            "    except subprocess.TimeoutExpired as _e:",
+            "      print(_json.dumps({'__shell_result__': True,",
+            "        'stdout': (_e.stdout or ''),",
+            f"        'stderr': 'Timed out after {timeout}s',",
+            "        'returncode': -1}))",
+            "    finally:",
+            "      os.chdir(_orig)",
+            "_run()",
+        ])
 
 
 class _NoopGuardedRunSkillScriptTool(_EnablementCheckedRunSkillScriptTool):
@@ -1134,6 +1353,17 @@ class _EnablementAwareSkillToolset(SkillToolset):
         ])
 
 
+def _install_wider_script_launcher() -> None:
+    """Point ADK's `run_skill_script` at `_WiderScriptCodeExecutor`.
+
+    Idempotent, and a no-op for `.py`/`.sh`/`.bash` (those still go through
+    ADK's own wrapper), so re-running it or hitting it from several toolsets is
+    safe. Global because ADK instantiates the class by module-level name.
+    """
+    if _adk_skill_toolset._SkillScriptCodeExecutor is not _WiderScriptCodeExecutor:
+        _adk_skill_toolset._SkillScriptCodeExecutor = _WiderScriptCodeExecutor
+
+
 def _patch_skill_tools(
     toolset: SkillToolset, skill_dirs: dict[str, str]
 ) -> None:
@@ -1148,6 +1378,7 @@ def _patch_skill_tools(
     Idempotent: already-swapped subclasses are skipped.
     """
     guards = _guards_on()
+    _install_wider_script_launcher()
     for i, tool in enumerate(toolset._tools):
         if isinstance(tool, LoadSkillResourceTool) and not isinstance(
             tool, _LenientLoadSkillResourceTool

@@ -55,6 +55,38 @@ def _csv(path: str) -> None:
     open(path, "w").write("\n".join(rows) + "\n")
 
 
+def _node_skill(proj: str) -> None:
+    """A project skill whose only entrypoint is Node.
+
+    Until the launcher grew other interpreters this could not be started at
+    all — `run_skill_script` answered "Unsupported script type '.mjs'" — and
+    the agent's fallback, `node scripts/…`, cannot work either because a
+    skill's files are not in the workspace. So this task fails loudly if the
+    fix regresses, whereas a Python skill would just keep passing.
+    """
+    d = os.path.join(proj, ".adk-cc", "skills", "release-notes")
+    os.makedirs(os.path.join(d, "scripts"), exist_ok=True)
+    with open(os.path.join(d, "SKILL.md"), "w") as fh:
+        fh.write(
+            "---\nname: release-notes\ndescription: >\n"
+            "  Formats a version bump into the house release-note format. Use\n"
+            "  this whenever asked to write release notes; the wording and\n"
+            "  ordering are fixed by scripts/render.mjs and must not be\n"
+            "  hand-written.\n---\n\n"
+            "Run `scripts/render.mjs` with the version and one or more change\n"
+            "lines: `args=[\"1.4.0\", \"fixed login\", \"faster search\"]`.\n"
+            "Use its output verbatim.\n")
+    with open(os.path.join(d, "scripts", "render.mjs"), "w") as fh:
+        fh.write(
+            "import { banner } from './house_style.mjs';\n"
+            "const [v, ...items] = process.argv.slice(2);\n"
+            "console.log(banner(v));\n"
+            "for (const it of items) console.log('  * ' + it);\n"
+            "console.log('-- end of notes --');\n")
+    with open(os.path.join(d, "scripts", "house_style.mjs"), "w") as fh:
+        fh.write("export const banner = (v) => `### RELEASE ${v} ###`;\n")
+
+
 TASKS = [
     {
         "tag": "data-analyst",
@@ -69,6 +101,19 @@ TASKS = [
         "prompt": ("Build a small web page with a button that counts clicks and "
                    "shows the total, then confirm for me that clicking it "
                    "actually updates what a user sees."),
+    },
+    {
+        "tag": "node-skill",
+        "expect": "release-notes",
+        "setup": _node_skill,
+        # No mention of the skill, the script or Node: choosing it is part of
+        # what is being measured.
+        "prompt": ("Write the release notes for version 1.4.0. It fixed login "
+                   "and made search faster."),
+        # The banner only comes from the sibling module, so its presence proves
+        # the script ran with its neighbours materialised — not that the model
+        # guessed a plausible format.
+        "want_output": "### RELEASE 1.4.0 ###",
     },
 ]
 
@@ -111,6 +156,8 @@ def main() -> int:
             os.makedirs(proj, exist_ok=True)
             subprocess.run(["git", "init", "-q", proj], capture_output=True)
             _csv(os.path.join(proj, "data.csv"))
+            if task.get("setup"):
+                task["setup"](proj)
             pid = requests.post(BASE + "/desktop/projects", json={"path": proj},
                                 timeout=15).json()["project"]["id"]
             sid = f"s-{task['tag']}"
@@ -165,6 +212,20 @@ def main() -> int:
                   task["expect"] in loaded or
                   any(task["expect"] in s for s in scripts),
                   f"skills touched: {sorted(set(loaded)) or 'none'}")
+            if task.get("want_output"):
+                # Loading a skill and reading its script is not running it; the
+                # measured failure was exactly that — the right skill, the right
+                # intent, and a hand-written result. Only output the script
+                # alone can produce counts.
+                blob = "\n".join(answer)
+                for e in events:
+                    for p in ((e.get("content") or {}).get("parts") or []):
+                        fr = p.get("functionResponse")
+                        if fr:
+                            blob += "\n" + json.dumps(fr.get("response") or {})
+                check(f"{task['tag']}: the script's own output was produced",
+                      task["want_output"] in blob,
+                      f"never saw {task['want_output']!r}")
             summary[task["tag"]] = {
                 "status": st.get("status"), "calls": len(calls),
                 "loaded": sorted(set(loaded)), "scripts": sorted(set(scripts)),

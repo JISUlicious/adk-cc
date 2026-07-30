@@ -24,8 +24,26 @@ _INVOKES_PYTHON = re.compile(r"(?:^|[\s;&|(`$])(?:python3?|pip3?|uv\s+run)\b")
 _MISSING_FILE_RE = re.compile(
     r"(can't open file|No such file or directory|not found|cannot find)", re.I
 )
-# Path-ish tokens that look like a script.
-_SCRIPTISH_RE = re.compile(r"[\w./-]+\.(?:py|sh|bash|mjs|js)\b")
+_SCRIPTISH_RE: Optional[re.Pattern] = None
+
+
+def _scriptish_re() -> re.Pattern:
+    """Path-ish tokens that look like a script.
+
+    Built from the skill launcher's own extension set rather than restating it,
+    so adding an interpreter there extends this redirect too — they drifted the
+    moment that set grew. Built lazily because the skills module is imported
+    lazily here (import cycle), and cached because this runs on every failed
+    command. Longest-first so `.mjs` never matches as `.js`.
+    """
+    global _SCRIPTISH_RE
+    if _SCRIPTISH_RE is None:
+        from ...tools.skills import launchable_script_exts
+
+        alts = sorted((re.escape(e) for e in launchable_script_exts()),
+                      key=lambda e: (-len(e), e))
+        _SCRIPTISH_RE = re.compile(r"[\w./-]+\.(?:" + "|".join(alts) + r")\b")
+    return _SCRIPTISH_RE
 
 
 def _skill_script_hint(command: str, stderr: str) -> Optional[str]:
@@ -45,7 +63,7 @@ def _skill_script_hint(command: str, stderr: str) -> Optional[str]:
         return None
     from ...tools.skills import locate_skill_script
 
-    for token in _SCRIPTISH_RE.findall(command or ""):
+    for token in _scriptish_re().findall(command or ""):
         if token.startswith("/"):
             continue                       # absolute: not a skill-relative call
         found = locate_skill_script(token)

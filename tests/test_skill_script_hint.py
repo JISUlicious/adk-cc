@@ -77,6 +77,24 @@ def test_the_node_runner_is_covered_too() -> None:
     print("OK the_node_runner_is_covered_too")
 
 
+def test_every_launchable_extension_is_redirectable() -> None:
+    """The redirect and the launcher must agree on what a script IS.
+
+    They didn't: the launcher grew `.ps1`/`.rb`/`.ts`, the hint's own regex kept
+    listing py|sh|bash|mjs|js, and a skill shipping a PowerShell script would
+    have failed in bash with no pointer to `run_skill_script` at all.
+    """
+    from adk_cc.tools.bash.tool import _scriptish_re
+    from adk_cc.tools.skills import launchable_script_exts
+
+    rx = _scriptish_re()
+    for ext in launchable_script_exts():
+        token = f"scripts/thing.{ext}"
+        assert rx.findall(f"python {token} --flag") == [token], (
+            f".{ext} is launchable but the hint cannot even see it as a script")
+    print("OK every_launchable_extension_is_redirectable")
+
+
 def test_an_ordinary_failure_is_left_alone() -> None:
     """No hint where there is nothing to redirect to — otherwise every failed
     command grows a paragraph nobody needs."""
@@ -117,6 +135,7 @@ def main() -> None:
     test_the_verbatim_live_failure_is_explained()
     test_a_bare_script_name_also_resolves()
     test_the_node_runner_is_covered_too()
+    test_every_launchable_extension_is_redirectable()
     test_an_ordinary_failure_is_left_alone()
     test_a_succeeding_command_gets_nothing()
     test_an_absolute_path_is_not_hijacked()
