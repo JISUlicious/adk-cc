@@ -16,9 +16,24 @@ unmodified scripts** in a DOM and drives them.
 
 ## Run
 
-```bash
-node scripts/smoke_page.mjs <page.html> <check.mjs> [--json]
+Use `run_skill_script` with **`scripts/smoke_page.py`** and the args as a list:
+
 ```
+run_skill_script(skill_name="web-smoke-check",
+                 file_path="scripts/smoke_page.py",
+                 args=["/abs/path/index.html", "/abs/path/check.mjs", "--json"])
+```
+
+**Absolute paths.** Skill scripts run in a temporary directory, not your
+workspace, so `["index.html", …]` resolves against the wrong place and fails
+with "page not found". Get the real paths first: `run_bash: realpath index.html
+check.mjs`.
+
+Not `node scripts/smoke_page.mjs`. A skill's files are not in your workspace —
+they are served through the skill tools — so that relative path does not exist
+where your commands run, and `run_skill_script` cannot launch a `.mjs` at all.
+The Python entrypoint is the supported way in; it locates the Node runner beside
+itself.
 
 Exit codes: `0` pass, `1` the check failed, `2` no DOM runtime installed,
 `3` usage error. The report always names the tier that ran.
@@ -56,8 +71,10 @@ Exit code 2 means nothing is installed. Provision the shared cache once:
 mkdir -p ~/.adk-cc/web-runtime && cd ~/.adk-cc/web-runtime && npm i jsdom
 ```
 
-Until then, say the behaviour is unverified. Do not substitute a syntax check
-or a re-implementation and report it as verification.
+That writes OUTSIDE the project, so it needs the user's permission — ask, do not
+assume it failed. Until a runtime exists, say the behaviour is unverified. Do
+not substitute a syntax check or a re-implementation and report it as
+verification.
 
 ## Coverage
 
