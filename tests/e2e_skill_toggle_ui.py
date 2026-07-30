@@ -100,6 +100,13 @@ def main() -> int:
     os.makedirs(skills_root, exist_ok=True)
     _write_skill(skills_root, "toggle-me")
     _write_skill(skills_root, "keep-me")
+    # Installed and unloadable. Before this it was absent from the panel with
+    # no explanation anywhere — measured on a PUBLISHED skill (`claude-api`,
+    # whose description exceeds ADK's cap), which is how a user meets it.
+    broken = os.path.join(skills_root, "broken-skill")
+    os.makedirs(broken, exist_ok=True)
+    with open(os.path.join(broken, "SKILL.md"), "w") as f:
+        f.write("---\nname: not-the-directory-name\ndescription: Broken.\n---\n\nBody.\n")
     enablement = os.path.join(data, "skill-enablement.json")
 
     env = dict(os.environ)
@@ -158,6 +165,24 @@ def main() -> int:
                   page.locator('[data-skill="keep-me"]').first
                       .locator('input[type="checkbox"]').is_checked())
 
+            # The broken skill: present, explained, and not toggleable.
+            bad = page.locator('[data-skill="broken-skill"]').first
+            check("an unloadable skill still appears in the panel",
+                  bad.count() > 0 if hasattr(bad, "count") else False)
+            problem = page.locator('[data-skill-problem="broken-skill"]')
+            check("it says why it did not load",
+                  problem.count() > 0 and "not loaded" in (problem.first.inner_text() or ""),
+                  problem.first.inner_text() if problem.count() else "(no problem row)")
+            check("its reason names the actual fault",
+                  "name" in (problem.first.inner_text() or "").lower(),
+                  problem.first.inner_text() if problem.count() else "")
+            check("and it cannot be switched on",
+                  bad.locator('input[type="checkbox"]').is_disabled())
+            check("it is filed under the source it came from",
+                  "installed" in (bad.inner_text() or ""),
+                  bad.inner_text())
+
+            page.screenshot(path=os.path.join(data, "skills-panel.png"), full_page=True)
             browser.close()
 
         # The point of the feature: the agent's own view changed.

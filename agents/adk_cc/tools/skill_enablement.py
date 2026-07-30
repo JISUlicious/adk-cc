@@ -304,10 +304,17 @@ def catalog(
         name = broken.get("name") or ""
         if not name or name in seen:
             continue
+        # Label it from the source it actually came from, so a broken skill
+        # sits under the same heading as its neighbours instead of falling
+        # through to "configured" and looking like it came from elsewhere.
+        parent = Path(broken.get("dir") or ".").parent
+        source = next((label for label, base in sources
+                       if base.resolve() == parent.resolve()),
+                      _classify_source(parent))
         rows.append({
             "name": name,
             "description": "",
-            "source": _classify_source(Path(broken.get("dir") or ".").parent),
+            "source": source,
             "path": broken.get("dir") or "",
             "enabled": False,
             "disabled_by": None,
