@@ -851,8 +851,61 @@ def _denied(name: str, tool_context: ToolContext) -> bool:
         return False
 
 
+def _anchor_script_args(args: dict[str, Any], tool_context: ToolContext) -> dict[str, Any]:
+    """Rewrite workspace-relative path arguments to absolute ones.
+
+    ADK runs a skill script inside a fresh temp directory — its wrapper does
+    `os.chdir(tempfile.TemporaryDirectory())` (skill_toolset.py) so the script
+    cannot litter the workspace. The side effect is that EVERY relative path
+    argument resolves against that temp dir: a live run passed
+    `["index.html", "check.mjs"]` and got "page not found:
+    /var/.../tmpXXXX/index.html", then spent a round trip on `realpath` to
+    recover. It is not skill-specific — every data-analyst probe takes a data
+    file path through the same door.
+
+    Only rewritten when `<workspace>/<value>` EXISTS. That keeps the rule
+    evidence-based rather than pattern-guessing: `data.csv` becomes absolute,
+    while `defect_rate` (a column name), `10` and `--flag` are left exactly as
+    given. The remaining ambiguity is a column named the same as a file in the
+    workspace, which would be rewritten wrongly; a heuristic on "looks like a
+    path" would have that problem far more often.
+
+    Remote and containerized workspaces: the check uses the local filesystem, so
+    a path that only exists on the remote is not rewritten and behaves as it does
+    today. No regression, and absolute paths keep working everywhere.
+    """
+    try:
+        from ..sandbox import get_workspace
+
+        root = str(getattr(get_workspace(tool_context), "abs_path", "") or "")
+    except Exception:  # noqa: BLE001 — no workspace: leave the args alone
+        return args
+    if not root or not os.path.isdir(root):
+        return args
+
+    def _fix(value: Any) -> Any:
+        if not isinstance(value, str) or not value or value.startswith("-"):
+            return value
+        if os.path.isabs(value):
+            return value
+        candidate = os.path.join(root, value)
+        return candidate if os.path.exists(candidate) else value
+
+    out = dict(args)
+    raw = out.get("args")
+    if isinstance(raw, list):
+        out["args"] = [_fix(v) for v in raw]
+    elif isinstance(raw, dict):
+        out["args"] = {k: _fix(v) for k, v in raw.items()}
+    if isinstance(out.get("positional_args"), list):
+        out["positional_args"] = [_fix(v) for v in out["positional_args"]]
+    if isinstance(out.get("short_options"), dict):
+        out["short_options"] = {k: _fix(v) for k, v in out["short_options"].items()}
+    return out
+
+
 class _EnablementCheckedRunSkillScriptTool(RunSkillScriptTool):
-    """`run_skill_script` refuses a disabled skill."""
+    """`run_skill_script` refuses a disabled skill, and anchors relative paths."""
 
     async def run_async(
         self, *, args: dict[str, Any], tool_context: ToolContext
@@ -860,6 +913,7 @@ class _EnablementCheckedRunSkillScriptTool(RunSkillScriptTool):
         name = args.get("skill_name") or ""
         if name and _denied(name, tool_context):
             return skill_enablement.refusal(name)
+        args = _anchor_script_args(args, tool_context)
         return await super().run_async(args=args, tool_context=tool_context)
 
 

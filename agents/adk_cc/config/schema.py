@@ -721,6 +721,10 @@ FIELDS: list[Var] = [
         "Verification in the loop: 'soft' nudges when a result is asserted "
         "without an executed check, 'off' disables, 'hard' reserved for the "
         "forced verifier pass.", default="soft"),
+    Var("ADK_CC_WEB_RUNTIME_DIR", Tier.ADVANCED, "Behavior",
+        "Where the web-smoke-check skill looks for a DOM runtime (jsdom). "
+        "Defaults to ~/.adk-cc/web-runtime, provisioned once with "
+        "`npm i jsdom` there.", default=None, parse=as_path),
     Var("ADK_CC_BUILTIN_SKILLS", Tier.ADVANCED, "Behavior",
         "Load adk-cc's built-in skills (base layer; project/env skills of the "
         "same name still override individually).", default=True, parse=as_bool),
