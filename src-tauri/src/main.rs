@@ -106,6 +106,14 @@ fn ensure_fernet_key(data: &PathBuf) -> String {
     use base64::Engine;
     let key = base64::engine::general_purpose::URL_SAFE.encode(bytes);
     std::fs::write(&path, &key).ok();
+    // 0600: this key decrypts every stored secret (model API keys, MCP tokens,
+    // and now remote SSH passwords). It was created with the process umask,
+    // which on a stock system leaves it world-readable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
     key
 }
 

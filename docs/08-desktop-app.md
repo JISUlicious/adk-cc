@@ -158,3 +158,47 @@ so `adk_cc` imports from the shipped source (no pip install on the target).
   model.
 - Desktop mode uses the `noop` sandbox — `run_bash` and file tools operate
   directly in the session's local worktree.
+
+## Remote projects over SSH
+
+"Remote" in the projects rail binds a project to a directory on another machine.
+Everything the agent does — `run_bash`, file reads and writes, checkpoints —
+happens there, over one multiplexed SSH connection (`ControlMaster`), using the
+system `ssh` so `~/.ssh/config` applies at full fidelity (aliases, `ProxyJump`,
+`Match` blocks).
+
+Three fields:
+
+| field | notes |
+|---|---|
+| host | anything your `ssh` accepts — `box`, `user@box`, a config alias |
+| path | the ABSOLUTE workspace root on the remote |
+| port | optional; blank means 22 |
+| password | optional; blank means keys/agent |
+
+**Keys are still the better path.** Leave the password blank and the connection
+is exactly as before: `BatchMode=yes`, so nothing can ever block on a prompt.
+Run `ssh <host>` once in a terminal first to accept the host key and confirm the
+key works.
+
+**When a host only takes a password**, fill the field. What happens then:
+
+- The password is encrypted with the same key as every other stored secret
+  (`credential.key`, generated on first launch) and saved per host+port under
+  `admin-data/ssh-passwords/`. The filename is a hash, so listing the directory
+  does not reveal which hosts you use.
+- `projects.json` records only `"auth": "password"` — never the password.
+- It reaches `ssh` through `SSH_ASKPASS`, not the command line. `sshpass -p`
+  would put it on the argv, where `ps` shows it to every other user on your
+  machine.
+- Prompting is enabled only for that host (`BatchMode=no`), keys are turned off
+  for it (`PubkeyAuthentication=no`, so ssh does not exhaust key attempts before
+  trying the password), and exactly one prompt is allowed
+  (`NumberOfPasswordPrompts=1`) so a stale saved password fails immediately
+  instead of retrying.
+- Because the connection is multiplexed, the password is used for the FIRST
+  connection; later operations ride the existing master until it idles out.
+
+Changing a saved password creates a new connection rather than reusing the old
+authenticated one. **Test** works before the project is saved, so you can check
+host, port and password together and only then add it.

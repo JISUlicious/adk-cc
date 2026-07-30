@@ -497,6 +497,11 @@ FIELDS: list[Var] = [
         "SSH key path (else ~/.ssh/config / agent).", default=None, parse=as_path),
     Var("ADK_CC_SSH_EXTRA_OPTS", Tier.DEV, "Sandbox: SSH",
         "Extra ssh opts (tests use this for throwaway known_hosts).", default=None),
+    Var("ADK_CC_SSH_PASSWORD", Tier.ADVANCED, "Sandbox: SSH",
+        "SSH password for a host that has no key. Prefer the desktop UI, which "
+        "encrypts it per host; this env fallback exists for headless SSH-backend "
+        "runs. Enables prompting (BatchMode=no) and is fed via SSH_ASKPASS, so it "
+        "never appears on the ssh argv.", default=None, secret=True),
     Var("ADK_CC_SSH_CONTROL_DIR", Tier.ADVANCED, "Sandbox: SSH",
         "ControlMaster socket dir.", default=None, parse=as_path, default_display="~/.adk-cc-ssh"),
 

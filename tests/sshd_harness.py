@@ -64,9 +64,15 @@ class SshdBox:
 
 @dataclass
 class SshdContainer:
-    """Context manager owning one sshd container + throwaway keypair."""
+    """Context manager owning one sshd container + throwaway keypair.
+
+    `password` switches the box to PASSWORD-ONLY auth (the image's
+    PASSWORD_ACCESS, and no PUBLIC_KEY at all) so a test cannot accidentally
+    pass by falling back to the key — which is the only way to prove the
+    password path actually authenticates."""
 
     port: int = field(default_factory=lambda: _BASE_PORT + (os.getpid() % 200))
+    password: str | None = None
     _box: SshdBox | None = None
 
     def __enter__(self) -> SshdBox | None:
@@ -87,11 +93,16 @@ class SshdContainer:
                 shutil.rmtree(tmp, ignore_errors=True)
                 return None
 
+        auth_env = (
+            ["-e", "PASSWORD_ACCESS=true", "-e", f"USER_PASSWORD={self.password}"]
+            if self.password
+            else ["-e", f"PUBLIC_KEY={pub}"]
+        )
         run = _sh(
             [
                 "docker", "run", "-d", "--rm",
                 "-p", f"127.0.0.1:{self.port}:2222",
-                "-e", f"PUBLIC_KEY={pub}",
+                *auth_env,
                 "-e", f"USER_NAME={USER}",
                 IMAGE,
             ]

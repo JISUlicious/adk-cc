@@ -27,15 +27,24 @@ export function addProject(path: string): Promise<{ project: Project }> {
 
 /** Register a remote (SSH) project. `host` is anything your `ssh` accepts
  * (alias / user@host); `path` is the ABSOLUTE workspace root on the remote.
- * Key/agent auth only — set the host up with `ssh <host>` once first. */
+ *
+ * Auth: keys/agent by default — set the host up with `ssh <host>` once first.
+ * Pass `password` for a host that only takes a password; it is encrypted
+ * server-side with the same key as the credential store and is NEVER written
+ * into projects.json (which records only that the binding uses a password). */
 export function addRemoteProject(
   host: string,
   path: string,
   port?: number,
+  password?: string,
 ): Promise<{ project: Project }> {
   return apiFetch("/desktop/projects/remote", {
     method: "POST",
-    body: JSON.stringify({ host, path, ...(port ? { port } : {}) }),
+    body: JSON.stringify({
+      host, path,
+      ...(port ? { port } : {}),
+      ...(password ? { password } : {}),
+    }),
   })
 }
 
@@ -47,11 +56,20 @@ export interface RemoteProbe {
   uname?: string
   path_exists?: boolean
 }
-/** Probe a remote host over the SAME transport the agent will use. */
-export function testRemote(host: string, path?: string, port?: number): Promise<RemoteProbe> {
+/** Probe a remote host over the SAME transport the agent will use.
+ *  `password` may be supplied before the project exists, so Test works in the
+ *  order a person actually does it: type the details, check, then save. */
+export function testRemote(
+  host: string, path?: string, port?: number, password?: string,
+): Promise<RemoteProbe> {
   return apiFetch("/desktop/projects/test-remote", {
     method: "POST",
-    body: JSON.stringify({ host, ...(path ? { path } : {}), ...(port ? { port } : {}) }),
+    body: JSON.stringify({
+      host,
+      ...(path ? { path } : {}),
+      ...(port ? { port } : {}),
+      ...(password ? { password } : {}),
+    }),
   })
 }
 

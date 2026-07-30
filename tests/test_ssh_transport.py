@@ -96,6 +96,66 @@ def test_build_argv_shape():
     print("OK build_argv_shape")
 
 
+def test_password_auth_turns_prompting_on() -> None:
+    """A configured password is the one case that needs BatchMode OFF.
+
+    Reported: connecting a remote from desktop mode needs password auth and a
+    non-22 port. Port already worked end-to-end server-side; passwords could not
+    work at all, because every invocation passed `BatchMode=yes` and ssh will
+    not read a password in batch mode."""
+    t = _transport(port=2299, password="s3cret")
+    argv = t.build_argv(["/bin/sh", "-s"])
+    joined = " ".join(argv)
+    assert "BatchMode=no" in joined and "BatchMode=yes" not in joined
+    assert "PreferredAuthentications=password,keyboard-interactive" in joined
+    assert "PubkeyAuthentication=no" in joined      # else keys are tried first
+    assert "NumberOfPasswordPrompts=1" in joined    # fail fast on a wrong one
+    assert "-p" in argv and "2299" in argv
+    print("OK password_auth_turns_prompting_on")
+
+
+def test_the_password_is_never_on_argv() -> None:
+    """`sshpass -p` would put it there, where `ps` shows it to every local
+    user. The whole reason for the askpass helper."""
+    t = _transport(password="s3cret")
+    argv = t.build_argv(["/bin/sh", "-s"])
+    assert not any("s3cret" in a for a in argv), argv
+    assert "sshpass" not in " ".join(argv)
+    print("OK the_password_is_never_on_argv")
+
+
+def test_askpass_helper_is_private_and_prints_the_env_var() -> None:
+    import os
+    import stat
+    import subprocess as sp
+
+    t = _transport(password="s3cret")
+    env = t._spawn_env()
+    assert env is not None
+    assert env["ADK_CC_SSH_PASSWORD"] == "s3cret"
+    assert env["SSH_ASKPASS_REQUIRE"] == "force"
+    helper = env["SSH_ASKPASS"]
+    mode = stat.S_IMODE(os.stat(helper).st_mode)
+    assert mode == 0o700, oct(mode)          # readable only by this uid
+    # It must actually emit the password ssh asks for.
+    out = sp.run([helper], capture_output=True, text=True,
+                 env={"ADK_CC_SSH_PASSWORD": "s3cret"})
+    assert out.stdout == "s3cret", (out.stdout, out.stderr)
+    print("OK askpass_helper_is_private_and_prints_the_env_var")
+
+
+def test_the_key_path_is_untouched_without_a_password() -> None:
+    """No password configured → byte-for-byte the old behaviour, and no
+    inherited env override that could change auth for key-based hosts."""
+    t = _transport(port=22)
+    joined = " ".join(t.build_argv([]))
+    assert "BatchMode=yes" in joined
+    assert "PreferredAuthentications" not in joined
+    assert "PubkeyAuthentication" not in joined
+    assert t._spawn_env() is None
+    print("OK the_key_path_is_untouched_without_a_password")
+
+
 def test_transport_error_classifier():
     assert looks_like_transport_error(255, "ssh: connect to host x port 22: Connection refused")
     assert looks_like_transport_error(255, "Host key verification failed.")
@@ -114,6 +174,24 @@ def test_registry_reuses_by_key():
     assert a is b
     assert a is not c
     print("OK registry_reuses_by_key")
+
+
+def test_registry_separates_passwords_without_storing_them() -> None:
+    """A changed password must yield a new transport (and a new ControlMaster),
+    but the registry key holds a digest — this dict is long-lived process state
+    and a plaintext secret in a key surfaces in reprs and crash dumps."""
+    # Distinctive values: "one" would have matched the "None" in the repr of a
+    # password-less key and failed this test for the wrong reason.
+    a = get_transport("hostP", password="pw-alpha")
+    b = get_transport("hostP", password="pw-alpha")
+    c = get_transport("hostP", password="pw-beta")
+    d = get_transport("hostP")
+    assert a is b and a is not c and a is not d
+    from adk_cc.sandbox.ssh_transport import _REGISTRY
+
+    flat = repr(list(_REGISTRY.keys()))
+    assert "pw-alpha" not in flat and "pw-beta" not in flat, flat
+    print("OK registry_separates_passwords_without_storing_them")
 
 
 def test_long_control_dir_falls_back_to_short_socket_path():
@@ -157,6 +235,11 @@ def main():
     test_build_script_skips_invalid_env_names()
     test_secret_values_never_on_argv()
     test_build_argv_shape()
+    test_password_auth_turns_prompting_on()
+    test_the_password_is_never_on_argv()
+    test_askpass_helper_is_private_and_prints_the_env_var()
+    test_the_key_path_is_untouched_without_a_password()
+    test_registry_separates_passwords_without_storing_them()
     test_transport_error_classifier()
     test_registry_reuses_by_key()
     test_long_control_dir_falls_back_to_short_socket_path()

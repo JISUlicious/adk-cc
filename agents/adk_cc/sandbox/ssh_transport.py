@@ -156,10 +156,12 @@ class SshTransport:
         extra_ssh_opts: tuple[str, ...] = (),
         control_dir: Optional[str] = None,
         connect_timeout_s: float = _CONNECT_TIMEOUT_S,
+        password: Optional[str] = None,
     ) -> None:
         self.host = host
         self._port = port
         self._identity = identity_file
+        self._password = password or None
         self._extra = tuple(extra_ssh_opts)
         self._connect_timeout_s = connect_timeout_s
         cd = control_dir or os.environ.get("ADK_CC_SSH_CONTROL_DIR") or _DEFAULT_CONTROL_DIR
@@ -176,13 +178,28 @@ class SshTransport:
         shell command string — callers pre-quote anything path-like."""
         argv = [
             "ssh",
-            "-o", "BatchMode=yes",
+            # BatchMode=yes is the default posture: no prompt can ever block a
+            # server-side op. A configured password is the ONE exception — ssh
+            # will not read a password at all in batch mode — and it is fed
+            # through SSH_ASKPASS (see `_spawn_env`), never argv, never stdin
+            # (stdin carries the remote script).
+            "-o", "BatchMode=no" if self._password else "BatchMode=yes",
             "-o", "ControlMaster=auto",
             "-o", f"ControlPath={self._control_dir}/%C",
             "-o", f"ControlPersist={_CONTROL_PERSIST_S}",
             "-o", f"ConnectTimeout={int(self._connect_timeout_s)}",
             "-o", "LogLevel=ERROR",  # keep banners/motd out of stderr parsing
         ]
+        if self._password:
+            argv += [
+                # Without this, ssh tries every key and the agent first and can
+                # fail before it ever asks for the password the user gave us.
+                "-o", "PreferredAuthentications=password,keyboard-interactive",
+                "-o", "PubkeyAuthentication=no",
+                # One prompt only: a wrong stored password must fail fast rather
+                # than have askpass feed the same wrong value three times.
+                "-o", "NumberOfPasswordPrompts=1",
+            ]
         if self._port:
             argv += ["-p", str(self._port)]
         if self._identity:
@@ -191,6 +208,41 @@ class SshTransport:
         argv.append(self.host)
         argv += remote_command
         return argv
+
+    def _askpass_helper(self) -> str:
+        """Path to a tiny helper that prints the password ssh asks for.
+
+        Why askpass rather than `sshpass -p`: argv is world-readable through
+        `ps`, so a password there leaks to every local user. The helper reads it
+        from its own environment, which is readable only by this uid.
+
+        Written on demand, 0700, beside the ControlMaster sockets (already 0700
+        for the same reason)."""
+        path = os.path.join(self._control_dir, "askpass.sh")
+        body = '#!/bin/sh\nprintf %s "$ADK_CC_SSH_PASSWORD"\n'
+        try:
+            if not os.path.exists(path) or open(path, encoding="utf-8").read() != body:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(body)
+            os.chmod(path, 0o700)
+        except OSError as e:  # pragma: no cover — surfaces as an auth failure
+            _log.warning("could not write askpass helper: %s", e)
+        return path
+
+    def _spawn_env(self) -> Optional[dict]:
+        """Environment for the ssh child. None when no password is configured,
+        so the key/agent path is byte-for-byte unchanged."""
+        if not self._password:
+            return None
+        env = dict(os.environ)
+        env["ADK_CC_SSH_PASSWORD"] = self._password
+        env["SSH_ASKPASS"] = self._askpass_helper()
+        # OpenSSH only consults SSH_ASKPASS when it has no tty; `force` makes it
+        # use the helper regardless (8.4+). DISPLAY is set because older clients
+        # refuse askpass without one, and is otherwise ignored.
+        env["SSH_ASKPASS_REQUIRE"] = "force"
+        env.setdefault("DISPLAY", ":0")
+        return env
 
     # --- core ops ---------------------------------------------------------
 
@@ -244,6 +296,7 @@ class SshTransport:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=self._spawn_env(),
         )
         assert proc.stdin is not None
         proc.stdin.write(script.encode("utf-8"))
@@ -425,6 +478,7 @@ class SshTransport:
             stdin=asyncio.subprocess.PIPE if stdin_data is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=self._spawn_env(),
         )
         try:
             out, err = await asyncio.wait_for(
@@ -469,6 +523,7 @@ def get_transport(
     port: Optional[int] = None,
     identity_file: Optional[str] = None,
     extra_ssh_opts: tuple[str, ...] = (),
+    password: Optional[str] = None,
 ) -> SshTransport:
     # Env defaults so every construction site (backend factory, file panel,
     # checkpoint) resolves IDENTICAL transports without threading auth knobs
@@ -479,11 +534,34 @@ def get_transport(
     if not extra_ssh_opts:
         raw = os.environ.get("ADK_CC_SSH_EXTRA_OPTS") or ""
         extra_ssh_opts = tuple(shlex.split(raw)) if raw else ()
-    key = (host, port, identity_file, extra_ssh_opts)
+    if password is None:
+        password = os.environ.get("ADK_CC_SSH_PASSWORD") or None
+    if password is None:
+        # Resolved HERE rather than at each call site: the backend factory, the
+        # desktop workspace resolver, the file panel and the checkpoint store
+        # all build transports synchronously, and this is already where the
+        # other auth knobs get their defaults.
+        try:
+            from . import ssh_passwords
+
+            password = ssh_passwords.get(host, port)
+        except Exception:  # noqa: BLE001 — a store problem must not block key auth
+            log.debug("ssh password lookup failed", exc_info=True)
+    # The key holds a DIGEST, not the password: this registry is long-lived
+    # process state and a plaintext secret in a dict key ends up in reprs,
+    # debuggers and crash dumps. Changing the password still yields a new
+    # transport (and so a new ControlMaster), which is the point.
+    auth_id = (
+        __import__("hashlib").sha256(password.encode()).hexdigest()[:12]
+        if password
+        else None
+    )
+    key = (host, port, identity_file, extra_ssh_opts, auth_id)
     t = _REGISTRY.get(key)
     if t is None:
         t = SshTransport(
-            host, port=port, identity_file=identity_file, extra_ssh_opts=extra_ssh_opts
+            host, port=port, identity_file=identity_file,
+            extra_ssh_opts=extra_ssh_opts, password=password,
         )
         _REGISTRY[key] = t
     return t

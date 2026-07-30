@@ -143,6 +143,10 @@ export function ProjectRail({
   const [remotePrompt, setRemotePrompt] = useState(false)
   const [remoteHost, setRemoteHost] = useState("")
   const [remotePath, setRemotePath] = useState("")
+  const [remotePort, setRemotePort] = useState("")
+  // Kept in component state only long enough to send it: the server encrypts it
+  // and it is never echoed back, so there is nothing to re-populate later.
+  const [remotePassword, setRemotePassword] = useState("")
   const [remoteProbe, setRemoteProbe] = useState<string | null>(null)
   const [probing, setProbing] = useState(false)
 
@@ -152,7 +156,12 @@ export function ProjectRail({
     setProbing(true)
     setRemoteProbe(null)
     try {
-      const r = await testRemote(host, remotePath.trim() || undefined)
+      const r = await testRemote(
+        host,
+        remotePath.trim() || undefined,
+        remotePort.trim() ? Number(remotePort.trim()) : undefined,
+        remotePassword || undefined,
+      )
       setRemoteProbe(
         r.ok
           ? `✓ connected — ${r.uname ?? "?"}, home ${r.home ?? "?"}, git ${r.git ? "yes" : "no"}` +
@@ -174,10 +183,16 @@ export function ProjectRail({
       return
     }
     try {
-      const { project } = await addRemoteProject(host, path)
+      const { project } = await addRemoteProject(
+        host, path,
+        remotePort.trim() ? Number(remotePort.trim()) : undefined,
+        remotePassword || undefined,
+      )
       setRemotePrompt(false)
       setRemoteHost("")
       setRemotePath("")
+      setRemotePort("")
+      setRemotePassword("")
       setRemoteProbe(null)
       reloadProjects()
       setExpanded((prev) => new Set(prev).add(project.id))
@@ -279,6 +294,24 @@ export function ProjectRail({
               placeholder="/absolute/path/on/remote"
               className="w-full rounded border border-input bg-background px-2 py-1 font-mono text-xs"
             />
+            <div className="flex gap-1">
+              <input
+                value={remotePort}
+                onChange={(e) => setRemotePort(e.target.value.replace(/[^0-9]/g, ""))}
+                inputMode="numeric"
+                placeholder="port (22)"
+                className="w-24 rounded border border-input bg-background px-2 py-1 font-mono text-xs"
+              />
+              <input
+                value={remotePassword}
+                onChange={(e) => setRemotePassword(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Escape") setRemotePrompt(false) }}
+                type="password"
+                autoComplete="off"
+                placeholder="password (blank = key/agent)"
+                className="flex-1 rounded border border-input bg-background px-2 py-1 font-mono text-xs"
+              />
+            </div>
             <div className="flex items-center gap-1">
               <Button size="sm" variant="outline" onClick={doTestRemote} disabled={probing || !remoteHost.trim()}>
                 {probing ? "Testing…" : "Test"}
@@ -293,8 +326,10 @@ export function ProjectRail({
               </p>
             )}
             <p className="text-[10px] leading-snug text-muted-foreground">
-              Key/agent auth only — run <span className="font-mono">ssh &lt;host&gt;</span> once in a
-              terminal first. Commands run on the remote as that account (not containerized).
+              Leave the password blank to use keys/agent — for that path, run{" "}
+              <span className="font-mono">ssh &lt;host&gt;</span> once in a terminal first. A
+              password is encrypted on this machine and never stored in the project file.
+              Commands run on the remote as that account (not containerized).
             </p>
           </div>
         )}

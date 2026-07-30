@@ -205,6 +205,17 @@ def mount_desktop_routes(app) -> None:
         remote: dict = {"host": host, "path": path}
         if port:
             remote["port"] = port
+        # The password is stored ENCRYPTED and separately; projects.json records
+        # only the auth mode, so opening that file never reveals a credential.
+        password = body.get("password") or ""
+        if password:
+            from ..sandbox import ssh_passwords
+
+            try:
+                ssh_passwords.put(host, port, str(password))
+            except ssh_passwords.SshPasswordStoreUnavailable as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            remote["auth"] = "password"
         proj = {
             "id": uuid.uuid4().hex[:12],
             "name": str(body.get("name") or "").strip()
@@ -233,7 +244,11 @@ def mount_desktop_routes(app) -> None:
 
         from ..sandbox.ssh_transport import SshConnectionError, get_transport
 
-        t = get_transport(host, port=port)
+        # An unsaved password so "Test" works BEFORE the project exists — which
+        # is the order a person actually does it in. Falls back to the stored
+        # one (get_transport resolves it) when the field is left blank.
+        password = str(body.get("password") or "") or None
+        t = get_transport(host, port=port, password=password)
         try:
             probe = await t.probe(refresh=True, timeout_s=20)
         except SshConnectionError as e:
