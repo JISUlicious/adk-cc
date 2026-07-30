@@ -1,4 +1,5 @@
 import { Rocket, Ban, Info, PencilLine } from "lucide-react"
+import { cn, THREAD_ROW_WIDTH } from "@/shared/lib/utils"
 
 /**
  * Renders the RESOLVED outcome of an `exit_plan_mode` call.
@@ -84,7 +85,7 @@ export function ExitPlanCard({
 
   return (
     <div className="flex justify-start">
-      <div className="w-full rounded-md border border-primary/40 bg-brand-tint text-sm">
+      <div className={cn(THREAD_ROW_WIDTH, "rounded-md border border-primary/40 bg-brand-tint text-sm")}>
         <div className="flex items-center gap-2 px-3 py-2">
           <Icon className={`h-4 w-4 ${accent}`} />
           <span className="text-xs font-medium flex-1">{label}</span>

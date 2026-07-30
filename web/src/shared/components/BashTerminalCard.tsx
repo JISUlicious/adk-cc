@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { Terminal, ChevronDown, ChevronRight } from "lucide-react"
-import { cn, toolCallTitle } from "@/shared/lib/utils"
+import { cn, toolCallTitle, THREAD_ROW_WIDTH } from "@/shared/lib/utils"
 
 /**
  * Terminal-style renderer for `run_bash` calls.
@@ -67,7 +67,7 @@ export function BashTerminalCard({
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-[80%] w-full rounded-md border border-border bg-card/50 text-sm">
+      <div className={cn(THREAD_ROW_WIDTH, "rounded-md border border-border bg-card/50 text-sm")}>
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}

@@ -1,3 +1,4 @@
+import { cn, THREAD_ROW_WIDTH } from "@/shared/lib/utils"
 import { useState } from "react"
 import { Download, FileDown, RefreshCw } from "lucide-react"
 import { downloadArtifact, isHtmlArtifact } from "@/shared/api/artifacts"
@@ -49,7 +50,7 @@ export function ArtifactChip({
   }
 
   return (
-    <div className="flex flex-col items-start gap-2 max-w-[80%]">
+    <div className={cn(THREAD_ROW_WIDTH, "flex flex-col items-start gap-2")}>
       <button
         type="button"
         onClick={handleDownload}

@@ -1,3 +1,4 @@
+import { THREAD_ROW_WIDTH } from "@/shared/lib/utils"
 import { useState } from "react"
 import { ChevronDown, ChevronRight, FoldVertical } from "lucide-react"
 
@@ -26,7 +27,7 @@ export function CompactionDivider({
 
   return (
     <div className="flex justify-center py-1">
-      <div className="w-full max-w-[80%]">
+      <div className={THREAD_ROW_WIDTH}>
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}

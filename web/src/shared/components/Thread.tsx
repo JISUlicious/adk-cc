@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react"
 import { Play } from "lucide-react"
 import { downloadArtifact, isHtmlArtifact } from "@/shared/api/artifacts"
+import { cn, THREAD_ROW_WIDTH } from "@/shared/lib/utils"
 import { HtmlArtifactPreview } from "./HtmlArtifactPreview"
 import { type RunEvent } from "@/shared/api/sse"
 import { MessageBubble } from "./MessageBubble"
@@ -824,7 +825,8 @@ function RunOutputsCard({
   const [open, setOpen] = useState<string | null>(null)
   const version = outputs.find((o) => o.filename === open)?.version
   return (
-    <div className="my-1 rounded-md border border-border bg-card/40 p-2 text-xs">
+    <div className={cn(THREAD_ROW_WIDTH,
+                       "my-1 rounded-md border border-border bg-card/40 p-2 text-xs")}>
       <div className="mb-1 flex items-center gap-1.5">
         <Play className="h-3.5 w-3.5 text-muted-foreground" />
         <span className="font-medium">{outputs.length} outputs from this run</span>

@@ -1,4 +1,4 @@
-import { cn } from "@/shared/lib/utils"
+import { cn, THREAD_ROW_WIDTH } from "@/shared/lib/utils"
 import { Markdown } from "@/shared/lib/markdown"
 
 /**
@@ -30,10 +30,12 @@ export function MessageBubble({
     <div className={cn("flex", isUser ? "justify-end" : "justify-start")}>
       <div
         className={cn(
-          "max-w-[80%] rounded-lg px-4 py-2 text-sm",
+          "rounded-lg px-4 py-2 text-sm",
           isUser
-            ? "bg-primary text-primary-foreground whitespace-pre-wrap"
-            : "bg-muted text-foreground",
+            ? "max-w-[80%] bg-primary text-primary-foreground whitespace-pre-wrap"
+            // Model text shares the column with the tool cards, so the
+            // conversation has one right edge instead of one per message.
+            : cn(THREAD_ROW_WIDTH, "bg-muted text-foreground"),
           isPartial && "animate-pulse",
         )}
       >

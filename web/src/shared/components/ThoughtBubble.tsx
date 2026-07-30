@@ -1,5 +1,6 @@
 import { useState } from "react"
 import { ChevronDown, ChevronRight, Sparkles } from "lucide-react"
+import { cn, THREAD_ROW_WIDTH } from "@/shared/lib/utils"
 
 /**
  * Renders a model "thought" part — Gemini's `thought: true` summary
@@ -36,7 +37,7 @@ export function ThoughtBubble({
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="max-w-[80%] flex items-start gap-2 border-l-2 border-border pl-3 pr-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors text-left w-full"
+        className={cn(THREAD_ROW_WIDTH, "flex items-start gap-2 border-l-2 border-border pl-3 pr-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:border-muted-foreground transition-colors text-left")}
       >
         {open ? (
           <ChevronDown className="h-3 w-3 mt-0.5 shrink-0" />

@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { BookOpen, FileText, ChevronDown, ChevronRight } from "lucide-react"
 import { Markdown } from "@/shared/lib/markdown"
+import { cn, THREAD_ROW_WIDTH } from "@/shared/lib/utils"
 
 /**
  * Renders `write_plan` and `read_current_plan` tool calls.
@@ -75,7 +76,7 @@ export function PlanCard({
 
   return (
     <div className="flex justify-start">
-      <div className="w-full rounded-md border border-primary/40 bg-brand-tint text-sm">
+      <div className={cn(THREAD_ROW_WIDTH, "rounded-md border border-primary/40 bg-brand-tint text-sm")}>
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}

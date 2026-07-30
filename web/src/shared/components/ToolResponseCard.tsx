@@ -1,5 +1,6 @@
 import { useState } from "react"
 import { ChevronDown, ChevronRight, CornerDownRight } from "lucide-react"
+import { cn, THREAD_ROW_WIDTH } from "@/shared/lib/utils"
 
 /**
  * Tool response sibling of `ToolCallCard`. The two are paired by callId
@@ -19,7 +20,7 @@ export function ToolResponseCard({
   const [open, setOpen] = useState(false)
   return (
     <div className="flex justify-start">
-      <div className="max-w-[80%] w-full rounded-md border border-border bg-card/30 text-sm">
+      <div className={cn(THREAD_ROW_WIDTH, "rounded-md border border-border bg-card/30 text-sm")}>
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}

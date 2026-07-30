@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { HelpCircle } from "lucide-react"
 import { Button } from "./ui/button"
-import { cn } from "@/shared/lib/utils"
+import { cn, THREAD_ROW_WIDTH } from "@/shared/lib/utils"
 
 /**
  * Renders an `ask_user_question` long-running tool call as an inline
@@ -108,7 +108,7 @@ export function AskUserQuestionCard({
       {/* kami: same single accent as ConfirmationCard. Differentiation
           between "permission ask" and "agent question" comes from the
           icon and the form, not a second chromatic hue. */}
-      <div className="max-w-[80%] w-full rounded-md border border-primary/40 bg-brand-tint text-sm">
+      <div className={cn(THREAD_ROW_WIDTH, "rounded-md border border-primary/40 bg-brand-tint text-sm")}>
         <div className="flex items-start gap-2 px-3 pt-3">
           <HelpCircle className="h-5 w-5 text-primary mt-0.5 shrink-0" />
           <div className="text-xs text-muted-foreground">

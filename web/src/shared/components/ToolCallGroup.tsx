@@ -1,3 +1,4 @@
+import { THREAD_ROW_WIDTH } from "@/shared/lib/utils"
 import { useState, type ReactNode } from "react"
 import { ChevronDown, ChevronRight, Layers } from "lucide-react"
 
@@ -33,7 +34,7 @@ export function ToolCallGroup({
 
   return (
     <div className="flex justify-start">
-      <div className="max-w-[80%] w-full">
+      <div className={THREAD_ROW_WIDTH}>
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}

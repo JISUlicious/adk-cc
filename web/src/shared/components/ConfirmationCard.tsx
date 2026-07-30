@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { ShieldAlert } from "lucide-react"
 import { Button } from "./ui/button"
+import { cn, THREAD_ROW_WIDTH } from "@/shared/lib/utils"
 
 /**
  * Renders an adk-cc permission "ask" confirmation prompt inline in the
@@ -63,7 +64,7 @@ export function ConfirmationCard({
     <div className="flex justify-start">
       {/* kami: single accent. The "this needs your attention" weight
           comes from ink-blue framing and the icon, not a second hue. */}
-      <div className="w-full rounded-md border border-primary/40 bg-brand-tint text-sm">
+      <div className={cn(THREAD_ROW_WIDTH, "rounded-md border border-primary/40 bg-brand-tint text-sm")}>
         <div className="flex items-start gap-2 px-3 pt-2">
           <ShieldAlert className="h-4 w-4 text-primary mt-0.5 shrink-0" />
           <div className="min-w-0 flex-1">
