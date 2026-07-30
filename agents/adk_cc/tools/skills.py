@@ -979,6 +979,45 @@ _ACTIVE_PROJECT_ROOT: "contextvars.ContextVar[Optional[str]]" = contextvars.Cont
 _SKILLS_BY_ROOT: dict[str, tuple[list[Skill], dict[str, str]]] = {}
 
 
+def locate_skill_script(candidate: str) -> Optional[tuple[str, str]]:
+    """`(skill_name, path_within_skill)` for a script that lives in a SKILL, or
+    None. Used to explain a failed `run_bash python scripts/x.py`.
+
+    A skill's files are not in the workspace — they are served through the skill
+    tools — but the natural instinct (and, for vendored skills, their own docs:
+    `data-analyst/scripts/README.md` says `python scripts/premodel_audit.py
+    data.csv --target SalePrice`) is a bare interpreter call on a relative path.
+    Live, that failed with "can't open file", and the agent quietly wrote its own
+    analysis instead: six vetted probe scripts shipped, none run, and an answer
+    that looked fine.
+
+    Matching is by the tail of the path, so `scripts/premodel_audit.py` and a
+    bare `premodel_audit.py` both resolve.
+    """
+    name = (candidate or "").strip().strip("'\"")
+    if not name:
+        return None
+    tail = name.split("/")[-1]
+    if not tail or "." not in tail:
+        return None
+    resolved = _skills_for_root(_ACTIVE_PROJECT_ROOT.get())
+    index: dict[str, str] = dict(resolved[1]) if resolved else {}
+    if not index:
+        try:
+            pairs = discover_skills_with_sources()
+            index = _build_skill_dir_index(pairs)
+        except Exception:  # noqa: BLE001
+            return None
+    for skill_name, base in index.items():
+        try:
+            for found in Path(base).rglob(tail):
+                if found.is_file():
+                    return skill_name, str(found.relative_to(base))
+        except OSError:
+            continue
+    return None
+
+
 def _skill_dir_for(skill_name: str, fallback: dict[str, str]) -> Optional[str]:
     """On-disk dir for a skill, preferring the active session's index.
 

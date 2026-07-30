@@ -21,6 +21,50 @@ _log = logging.getLogger(__name__)
 _INVOKES_PYTHON = re.compile(r"(?:^|[\s;&|(`$])(?:python3?|pip3?|uv\s+run)\b")
 
 
+_MISSING_FILE_RE = re.compile(
+    r"(can't open file|No such file or directory|not found|cannot find)", re.I
+)
+# Path-ish tokens that look like a script.
+_SCRIPTISH_RE = re.compile(r"[\w./-]+\.(?:py|sh|bash|mjs|js)\b")
+
+
+def _skill_script_hint(command: str, stderr: str) -> Optional[str]:
+    """Explain a failed attempt to run a SKILL's script as a plain file.
+
+    Skill files are not in the workspace — they are served through the skill
+    tools — so `python scripts/premodel_audit.py …` fails with "can't open
+    file". Observed live: the agent had read the skill's own README, which
+    documents exactly that invocation, hit the failure, and silently fell back
+    to writing its own analysis. Six vetted probe scripts shipped; none ran.
+
+    Enriching the FAILURE rather than intercepting the command: a pre-flight
+    block would have to guess, and this way a legitimate command keeps its real
+    exit code and output.
+    """
+    if not _MISSING_FILE_RE.search(stderr or ""):
+        return None
+    from ...tools.skills import locate_skill_script
+
+    for token in _SCRIPTISH_RE.findall(command or ""):
+        if token.startswith("/"):
+            continue                       # absolute: not a skill-relative call
+        found = locate_skill_script(token)
+        if not found:
+            continue
+        skill, rel = found
+        return (
+            f"[adk-cc] `{token}` belongs to the `{skill}` skill, and a skill's "
+            "files are NOT in your workspace — no filesystem path reaches them. "
+            "Run it through the skill tool instead:\n"
+            f'  run_skill_script(skill_name="{skill}", file_path="{rel}", '
+            'args=["<abs-path-arg>", ...])\n'
+            "Pass ABSOLUTE paths for file arguments (skill scripts execute in a "
+            "temp directory). Do not re-implement the script inline — it is "
+            "shipped because its behaviour is the vetted one."
+        )
+    return None
+
+
 class BashTool(AdkCcTool):
     """Shell command execution, delegated to the active SandboxBackend.
 
@@ -199,6 +243,10 @@ class BashTool(AdkCcTool):
                 },
             )
         stderr = result.stderr[-2000:]
+        if result.exit_code != 0:
+            hint = _skill_script_hint(args.command, stderr)
+            if hint:
+                stderr = hint + "\n\n" + stderr
         if self._env_note and result.exit_code != 0:
             # The command failed AND the managed interpreter was unavailable —
             # almost certainly the cause. Say so instead of leaving the model
