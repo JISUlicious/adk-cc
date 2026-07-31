@@ -136,6 +136,21 @@ _BASH_SKILL_SCRIPT_RE = re.compile(
     r"(?:^|[\s;&|(`'\"=])(?:\./)?(?:[\w./-]*/)?"
     r"\.(?:adk-cc|agents)/skills/([\w.-]+)/(scripts/[\w./-]+)")
 
+def _pending_deps(tool: Any, args: dict) -> list[str]:
+    """The Python packages the launcher will install on this skill's first
+    run — shown BEFORE the click, because an install is a side effect the
+    script's source alone does not reveal."""
+    try:
+        from ..tools.skill_deps import collect_requirements
+
+        toolset = getattr(tool, "_toolset", None)
+        skill = (toolset._get_skill(str(args.get("skill_name") or ""))
+                 if toolset is not None else None)
+        return collect_requirements(skill) if skill is not None else []
+    except Exception:  # noqa: BLE001 — the card must render regardless
+        return []
+
+
 def _preview_from_workspace(tool_context: Any, workspace_root: Optional[str],
                             args: dict) -> str:
     """The script's source for the BASH route, read from the workspace file —
@@ -480,10 +495,17 @@ class PermissionPlugin(BasePlugin):
             "access; adk-cc does not mediate what it does once started"
         )
         if via_bash:
+            # No install line here: the bash route executes the file directly,
+            # so the launcher's lazy install never runs on it.
             preview = _preview_from_workspace(
                 tool_context, self._workspace_root(tool_context), tool_args)
         else:
             preview = skill_script_preview(tool, tool_args)
+            deps = _pending_deps(tool, tool_args)
+            if deps:
+                preview += (
+                    "\n\nFirst run will also install into the analysis "
+                    "environment: " + ", ".join(deps))
         prompt = allow_once_always_deny_prompt(
             SKILL_SCRIPT_TOOL,
             reason + "\n\n" + preview,

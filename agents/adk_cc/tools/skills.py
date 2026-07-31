@@ -107,7 +107,7 @@ from google.adk.tools.skill_toolset import (
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 from ..config.schema import env_bool
-from . import skill_enablement, skill_trust, skill_usage
+from . import skill_deps, skill_enablement, skill_trust, skill_usage
 
 _log = logging.getLogger(__name__)
 
@@ -1645,6 +1645,7 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
 
         try:
             tiers = _skill_import_tiers(files)
+            deps = skill_deps.collect_requirements(skill)
             # Ask first, carry nothing: if this workspace already holds the
             # skill at this digest, that one exchange also runs the script and
             # the payload never moves. An in-process "already materialised" set
@@ -1652,10 +1653,10 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             # where the first attempt went wrong — `id(self._base_executor)`
             # changes per call, so every run looked cold and shipped 1.1 MB.
             res = await self._exec(invocation_context, self._wrapper(
-                cache, file_path, argv, None, tiers))
+                cache, file_path, argv, None, tiers, deps))
             if res.get("__needs_materialize__"):
                 res = await self._exec(invocation_context, self._wrapper(
-                    cache, file_path, argv, files, tiers))
+                    cache, file_path, argv, files, tiers, deps))
         except Exception as e:  # noqa: BLE001 — same shape as ADK's catch
             _log.exception("skill script '%s' of '%s' failed", file_path, name)
             return {"error": f"Failed to execute script '{file_path}':"
@@ -1690,7 +1691,8 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
                               "skill-script launcher")}
 
     def _wrapper(self, cache: str, file_path: str, argv: list[str],
-                 files: Optional[dict[str, Any]], tiers: list[str]) -> str:
+                 files: Optional[dict[str, Any]], tiers: list[str],
+                 deps: Optional[list[str]] = None) -> str:
         """The code that runs in the sandbox.
 
         Sent without `files` first: if this workspace already has the skill at
@@ -1712,7 +1714,11 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             f"_interp = {interp!r}",
             f"_files = {files!r}" if files is not None else "_files = None",
             "_ready = os.path.join(_cache, '.ready')",
-            "def _emit(**kw): print(_json.dumps(dict(__shell_result__=True, **kw)))",
+            f"_deps = {list(deps or ())!r}",
+            "_depnote = ''",
+            "def _emit(**kw):",
+            "    if _depnote: kw['stderr'] = _depnote + (kw.get('stderr') or '')",
+            "    print(_json.dumps(dict(__shell_result__=True, **kw)))",
             "if not os.path.isfile(_ready):",
             "    if _files is None:",
             "        print(_json.dumps({'__needs_materialize__': True}))",
@@ -1734,6 +1740,29 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             "            try: os.chmod(os.path.join(_cache, _r), 0o755)",
             "            except OSError: pass",
             "    open(_ready, 'w').write('1')",
+            # Lazy dependency install (#94): Python only, into THIS session's
+            # analysis env (sys.executable here IS that env), once per skill
+            # version (the marker sits beside .ready in the digest dir). The
+            # user has already seen this list on the confirmation card. A
+            # failed install is reported and the script still runs — it may
+            # not need every package on the list.
+            "_depmark = os.path.join(_cache, '.deps-ok')",
+            "if _deps and not os.path.isfile(_depmark):",
+            "    _uv = shutil.which('uv')",
+            "    if not _uv:",
+            "        _depnote = ('[adk-cc] could not install ' + ', '.join(_deps) +",
+            "                    ' (uv not available); the script may fail on "
+            "imports.\\n')",
+            "    else:",
+            "        _ir = subprocess.run([_uv, 'pip', 'install', '--python',",
+            "            sys.executable] + _deps, capture_output=True, text=True,",
+            "            timeout=600)",
+            "        if _ir.returncode == 0:",
+            "            open(_depmark, 'w').write('1')",
+            "        else:",
+            "            _depnote = ('[adk-cc] installing ' + ', '.join(_deps) +",
+            "                        ' failed: ' + (_ir.stderr or '')[-400:] +",
+            "                        '\\n')",
             "_abs = os.path.abspath(os.path.join(_cache, _rel))",
             "if not os.path.isfile(_abs):",
             "    _emit(stdout='', stderr='materialised skill is missing ' + _rel,",
