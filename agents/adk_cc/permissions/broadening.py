@@ -213,6 +213,14 @@ def compute_allow_always_rule_contents(
     if not isinstance(raw, str):
         return [""]
 
+    if tool_name == "run_skill_script":
+        # Literal (this script) plus the whole skill, so one click can cover a
+        # skill you have decided to trust — the same shape as run_bash's
+        # literal + broadened pair, and the prompt shows the broadened form so
+        # the scope is visible before clicking rather than after.
+        skill = raw.split(":", 1)[0]
+        return [raw, f"{skill}:*"] if skill else [raw]
+
     literal = raw.strip()
     if not literal:
         return [""]

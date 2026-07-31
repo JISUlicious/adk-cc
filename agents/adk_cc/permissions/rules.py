@@ -53,6 +53,15 @@ class PermissionRule(BaseModel):
 
 # Per-tool extractor: given args, return the string that rule_content matches.
 _RULE_KEY_EXTRACTORS: dict[str, Callable[[dict], str]] = {
+    # A skill's script is keyed by `<skill>:<path within the skill>`, so a rule
+    # can name one script (`openscad:scripts/render.sh`) or a whole skill
+    # (`openscad:*`). The script is third-party code that runs with the
+    # session's authority, and nothing mediates what it does INSIDE — measured
+    # live: a published skill's own script created ~/openscad-projects and
+    # wrote there, while the agent's own write_file to the same path was
+    # stopped by the floor and asked.
+    "run_skill_script": lambda args: (
+        f"{args.get('skill_name', '')}:{args.get('file_path', '')}"),
     "read_file":   lambda args: args.get("path", ""),
     "write_file":  lambda args: args.get("path", ""),
     "edit_file":   lambda args: args.get("path", ""),

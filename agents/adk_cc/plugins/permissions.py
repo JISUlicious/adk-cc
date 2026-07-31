@@ -60,6 +60,7 @@ from ..permissions.rules import (
     RuleBehavior,
     RuleSource,
     _resolve_against_workspace,
+    rule_matches,
 )
 from ..permissions.settings import SettingsHierarchy
 from ..tools.base import AdkCcTool
@@ -78,6 +79,52 @@ _CONTINUE = object()
 # across all of the same user's future sessions. Both are lists of
 # `PermissionRule.model_dump(mode="json")` dicts so they round-trip
 # cleanly through the session DB serializer.
+# ADK's own skill-script tool, gated here by NAME because it is not an
+# AdkCcTool and so never carried a ToolMeta.
+SKILL_SCRIPT_TOOL = "run_skill_script"
+
+# How much of a script to put in front of the user. Enough to see what it does
+# and to spot the obvious ("curl … | sh", a write to $HOME); not so much that
+# the buttons scroll off the card. The rest is one `load_skill_resource` away.
+_SCRIPT_PREVIEW_LINES = 40
+_SCRIPT_PREVIEW_CHARS = 2400
+
+
+def skill_script_preview(tool: Any, args: dict) -> str:
+    """The script's own source, for the confirmation card.
+
+    "Do you want to run openscad/scripts/render.sh?" is unanswerable without
+    it — the whole point of asking is that the user can look. Read from the
+    loaded skill (the same bytes the launcher will materialise), never from
+    disk, so what is shown is what will run.
+    """
+    skill_name = str(args.get("skill_name") or "")
+    rel = str(args.get("file_path") or "")
+    body = ""
+    try:
+        toolset = getattr(tool, "_toolset", None)
+        skill = toolset._get_skill(skill_name) if toolset is not None else None
+        if skill is not None:
+            want = rel[len("scripts/"):] if rel.startswith("scripts/") else rel
+            scr = skill.resources.get_script(want)
+            src = getattr(scr, "src", None)
+            if isinstance(src, bytes):
+                body = f"(binary, {len(src)} bytes)"
+            elif isinstance(src, str):
+                body = src
+    except Exception:  # noqa: BLE001 — a preview that fails must not block the ask
+        body = ""
+    if not body:
+        return f"{skill_name} / {rel}\n(could not read the script to show it)"
+
+    lines = body.splitlines()
+    shown = "\n".join(lines[:_SCRIPT_PREVIEW_LINES])[:_SCRIPT_PREVIEW_CHARS]
+    more = ""
+    if len(lines) > _SCRIPT_PREVIEW_LINES or len(shown) < len(body):
+        more = f"\n… ({len(lines)} lines, {len(body)} bytes in total)"
+    return f"{skill_name} / {rel}\n\n{shown}{more}"
+
+
 _SESSION_ALLOW_STATE_KEY = "adk_cc_allow_rules"
 _USER_ALLOW_STATE_KEY = "user:adk_cc_allow_rules"
 
@@ -152,6 +199,16 @@ class PermissionPlugin(BasePlugin):
         tool_args: dict[str, Any],
         tool_context: ToolContext,
     ) -> Optional[dict]:
+        # `run_skill_script` is one of ADK's own tools, so it never reached the
+        # AdkCcTool gate below — and it is the widest hole there is: the script
+        # is third-party code, it runs with the session's authority, and
+        # nothing mediates what it does INSIDE. Measured live: a published
+        # skill's script created ~/openscad-projects and wrote there, silently,
+        # while the agent's own write_file to that same path was stopped by the
+        # floor and asked.
+        if getattr(tool, "name", "") == SKILL_SCRIPT_TOOL:
+            return await self._gate_skill_script(tool, tool_args, tool_context)
+
         if not isinstance(tool, AdkCcTool):
             return None
 
@@ -308,6 +365,79 @@ class PermissionPlugin(BasePlugin):
             }
 
         return None
+
+    # ---------------------------------------------------------------- skills
+    async def _gate_skill_script(
+        self,
+        tool: BaseTool,
+        tool_args: dict[str, Any],
+        tool_context: ToolContext,
+    ) -> Optional[dict]:
+        """Ask once before running a skill's script, showing what it contains.
+
+        Same three options as the bash gate — Allow once / Allow always / Deny
+        — and the same rule storage, so one list of grants covers both. What
+        differs is the payload: the script's SOURCE goes in the detail, because
+        "do you trust openscad/scripts/render.sh" is not a question anyone can
+        answer without reading it.
+
+        Why this asks even under bypassPermissions: the mode says the user
+        trusts THE AGENT's judgement about its own actions. A skill script is
+        somebody else's code, and running it is closer to `curl | sh` than to
+        an edit the agent decided to make — the dangerous-command gate takes
+        the same line.
+        """
+        key = f"{tool_args.get('skill_name', '')}:{tool_args.get('file_path', '')}"
+
+        # Already granted (this session, or persisted for this user)?
+        effective = self._effective_settings(tool_context)
+        for rule in effective.all_rules():
+            if (rule.behavior is RuleBehavior.ALLOW
+                    and rule_matches(rule, SKILL_SCRIPT_TOOL, tool_args)):
+                return None
+
+        confirmation = getattr(tool_context, "tool_confirmation", None)
+        if confirmation is not None:
+            chose_id = _read_choice_id(confirmation)
+            emit_confirmation_resume(
+                tool_name=SKILL_SCRIPT_TOOL,
+                chose_id=chose_id,
+                confirmed=getattr(confirmation, "confirmed", None),
+                function_call_id=getattr(tool_context, "function_call_id", None),
+                ctx=tool_context,
+            )
+            if chose_id in ("allow", "allow_once"):
+                return None
+            if chose_id == "allow_always":
+                self._add_session_allow(
+                    SKILL_SCRIPT_TOOL, tool_args, tool_context,
+                    persist_across_sessions=_read_persist_toggle(confirmation),
+                )
+                return None
+            if chose_id is None and getattr(confirmation, "confirmed", False):
+                return None
+            return {
+                "status": "permission_denied_by_user",
+                "error": "User declined to run this skill script.",
+                "reason": "User declined to run this skill script.",
+            }
+
+        if not tool_context.function_call_id:
+            return None      # no HITL channel (some test contexts) — don't block
+
+        reason = (
+            "a skill's script is third-party code and runs with this session's "
+            "access; adk-cc does not mediate what it does once started"
+        )
+        prompt = allow_once_always_deny_prompt(
+            SKILL_SCRIPT_TOOL,
+            reason + "\n\n" + skill_script_preview(tool, tool_args),
+            subject=key,
+            allow_always_preview=f"{tool_args.get('skill_name', '')}:*",
+        )
+        tool_context.request_confirmation(hint=reason, payload=prompt.model_dump())
+        tool_context.actions.skip_summarization = True
+        return {"status": "needs_confirmation", "reason": reason}
 
     async def after_tool_callback(
         self,
@@ -524,7 +654,7 @@ class PermissionPlugin(BasePlugin):
 
     def _add_session_allow(
         self,
-        tool: AdkCcTool,
+        tool: AdkCcTool | str,
         args: dict,
         tool_context: ToolContext,
         *,
@@ -563,7 +693,7 @@ class PermissionPlugin(BasePlugin):
         State-backed rules are loaded by `_effective_settings` on
         every `decide` call.
         """
-        tool_name = tool.meta.name
+        tool_name = tool if isinstance(tool, str) else tool.meta.name
         contents = compute_allow_always_rule_contents(
             tool_name, args, workspace_root=workspace_root
         )
