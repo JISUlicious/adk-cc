@@ -1435,6 +1435,12 @@ class _EnablementCheckedRunSkillScriptTool(RunSkillScriptTool):
     async def run_async(
         self, *, args: dict[str, Any], tool_context: ToolContext
     ) -> Any:
+        # Bind the project root HERE, not only in process_llm_request: ADK's
+        # confirmation-resume path (`request_confirmation.py`) re-invokes a
+        # confirmed tool directly, with no model request in between — so the
+        # contextvar was unset and a PROJECT skill's script came back
+        # SKILL_NOT_FOUND the moment the user clicked Allow (measured live).
+        _ACTIVE_PROJECT_ROOT.set(_root_of(tool_context))
         name = args.get("skill_name") or ""
         if name and _denied(name, tool_context):
             return skill_enablement.refusal(name)

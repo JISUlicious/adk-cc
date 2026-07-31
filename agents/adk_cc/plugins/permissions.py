@@ -38,6 +38,7 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import re
 from typing import Any, Optional
 
 from google.adk.plugins.base_plugin import BasePlugin
@@ -125,6 +126,37 @@ def skill_script_preview(tool: Any, args: dict) -> str:
     return f"{skill_name} / {rel}\n\n{shown}{more}"
 
 
+# A PROJECT skill's scripts are also plain files in the workspace, so the
+# skill gate is reachable a second way: `bash .adk-cc/skills/x/scripts/y.sh`.
+# Measured live — when the gated tool failed, the model read the script and ran
+# it through run_bash, in-scope and unflagged, and it wrote to $HOME. Matching
+# the invocation path lets both channels share ONE rule key (skill:file), so a
+# grant made on either covers the other.
+_BASH_SKILL_SCRIPT_RE = re.compile(
+    r"(?:^|[\s;&|(`'\"=])(?:\./)?(?:[\w./-]*/)?"
+    r"\.(?:adk-cc|agents)/skills/([\w.-]+)/(scripts/[\w./-]+)")
+
+def _preview_from_workspace(tool_context: Any, workspace_root: Optional[str],
+                            args: dict) -> str:
+    """The script's source for the BASH route, read from the workspace file —
+    which for this route is exactly what will run."""
+    skill = str(args.get("skill_name") or "")
+    rel = str(args.get("file_path") or "")
+    for base in (".adk-cc", ".agents"):
+        try:
+            path = os.path.join(workspace_root or "", base, "skills", skill, rel)
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    body = fh.read(_SCRIPT_PREVIEW_CHARS + 1)
+                lines = body.splitlines()
+                shown = "\n".join(lines[:_SCRIPT_PREVIEW_LINES])[:_SCRIPT_PREVIEW_CHARS]
+                more = " …" if len(body) > _SCRIPT_PREVIEW_CHARS else ""
+                return f"{skill} / {rel} (invoked via run_bash)\n\n{shown}{more}"
+        except OSError:
+            continue
+    return f"{skill} / {rel} (invoked via run_bash; could not read the script)"
+
+
 _SESSION_ALLOW_STATE_KEY = "adk_cc_allow_rules"
 _USER_ALLOW_STATE_KEY = "user:adk_cc_allow_rules"
 
@@ -208,6 +240,23 @@ class PermissionPlugin(BasePlugin):
         # floor and asked.
         if getattr(tool, "name", "") == SKILL_SCRIPT_TOOL:
             return await self._gate_skill_script(tool, tool_args, tool_context)
+
+        # The same gate for the bash route into a project skill's scripts.
+        # Read-only commands (cat/grep of a script) stay free — the gate is
+        # about EXECUTING third-party code, not reading it.
+        if isinstance(tool, AdkCcTool) and tool.meta.name == "run_bash":
+            m = _BASH_SKILL_SCRIPT_RE.search(str(tool_args.get("command") or ""))
+            if m is not None:
+                from ..tools.bash.readonly import is_read_only_command
+
+                if not is_read_only_command(str(tool_args.get("command") or "")):
+                    gate = await self._gate_skill_script(
+                        tool, {"skill_name": m.group(1), "file_path": m.group(2)},
+                        tool_context, via_bash=True)
+                    if gate is not None:
+                        return gate
+                    # Granted or allowed — fall through to the NORMAL bash
+                    # decision; scope and danger checks still apply.
 
         if not isinstance(tool, AdkCcTool):
             return None
@@ -372,6 +421,7 @@ class PermissionPlugin(BasePlugin):
         tool: BaseTool,
         tool_args: dict[str, Any],
         tool_context: ToolContext,
+        via_bash: bool = False,
     ) -> Optional[dict]:
         """Ask once before running a skill's script, showing what it contains.
 
@@ -429,9 +479,14 @@ class PermissionPlugin(BasePlugin):
             "a skill's script is third-party code and runs with this session's "
             "access; adk-cc does not mediate what it does once started"
         )
+        if via_bash:
+            preview = _preview_from_workspace(
+                tool_context, self._workspace_root(tool_context), tool_args)
+        else:
+            preview = skill_script_preview(tool, tool_args)
         prompt = allow_once_always_deny_prompt(
             SKILL_SCRIPT_TOOL,
-            reason + "\n\n" + skill_script_preview(tool, tool_args),
+            reason + "\n\n" + preview,
             subject=key,
             allow_always_preview=f"{tool_args.get('skill_name', '')}:*",
         )

@@ -86,12 +86,27 @@ def _answer(sess_post: str, app: str, uid: str, sid: str, fc: dict,
     orig = (args.get("originalFunctionCall") or {}).get("name") or "?"
     detail = ((args.get("toolConfirmation") or {}).get("payload") or {}).get("title") or ""
     log.append(f"{orig}: {detail}")
+    # P0 exit criterion for the #95 gate: at the moment the run_skill_script
+    # confirmation is PENDING, the script must not have run yet — the openscad
+    # skill's first act is to create ~/openscad-projects, so its absence here
+    # is the proof. Recorded, not asserted, so the log tells the story.
+    if orig == "run_skill_script":
+        home_dir = os.path.expanduser("~/openscad-projects")
+        log.append(f"[gate] pre-answer, ~/openscad-projects exists: "
+                   f"{os.path.exists(home_dir)}")
+        payload = ((args.get("toolConfirmation") or {}).get("payload") or {})
+        log.append(f"[gate] card shows source: "
+                   f"{'mkdir' in str(payload.get('detail')) or 'openscad' in str(payload.get('detail'))}")
     r = requests.post(sess_post, timeout=60, json={
         "appName": app, "userId": uid, "sessionId": sid,
         "newMessage": {"role": "user", "parts": [{"functionResponse": {
             "id": fc.get("id"), "name": fc.get("name"),
-            "response": {"confirmed": True, "outcome": "allow_once",
-                         "selected": "allow_once"}}}]}})
+            # The documented payload-aware frontend shape. The first version
+            # sent {"confirmed", "outcome", "selected"} — none of the shapes
+            # the inbound reshaper accepts — so the answer was never renamed
+            # to adk_request_confirmation and ADK never resumed the tool.
+            # Every "answered but nothing happened" turn traced back to this.
+            "response": {"chose_id": "allow_once"}}}]}})
     # The answer starts a NEW turn — the work continues under that id, not the
     # one we were watching. Following the old id declared the turn finished
     # while the continuation was still thinking, and the export turn looked

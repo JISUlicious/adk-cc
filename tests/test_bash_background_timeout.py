@@ -73,7 +73,11 @@ _run("true", timeout=60)
 def test_a_background_child_does_not_outlive_the_timeout() -> None:
     """The call must return at its deadline, not when the orphan finishes."""
     elapsed, res = _run("sleep 30 & echo started; sleep 0.3; echo done", timeout=3)
-    assert elapsed < 3 + 3.5, f"took {elapsed:.1f}s for a 3s timeout"
+    # Margin sized to the DEFECT, not to a quiet machine: the regression this
+    # guards blocked for the child's full 30s. Under parallel load (a live
+    # server shutting down beside the sweep) spawn+kill overhead alone once
+    # cost 41s with the logic correct — a tight margin measured the machine.
+    assert elapsed < 15, f"took {elapsed:.1f}s for a 3s timeout"
     assert res.get("timed_out") is True, res
     print(f"OK a_background_child_does_not_outlive_the_timeout ({elapsed:.1f}s)")
 
