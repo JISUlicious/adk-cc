@@ -71,10 +71,15 @@ export type SkillCatalogEntry = {
   enabled: boolean
   disabled_by: "org" | "user" | null
   shadows: { source: string; path: string }[]
-  /** Present only when the skill is installed but could not be loaded (bad
-   * frontmatter, over-long description). It has no tools and no catalogue
-   * entry; showing it is the only way the user learns why it is missing. */
+  /** Present only when the skill is installed but could not be loaded — per the
+   * Agent Skills implementer guide, that is just two cases: no description, or
+   * unparseable frontmatter. It has no tools and no catalogue entry; showing it
+   * is the only way the user learns why it is missing. */
   problem?: string
+  /** Notes about a skill that DID load. `warning` = a spec breach adk-cc
+   * repaired or tolerated (the guide prescribes loading anyway); `advice` =
+   * guidance for the skill's author, never enforced. */
+  notes?: { severity: "warning" | "advice"; message: string }[]
 }
 export function getDesktopSkillCatalog(
   scope: Scope,

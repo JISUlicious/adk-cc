@@ -71,10 +71,30 @@ def _fixtures() -> Path:
     (d / "assets").mkdir()
     (d / "assets" / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(range(200)))
 
-    # 3. Broken beyond repair: this one SHOULD stay rejected.
-    d = root / "hopeless-skill"
+    # 3. Renamed on install — the commonest real-world breakage. The implementer
+    #    guide says warn and LOAD; adk-cc used to refuse it.
+    d = root / "renamed-skill"
     d.mkdir()
-    (d / "SKILL.md").write_text("---\nname: totally-different-name\ndescription: x\n---\n")
+    (d / "SKILL.md").write_text(
+        "---\nname: original-name\ndescription: Still perfectly usable.\n---\n\nBody.\n")
+
+    # 4. The malformed YAML the guide calls out by name: an unquoted colon.
+    d = root / "colon-skill"
+    d.mkdir()
+    (d / "SKILL.md").write_text(
+        "---\nname: colon-skill\ndescription: Use this skill when: the user "
+        "asks about PDFs\n---\n\nBody.\n")
+
+    # 5. Fatal per the guide: no description means the model can never know
+    #    when to use it, so there is nothing to disclose.
+    d = root / "mute-skill"
+    d.mkdir()
+    (d / "SKILL.md").write_text("---\nname: mute-skill\n---\n\nBody.\n")
+
+    # 6. Fatal per the guide: frontmatter that cannot be parsed at all.
+    d = root / "garbage-skill"
+    d.mkdir()
+    (d / "SKILL.md").write_text("not frontmatter at all\njust text\n")
     return root
 
 
@@ -163,22 +183,49 @@ def main() -> int:
     check("text next to it stays text",
           bool(b) and isinstance(b.resources.get_script("use.sh").src, str))
 
-    # --- what cannot be repaired is REPORTED -----------------------------
+    # --- lenient where the guide says lenient ----------------------------
+    # "Name doesn't match the parent directory name → warn, load anyway."
+    diags = sk.skill_diagnostics()
+    check("a skill whose folder was renamed still loads",
+          "original-name" in loaded, f"loaded: {sorted(loaded)}")
+    mismatch = [d["message"] for d in diags.get("original-name", [])
+                if d["severity"] == "warning"]
+    check("and the mismatch is reported rather than silently accepted",
+          any("does not match the directory" in m for m in mismatch), mismatch)
+
+    # The guide's named malformation: `description: Use this skill when: …`
+    check("an unquoted colon in a value is recovered, not fatal",
+          "colon-skill" in loaded, f"loaded: {sorted(loaded)}")
+    check("and the recovered description is the real one",
+          "PDFs" in (loaded["colon-skill"].frontmatter.description
+                     if "colon-skill" in loaded else ""),
+          loaded.get("colon-skill") and loaded["colon-skill"].frontmatter.description)
+
+    # --- fatal where the guide says fatal --------------------------------
     broken = {u["name"]: u for u in sk.unloadable_skills()}
-    check("a genuinely broken skill is still refused",
-          "hopeless-skill" not in loaded)
-    check("but it is recorded instead of vanishing",
-          "hopeless-skill" in broken, f"unloadable={sorted(broken)}")
-    check("with a reason a person can act on",
-          "name" in (broken.get("hopeless-skill", {}).get("reason") or "").lower(),
-          broken.get("hopeless-skill", {}).get("reason", ""))
+    check("no description is fatal — there is nothing to disclose",
+          "mute-skill" not in loaded and "mute-skill" in broken,
+          f"unloadable={sorted(broken)}")
+    check("unparseable frontmatter is fatal",
+          "garbage-skill" not in loaded and "garbage-skill" in broken,
+          f"unloadable={sorted(broken)}")
+    check("each says which of the two it was",
+          "description" in (broken.get("mute-skill", {}).get("reason") or "")
+          and "YAML" in (broken.get("garbage-skill", {}).get("reason") or ""),
+          f"{broken.get('mute-skill')} | {broken.get('garbage-skill')}")
 
     rows = {r["name"]: r for r in skill_enablement.catalog()}
-    check("the UI catalogue shows it as a problem row",
-          rows.get("hopeless-skill", {}).get("problem"),
-          f"row={rows.get('hopeless-skill')}")
+    check("the UI catalogue shows a fatal one as a problem row",
+          rows.get("mute-skill", {}).get("problem"),
+          f"row={rows.get('mute-skill')}")
     check("and it cannot be enabled",
-          rows.get("hopeless-skill", {}).get("enabled") is False)
+          rows.get("mute-skill", {}).get("enabled") is False)
+    check("a tolerated one appears as a normal row carrying notes",
+          rows.get("original-name", {}).get("enabled") is True
+          and rows.get("original-name", {}).get("notes"),
+          f"row={rows.get('original-name')}")
+    check("and it is NOT presented as a problem",
+          not rows.get("original-name", {}).get("problem"))
 
     # --- a missing package is named -------------------------------------
     hinted = sk._explain_missing_package(
@@ -194,6 +241,48 @@ def main() -> int:
     # --- and the bytes reach the script, which is the whole point -------
     check("the binary materialises next to the script that needs it",
           _run_use_sh() == "FOUND", f"got {_run_use_sh()!r}")
+
+    # --- skills installed by ANOTHER agent ------------------------------
+    # The implementer guide's cross-client convention: scan `.agents/skills/`
+    # alongside your own directory so a skill installed by any compliant agent
+    # is visible. Ours wins on a name collision.
+    proj = Path(tempfile.mkdtemp(prefix="interop-"))
+    for scope, sub in (("mine", ".adk-cc/skills"), ("theirs", ".agents/skills")):
+        d = proj / sub / f"{scope}-skill"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {scope}-skill\ndescription: A {scope} skill.\n---\n\nBody.\n")
+    both = proj / ".agents" / "skills" / "shared-name"
+    both.mkdir(parents=True)
+    (both / "SKILL.md").write_text(
+        "---\nname: shared-name\ndescription: From the interop dir.\n---\n\nBody.\n")
+    mine = proj / ".adk-cc" / "skills" / "shared-name"
+    mine.mkdir(parents=True)
+    (mine / "SKILL.md").write_text(
+        "---\nname: shared-name\ndescription: From adk-cc's own dir.\n---\n\nBody.\n")
+
+    prev = os.environ.pop("ADK_CC_SKILLS_DIR", None)
+    try:
+        dirs = [str(d) for d in sk._resolve_skills_dirs(proj)]
+        check("the cross-client .agents/skills path is scanned",
+              any(d.endswith("/.agents/skills") for d in dirs), dirs[:4])
+        sk.clear_project_skill_cache()
+        found = {s.frontmatter.name: s
+                 for s, _ in sk.discover_skills_with_sources(
+                     [p for p in sk._resolve_skills_dirs(proj)])}
+        check("a skill another agent installed is usable",
+              "theirs-skill" in found, sorted(found))
+        check("and adk-cc's own dir still wins a name collision",
+              "adk-cc's own" in (found.get("shared-name").frontmatter.description
+                                 if "shared-name" in found else ""),
+              found.get("shared-name") and found["shared-name"].frontmatter.description)
+        check("it is labelled as shared, not as one of ours",
+              skill_enablement._classify_source(proj / ".agents" / "skills") == "shared",
+              skill_enablement._classify_source(proj / ".agents" / "skills"))
+    finally:
+        if prev is not None:
+            os.environ["ADK_CC_SKILLS_DIR"] = prev
+        sk.clear_project_skill_cache()
 
     # --- the real corpus, when this machine has it ----------------------
     corpus = Path(os.path.expanduser(

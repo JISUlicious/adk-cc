@@ -694,6 +694,9 @@ FIELDS: list[Var] = [
         "Truncation cap on injected SKILL.md instructions.", default=60000, parse=as_int),
     Var("ADK_CC_DISABLE_PROJECT_SKILLS", Tier.ADVANCED, "Skills",
         "Disable the project .adk-cc/skills walk-up.", default=False, parse=as_bool),
+    Var("ADK_CC_DISABLE_INTEROP_SKILLS", Tier.ADVANCED, "Skills",
+        "Stop scanning the cross-client .agents/skills directories.",
+        default=False, parse=as_bool),
 
     # --- Deployment / storage / misc (remaining) -------------------------
     Var("ADK_CC_DESKTOP", Tier.DEV, "Deployment",

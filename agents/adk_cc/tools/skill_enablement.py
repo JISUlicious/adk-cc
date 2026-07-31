@@ -261,6 +261,7 @@ def catalog(
     from .skills import (
         _load_skills_from_dir,
         _resolve_skills_dirs,
+        skill_diagnostics,
         unloadable_skills,
     )
 
@@ -295,6 +296,14 @@ def catalog(
             }
             seen[name] = row
             rows.append(row)
+
+    # Notes for skills that DID load: a spec breach adk-cc tolerated, or advice
+    # for the author. Separate from `problem`, which means the skill is absent.
+    diags = skill_diagnostics()
+    for row in rows:
+        notes = diags.get(row["name"]) or []
+        if notes:
+            row["notes"] = notes
 
     # Installed but unloadable. Without this the skill is simply absent from
     # the list, which reads as "not installed" — measured on a published skill
@@ -346,6 +355,11 @@ def _classify_source(base: Path) -> str:
                 return "global"
         except OSError:
             continue
+    if ".agents" in base.parts:
+        # The cross-client `.agents/skills` convention. Labelled distinctly
+        # because "installed by another agent" is exactly what a user needs to
+        # know before turning it off — it is not adk-cc's to manage.
+        return "shared"
     if ".adk-cc" in base.parts:
         return "project"
     return "configured"

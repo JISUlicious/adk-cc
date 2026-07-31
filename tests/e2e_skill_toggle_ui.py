@@ -103,10 +103,20 @@ def main() -> int:
     # Installed and unloadable. Before this it was absent from the panel with
     # no explanation anywhere — measured on a PUBLISHED skill (`claude-api`,
     # whose description exceeds ADK's cap), which is how a user meets it.
+    # Per the Agent Skills implementer guide only two things are fatal; a
+    # missing description is one of them ("essential for disclosure").
     broken = os.path.join(skills_root, "broken-skill")
     os.makedirs(broken, exist_ok=True)
     with open(os.path.join(broken, "SKILL.md"), "w") as f:
-        f.write("---\nname: not-the-directory-name\ndescription: Broken.\n---\n\nBody.\n")
+        f.write("---\nname: broken-skill\n---\n\nNo description at all.\n")
+
+    # Loaded, but bending the spec — the guide says warn and load rather than
+    # lose the skill, so this must NOT look like the one above.
+    warned = os.path.join(skills_root, "renamed-skill")
+    os.makedirs(warned, exist_ok=True)
+    with open(os.path.join(warned, "SKILL.md"), "w") as f:
+        f.write("---\nname: original-name\ndescription: Folder was renamed on "
+                "install; still usable.\n---\n\nBody.\n")
     enablement = os.path.join(data, "skill-enablement.json")
 
     env = dict(os.environ)
@@ -174,13 +184,29 @@ def main() -> int:
                   problem.count() > 0 and "not loaded" in (problem.first.inner_text() or ""),
                   problem.first.inner_text() if problem.count() else "(no problem row)")
             check("its reason names the actual fault",
-                  "name" in (problem.first.inner_text() or "").lower(),
+                  "description" in (problem.first.inner_text() or "").lower(),
                   problem.first.inner_text() if problem.count() else "")
             check("and it cannot be switched on",
                   bad.locator('input[type="checkbox"]').is_disabled())
             check("it is filed under the source it came from",
                   "installed" in (bad.inner_text() or ""),
                   bad.inner_text())
+
+            # The tolerated skill: loaded, usable, and visibly flagged — the
+            # distinction the implementer guide draws between "warn and load"
+            # and "skip and log".
+            warned_row = page.locator('[data-skill="original-name"]').first
+            note = page.locator('[data-skill-note="original-name"]')
+            check("a skill loaded despite a spec breach is present and enabled",
+                  warned_row.locator('input[type="checkbox"]').is_checked())
+            check("it is not disabled like a broken one",
+                  not warned_row.locator('input[type="checkbox"]').is_disabled())
+            check("and it carries a visible warning about the breach",
+                  note.count() > 0 and "does not match the directory"
+                  in (note.first.inner_text() or ""),
+                  note.first.inner_text() if note.count() else "(no note)")
+            check("the renamed skill is listed under its frontmatter name",
+                  page.locator('[data-skill="renamed-skill"]').count() == 0)
 
             page.screenshot(path=os.path.join(data, "skills-panel.png"), full_page=True)
             browser.close()

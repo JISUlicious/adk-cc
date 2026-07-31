@@ -258,6 +258,21 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
             not loaded — {s.problem}
           </p>
         )}
+        {/* Loaded, but the standard was bent to do it. A warning means adk-cc
+            tolerated a spec breach (the implementer guide says load anyway
+            rather than lose the skill); advice is for whoever wrote it. */}
+        {s.notes?.map((n, i) => (
+          <p
+            key={i}
+            className={`mb-1 ml-6 mt-0.5 text-xs ${
+              n.severity === "warning" ? "text-amber-600 dark:text-amber-500" : "text-muted-foreground"
+            }`}
+            data-skill-note={s.name}
+          >
+            {n.severity === "warning" ? "⚠ " : "· "}
+            {n.message}
+          </p>
+        ))}
         </div>
   )
 

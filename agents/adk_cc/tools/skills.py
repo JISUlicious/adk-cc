@@ -118,6 +118,13 @@ _log = logging.getLogger(__name__)
 # is no longer picked up as one.
 _PROJECT_SKILLS_SUBDIR = ".adk-cc/skills"
 
+# The cross-client convention from the Agent Skills implementer guide: a client
+# should scan its own directory AND `.agents/skills/`, so a skill installed by
+# any compliant agent is visible to the others. Deliberately NOT `.claude`,
+# which is one vendor's private location — this is the shared one.
+_INTEROP_SKILLS_SUBDIR = ".agents/skills"
+_INTEROP_HOME_SUBDIR = ".agents/skills"
+
 # GLOBAL locations — tied to the adk-cc INSTALL, not to any bound project:
 #   * `<run dir>/.adk-cc/skills` — the directory the server process runs in. In
 #     dev that is the adk-cc checkout; whatever project happens to be the run
@@ -185,6 +192,10 @@ def _resolve_skills_dirs(project_root: Optional[Path] = None) -> list[Path]:
             home = Path.home()
             while True:
                 _add(cursor / _PROJECT_SKILLS_SUBDIR)
+                # …and the cross-client location at the same level, AFTER ours,
+                # so a skill that exists in both is adk-cc's.
+                if not env_bool("ADK_CC_DISABLE_INTEROP_SKILLS"):
+                    _add(cursor / _INTEROP_SKILLS_SUBDIR)
                 if cursor == home or cursor == cursor.parent:
                     break
                 cursor = cursor.parent
@@ -200,6 +211,14 @@ def _resolve_skills_dirs(project_root: Optional[Path] = None) -> list[Path]:
         _add(Path(deployment.data_dir()) / _GLOBAL_DATA_SUBDIR)
     except Exception:  # noqa: BLE001 — no data dir configured (bare tests)
         pass
+    # User-level cross-client skills, the counterpart to the project-level
+    # `.agents/skills` above. Last of the global sources: an adk-cc install's
+    # own skills win over one another agent dropped in the home directory.
+    if not env_bool("ADK_CC_DISABLE_INTEROP_SKILLS"):
+        try:
+            _add(Path.home() / _INTEROP_HOME_SUBDIR)
+        except (OSError, RuntimeError):
+            pass
 
     # 3. Built-in skills — a base layer, always added (never a "fallback"):
     # higher-precedence sources override BY NAME via the first-found rule,
@@ -281,6 +300,17 @@ _MAX_DESCRIPTION_CHARS = 1024
 
 _UNLOADABLE: dict[str, dict[str, str]] = {}
 
+# name → [{severity, message}] for skills that DID load. `warning` means a spec
+# breach adk-cc repaired or tolerated; `advice` is guidance aimed at the skill's
+# author. Kept apart from _UNLOADABLE so the panel can show three states rather
+# than "works" / "gone".
+_DIAGNOSTICS: dict[str, list[dict[str, str]]] = {}
+
+
+def skill_diagnostics() -> dict[str, list[dict[str, str]]]:
+    """Per-skill notes from the most recent discovery."""
+    return {k: [dict(d) for d in v] for k, v in _DIAGNOSTICS.items()}
+
 
 def _note_unloadable(name: str, skill_dir: Path, reason: str) -> None:
     """Remember a skill that is installed but could not be loaded.
@@ -307,48 +337,190 @@ def unloadable_skills() -> list[dict[str, str]]:
     return [dict(v) for v in _UNLOADABLE.values()]
 
 
-def _repair_skill(skill_dir: Path) -> Optional[Skill]:
-    """Load a skill ADK rejected, when the defect is only its description.
+# The Agent Skills spec's hard limits, restated because the lenient loader has
+# to know what it is repairing.
+_MAX_NAME_CHARS = 64
+_MAX_COMPATIBILITY_CHARS = 500
+# Body-size guidance from the spec — recommendations to AUTHORS, never enforced
+# here. `claude-api` ships ~18k tokens and works; trimming to these would break
+# a published skill. They exist only to produce advice.
+_ADVISORY_BODY_LINES = 500
+_ADVISORY_BODY_TOKENS = 5000
 
-    ADK caps `description` at 1024 characters and refuses the whole skill past
-    that. The description is catalogue text — it is injected into every request
-    so the model can choose the skill — so an over-long one is a reason to
-    shorten the text, not to lose a working skill. Anthropic's own published
-    `claude-api` skill trips it.
+# Fields the spec defines. Anything else is a vendor extension — Claude Code
+# alone defines a dozen (`when_to_use`, `user-invocable`, `paths`, …). The
+# reference validator calls an unknown field an ERROR; here it is at most a
+# note, because rejecting them would reject most skills written for any
+# specific client.
+_SPEC_FIELDS = frozenset({
+    "name", "description", "license", "allowed-tools", "allowed_tools",
+    "metadata", "compatibility",
+})
 
-    Anything else stays rejected: this repairs presentation, not substance.
+_UNQUOTED_COLON_RE = re.compile(r"^(\s*)([A-Za-z_-]+):\s+(.*:.*)$")
+
+
+def _parse_frontmatter(text: str) -> Optional[dict]:
+    """YAML frontmatter, with the guide's recovery for the common malformation.
+
+    The implementer guide names it: a value containing an unquoted colon —
+    `description: Use this skill when: the user asks about PDFs` — is invalid
+    YAML that some clients' parsers happen to accept. Quote it and retry rather
+    than lose the skill.
     """
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return None
+    for attempt in (0, 1):
+        block = parts[1]
+        if attempt:
+            fixed = []
+            for line in block.splitlines():
+                m = _UNQUOTED_COLON_RE.match(line)
+                if m and not m.group(3).lstrip().startswith(("'", '"', "|", ">")):
+                    val = m.group(3).replace('"', '\\"')
+                    fixed.append(f'{m.group(1)}{m.group(2)}: "{val}"')
+                else:
+                    fixed.append(line)
+            block = "\n".join(fixed)
+        try:
+            data = yaml.safe_load(block)
+        except yaml.YAMLError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def _lenient_skill(skill_dir: Path) -> tuple[Optional[Skill], list[dict[str, str]]]:
+    """Load a skill ADK rejected, the way the standard tells clients to.
+
+    ADK enforces the spec strictly and refuses the whole skill on any breach.
+    The Agent Skills implementer guide prescribes the opposite for a client:
+
+        name doesn't match the parent directory  → warn, load anyway
+        name exceeds 64 characters               → warn, load anyway
+        description missing or empty             → skip, log the error
+        YAML completely unparseable              → skip, log the error
+        "record diagnostics … but don't block skill loading on cosmetic issues"
+
+    A folder renamed during install is the commonest real-world breakage and it
+    cost the whole skill. Returns `(skill_or_None, diagnostics)`; the caller
+    reports the diagnostics whether or not the load succeeded.
+    """
+    diags: list[dict[str, str]] = []
+
+    def note(severity: str, message: str) -> None:
+        diags.append({"severity": severity, "message": message})
+
     md = skill_dir / "SKILL.md"
     try:
         text = md.read_text(encoding="utf-8")
-        parts = text.split("---", 2)
-        if len(parts) < 3:
-            return None
-        data = yaml.safe_load(parts[1]) or {}
-        desc = str(data.get("description") or "")
-        if not isinstance(data, dict) or len(desc) <= _MAX_DESCRIPTION_CHARS:
-            return None
+    except OSError as e:
+        note("error", f"SKILL.md could not be read: {e}")
+        return None, diags
+
+    data = _parse_frontmatter(text)
+    if data is None:
+        # Fatal per the guide: without frontmatter there is nothing to disclose.
+        note("error", "frontmatter is missing or could not be parsed as YAML")
+        return None, diags
+    body = text.split("---", 2)[2]
+
+    name = str(data.get("name") or "").strip()
+    if not name:
+        name = skill_dir.name
+        note("warning", f"no name in frontmatter; using the directory name "
+                        f"'{skill_dir.name}'")
+    if name != skill_dir.name:
+        note("warning", f"name '{name}' does not match the directory "
+                        f"'{skill_dir.name}' — the spec requires them to match")
+    if len(name) > _MAX_NAME_CHARS:
+        note("warning", f"name is {len(name)} characters (limit "
+                        f"{_MAX_NAME_CHARS})")
+    if name != name.lower() or not all(c.isalnum() or c == "-" for c in name):
+        note("warning", f"name '{name}' is not lowercase letters, digits and "
+                        "hyphens")
+    if name.startswith("-") or name.endswith("-") or "--" in name:
+        note("warning", f"name '{name}' has a leading, trailing or doubled "
+                        "hyphen")
+
+    desc = str(data.get("description") or "").strip()
+    if not desc:
+        # Fatal per the guide: "a description is essential for disclosure".
+        note("error", "description is missing or empty, so the model would "
+                      "never know when to use this skill")
+        return None, diags
+    if len(desc) > _MAX_DESCRIPTION_CHARS:
         # Budget the marker BEFORE cutting: an earlier version reserved a
         # round 40 characters for a 52-character marker, so the "repaired"
         # description came out at 1036 and failed the very validator this
         # exists to satisfy — silently, since a failed repair just means no
         # repair.
         marker = " …(truncated to fit the catalogue limit)"
-        data["description"] = (
-            desc[: _MAX_DESCRIPTION_CHARS - len(marker)].rstrip() + marker)
-        skill = _SkillModel(
-            frontmatter=_FrontmatterModel.model_validate(data),
-            instructions=parts[2],
-            resources=_ResourcesModel(),
+        note("warning", f"description is {len(desc)} characters (limit "
+                        f"{_MAX_DESCRIPTION_CHARS}); truncated for the catalogue")
+        desc = desc[: _MAX_DESCRIPTION_CHARS - len(marker)].rstrip() + marker
+
+    compat = data.get("compatibility")
+    if compat is not None and len(str(compat)) > _MAX_COMPATIBILITY_CHARS:
+        note("warning", f"compatibility is {len(str(compat))} characters "
+                        f"(limit {_MAX_COMPATIBILITY_CHARS}); truncated")
+        data["compatibility"] = str(compat)[:_MAX_COMPATIBILITY_CHARS]
+
+    try:
+        # `model_construct` because the point is to bypass the validation that
+        # rejected this skill in the first place; every constraint it would
+        # have raised is already recorded above as a diagnostic.
+        fm = _FrontmatterModel.model_construct(
+            name=name, description=desc,
+            license=data.get("license"),
+            compatibility=data.get("compatibility"),
+            allowed_tools=data.get("allowed-tools") or data.get("allowed_tools"),
+            metadata=data.get("metadata") if isinstance(
+                data.get("metadata"), dict) else {},
         )
+        skill = _SkillModel(frontmatter=fm, instructions=body,
+                            resources=_ResourcesModel())
         _attach_missing_resources(skill, skill_dir)
-    except Exception:  # noqa: BLE001 — a repair that fails is just no repair
-        return None
-    _log.warning(
-        "skills: '%s' has a %d-character description (limit %d); loaded it "
-        "with the description truncated — shorten it in SKILL.md",
-        skill.frontmatter.name, len(desc), _MAX_DESCRIPTION_CHARS)
-    return skill
+    except Exception as e:  # noqa: BLE001 — a repair that fails is just no repair
+        note("error", f"could not be loaded even leniently: {type(e).__name__}")
+        return None, diags
+
+    diags.extend(_advisories(data, body))
+    for d in diags:
+        _log.warning("skills: '%s' in %s: %s", name, skill_dir, d["message"])
+    return skill, diags
+
+
+def _advisories(data: dict, body: str) -> list[dict[str, str]]:
+    """Notes for the skill's AUTHOR: recommendations, never enforced.
+
+    Kept strictly separate from the hard constraints above. The spec's body
+    guidance is advice — two published skills exceed it and work — so this
+    reports and stops there.
+    """
+    out: list[dict[str, str]] = []
+    lines = body.count("\n")
+    if lines > _ADVISORY_BODY_LINES:
+        out.append({"severity": "advice", "message": (
+            f"SKILL.md body is {lines} lines; the spec recommends under "
+            f"{_ADVISORY_BODY_LINES}, since the whole body loads on activation")})
+    approx = len(body) // 4
+    if approx > _ADVISORY_BODY_TOKENS:
+        out.append({"severity": "advice", "message": (
+            f"body is roughly {approx} tokens; the spec recommends under "
+            f"{_ADVISORY_BODY_TOKENS} — move detail into references/")})
+    if data.get("allowed-tools") or data.get("allowed_tools"):
+        out.append({"severity": "advice", "message": (
+            "declares allowed-tools, which adk-cc does not honour; tool "
+            "permissions come from your own settings")})
+    unknown = sorted(k for k in data if k not in _SPEC_FIELDS)
+    if unknown:
+        out.append({"severity": "advice", "message": (
+            f"frontmatter fields outside the Agent Skills spec, ignored here: "
+            f"{', '.join(unknown)}")})
+    return out
 
 
 def _attach_missing_resources(skill: Skill, skill_dir: Path) -> None:
@@ -439,16 +611,20 @@ def _load_skills_from_dir(base: Path) -> list[tuple[Skill, Path]]:
     for name in names + rejected:
         skill_dir = (base / name).resolve()
         _UNLOADABLE.pop(name, None)
+        _DIAGNOSTICS.pop(name, None)
         try:
             skill = load_skill_from_dir(skill_dir)
         except Exception as exc:  # noqa: BLE001
-            skill = _repair_skill(skill_dir)
+            # ADK enforces the spec strictly; the standard tells CLIENTS to be
+            # lenient and record diagnostics instead.
+            skill, diags = _lenient_skill(skill_dir)
             if skill is None:
-                # Skip a malformed skill rather than refusing to start — but
-                # say so: a skill that is simply absent is the hardest kind of
-                # bug to notice from the outside.
-                _note_unloadable(name, skill_dir, str(exc))
+                # Only the two cases the guide keeps fatal reach here.
+                reason = next((d["message"] for d in diags
+                               if d["severity"] == "error"), str(exc))
+                _note_unloadable(name, skill_dir, reason)
                 continue
+            _DIAGNOSTICS[skill.frontmatter.name] = diags
         try:
             _attach_missing_resources(skill, skill_dir)
         except Exception:  # noqa: BLE001 — never let this cost us the skill
@@ -1607,6 +1783,7 @@ def clear_project_skill_cache() -> None:
     # Whatever was broken last time may have been fixed; the next discovery
     # re-records it if not.
     _UNLOADABLE.clear()
+    _DIAGNOSTICS.clear()
 
 
 class _EnablementAwareSkillToolset(SkillToolset):
