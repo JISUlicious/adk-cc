@@ -277,6 +277,55 @@ def _path_of(fc: Any) -> str:
     return ""
 
 
+def undriven_pages(events: Iterable[Any]) -> tuple[str, ...]:
+    """Pages this SESSION has written that nothing has driven since.
+
+    The turn-scoped `unexercised_page` cannot see across a turn boundary:
+    build in turn 2, ask "does it work?" in turn 3, and `built_a_page` is
+    False — the claim escapes however confident it is. Measured across three
+    live runs of the same scenario: the one turn that drove the page was the
+    only one whose claim was actually true; in another, the agent confirmed a
+    Three.js preview that never loads (`Failed to resolve module specifier
+    "three"`, zero canvas elements). Same prompt, no verification either way —
+    the difference between a true claim and a shipped falsehood was luck.
+
+    Scans the WHOLE event list rather than keeping state: derivation cannot go
+    stale, survives session resume, and needs no schema. A drive event marks
+    every page written before it as driven (a command cannot reliably be bound
+    to one file); a later write marks that page undriven again — which also
+    catches driven-in-turn-2, edited-in-turn-4, claimed-in-turn-5.
+    """
+    last_write: dict[str, int] = {}
+    last_drive = -1
+    idx = 0
+    for e in events:
+        parts = getattr(getattr(e, "content", None), "parts", None) or []
+        for p in parts:
+            fc = getattr(p, "function_call", None)
+            if fc is None:
+                continue
+            idx += 1
+            name = getattr(fc, "name", "") or ""
+            args = getattr(fc, "args", None) or {}
+            if name in ("write_file", "edit_file"):
+                path = str(args.get("path") or "")
+                if path.lower().endswith(_PAGE_SUFFIXES):
+                    last_write[path] = idx
+            elif name == "run_bash":
+                cmd = str(args.get("command") or "")
+                if (_PAGE_RUNTIME_RE.search(cmd) or _TEST_RUNNER_RE.search(cmd)
+                        or _DOM_SHIM_RE.search(cmd)):
+                    last_drive = idx
+            elif name == "run_skill_script":
+                # web-smoke-check runs through the skill tool, not run_bash —
+                # the drive that run 1 actually performed came in this shape.
+                blob = f"{args.get('skill_name', '')} {args.get('file_path', '')}"
+                if "smoke_page" in blob or "web-smoke-check" in blob:
+                    last_drive = idx
+    return tuple(sorted(
+        path for path, wrote in last_write.items() if wrote > last_drive))
+
+
 def collect(events: Iterable[Any], *, author: Optional[str] = None) -> TurnSignals:
     """Reduce a turn's events to signals.
 

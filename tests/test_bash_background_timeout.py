@@ -63,6 +63,13 @@ def _run(cmd: str, timeout: int = 4):
     return time.time() - t0, res
 
 
+# Warm the path once OUTSIDE any timed section. On a cold machine the first
+# execution provisions the analysis environment (uv venv + resolution), which
+# once took 65s inside a 3s-timeout measurement and failed the sweep about one
+# run in three. The subject here is timeout behaviour, not provisioning cost.
+_run("true", timeout=60)
+
+
 def test_a_background_child_does_not_outlive_the_timeout() -> None:
     """The call must return at its deadline, not when the orphan finishes."""
     elapsed, res = _run("sleep 30 & echo started; sleep 0.3; echo done", timeout=3)

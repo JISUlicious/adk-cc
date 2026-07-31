@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import uuid
 from typing import Optional
 
@@ -56,16 +57,34 @@ from google.genai import types
 
 from ..verification.signals import (
     _CLAIM_RE,
+    _HEDGE_RE,
     _LEAD_CLAIM_RE,
     collect,
     noop_subagent_reentry,
     nudge_text,
     reentry_note,
+    undriven_pages,
 )
 
 _log = logging.getLogger(__name__)
 
+# The vocabulary of a claim ABOUT page behaviour — what a user sees or does.
+# Guards the cross-turn label: a session with an undriven page must not label
+# an unrelated "Done — renamed the file".
+# An AFFIRMATION — the claim shape of answering "does it work?" with "yes".
+# The shared _CLAIM_RE is completion-report shaped ("done", "fixed", "works
+# now") and missed both live turn-3 answers, which led with "Yes — the colour
+# control does change …". Scoped to the cross-turn path only, so the same-turn
+# signals keep their measured recall/noise balance.
+_AFFIRM_RE = re.compile(
+    r"(?i)^\s*(?:\*\*)?(?:yes|correct|indeed|it works|absolutely)\b")
+
+_BEHAVIOUR_RE = re.compile(
+    r"\b(page|preview|click|button|control|swatch|visitor|browser|render|"
+    r"display|updates?|changes)\b")
+
 _STATE_NUDGED = "temp:verify_nudged_invocation"
+_STATE_LABELED = "temp:verify_labeled_invocation"
 _STATE_GATED = "temp:verify_gated_invocation"
 _STATE_REENTRY = "temp:verify_reentry_invocation"
 _VERIFIER = "verification"
@@ -146,8 +165,16 @@ class VerifyNudgePlugin(BasePlugin):
         (not a tool call); the turn changed something; nothing checked it; and
         the answer asserts a result (or the turn did something irreversible).
         Bounded to once per invocation, so a FAIL cannot ping-pong.
+
+        SOFT mode also acts here, for one narrow case the request-side nudge
+        can never reach: a behaviour claim about a page built in an EARLIER
+        turn. `before_model` sees only the user's question then, and the claim
+        does not exist until this response — so the honest thing left is to
+        LABEL it: append one visible line saying the page has not been driven
+        since it changed. Measured (three live runs): without this, a true
+        claim and a shipped falsehood read identically to the user.
         """
-        if _mode() != "hard":
+        if _mode() == "off":
             return None
         content = getattr(llm_response, "content", None)
         parts = list(getattr(content, "parts", None) or [])
@@ -189,9 +216,50 @@ class VerifyNudgePlugin(BasePlugin):
             return None
 
         sig = collect(turn, author=agent)
-        if sig.has_evidence or not sig.changed_anything:
+        if sig.has_evidence:
             return None
         claims = bool(_CLAIM_RE.search(answer)) or bool(_LEAD_CLAIM_RE.match(answer))
+
+        # The cross-turn case: a claim about a page nothing has driven since it
+        # last changed. Requires the answer to be ABOUT the page — its name, or
+        # the vocabulary of page behaviour — so an unrelated "Done — renamed
+        # the file" in the same session is not labelled.
+        stale = ()
+        if (claims or _AFFIRM_RE.match(answer)) and not _HEDGE_RE.search(answer):
+            pages = undriven_pages(events)
+            low = answer.lower()
+            stale = tuple(
+                pg for pg in pages
+                if os.path.basename(pg).lower() in low or _BEHAVIOUR_RE.search(low))
+
+        if _mode() == "soft":
+            if not stale:
+                return None
+            if state is not None:
+                if state.get(_STATE_LABELED) == inv:
+                    return None
+                try:
+                    state[_STATE_LABELED] = inv
+                except Exception:  # noqa: BLE001
+                    pass
+            _log.info("verify label: stale page claim about %s", stale)
+            note = (
+                f"\n\n> ⚠ adk-cc: `{os.path.basename(stale[0])}` has changed "
+                "since it was last actually driven — the behaviour described "
+                "above is asserted, not verified. The web-smoke-check skill "
+                "can close that gap."
+            )
+            labeled = llm_response.model_copy(deep=True)
+            try:
+                labeled.content.parts.append(types.Part(text=note))
+            except Exception:  # noqa: BLE001 — labelling must never eat the answer
+                return None
+            return labeled
+
+        # hard: the gate. A stale cross-turn claim now qualifies alongside the
+        # original same-turn trigger.
+        if not sig.changed_anything and not stale:
+            return None
         if not (claims or sig.risky):
             return None
 
