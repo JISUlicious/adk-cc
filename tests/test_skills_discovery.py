@@ -24,6 +24,11 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+# Project skills are gated on a trust decision (see test_skill_trust.py).
+# This file is about DISCOVERY mechanics, so it opts out of the gate
+# rather than carrying a trust store: the two concerns are tested apart.
+os.environ["ADK_CC_TRUST_PROJECT_SKILLS"] = "1"
+
 os.environ.setdefault("ADK_CC_API_KEY", "sk-dummy-for-tests")
 
 from adk_cc.tools.skills import (

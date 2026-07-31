@@ -107,7 +107,7 @@ from google.adk.tools.skill_toolset import (
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 from ..config.schema import env_bool
-from . import skill_enablement
+from . import skill_enablement, skill_trust
 
 _log = logging.getLogger(__name__)
 
@@ -182,8 +182,16 @@ def _resolve_skills_dirs(project_root: Optional[Path] = None) -> list[Path]:
     if raw:
         _add(Path(raw).expanduser())
 
-    # 2. PROJECT — walk up from the bound project only.
-    if project_root is not None and not env_bool("ADK_CC_DISABLE_PROJECT_SKILLS"):
+    # 2. PROJECT — walk up from the bound project only, and ONLY once the user
+    # has trusted the folder. A project's skills arrive with the repository, so
+    # a clone can otherwise inject instructions into the agent's context; both
+    # the implementer guide and Anthropic's docs call this out. What gets
+    # skipped is recorded below so it can be offered rather than lost.
+    if (project_root is not None
+            and not env_bool("ADK_CC_DISABLE_PROJECT_SKILLS")
+            and not skill_trust.is_trusted(project_root)):
+        _note_untrusted(project_root)
+    elif project_root is not None and not env_bool("ADK_CC_DISABLE_PROJECT_SKILLS"):
         try:
             cursor = Path(project_root).resolve()
         except OSError:
@@ -228,6 +236,58 @@ def _resolve_skills_dirs(project_root: Optional[Path] = None) -> list[Path]:
         _add(here)
 
     return dirs
+
+
+# project root → the skill dirs withheld from it, and what is in them.
+_UNTRUSTED: dict[str, list[str]] = {}
+
+
+def _note_untrusted(project_root: Path) -> None:
+    """Record project skill dirs skipped for want of trust, with their names.
+
+    Recorded rather than merely skipped: the whole point of this area is that a
+    skill which silently is not there is the hardest failure to diagnose. The
+    user should be offered the choice, not left wondering.
+    """
+    found: list[str] = []
+    try:
+        cursor = Path(project_root).resolve()
+        home = Path.home()
+        while True:
+            for sub in (_PROJECT_SKILLS_SUBDIR, _INTEROP_SKILLS_SUBDIR):
+                d = cursor / sub
+                if _is_dir_silently(d):
+                    found += [f"{p.name}" for p in sorted(d.iterdir())
+                              if (p / "SKILL.md").is_file()]
+            if cursor == home or cursor == cursor.parent:
+                break
+            cursor = cursor.parent
+    except OSError:
+        pass
+    _UNTRUSTED[str(Path(project_root))] = found
+    if found:
+        _log.info("skills: %d project skill(s) in %s withheld until the folder "
+                  "is trusted: %s", len(found), project_root, ", ".join(found))
+
+
+def untrusted_project_skills() -> dict[str, list[str]]:
+    """`{project_root: [skill names withheld]}` from the last discovery."""
+    return {k: list(v) for k, v in _UNTRUSTED.items()}
+
+
+def withheld_for(project_root: Optional[Path | str]) -> list[str]:
+    """Skill names this project ships that are withheld for want of trust.
+
+    Asked directly rather than read out of the discovery cache: the settings
+    panel is often the FIRST thing to ask about a freshly opened project, and
+    at that point nothing has resolved its skills yet — the banner simply never
+    appeared. A question with an answer that does not depend on what happened
+    to run earlier is the right shape here.
+    """
+    if project_root is None or skill_trust.is_trusted(project_root):
+        return []
+    _note_untrusted(Path(project_root))
+    return list(_UNTRUSTED.get(str(Path(project_root))) or [])
 
 
 def _is_dir_silently(p: Path) -> bool:
@@ -1382,12 +1442,27 @@ def _explain_missing_package(res: dict, skill: Skill) -> dict:
         siblings = set()
     if missing in siblings:
         return res
-    return {**res, "stderr": err.rstrip() + (
+    return _with_compatibility({**res, "stderr": err.rstrip() + (
         f"\n\n[adk-cc] this script needs the '{missing}' package, which is not "
         f"installed in the environment skill scripts run in. Install it there "
         f"(uv pip install {missing}) and re-run, or report the step as NOT RUN "
         f"— do not re-implement the script's job inline and present it as the "
-        f"script's result.")}
+        f"script's result.")}, skill)
+
+
+def _with_compatibility(res: dict, skill: Skill) -> dict:
+    """Append the skill's own `compatibility` note to an environment failure.
+
+    The spec has a field for exactly this — "environment requirements: intended
+    product, system packages, network access" — so when a script dies because
+    something is not installed, the author has usually already said what it
+    needs. Quoting them beats making the agent guess.
+    """
+    note = (getattr(skill.frontmatter, "compatibility", None) or "").strip()
+    if not note or note in (res.get("stderr") or ""):
+        return res
+    return {**res, "stderr": (res.get("stderr") or "").rstrip() + (
+        f"\n[adk-cc] the skill declares its requirements as: {note}")}
 
 
 def _skill_files(skill: Skill) -> dict[str, Any]:
@@ -1504,9 +1579,14 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
                 status = "warning"
             else:
                 status = "success"
-            return _explain_missing_package({
+            shaped = _explain_missing_package({
                 "skill_name": skill.name, "file_path": file_path,
                 "stdout": stdout, "stderr": stderr, "status": status}, skill)
+            # A missing INTERPRETER (returncode 127) is the other half of the
+            # same question, and the wrapper cannot see the frontmatter.
+            if rc == 127:
+                shaped = _with_compatibility(shaped, skill)
+            return shaped
 
         try:
             tiers = _skill_import_tiers(files)
@@ -1784,6 +1864,7 @@ def clear_project_skill_cache() -> None:
     # re-records it if not.
     _UNLOADABLE.clear()
     _DIAGNOSTICS.clear()
+    _UNTRUSTED.clear()
 
 
 class _EnablementAwareSkillToolset(SkillToolset):

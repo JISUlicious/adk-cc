@@ -288,6 +288,14 @@ def catalog(
             row = {
                 "name": name,
                 "description": description,
+                # The spec's own field for "what this skill needs" — system
+                # packages, an interpreter, network access. Shown because a
+                # user deciding whether a skill is usable here has no other
+                # way to know, and because 0 of 41 skills surveyed set it:
+                # surfacing it is what makes declaring it worth an author's
+                # time.
+                "compatibility": getattr(
+                    skill.frontmatter, "compatibility", None) or "",
                 "source": source,
                 "path": str(skill_dir),
                 "enabled": name not in org and name not in user,

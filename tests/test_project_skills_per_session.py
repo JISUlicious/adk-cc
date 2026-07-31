@@ -25,6 +25,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Project skills are gated on a trust decision (see test_skill_trust.py).
+# This file is about DISCOVERY mechanics, so it opts out of the gate
+# rather than carrying a trust store: the two concerns are tested apart.
+os.environ["ADK_CC_TRUST_PROJECT_SKILLS"] = "1"
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "agents"))
 os.environ.setdefault("ADK_CC_SKIP_DOTENV", "1")

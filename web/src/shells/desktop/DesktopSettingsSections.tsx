@@ -11,6 +11,7 @@ import {
   listDesktopMcp, setDesktopMcp, deleteDesktopMcp, type DesktopMcpServer,
   listDesktopSkills, uploadDesktopSkill, deleteDesktopSkill, addDesktopSkillFromDir,
   getDesktopSkillCatalog, setDesktopSkillEnabled, type SkillCatalogEntry,
+  trustProjectSkills, getUntrustedProjectSkills, type UntrustedSkills,
   listWorkingDirs, addWorkingDir, removeWorkingDir,
 } from "@/shared/api/desktop-settings"
 
@@ -166,12 +167,21 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
   // The CATALOG, not the install list: built-ins and project skills can't be
   // uninstalled from here, so a switch is the only control that reaches them.
   const [skills, setSkills] = useState<SkillCatalogEntry[]>([])
+  const [untrusted, setUntrusted] = useState<UntrustedSkills[]>([])
   const [installed, setInstalled] = useState<string[]>([])
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
   const reload = useCallback(() => {
-    getDesktopSkillCatalog(scope, projectId).then((r) => setSkills(r.skills)).catch((e) => setErr(errMsg(e)))
+    getDesktopSkillCatalog(scope, projectId)
+      .then((r) => setSkills(r.skills))
+      .catch((e) => setErr(errMsg(e)))
+    // Independent of `scope`: a project's own skills are withheld whichever
+    // settings layer you happen to be looking at, and hiding the offer behind
+    // the project tab would leave it unfindable.
+    getUntrustedProjectSkills(projectId)
+      .then((r) => setUntrusted(r.untrusted ?? []))
+      .catch(() => setUntrusted([]))
     listDesktopSkills(scope, projectId).then((r) => setInstalled(r.skills)).catch(() => {})
   }, [scope, projectId])
   useEffect(reload, [reload])
@@ -203,6 +213,11 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
     setSkills((prev) => prev.map((s) => (s.name === name ? { ...s, enabled } : s)))
     try { await setDesktopSkillEnabled(name, enabled, scope, projectId) } catch (e) { setErr(errMsg(e)) }
     reload()
+  }
+  async function trust(root: string) {
+    setErr(null); setBusy(true)
+    try { await trustProjectSkills(root, true); reload() }
+    catch (e) { setErr(errMsg(e)) } finally { setBusy(false) }
   }
   // Two audiences in one list. Skills you added are yours to upload, edit and
   // delete; built-ins ship inside the app and can only be switched off. Mixing
@@ -258,6 +273,14 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
             not loaded — {s.problem}
           </p>
         )}
+        {/* What the skill says it needs. Almost no skill sets this, so when
+            one does it is the difference between "why did that fail" and a
+            one-line answer. */}
+        {s.compatibility && (
+          <p className="mb-1 ml-6 mt-0.5 text-xs text-muted-foreground" data-skill-needs={s.name}>
+            <span className="rounded bg-muted px-1 text-[10px]">needs</span> {s.compatibility}
+          </p>
+        )}
         {/* Loaded, but the standard was bent to do it. A warning means adk-cc
             tolerated a spec breach (the implementer guide says load anyway
             rather than lose the skill); advice is for whoever wrote it. */}
@@ -297,6 +320,36 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
           {enabledCount} of {skills.length} enabled — only these are offered to the agent.
         </p>
       )}
+      {/* Skills the open project ships. They arrive with the repository — a
+          clone you have not read can put instructions and code in front of the
+          agent — so they are withheld until you say otherwise. Listed by name
+          rather than merely counted: "trust this folder" is not a decision
+          anyone can make without seeing what is in it. */}
+      {untrusted.map((u) => (
+        <div
+          key={u.root}
+          data-untrusted-root={u.root}
+          className="rounded border border-amber-500/40 bg-amber-500/5 p-2 text-xs"
+        >
+          <p className="font-medium text-amber-700 dark:text-amber-500">
+            {u.skills.length === 1
+              ? "1 skill in this project is not loaded"
+              : `${u.skills.length} skills in this project are not loaded`}
+          </p>
+          <p className="mt-0.5 text-muted-foreground">
+            {u.root} ships <span className="font-mono">{u.skills.join(", ")}</span>. Project skills
+            come from the repository, so they run only if you trust it.
+          </p>
+          <button
+            onClick={() => trust(u.root)}
+            disabled={busy}
+            data-trust-root={u.root}
+            className="mt-1.5 rounded border border-border px-2 py-0.5 hover:bg-muted disabled:opacity-50"
+          >
+            Trust this folder
+          </button>
+        </div>
+      ))}
       {/* Yours first: it is the shorter list and the only one you can change
           beyond a switch. */}
       {section("Installed here", "added by you — upload, replace or remove", mine)}

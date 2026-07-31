@@ -68,6 +68,10 @@ export type SkillCatalogEntry = {
   description: string
   source: string
   path: string
+  /** The spec's `compatibility` field: what the skill needs to run here
+   * (interpreter, packages, network). Empty for most skills — almost nobody
+   * fills it in, which is part of why it is worth showing when they do. */
+  compatibility?: string
   enabled: boolean
   disabled_by: "org" | "user" | null
   shadows: { source: string; path: string }[]
@@ -81,11 +85,32 @@ export type SkillCatalogEntry = {
    * guidance for the skill's author, never enforced. */
   notes?: { severity: "warning" | "advice"; message: string }[]
 }
+/** A project folder whose bundled skills are withheld pending a trust
+ *  decision. They arrive with the repository, so running them is the user's
+ *  call to make — but they must be OFFERED, not silently dropped. */
+export type UntrustedSkills = { root: string; skills: string[] }
 export function getDesktopSkillCatalog(
   scope: Scope,
   projectId?: string,
-): Promise<{ skills: SkillCatalogEntry[] }> {
+): Promise<{ skills: SkillCatalogEntry[]; untrusted?: UntrustedSkills[] }> {
   return apiFetch(`/desktop/settings/skills/catalog?${qs(scope, projectId)}`)
+}
+/** Asked with the OPEN project's id regardless of which settings scope is
+ *  being viewed — trust is a property of the folder, not of the layer. */
+export function getUntrustedProjectSkills(
+  projectId?: string,
+): Promise<{ untrusted: UntrustedSkills[] }> {
+  const q = projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""
+  return apiFetch(`/desktop/settings/skills/untrusted${q}`)
+}
+export function trustProjectSkills(
+  root: string,
+  trusted: boolean,
+): Promise<{ root: string; trusted: boolean }> {
+  return apiFetch(`/desktop/settings/skills/trust`, {
+    method: "POST",
+    body: JSON.stringify({ root, trusted }),
+  })
 }
 export function setDesktopSkillEnabled(
   name: string,

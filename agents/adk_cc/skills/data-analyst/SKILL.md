@@ -14,6 +14,10 @@ description: >
   wafer maps, Pareto or Fishbone or 5-Why, DOE, 8D, or any Python
   data-science task — even when they don't explicitly say "pandas" or
   "analysis".
+compatibility: >-
+  Requires Python with pandas, numpy, scipy, scikit-learn, statsmodels and
+  matplotlib. adk-cc provisions these automatically for skill scripts; running
+  the scripts elsewhere needs them installed.
 metadata:
   verify:
     - "All four Pre-Modeling Diagnostics ran before any modeling or driver claim (scripts/premodel_audit.py, or the equivalent inline)"

@@ -175,6 +175,66 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
             )
             return {"status": "deleted", "server_name": server_name}
 
+    # ----------------------------------------------- project skill trust
+    # OUTSIDE the `if skill_root:` block below: whether a project's own
+    # skills may run has nothing to do with whether a desktop skill STORE
+    # is configured. Mounted inside it, the trust prompt simply 404'd.
+    def _withheld_rows(request: Request) -> list[dict]:
+        """Project skills waiting on a trust decision.
+
+        With `project_id`, that project; without it, EVERY known project —
+        because the settings panel's global section has no project id, and
+        burying a security decision inside a collapsed per-project row is
+        how it goes unnoticed.
+        """
+        from ..tools import skills as _skills
+
+        pid = (request.query_params.get("project_id")
+               or request.query_params.get("projectId") or "").strip()
+        try:
+            from .desktop_routes import load_projects, project_repo_path
+
+            roots = ([project_repo_path(pid)] if pid
+                     else [p.get("repo_path") for p in load_projects()])
+        except Exception:  # noqa: BLE001 — no project registry yet
+            return []
+        out: list[dict] = []
+        for root in roots:
+            if not root:
+                continue
+            names = _skills.withheld_for(root)
+            if names:
+                out.append({"root": str(root), "skills": names})
+        return out
+
+    @app.get("/desktop/settings/skills/untrusted", include_in_schema=False)
+    async def untrusted_project_skills(request: Request):  # noqa: ANN202
+        """Skills the OPEN project ships that are waiting on a trust
+        decision. Separate from the catalogue because it is a property of
+        the project, not of the settings scope being viewed."""
+        return {"untrusted": _withheld_rows(request)}
+
+    @app.post("/desktop/settings/skills/trust", include_in_schema=False)
+    async def trust_project_skills(request: Request):  # noqa: ANN202
+        """Agree (or refuse) to run the skills a project folder ships.
+
+        A project's skills come with the repository, so this is the moment
+        the user takes responsibility for instructions and code they may
+        not have read.
+        """
+        from ..tools import skill_trust, skills as _skills
+
+        body = await request.json()
+        root = str(body.get("root") or "").strip()
+        if not root:
+            raise HTTPException(status_code=400, detail="root is required")
+        trusted = bool(body.get("trusted", True))
+        skill_trust.set_trusted(root, trusted)
+        # Discovery is cached per root; the decision must take effect now.
+        _skills.clear_project_skill_cache()
+        return {"root": root, "trusted": trusted}
+
+
     # ------------------------------------------------------------------ skills
     if skill_root:
         sroot = Path(skill_root)
@@ -207,6 +267,8 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
             """
             from ..tools import skill_enablement
 
+            from ..tools import skills as _skills
+
             uid = _scope_user(request)
             return {
                 "skills": skill_enablement.catalog(
@@ -216,7 +278,12 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
                         ([("project", _skill_base(uid))] if uid else [])
                         + [("installed", _skill_base(None))]
                     ),
-                )
+                ),
+                # Project skills withheld pending a trust decision are served
+                # separately (see /skills/untrusted): the question is about the
+                # OPEN project, not about which settings layer is being viewed,
+                # and this endpoint's project_id is scope-dependent.
+                "untrusted": _withheld_rows(request),
             }
 
         @app.patch("/desktop/settings/skills/{skill_name}/enabled", include_in_schema=False)

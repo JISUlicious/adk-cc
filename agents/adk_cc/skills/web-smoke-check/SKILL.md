@@ -4,6 +4,9 @@ description: >
   Verify a page by driving it in a real DOM: click what a user clicks, assert
   what they would see. Use for any page, game, or browser app — reading the
   code or re-implementing its logic proves nothing.
+compatibility: >-
+  Requires Node.js and a DOM runtime (jsdom). Without one the check reports
+  exit code 2 and the page behaviour is unverified.
 metadata:
   x-adk-cc/verify: |
     {"mode": "self", "checks": ["the page was loaded and driven by the runner (its reported tier is quoted), not read or re-implemented", "the check asserts state AFTER the action settles, not merely that a handler exists", "console errors and uncaught page exceptions from the run are reported, including when zero", "coverage limits of the tier are stated before any claim about appearance"]}

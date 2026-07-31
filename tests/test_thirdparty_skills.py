@@ -262,6 +262,9 @@ def main() -> int:
         "---\nname: shared-name\ndescription: From adk-cc's own dir.\n---\n\nBody.\n")
 
     prev = os.environ.pop("ADK_CC_SKILLS_DIR", None)
+    # A project's skills load only once the folder is trusted; that gate has its
+    # own test, so grant it here and keep this about interop.
+    os.environ["ADK_CC_TRUST_PROJECT_SKILLS"] = "1"
     try:
         dirs = [str(d) for d in sk._resolve_skills_dirs(proj)]
         check("the cross-client .agents/skills path is scanned",
@@ -282,6 +285,7 @@ def main() -> int:
     finally:
         if prev is not None:
             os.environ["ADK_CC_SKILLS_DIR"] = prev
+        os.environ.pop("ADK_CC_TRUST_PROJECT_SKILLS", None)
         sk.clear_project_skill_cache()
 
     # --- the real corpus, when this machine has it ----------------------

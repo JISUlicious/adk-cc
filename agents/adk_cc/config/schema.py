@@ -697,6 +697,10 @@ FIELDS: list[Var] = [
     Var("ADK_CC_DISABLE_INTEROP_SKILLS", Tier.ADVANCED, "Skills",
         "Stop scanning the cross-client .agents/skills directories.",
         default=False, parse=as_bool),
+    Var("ADK_CC_TRUST_PROJECT_SKILLS", Tier.ADVANCED, "Skills",
+        "Load a project's own skills without asking. For deployments with no "
+        "way to prompt; a project's skills arrive with its repository.",
+        default=False, parse=as_bool),
 
     # --- Deployment / storage / misc (remaining) -------------------------
     Var("ADK_CC_DESKTOP", Tier.DEV, "Deployment",
