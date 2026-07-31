@@ -107,7 +107,7 @@ from google.adk.tools.skill_toolset import (
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 from ..config.schema import env_bool
-from . import skill_enablement, skill_trust
+from . import skill_enablement, skill_trust, skill_usage
 
 _log = logging.getLogger(__name__)
 
@@ -1098,6 +1098,36 @@ class _LenientLoadSkillResourceTool(LoadSkillResourceTool):
             return None
 
 
+def _invocation_id_of(ctx: Any) -> Optional[str]:
+    """The turn's id, so offers are counted per TURN rather than per request."""
+    try:
+        inv = getattr(ctx, "_invocation_context", None)
+        return str(getattr(inv, "invocation_id", "") or "") or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _already_active(name: str, tool_context: ToolContext) -> bool:
+    """Has this session already loaded this skill?
+
+    Tracked in SESSION state rather than in the process: two sessions are two
+    contexts, and a skill loaded in one is not in the other's. Marks as a side
+    effect — the caller is about to load it.
+    """
+    if not name:
+        return False
+    try:
+        state = tool_context.state
+        key = "temp:skills_loaded"
+        seen = list(state.get(key) or [])
+        if name in seen:
+            return True
+        state[key] = seen + [name]
+    except Exception:  # noqa: BLE001 — no writable state: never block a load
+        return False
+    return False
+
+
 class _BoundedLoadSkillTool(LoadSkillTool):
     """`load_skill` that caps the injected SKILL.md instructions.
 
@@ -1113,7 +1143,26 @@ class _BoundedLoadSkillTool(LoadSkillTool):
         name = args.get("skill_name") or ""
         if name and _denied(name, tool_context):
             return skill_enablement.refusal(name)
+        already = _already_active(name, tool_context)
+        if not already:
+            try:
+                skill_usage.record_used(name)
+            except Exception:  # noqa: BLE001 — never break a load for a counter
+                _log.debug("skills: could not record use of '%s'", name)
         result = await super().run_async(args=args, tool_context=tool_context)
+        if already and isinstance(result, dict) and result.get("instructions"):
+            # The implementer guide's dedupe: these instructions are already in
+            # this session's context, and re-injecting them pays their whole
+            # token cost a second time to say nothing new.
+            _log.info("load_skill: '%s' already active this session", name)
+            return {
+                "skill_name": name,
+                "already_loaded": True,
+                "instructions": (
+                    f"[adk-cc] '{name}' is already loaded in this conversation — "
+                    "its instructions are above and still apply. Nothing was "
+                    "re-sent. Use load_skill_resource for a specific file."),
+            }
         if isinstance(result, dict) and isinstance(result.get("instructions"), str):
             instr = result["instructions"]
             cap = _instructions_max_chars()
@@ -1927,6 +1976,16 @@ class _EnablementAwareSkillToolset(SkillToolset):
             _DEFAULT_SKILL_SYSTEM_INSTRUCTION,
             _skill_prompt.format_skills_as_xml(skills),
         ])
+        # This is the only place that knows what was actually OFFERED on a
+        # turn — after the enablement filter, before the model chooses. Paired
+        # with the activation count in `load_skill`, it tells a skill's author
+        # whether their description is doing its job.
+        try:
+            skill_usage.record_offered(
+                [s.frontmatter.name for s in skills],
+                _invocation_id_of(tool_context))
+        except Exception:  # noqa: BLE001 — a counter must never break a turn
+            _log.debug("skills: could not record offers", exc_info=True)
 
 
 def _install_wider_script_launcher() -> None:

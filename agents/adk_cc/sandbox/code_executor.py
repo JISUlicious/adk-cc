@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import hashlib
 import re
 import shlex
 import threading
@@ -115,9 +116,19 @@ class SandboxBackedCodeExecutor(BaseCodeExecutor):
                 ),
             )
 
-        # Stable name for stateful execution_id so the model can refer to
-        # files between turns; ephemeral otherwise.
-        eid = code_execution_input.execution_id or "scratch"
+        # Stable name for a stateful execution_id so the model can refer to
+        # files between turns. WITHOUT one, the name is derived from the code
+        # itself rather than being the constant "scratch": two executions
+        # running at once shared that single file, and the second write landed
+        # while the first was still being read.
+        #
+        # Measured live: a model ran `premodel_audit.py` and `collinearity_probe.py`
+        # in the same moment and BOTH died with `SyntaxError: unmatched ')'` at
+        # the same line of scratch.py — two halves of two different programs.
+        # Content-addressed means identical code still shares one file (so a
+        # retry is idempotent) while different code never collides.
+        eid = code_execution_input.execution_id or "scratch-" + hashlib.sha256(
+            (code_execution_input.code or "").encode("utf-8")).hexdigest()[:12]
         rel_tmpfile = f".adk-cc/code/{eid}.py"
         abs_tmpfile = os.path.join(ws.abs_path, rel_tmpfile)
 

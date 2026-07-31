@@ -253,6 +253,19 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
               shadows {s.shadows.map((x) => x.source).join(", ")}
             </span>
           )}
+          {s.usage && s.usage.offered > 0 && (
+            <span
+              className={`text-[10px] ${s.usage.used === 0 && s.usage.offered >= 10 ? "text-amber-600 dark:text-amber-500" : "text-muted-foreground"}`}
+              data-skill-usage={s.name}
+              title={
+                s.usage.used === 0
+                  ? "Offered to the model on this many turns and never chosen — usually the description, which is what the model matches against."
+                  : "Turns where this skill was offered, and times it was loaded."
+              }
+            >
+              {s.usage.used}/{s.usage.offered} used
+            </span>
+          )}
           {installed.includes(s.name) && (
             <button onClick={() => del(s.name)} className="ml-auto text-muted-foreground hover:text-destructive" title="Remove"><Trash2 className="h-3.5 w-3.5" /></button>
           )}

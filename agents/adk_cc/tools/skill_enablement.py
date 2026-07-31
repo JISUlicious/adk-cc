@@ -258,6 +258,7 @@ def catalog(
     the moment toggles exist: a project skill silently replacing a built-in of
     the same name means turning "the built-in" off does nothing visible.
     """
+    from . import skill_usage
     from .skills import (
         _load_skills_from_dir,
         _resolve_skills_dirs,
@@ -308,10 +309,18 @@ def catalog(
     # Notes for skills that DID load: a spec breach adk-cc tolerated, or advice
     # for the author. Separate from `problem`, which means the skill is absent.
     diags = skill_diagnostics()
+    counts = skill_usage.usage()
     for row in rows:
         notes = diags.get(row["name"]) or []
         if notes:
             row["notes"] = notes
+        # Offered vs used. The spec makes the description responsible for
+        # triggering, and nothing anywhere tells an author theirs is not
+        # working; a large offered count against zero uses says it plainly.
+        count = counts.get(row["name"])
+        if count:
+            row["usage"] = {"offered": int(count.get("offered", 0)),
+                            "used": int(count.get("used", 0))}
 
     # Installed but unloadable. Without this the skill is simply absent from
     # the list, which reads as "not installed" — measured on a published skill

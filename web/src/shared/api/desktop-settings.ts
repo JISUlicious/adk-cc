@@ -84,6 +84,11 @@ export type SkillCatalogEntry = {
    * repaired or tolerated (the guide prescribes loading anyway); `advice` =
    * guidance for the skill's author, never enforced. */
   notes?: { severity: "warning" | "advice"; message: string }[]
+  /** Turns this skill was OFFERED to the model vs times it was actually
+   * loaded. The spec makes the description responsible for triggering, so a
+   * large `offered` against `used: 0` points at the description — the feedback
+   * loop the ecosystem lacks. */
+  usage?: { offered: number; used: number }
 }
 /** A project folder whose bundled skills are withheld pending a trust
  *  decision. They arrive with the repository, so running them is the user's

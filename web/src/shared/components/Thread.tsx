@@ -17,6 +17,7 @@ import {
 import { ArtifactChip } from "./ArtifactChip"
 import { CompactionDivider } from "./CompactionDivider"
 import { BashTerminalCard } from "./BashTerminalCard"
+import { SkillCard } from "./SkillCard"
 import { FileEditCard } from "./FileEditCard"
 import { PlanCard } from "./PlanCard"
 import { ExitPlanCard } from "./ExitPlanCard"
@@ -70,9 +71,16 @@ const ASK_QUESTION_NAME = "ask_user_question"
 // pair) to avoid a duplicate ToolResponseCard right below.
 const PAIRED_RENDERERS: Record<
   string,
-  "bash" | "edit" | "write" | "plan_read" | "plan_write" | "plan_exit"
+  "bash" | "edit" | "write" | "plan_read" | "plan_write" | "plan_exit" | "skill"
 > = {
   run_bash: "bash",
+  // A skill activation says which skill was chosen and what it cost; as a
+  // generic tool row it said neither, which is two of the ecosystem's standing
+  // complaints reproduced in our own UI.
+  load_skill: "skill",
+  run_skill_script: "skill",
+  load_skill_resource: "skill",
+  search_skill_resource: "skill",
   edit_file: "edit",
   write_file: "write",
   read_current_plan: "plan_read",
@@ -319,6 +327,8 @@ function Row({
       }
 
       switch (pairKind) {
+        case "skill":
+          return <SkillCard name={name} args={args} response={response} />
         case "bash":
           return <BashTerminalCard callId={callId} args={args} response={response} />
         case "edit":
@@ -423,6 +433,11 @@ function isGroupableToolRow(
   if (row.kind === "function_response") return true
   if (row.kind === "tool_pair") {
     if (PLAN_PAIR_KINDS.has(row.pairKind)) return false
+    // A skill activation is never folded away, for the same reason a plan is
+    // not: "which skill did it choose, and what did that cost" is the question
+    // this row exists to answer, and behind a "6 tool calls" header it answers
+    // nothing. Measured — the card rendered correctly and was invisible.
+    if (row.pairKind === "skill") return false
     const interactive =
       pendingCallIds.has(row.callId) &&
       (CONFIRMATION_NAMES.has(row.name) || row.name === ASK_QUESTION_NAME)
@@ -483,6 +498,7 @@ type ChatRow =
         | "plan_read"
         | "plan_write"
         | "plan_exit"
+        | "skill"
         | "generic"
       args: unknown
       /** null while the response hasn't landed yet. */
