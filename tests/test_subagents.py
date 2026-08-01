@@ -97,7 +97,7 @@ async def _scenario():
         # coroutine until the next await, so a lazily-created event would not
         # exist when the test tries to set it.
         for t in ("auth flow", "sandbox backends", "css pipeline",
-                  "q1", "q2", "stray", "a", "b"):
+                  "q1", "q2", "stray", "a", "b", "slowpoke"):
             finish[t] = asyncio.Event()
 
         # --- spawn returns immediately, children keep running -------------
@@ -139,6 +139,23 @@ async def _scenario():
               all(d["report"] == f"report for {d['task']}" for d in got["done"]))
         check("nothing is left running afterwards",
               sa.running_children(skey) == [] and skey not in sa._REGISTRY)
+
+        # --- an empty timed-out collect explains itself ----------------------
+        # Measured live: first_done+timeout_s=20 returned nothing, the model
+        # cancelled everything, re-spawned, repeated the pattern — six
+        # explorers, zero reports — then answered from memory and the NEXT
+        # turn avoided the feature entirely. The empty result must teach.
+        out = await spawn.run_async(args={"tasks": ["slowpoke"]}, tool_context=ctx)
+        got = await collect.run_async(
+            args={"wait": "first_done", "timeout_s": 0.05}, tool_context=ctx)
+        check("an empty timed-out collect says the explorers just need time",
+              got["done"] == [] and "30-120s" in got.get("note", ""), got)
+        check("and nothing was killed by it",
+              len(sa.running_children(skey)) == 1)
+        finish["slowpoke"].set()
+        got = await collect.run_async(args={}, tool_context=ctx)
+        check("collecting again then simply works",
+              len(got["done"]) == 1, got)
 
         # --- enough already: cancel the rest --------------------------------
         out = await spawn.run_async(args={"tasks": ["q1", "q2"]},

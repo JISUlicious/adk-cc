@@ -331,7 +331,8 @@ class SpawnExplorersTool(BaseTool):
         return {
             "spawned": spawned,
             "running": len(running_children(skey)),
-            "next": "call collect_explorers (default waits for all)",
+            "next": ("call collect_explorers — default waits for all; "
+                     "explorers typically need 30-120s each"),
         }
 
 
@@ -347,10 +348,15 @@ class CollectExplorersTool(BaseTool):
                 "at least one finishes (the rest keep running — collect again "
                 "or set cancel_remaining=true once you have enough). Each "
                 "report is {id, task, ok, report, elapsed_s, tool_calls, "
-                "tools_used, error?}. CAREFUL with cancel_remaining: it "
+                "tools_used, error?}. TIMING: an explorer typically needs "
+                "30-120s (it makes its own model calls) — first_done with NO "
+                "timeout returns at the first real completion and is the "
+                "right way to get the fastest answer; a short timeout that "
+                "expires returns nothing. CAREFUL with cancel_remaining: it "
                 "DISCARDS the work of anything still running — a timed-out "
                 "explorer can simply be collected again later, so only cancel "
-                "when you truly no longer need those answers."),
+                "when you truly no longer need those answers, and never on a "
+                "collect that returned zero reports."),
         )
 
     def _get_declaration(self) -> types.FunctionDeclaration:
@@ -403,6 +409,7 @@ class CollectExplorersTool(BaseTool):
                              else asyncio.ALL_COMPLETED),
             )
 
+        got_nothing_hint = None
         done, running = [], []
         for c in children:
             if c.atask.done():
@@ -421,6 +428,19 @@ class CollectExplorersTool(BaseTool):
                 running.append({"id": c.id, "task": c.task_text,
                                 "elapsed_s": round(
                                     time.perf_counter() - c.started, 1)})
+
+        if not done and running and (mode == "first_done" or timeout):
+            # Measured live: first_done + timeout_s=20 + cancel_remaining
+            # returned zero reports, cancelled all three, the model re-spawned
+            # and repeated the identical pattern — six explorers, zero reports,
+            # answer silently from memory. And the NEXT turn routed around the
+            # feature entirely: in-context, "explorers yield nothing" had been
+            # learned. An empty collect must carry its own explanation.
+            got_nothing_hint = (
+                "no explorer has finished YET — they typically need 30-120s "
+                "each. Collect again (first_done with no timeout returns at "
+                "the first real completion). Cancelling now would discard all "
+                "their work for nothing.")
 
         if args.get("cancel_remaining") and running:
             # Name what died. Measured in real use: the model set wait=all +
@@ -448,7 +468,10 @@ class CollectExplorersTool(BaseTool):
             extra = {}
         if not bucket:
             _REGISTRY.pop(skey, None)
-        return {"done": done, "running": running, **extra}
+        out = {"done": done, "running": running, **extra}
+        if got_nothing_hint and not out.get("cancelled"):
+            out["note"] = got_nothing_hint
+        return out
 
 
 # --- lifecycle -------------------------------------------------------------
