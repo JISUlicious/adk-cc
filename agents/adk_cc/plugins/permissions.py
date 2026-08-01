@@ -204,6 +204,30 @@ def _read_persist_toggle(confirmation: Any) -> bool:
     return payload.get("persist_across_sessions") is True
 
 
+def _in_subagent(tool_context: ToolContext) -> bool:
+    """Is this tool call running inside a spawned sub-agent's session?
+
+    A sub-agent has no human: its events never reach the UI, so a
+    confirmation raised there has no one to answer it — the fan-out would
+    hang. Every would-ask below becomes a structured deny instead, telling
+    the coordinator to do that step itself.
+    """
+    try:
+        return bool(tool_context.state.get("subagent"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _subagent_deny(reason: str) -> dict:
+    return {
+        "status": "permission_denied",
+        "error": ("this operation needs user confirmation, and no user is "
+                  "reachable from a sub-agent — report the finding without it, "
+                  "or the coordinator must perform this step itself"),
+        "reason": reason,
+    }
+
+
 def _load_state_rules(tool_context: ToolContext) -> list[PermissionRule]:
     """Load runtime ALLOW rules from session state. Reads both the
     per-session key and the per-user key; rules are returned in the
@@ -316,6 +340,8 @@ class PermissionPlugin(BasePlugin):
             return self._deny_result(decision)
 
         if decision.behavior == "ask":
+            if _in_subagent(tool_context):
+                return _subagent_deny(decision.reason)
             # Two-call confirmation pattern (mirrors AdkCcTool.run_async):
             # the first invocation has tool_confirmation=None and asks;
             # ADK pauses the flow; user confirms (or denies) via the
@@ -487,6 +513,9 @@ class PermissionPlugin(BasePlugin):
                 "reason": "User declined to run this skill script.",
             }
 
+        if _in_subagent(tool_context):
+            return _subagent_deny("skill scripts cannot be confirmed from a "
+                                  "sub-agent")
         if not tool_context.function_call_id:
             return None      # no HITL channel (some test contexts) — don't block
 
@@ -674,6 +703,10 @@ class PermissionPlugin(BasePlugin):
         # plan-mode block, protected-deny) — let decide() deny it via the main flow.
         if _decide().behavior == "deny":
             return _CONTINUE
+        if _in_subagent(tool_context):
+            # No human to grant scope from inside a sub-agent.
+            return _subagent_deny(
+                f"{tool.meta.name} targets a path outside the project scope")
         if not tool_context.function_call_id:
             return _CONTINUE  # no HITL channel; gate 2 will still deny
 

@@ -88,6 +88,7 @@ from .plugins import (
 )
 from .plugins.model_session import ModelSessionPlugin
 from .plugins.secret_redaction import SecretRedactionPlugin
+from .tools.subagents import SubagentCleanupPlugin
 from .plugins.truncated_tool_call import TruncatedToolCallPlugin
 from .credentials import credential_provider_from_env
 from .config.schema import env_bool
@@ -527,6 +528,33 @@ if _tenant_mcp is not None:
     _coordinator_tools.append(_tenant_mcp)
 if _tenant_skills is not None:
     _coordinator_tools.append(_tenant_skills)
+
+# --- Spawnable sub-agents (opt-in: ADK_CC_SUBAGENTS=1) ----------------------
+# Reopened from feat/agent-tool-parallel-explore with a changed shape (user
+# decisions, 2026-08-01): ONE merged read-only explorer (code + web, nothing
+# interactive), spawn/collect instead of one-call-per-explorer so the
+# coordinator can wait for all (default) OR resume early once part of the
+# batch already answers the question. Strays are cancelled at invocation end
+# and on session abort. Distinct from the transfer-based `Explore` specialist,
+# which stays sequential and in-session.
+if os.environ.get("ADK_CC_SUBAGENTS") == "1":
+    from .tools.subagents import CollectExplorersTool, SpawnExplorersTool
+
+    _spawned_explorer = LlmAgent(
+        name="explorer",
+        model=MODEL,
+        description=(
+            "Read-only explorer for ONE focused question — codebase or web. "
+            "Runs isolated from the chat; returns a structured report."
+        ),
+        instruction=prompts.EXPLORE_INSTRUCTION,
+        # Read-only by construction, and NOTHING interactive: a sub-agent has
+        # no human to ask, and the permission plugin turns any would-ask into
+        # a deny. No write tools, no bash, no skills.
+        tools=[_read_file, _glob_files, _grep, _web_fetch],
+    )
+    _coordinator_tools.append(SpawnExplorersTool(_spawned_explorer))
+    _coordinator_tools.append(CollectExplorersTool())
 
 # Knowledge-wiki memory tools (opt-in, ADK_CC_WIKI=1). User-scope writes
 # only: wiki_add captures to the caller's PRIVATE inbox; the offline
@@ -1186,6 +1214,9 @@ _app_kwargs = dict(
         # when no CredentialProvider is configured.
         SecretRedactionPlugin(credential_provider_from_env()),
         AuditPlugin(),
+        # Cancels spawned-explorer strays when an invocation ends (opt-in
+        # subagents; inert otherwise — the registry is simply empty).
+        SubagentCleanupPlugin(),
         # Copies a session's pinned model (state: model_endpoint/model_id,
         # set by /model in chat) into the SelectableLlm contextvar before
         # every model call. Order-independent — nothing else reads it during

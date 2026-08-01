@@ -259,6 +259,11 @@ class TurnBroker:
     ) -> int:
         """Cancel every running turn for a session. Returns how many.
 
+        Also kills spawned sub-agent children: they are independent asyncio
+        tasks, so cancelling the turn task alone would leave explorers
+        running against a session the user just deleted (#87's lesson,
+        applied to the nested tree).
+
         Deleting a session used to leave its run going: the row/file went away,
         the broker kept driving, and the next `append_event` re-created the
         session — so the UI carried on streaming and the "deleted" session
@@ -267,6 +272,12 @@ class TurnBroker:
         Scans all turns rather than using `_latest_by_session`, because a
         confirmation retry can leave an earlier turn running for the same
         session and only the latest is indexed."""
+        try:
+            from ..tools.subagents import cancel_children
+
+            cancel_children(f"{app_name}/{user_id}/{session_id}")
+        except Exception:  # noqa: BLE001 — abort must never fail on cleanup
+            pass
         stopped = 0
         for t in list(self._turns.values()):
             if (t.app_name, t.user_id, t.session_id) != (app_name, user_id, session_id):

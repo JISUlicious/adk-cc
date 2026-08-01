@@ -697,6 +697,12 @@ FIELDS: list[Var] = [
     Var("ADK_CC_DISABLE_INTEROP_SKILLS", Tier.ADVANCED, "Skills",
         "Stop scanning the cross-client .agents/skills directories.",
         default=False, parse=as_bool),
+    Var("ADK_CC_SUBAGENTS", Tier.ADVANCED, "Behavior",
+        "Enable spawnable read-only explorer sub-agents (spawn_explorers / "
+        "collect_explorers).", default=False, parse=as_bool),
+    Var("ADK_CC_SUBAGENTS_MAX", Tier.ADVANCED, "Behavior",
+        "Max explorer sub-agents running concurrently; extras queue.",
+        default=8, parse=as_int),
     Var("ADK_CC_TRUST_PROJECT_SKILLS", Tier.ADVANCED, "Skills",
         "Load a project's own skills without asking. For deployments with no "
         "way to prompt; a project's skills arrive with its repository.",
