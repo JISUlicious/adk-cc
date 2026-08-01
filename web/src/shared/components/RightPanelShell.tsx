@@ -48,6 +48,7 @@ export function RightPanelShell({
   onClose,
   headerRight,
   children,
+  footer,
 }: {
   /** Panel name. A ReactNode so a panel can hang context off it (the desktop
    * file tree shows the project path) while collapse/expand labels still read
@@ -59,6 +60,9 @@ export function RightPanelShell({
   onClose: () => void
   headerRight?: ReactNode
   children: ReactNode
+  /** Pinned below the scrollable body — the sub-agents dock lives here so it
+   * stays visible however deep the file tree/artifact view scrolls. */
+  footer?: ReactNode
 }) {
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
@@ -189,6 +193,7 @@ export function RightPanelShell({
           <div className="adk-right-panel-body min-h-0 flex-1 overflow-y-auto">
             {children}
           </div>
+          {footer}
         </div>
       </aside>
     </>

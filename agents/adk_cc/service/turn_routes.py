@@ -94,6 +94,17 @@ def mount_turn_routes(app: Any, broker: Any) -> None:
             raise HTTPException(status_code=409, detail=str(e))
         return JSONResponse(turn.snapshot(), status_code=201)
 
+    @app.get("/api/subagents", include_in_schema=False)
+    async def subagents_status(app_name: str, user_id: str,
+                               session_id: str):  # noqa: ANN202
+        """Live snapshot of a session's spawned sub-agents, for the right-panel
+        dock. Children run server-side and stream nothing to the thread, so
+        without this the only sign of them is the pending collect row."""
+        from ..tools.subagents import children_snapshot
+
+        return {"children": children_snapshot(
+            f"{app_name}/{user_id}/{session_id}")}
+
     @app.get("/api/turns/latest", include_in_schema=False)
     async def latest_turn(appName: str, userId: str, sessionId: str):
         turn = broker.latest_for(appName, userId, sessionId)

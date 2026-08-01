@@ -30,6 +30,7 @@ import {
   type Checkpoint,
 } from "@/shared/api/desktop-checkpoint"
 import { RightPanelShell, type RightPanelProps } from "@/shared/components/RightPanelShell"
+import { SubagentsDock } from "@/shared/components/SubagentsDock"
 import { SandboxedHtml } from "@/shared/components/SandboxedHtml"
 import { Database } from "lucide-react"
 import { listProjects } from "@/shared/api/projects"
@@ -498,6 +499,7 @@ export function FileTreeSidePanel({
 
   return (
     <RightPanelShell
+      footer={<SubagentsDock appName={appName} userId={projectId} sessionId={sessionId} />}
       title={
         <span className="flex min-w-0 items-baseline gap-1.5">
           Files

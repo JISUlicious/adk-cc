@@ -113,6 +113,21 @@ def running_children(session_key: str) -> list[dict[str, Any]]:
     return out
 
 
+def children_snapshot(session_key: str) -> list[dict[str, Any]]:
+    """Everything the session's registry holds, for the UI dock: running
+    children AND finished-but-uncollected ones (the coordinator has not
+    called collect yet — to a user, those are still 'the sub-agents')."""
+    out = []
+    for c in (_REGISTRY.get(session_key) or {}).values():
+        out.append({
+            "id": c.id,
+            "task": c.task_text,
+            "elapsed_s": round(time.perf_counter() - c.started, 1),
+            "status": "done" if c.atask.done() else "running",
+        })
+    return out
+
+
 def cancel_children(session_key: str,
                     invocation_id: Optional[str] = None) -> int:
     """Cancel (and forget) children — the whole session's, or one turn's.

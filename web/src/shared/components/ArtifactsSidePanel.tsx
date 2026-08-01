@@ -9,6 +9,7 @@ import {
 } from "@/shared/api/artifacts"
 import { HtmlArtifactPreview } from "./HtmlArtifactPreview"
 import { RightPanelShell, type RightPanelProps } from "./RightPanelShell"
+import { SubagentsDock } from "@/shared/components/SubagentsDock"
 import { CodeView } from "@/shared/components/CodeView"
 import { Markdown } from "@/shared/lib/markdown"
 import { isMarkdown, langFromPath } from "@/shared/lib/filetypes"
@@ -92,7 +93,13 @@ export function ArtifactsSidePanel({
   )
 
   return (
-    <RightPanelShell title="Artifacts" open={open} onClose={onClose} headerRight={refresh}>
+    <RightPanelShell
+      title="Artifacts"
+      open={open}
+      onClose={onClose}
+      headerRight={refresh}
+      footer={<SubagentsDock appName={appName} userId={userId} sessionId={sessionId} />}
+    >
       {selected ? (
         <ArtifactViewer
           appName={appName}

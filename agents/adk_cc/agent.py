@@ -579,6 +579,25 @@ root_agent = LlmAgent(
     sub_agents=[explore_agent, verify_agent],
 )
 
+if os.environ.get("ADK_CC_SUBAGENTS") == "1":
+    # Adoption needs saying, not just offering: measured live, the coordinator
+    # answered a three-question ask by fanning out DIRECT glob/grep/read calls
+    # and never touched spawn_explorers — the tool description alone does not
+    # outweigh habit, and every one of those results landed in ITS context.
+    root_agent.instruction += (
+        "\n\n## Spawning explorers\n"
+        "When a request contains SEVERAL independent questions, or needs a "
+        "broad sweep (many files, many directions), prefer `spawn_explorers` "
+        "— one task per question — over exploring inline: explorers run in "
+        "parallel in their own context, and only their REPORTS enter yours. "
+        "Then `collect_explorers`; the default waits for all, which is "
+        "usually right. If an early subset already answers the user, collect "
+        "with wait='first_done' and, once you have enough, "
+        "cancel_remaining=true. Do NOT spawn for a single quick lookup — one "
+        "grep beats one sub-agent. Each task string is the explorer's entire "
+        "briefing; it shares no chat history."
+    )
+
 
 # ---------- ADK events compaction (primary context-length defense) ----------
 # When configured via env, ADK runs token-threshold or sliding-window
