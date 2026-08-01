@@ -77,6 +77,15 @@ async def _scenario():
                                 task=task_text, agent="explorer",
                                 elapsed_s=0.1, tool_calls=2)
 
+    # The real _run_child labels a zero-tool report; assert via the real
+    # envelope path (measured live: an "explorer" answered from model memory
+    # in 24s, zero tool calls, and was presented as research).
+    lazy = sa.enrich_result("from memory", id="x", task="t", agent="explorer",
+                            tool_calls=0)
+    # enrich_result itself stays pure — the label is _run_child's; emulate its
+    # condition here to pin the contract:
+    assert "note" not in lazy
+
     real = sa._run_child
     sa._run_child = fake_child
     try:
@@ -140,7 +149,15 @@ async def _scenario():
             tool_context=ctx)
         check("cancel_remaining kills what is still running",
               len(got["done"]) == 1 and got.get("running") == []
-              and "cancelled" in got.get("note", ""), got)
+              and "DISCARDED" in got.get("note", ""), got)
+        # Measured in real use: a timeout+cancel collect destroyed a report and
+        # the note did not say WHICH question was lost — the model then covered
+        # that topic from memory, indistinguishable from research. The
+        # cancelled list names them.
+        check("what was cancelled is NAMED, task and all",
+              got.get("cancelled") == [{"id": [s["id"] for s in out["spawned"]
+                                              if s["task"] == "q2"][0],
+                                        "task": "q2"}], got.get("cancelled"))
         check("and the registry is clean",
               skey not in sa._REGISTRY)
 

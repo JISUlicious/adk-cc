@@ -259,12 +259,20 @@ async def _run_child(agent: Any, task_text: str, ctx: ToolContext,
         except Exception as e:  # noqa: BLE001 — a failed child is a RESULT
             ok, error = False, f"{type(e).__name__}: {str(e)[:300]}"
 
-    return enrich_result(
+    env = enrich_result(
         last_text, id=child_id, task=task_text, agent=getattr(agent, "name", "?"),
         ok=ok and bool(last_text), error=error if error else (
             None if last_text else "explorer returned no report"),
         elapsed_s=time.perf_counter() - t_start, queued_s=queued_s,
         tool_calls=tool_calls, tools_used=tools_used, events=n_events)
+    if env["ok"] and tool_calls == 0:
+        # Measured in real use: an "explorer" answered a comparison question
+        # from model memory in 24s — zero tool calls — and the coordinator
+        # presented it as research. The envelope already exposed the count;
+        # the label makes it impossible to miss.
+        env["note"] = ("no tools were used — this report is from model "
+                       "memory, not research; treat accordingly")
+    return env
 
 
 # --- the tools --------------------------------------------------------------
@@ -339,7 +347,10 @@ class CollectExplorersTool(BaseTool):
                 "at least one finishes (the rest keep running — collect again "
                 "or set cancel_remaining=true once you have enough). Each "
                 "report is {id, task, ok, report, elapsed_s, tool_calls, "
-                "tools_used, error?}."),
+                "tools_used, error?}. CAREFUL with cancel_remaining: it "
+                "DISCARDS the work of anything still running — a timed-out "
+                "explorer can simply be collected again later, so only cancel "
+                "when you truly no longer need those answers."),
         )
 
     def _get_declaration(self) -> types.FunctionDeclaration:
@@ -412,13 +423,27 @@ class CollectExplorersTool(BaseTool):
                                     time.perf_counter() - c.started, 1)})
 
         if args.get("cancel_remaining") and running:
+            # Name what died. Measured in real use: the model set wait=all +
+            # timeout_s + cancel_remaining on its FIRST collect, the timeout
+            # cancelled a still-running explorer, and the final answer covered
+            # that topic from model memory in the same confident voice as the
+            # researched ones — with a note that did not even say WHICH task
+            # was lost, honesty was not an option.
+            cancelled = []
             for r in running:
                 c = bucket.get(r["id"])
                 if c is not None:
                     c.atask.cancel()
                     bucket.pop(c.id, None)
-            note = f"cancelled {len(running)} still-running explorer(s)"
-            running, extra = [], {"note": note}
+                cancelled.append({"id": r["id"], "task": r["task"]})
+            running, extra = [], {
+                "cancelled": cancelled,
+                "note": (
+                    "cancelled and DISCARDED "
+                    f"{len(cancelled)} still-running explorer(s) — their "
+                    "questions are now UNRESEARCHED. Say so in your answer, "
+                    "or re-spawn them."),
+            }
         else:
             extra = {}
         if not bucket:
