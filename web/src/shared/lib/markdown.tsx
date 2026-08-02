@@ -168,11 +168,32 @@ function nodeText(node: React.ReactNode): string {
   return ""
 }
 
+/** A line that is JUST a number and a dot — "1902." — is, per CommonMark, an
+ * EMPTY ordered-list item: it renders as a hanging `<ol start=1902>` marker
+ * with no content. Seen live: a model answered "1902.\n\nCaveat: …" and the
+ * year displayed as a stray mis-indented marker above the caveat paragraph.
+ * No chat answer ever means an empty numbered list, so escape the delimiter
+ * and let the line read as literal text. Fenced code blocks are left alone. */
+export function escapeBareOrdinals(body: string): string {
+  let inFence = false
+  return body
+    .split("\n")
+    .map((line) => {
+      if (/^\s*(```|~~~)/.test(line)) inFence = !inFence
+      else if (!inFence) {
+        const m = /^(\s*)(\d+)([.)])\s*$/.exec(line)
+        if (m) return `${m[1]}${m[2]}\\${m[3]}`
+      }
+      return line
+    })
+    .join("\n")
+}
+
 /** GFM markdown rendered with the shared component map. */
 export function Markdown({ children }: { children: string }) {
   return (
     <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
-      {children}
+      {escapeBareOrdinals(children)}
     </ReactMarkdown>
   )
 }
