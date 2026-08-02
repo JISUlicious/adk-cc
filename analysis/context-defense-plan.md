@@ -28,9 +28,36 @@ shipped for it. Task #100 traced the root cause; this plan closes the class.
 | F7 | Overflow invisible to the user | error-event → turn ERROR + Retry; retry countdown | shipped (`245b42b`, `4face97`) |
 | F0 | The haul happening at all | routing: explicit-parallel asks → `spawn_explorers` (report-only crossing) | instruction sharpening shipped; see P1 note on demoting transfer |
 
+## Corrected mechanics (2026-08-02, after re-examining the incident)
+
+The transferred sub-agent DID inherit the plugin chain, and its context WAS
+being actively managed mid-turn — by `MicrocompactPlugin`
+(ADK_CC_MICROCOMPACT=1 in production; incident-window logs show "evicted 1
+tool result(s), ~32,779 tokens freed" etc.). That is why Explore's reported
+prompt usage SHRANK across its calls (115,927 → 106,780 → 82,207 → 76,349)
+and why Explore itself never overflowed.
+
+The incident lived in a **boundary shape change**: microcompact matches
+only `function_response` parts of allowlisted tools. When control returned
+to the coordinator, ADK re-rendered the same results as TEXT parts
+(`[Explore] \`web_fetch\` tool returned result: …`) — a shape microcompact
+cannot see. The guard was blind for a separate reason (the stale-usage
+shortcut, since fixed), and App-level compaction is post-invocation. Three
+defenses, three distinct blind spots, one incident in their intersection.
+
+Consequence for this plan: request-side rewriting already has a proven
+home. **P0/P1 extend MicrocompactPlugin** instead of growing a parallel
+engine off the guard — one subsystem owns request rewriting (stub +
+summarize, both shapes), the guard keeps measurement + the REJECT floor,
+and the reject-line eviction shipped in `ca189db` folds into the same
+module (it was partial duplication of microcompact, built before this
+re-examination). Plugin order (microcompact → guard) already ensures the
+guard measures post-rewrite sizes.
+
 ## The shared engine (P0): cached per-result summarization
 
-One module powers L1 and L3 — `agents/adk_cc/context/result_summaries.py`:
+One module powers L1 and L3 — `agents/adk_cc/context/result_summaries.py`
+— consumed by MicrocompactPlugin (per the corrected mechanics above):
 
 - **Window = one tool result.** Each result is bounded by the tool's own cap
   (~60KB ≈ 20k tokens), so every summarization fits any summarizer window.
@@ -65,12 +92,12 @@ today's eviction.
 The user-named requirement: compaction at the END of the sub-agent's turns,
 so its haul never reaches the parent's context.
 
-- **Mechanism: request-side substitution, not session mutation.** A
-  `before_model_callback` (in ContextGuard, reusing the P0 engine) detects
-  ADK's foreign-tool-result text parts (`_FOREIGN_RESULT_RE`, already
-  shipped for eviction) **above a low per-result threshold (default 8KB)**
-  and substitutes cached summaries — at EVERY parent call, not just the
-  reject line. The parent then never sees a sub-agent's raw haul, only
+- **Mechanism: request-side substitution, not session mutation.**
+  MicrocompactPlugin grows a second shape: ADK's foreign-tool-result text
+  parts (`_FOREIGN_RESULT_RE`, shipped in `ca189db`) **above a low
+  per-result threshold (default 8KB)** get cached summaries substituted —
+  at EVERY parent call, not just the reject line, alongside its existing
+  function_response stubbing. The parent then never sees a sub-agent's raw haul, only
   distilled results + the sub-agent's own final text. Injecting a
   compaction event mid-invocation (the "at handback" moment) is avoided
   on purpose: ADK is appending events concurrently and its semantics for
