@@ -120,11 +120,26 @@ const BROKER_CONTINUE = "Continue."
 
 function isBrokerContinue(events: RunEvent[], i: number, text: string): boolean {
   if (text.trim() !== BROKER_CONTINUE) return false
-  const prev = events[i - 1]
-  if (!prev) return false
-  for (const p of prev.content?.parts ?? []) {
-    if (p.functionResponse) return true
-    if (p.functionCall && HIDDEN_TOOL_NAMES.has(p.functionCall.name ?? "")) return true
+  // Authoritative: the broker stamps its synthetic message via state_delta
+  // (a temp: key — never persisted into session STATE, but the recorded
+  // event keeps it).
+  const actions = (events[i]?.actions ?? {}) as Record<string, unknown>
+  const delta = actions.stateDelta as Record<string, unknown> | undefined
+  if (delta && delta["temp:adk_cc_auto_continue"]) return true
+  // Fallback for history recorded before the marker existed. The broker only
+  // emits after a function response or a handback — but resumable runs put
+  // PART-LESS checkpoint events in between (end-of-agent, an error event,
+  // the session-title write), so looking at exactly one previous event
+  // missed (measured live: a stray "Continue." bubble four events after its
+  // handback). Walk back over the empty ones.
+  for (let j = i - 1, hops = 0; j >= 0 && hops < 8; j--, hops++) {
+    const parts = events[j].content?.parts ?? []
+    if (parts.length === 0) continue
+    for (const p of parts) {
+      if (p.functionResponse) return true
+      if (p.functionCall && HIDDEN_TOOL_NAMES.has(p.functionCall.name ?? "")) return true
+    }
+    return false
   }
   return false
 }

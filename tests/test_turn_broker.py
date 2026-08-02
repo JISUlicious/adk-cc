@@ -239,11 +239,13 @@ def test_dangling_handback_autocontinue() -> None:
         def __init__(self):
             self.rounds = 0
             self.messages = []
+            self.deltas = []
 
         async def run_async(self, *, user_id, session_id, new_message,
                             state_delta=None):
             self.rounds += 1
             self.messages.append(new_message)
+            self.deltas.append(state_delta)
             if self.rounds == 1:
                 yield _Ev(hb)                     # resumed run dies on handback
             else:
@@ -265,8 +267,96 @@ def test_dangling_handback_autocontinue() -> None:
         assert fr.rounds == 2, fr.rounds          # exactly one auto-continue
         parts = getattr(fr.messages[1], "parts", None)
         assert parts and parts[0].text == "Continue."
+        # The synthetic message is MARKED via the round's state_delta (a
+        # temp: key rides the injected user event; the UI hides the bubble).
+        assert fr.deltas[1] == {"temp:adk_cc_auto_continue": True}, fr.deltas
     asyncio.run(main())
     print("OK test_dangling_handback_autocontinue")
+
+
+def test_error_event_ends_turn_no_autocontinue() -> None:
+    """Measured live: Explore handed back, the coordinator's model call blew
+    the context window — surfaced as an in-stream ERROR EVENT, not an
+    exception — and the broker (a) auto-continued into the identical failure
+    and (b) finished the turn "done", burying the error under a stray
+    "Continue." bubble. An unresolved error event must end the turn AS an
+    error, with no continue."""
+    hb = types.Content(role="model", parts=[types.Part(
+        function_call=types.FunctionCall(name="_handback_to_coordinator", args={}))])
+
+    class _Ev:
+        def __init__(self, content, author="Explore", error_code=None,
+                     error_message=None):
+            self.content = content
+            self.author = author
+            self.error_code = error_code
+            self.error_message = error_message
+
+        def model_dump_json(self, **kw):
+            return "{}"
+
+    class _FakeRunner:
+        def __init__(self):
+            self.rounds = 0
+
+        async def run_async(self, *, user_id, session_id, new_message,
+                            state_delta=None):
+            self.rounds += 1
+            yield _Ev(hb)
+            yield _Ev(None, author="coordinator",
+                      error_code="chatgpt_stream_error",
+                      error_message="Your input exceeds the context window")
+
+    async def main():
+        fr = _FakeRunner()
+
+        async def get_runner(app_name):
+            return fr
+
+        broker = TurnBroker(get_runner=get_runner, session_service=None)
+        turn = broker.start(app_name="a", user_id="u", session_id="s",
+                            new_message="survey question")
+        await asyncio.wait_for(turn.task, timeout=10)
+        assert fr.rounds == 1, f"auto-continued into the same failure: {fr.rounds}"
+        assert turn.status == "error", turn.status
+        assert turn.error and turn.error["type"] == "chatgpt_stream_error", turn.error
+        assert "context window" in turn.error["message"], turn.error
+
+    asyncio.run(main())
+    print("OK test_error_event_ends_turn_no_autocontinue")
+
+
+def test_error_event_recovered_by_later_text_still_completes() -> None:
+    """A transient in-stream error the model speaks past must NOT fail the
+    turn — only an error nothing recovered from is terminal."""
+    class _Ev:
+        def __init__(self, content, author="coordinator", error_code=None):
+            self.content = content
+            self.author = author
+            self.error_code = error_code
+
+        def model_dump_json(self, **kw):
+            return "{}"
+
+    class _FakeRunner:
+        async def run_async(self, *, user_id, session_id, new_message,
+                            state_delta=None):
+            yield _Ev(None, error_code="transient_hiccup")
+            yield _Ev(types.Content(role="model",
+                      parts=[types.Part(text="recovered, here is the answer")]))
+
+    async def main():
+        async def get_runner(app_name):
+            return _FakeRunner()
+
+        broker = TurnBroker(get_runner=get_runner, session_service=None)
+        turn = broker.start(app_name="a", user_id="u", session_id="s",
+                            new_message="q")
+        await asyncio.wait_for(turn.task, timeout=10)
+        assert turn.status == "done", (turn.status, turn.error)
+
+    asyncio.run(main())
+    print("OK test_error_event_recovered_by_later_text_still_completes")
 
 
 def test_extract_adk_web_server() -> None:
@@ -291,6 +381,8 @@ def main() -> None:
     test_single_flight_and_abort()
     test_error_classification_and_retry_last()
     test_dangling_handback_autocontinue()
+    test_error_event_ends_turn_no_autocontinue()
+    test_error_event_recovered_by_later_text_still_completes()
     test_extract_adk_web_server()
     print("\nall turn-broker tests passed")
 

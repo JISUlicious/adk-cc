@@ -40,6 +40,11 @@ _FINISHED_TTL_S = 600.0
 # Bounded F3 auto-continues per turn — a guard, not a loop.
 _MAX_CONTINUES = 2
 _CONTINUE_TEXT = "Continue."
+# Rides the continue round's state_delta onto the injected user event
+# (temp: keys never persist into session STATE), so the UI can render the
+# synthetic message as a system marker instead of a user bubble — reported
+# live: a stray "Continue." shown as if the user typed it.
+_AUTO_CONTINUE_STATE_KEY = "temp:adk_cc_auto_continue"
 
 _HANDBACK = "_handback_to_coordinator"
 
@@ -410,22 +415,46 @@ class TurnBroker:
                 # dropped the F3 continue.
                 dangling = False
                 saw_any = False
+                saw_error: Optional[dict[str, Any]] = None
                 async for event in runner.run_async(
                     user_id=turn.user_id,
                     session_id=turn.session_id,
                     new_message=message,
-                    state_delta=turn.state_delta if round_ == 0 else None,
+                    state_delta=(turn.state_delta if round_ == 0
+                                 else {_AUTO_CONTINUE_STATE_KEY: True}),
                 ):
                     saw_any = True
                     if _is_dangling_handback(event):
                         dangling = True
                     elif _has_model_text(event):
                         dangling = False
+                        saw_error = None      # the model recovered and spoke
+                    code = getattr(event, "error_code", None)
+                    if code:
+                        saw_error = {
+                            "type": str(code),
+                            "message": str(getattr(event, "error_message", "")
+                                           or "")[:500],
+                            "rate_limited": False,
+                        }
                     authored = getattr(event, "author", "user") != "user"
                     await turn.push(
                         event.model_dump_json(exclude_none=True, by_alias=True),
                         model_authored=authored,
                     )
+                if saw_error is not None:
+                    # The round ended on an in-stream model error the model
+                    # never spoke past (e.g. a context-window overflow arrives
+                    # as an error EVENT, not an exception). Two things must
+                    # NOT happen — both measured live: an auto-continue, which
+                    # replays the same failure with strictly MORE context; and
+                    # finish("done"), which buried the error so the turn
+                    # looked successful. Surface it as the turn's error.
+                    _log.warning("turn %s: model error event ended the round "
+                                 "unresolved (%s) — finishing as error",
+                                 turn.id, saw_error["type"])
+                    await turn.finish("error", saw_error)
+                    return
                 if not dangling:
                     # The other way a turn can end with nothing said: the round
                     # yielded NO events at all. That is what answering a
