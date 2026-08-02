@@ -83,12 +83,25 @@ class _FakeReturnedEvent:
         self.actions = _FakeActions(_FakeCompaction(summary))
 
 
-class _FakeInputEvent:
-    """Cheap stand-in for an Event in the input list; the wrapper
-    only reads `.timestamp` from the last one."""
+class _FakePart:
+    def __init__(self, text: str) -> None:
+        self.text = text
 
-    def __init__(self, timestamp: float) -> None:
+
+class _FakeContent:
+    def __init__(self, text: str) -> None:
+        self.parts = [_FakePart(text)]
+
+
+class _FakeInputEvent:
+    """Stand-in for an Event in the input list. The wrapper reads
+    `.timestamp` from the last one and sums `.content.parts[*].text`
+    for the churn guard — so the fakes carry enough text to clear the
+    marginal-content floor unless a test overrides it."""
+
+    def __init__(self, timestamp: float, text: str = "conversation " * 500) -> None:
         self.timestamp = timestamp
+        self.content = _FakeContent(text)
 
 
 # --- Success path --------------------------------------------------
@@ -426,6 +439,105 @@ def test_env_var_invalid_falls_back_to_default() -> None:
     print("OK test_env_var_invalid_falls_back_to_default")
 
 
+# --- Churn guard (double-compaction fix) ---------------------------
+
+
+def test_trivial_marginal_skips_before_any_model_call() -> None:
+    """Measured live (session ux-eval-94595): ADK re-compacted 107s
+    after a compaction because the RETAINED events alone still exceeded
+    the token threshold — the second summary covered 12 extra seconds
+    of content. The guard skips when new content since the last summary
+    is under the floor, and the skip must happen BEFORE the inner
+    summarizer runs (no wasted LLM call)."""
+    events, sink = _capture()
+    set_global_sink(sink)
+    inner_calls = []
+    try:
+        summarizer = _make_summarizer()
+        seed = _FakeInputEvent(
+            1.0,
+            text="[The following condenses earlier messages in this "
+                 "session to save context.] " + "old summary " * 1000)
+        tiny = _FakeInputEvent(2.0, text="one small tool result")
+
+        async def fake_summarize(self, *, events):  # noqa: ANN001
+            inner_calls.append(1)
+            return _FakeReturnedEvent("should never be produced")
+
+        with patch(
+            "google.adk.apps.llm_event_summarizer.LlmEventSummarizer.maybe_summarize_events",
+            new=fake_summarize,
+        ):
+            result = asyncio.run(
+                summarizer.maybe_summarize_events(events=[seed, tiny]))
+    finally:
+        clear_global_sink()
+    assert result is None
+    assert inner_calls == [], "guard must skip BEFORE the model call"
+    assert [e["event"] for e in events] == [
+        "compaction_triggered", "compaction_failure"]
+    assert events[1]["reason"] == "trivial_marginal"
+    print("OK test_trivial_marginal_skips_before_any_model_call")
+
+
+def test_seed_summary_does_not_count_as_new_content() -> None:
+    """The rolling seed is huge but is NOT new content — only text
+    outside it counts toward the floor. Real new content past the floor
+    proceeds to the inner summarizer even with a seed present."""
+    events, sink = _capture()
+    set_global_sink(sink)
+    try:
+        summarizer = _make_summarizer()
+        seed = _FakeInputEvent(
+            1.0,
+            text="[The following condenses earlier messages in this "
+                 "session to save context.] " + "old summary " * 1000)
+        real = _FakeInputEvent(2.0, text="fresh conversation " * 500)
+
+        async def fake_summarize(self, *, events):  # noqa: ANN001
+            return _FakeReturnedEvent("compacted " * 10)
+
+        with patch(
+            "google.adk.apps.llm_event_summarizer.LlmEventSummarizer.maybe_summarize_events",
+            new=fake_summarize,
+        ):
+            result = asyncio.run(
+                summarizer.maybe_summarize_events(events=[seed, real]))
+    finally:
+        clear_global_sink()
+    assert result is not None
+    assert [e["event"] for e in events] == [
+        "compaction_triggered", "compaction_success"]
+    print("OK test_seed_summary_does_not_count_as_new_content")
+
+
+def test_min_new_chars_zero_disables_guard() -> None:
+    """ADK_CC_COMPACTION_MIN_NEW_CHARS=0 opts out — even a trivial
+    marginal proceeds to the summarizer."""
+    import os
+    saved = os.environ.get("ADK_CC_COMPACTION_MIN_NEW_CHARS")
+    os.environ["ADK_CC_COMPACTION_MIN_NEW_CHARS"] = "0"
+    try:
+        summarizer = _make_summarizer()
+
+        async def fake_summarize(self, *, events):  # noqa: ANN001
+            return _FakeReturnedEvent("compacted anyway")
+
+        with patch(
+            "google.adk.apps.llm_event_summarizer.LlmEventSummarizer.maybe_summarize_events",
+            new=fake_summarize,
+        ):
+            result = asyncio.run(summarizer.maybe_summarize_events(
+                events=[_FakeInputEvent(1.0, text="tiny")]))
+        assert result is not None
+    finally:
+        if saved is not None:
+            os.environ["ADK_CC_COMPACTION_MIN_NEW_CHARS"] = saved
+        else:
+            os.environ.pop("ADK_CC_COMPACTION_MIN_NEW_CHARS", None)
+    print("OK test_min_new_chars_zero_disables_guard")
+
+
 # --- Driver --------------------------------------------------------
 
 
@@ -440,6 +552,9 @@ def main() -> None:
     test_env_var_loads_timeout_default_30()
     test_env_var_loads_timeout_explicit()
     test_env_var_invalid_falls_back_to_default()
+    test_trivial_marginal_skips_before_any_model_call()
+    test_seed_summary_does_not_count_as_new_content()
+    test_min_new_chars_zero_disables_guard()
     print("\nall compaction-audit tests passed")
 
 

@@ -815,7 +815,23 @@ function flattenEvents(
       }
     }
   }
-  return foldRuns(rows)
+  // Rolling compaction supersession: ADK re-compacts by seeding the previous
+  // summary and REPLACING it — same startTimestamp, later end. Rendering every
+  // compaction event therefore stacks near-identical dividers (measured live:
+  // two, 107s apart, 12s of extra coverage — the user read it as "double
+  // compaction"). Only the LAST of a superseding chain is current.
+  const lastCompactionByStart = new Map<number, number>()
+  rows.forEach((r, i) => {
+    if (r.kind === "compaction" && r.startTs !== undefined) {
+      lastCompactionByStart.set(r.startTs, i)
+    }
+  })
+  const filtered = rows.filter((r, i) =>
+    r.kind !== "compaction" ||
+    r.startTs === undefined ||
+    lastCompactionByStart.get(r.startTs) === i)
+
+  return foldRuns(filtered)
 }
 
 /**

@@ -211,6 +211,9 @@ FIELDS: list[Var] = [
     Var("ADK_CC_COMPACTION_TOKEN_THRESHOLD", Tier.ADVANCED, "Context",
         "Token threshold that triggers conversation compaction. Requires EVENT_RETENTION set too.",
         default=None, parse=as_int, default_display="off"),
+    Var("ADK_CC_COMPACTION_MIN_NEW_CHARS", Tier.ADVANCED, "Behavior",
+        "Skip a re-compaction when the new content since the last summary is "
+        "below this many characters (churn guard).", default=4000, parse=as_int),
     Var("ADK_CC_COMPACTION_EVENT_RETENTION", Tier.ADVANCED, "Context",
         "Events to keep when compacting (must be set together with TOKEN_THRESHOLD).",
         default=None, parse=as_int, default_display="off"),

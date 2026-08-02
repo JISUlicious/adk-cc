@@ -594,8 +594,12 @@ if os.environ.get("ADK_CC_SUBAGENTS") == "1":
         "usually right. If an early subset already answers the user, collect "
         "with wait='first_done' and, once you have enough, "
         "cancel_remaining=true. Do NOT spawn for a single quick lookup — one "
-        "grep beats one sub-agent. Each task string is the explorer's entire "
-        "briefing; it shares no chat history."
+        "grep beats one sub-agent. When the user explicitly asks for parallel "
+        "or separate research ('in parallel', 'separately', 'spawn "
+        "explorers'), honour it with spawn_explorers — not a transfer and not "
+        "an inline fan-out of greps, which serializes what they asked to "
+        "parallelize. Each task string is the explorer's entire briefing; it "
+        "shares no chat history."
     )
 
 
@@ -939,6 +943,33 @@ def _make_lazy_summarizer_class():
                 last_event_ts=last_event_ts,
                 timeout_seconds=self.timeout_seconds,
             )
+
+            # Churn guard: with a rolling summary, ADK re-triggers whenever the
+            # RETAINED recent events alone exceed the token threshold — so a
+            # second compaction can fire minutes after the first with almost
+            # nothing new to fold in. Measured live (the user saw it): two
+            # compactions 107s apart, identical start_timestamp, the second
+            # covering 12 extra SECONDS of events — a full summarizer call and
+            # a second summary bubble for nothing. When the marginal new
+            # content (everything except the rolling seed, which our template
+            # makes recognisable) is trivial, skip: the existing summary
+            # already covers the session.
+            marginal = 0
+            for ev in (events or []):
+                parts = getattr(getattr(ev, "content", None), "parts", None) or []
+                text = "".join(getattr(pt, "text", None) or "" for pt in parts)
+                if text.startswith("[The following condenses earlier messages"):
+                    continue        # the rolling seed, not new content
+                marginal += len(text)
+            _min_new = int(os.environ.get("ADK_CC_COMPACTION_MIN_NEW_CHARS", "4000"))
+            if marginal < _min_new:
+                _compaction_log.info(
+                    "compaction_skipped model=%s reason=trivial_marginal "
+                    "new_chars=%d floor=%d", self.model_id, marginal, _min_new)
+                emit_compaction_event(
+                    "compaction_failure", model_id=self.model_id,
+                    reason="trivial_marginal", event_count=event_count)
+                return None
 
             started = time.monotonic()
             # Circuit breaker (P6): if recent summarizer calls keep failing, skip
