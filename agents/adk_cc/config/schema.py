@@ -706,6 +706,10 @@ FIELDS: list[Var] = [
     Var("ADK_CC_SUBAGENTS_MAX", Tier.ADVANCED, "Behavior",
         "Max explorer sub-agents running concurrently; extras queue.",
         default=8, parse=as_int),
+    Var("ADK_CC_SUBAGENT_DEADLINE_S", Tier.ADVANCED, "Behavior",
+        "Wall-clock cap per explorer sub-agent, from spawn (queueing "
+        "included). A stuck explorer becomes a timely error report instead "
+        "of dragging the turn. 0 disables.", default=300, parse=as_int),
     Var("ADK_CC_TRUST_PROJECT_SKILLS", Tier.ADVANCED, "Skills",
         "Load a project's own skills without asking. For deployments with no "
         "way to prompt; a project's skills arrive with its repository.",

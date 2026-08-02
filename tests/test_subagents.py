@@ -178,6 +178,24 @@ async def _scenario():
         check("and the registry is clean",
               skey not in sa._REGISTRY)
 
+        # --- a stuck child self-terminates at the deadline -------------------
+        # Measured live: one stuck explorer ground on for a whole 776s turn,
+        # survived four collects, and had to be stray-cancelled at turn end.
+        # The deadline turns that into a timely error envelope.
+        os.environ["ADK_CC_SUBAGENT_DEADLINE_S"] = "0.1"
+        try:
+            out = await spawn.run_async(args={"tasks": ["never finishes"]},
+                                        tool_context=ctx)
+            got = await collect.run_async(args={}, tool_context=ctx)
+            d = got["done"][0]
+            check("a child that never finishes hits the deadline as a RESULT",
+                  len(got["done"]) == 1 and not d["ok"]
+                  and "deadline" in (d.get("error") or ""), got)
+            check("the deadline leaves the registry clean",
+                  skey not in sa._REGISTRY)
+        finally:
+            os.environ.pop("ADK_CC_SUBAGENT_DEADLINE_S", None)
+
         # --- invocation end cancels strays ----------------------------------
         out = await spawn.run_async(args={"tasks": ["stray"]}, tool_context=ctx)
         n = sa.cancel_children(skey, invocation_id="inv-1")

@@ -182,6 +182,37 @@ def enrich_result(
 
 
 # --- the nested run (ported core, + state seeding) -------------------------
+def child_deadline_s() -> float:
+    """Wall-clock cap per explorer, measured from spawn (queueing included) —
+    the UX-meaningful bound: no report can arrive later than this. Measured
+    live: one stuck explorer ground on for a whole 776s turn, survived four
+    collects, and had to be stray-cancelled at turn end. 0 disables."""
+    try:
+        return max(0.0, float(os.environ.get(
+            "ADK_CC_SUBAGENT_DEADLINE_S", "300")))
+    except ValueError:
+        return 300.0
+
+
+async def _with_deadline(coro: Any, task_text: str, child_id: str,
+                         agent_name: str) -> dict[str, Any]:
+    deadline = child_deadline_s()
+    if deadline <= 0:
+        return await coro
+    try:
+        return await asyncio.wait_for(coro, timeout=deadline)
+    except asyncio.TimeoutError:
+        _log.info("subagents: child %s hit the %.0fs deadline", child_id,
+                  deadline)
+        return enrich_result(
+            "", id=child_id, task=task_text, agent=agent_name, ok=False,
+            elapsed_s=deadline,
+            error=(f"stopped at the {deadline:.0f}s explorer deadline "
+                   "(ADK_CC_SUBAGENT_DEADLINE_S) without finishing — "
+                   "re-spawn with a NARROWER question if this topic still "
+                   "matters"))
+
+
 async def _run_child(agent: Any, task_text: str, ctx: ToolContext,
                      child_id: str) -> dict[str, Any]:
     from google.adk.memory.in_memory_memory_service import InMemoryMemoryService
@@ -323,8 +354,9 @@ class SpawnExplorersTool(BaseTool):
         spawned = []
         for text in tasks:
             cid = f"e{uuid.uuid4().hex[:6]}"
-            atask = asyncio.create_task(
-                _run_child(self._agent, text, tool_context, cid))
+            atask = asyncio.create_task(_with_deadline(
+                _run_child(self._agent, text, tool_context, cid),
+                text, cid, getattr(self._agent, "name", "explorer")))
             bucket[cid] = _Child(cid, text, atask, inv_id)
             spawned.append({"id": cid, "task": text})
         _log.info("subagents: spawned %d explorer(s) for %s", len(spawned), skey)
