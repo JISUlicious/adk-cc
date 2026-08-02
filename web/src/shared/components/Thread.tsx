@@ -132,6 +132,7 @@ function isBrokerContinue(events: RunEvent[], i: number, text: string): boolean 
 export function Thread({
   events,
   isStreaming,
+  modelStatus,
   onSubmitFunctionResponse,
   appName,
   userId,
@@ -139,6 +140,14 @@ export function Thread({
 }: {
   events: RunEvent[]
   isStreaming: boolean
+  /** Model-layer wait state (rate-limit backoff) from the turn snapshot —
+   * without it a retry sleep looks like a dead "agent is working…". */
+  modelStatus?: {
+    model: string
+    attempt: number
+    of: number
+    resume_in_s: number
+  } | null
   onSubmitFunctionResponse: (
     callId: string,
     toolName: string,
@@ -214,7 +223,11 @@ export function Thread({
       {body}
       {isStreaming && (
         <p className="text-xs text-muted-foreground italic px-2">
-          agent is working…
+          {modelStatus
+            ? `model rate-limited — retrying in ~${Math.ceil(
+                modelStatus.resume_in_s)}s (attempt ${modelStatus.attempt}/${
+                modelStatus.of} on ${modelStatus.model})`
+            : "agent is working…"}
         </p>
       )}
     </div>

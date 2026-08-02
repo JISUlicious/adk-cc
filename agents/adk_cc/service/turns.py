@@ -162,7 +162,7 @@ class Turn:
                 yield ""  # keepalive marker (router turns it into a comment)
 
     def snapshot(self) -> dict[str, Any]:
-        return {
+        snap = {
             "turn_id": self.id,
             "status": self.status,
             "cursor": len(self.events),
@@ -172,6 +172,17 @@ class Turn:
             "finished_at": self.finished_at,
             "error": self.error,
         }
+        if self.status == "running":
+            # A model call sleeping out a rate limit is otherwise a dead
+            # "running" spinner; surface the countdown the model layer
+            # published (see models/retry_status.py).
+            from ..models import retry_status
+
+            ms = retry_status.get_status(
+                f"{self.app_name}/{self.user_id}/{self.session_id}")
+            if ms:
+                snap["model_status"] = ms
+        return snap
 
 
 class TurnBroker:

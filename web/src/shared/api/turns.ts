@@ -31,6 +31,16 @@ export interface TurnSnapshot {
   model_events: number
   session_id: string
   error: TurnError | null
+  /** Present while the model call is sleeping out a rate limit — the
+   * otherwise-invisible backoff, surfaced as a countdown. */
+  model_status?: {
+    state: "rate_limited"
+    model: string
+    attempt: number
+    of: number
+    reason: string
+    resume_in_s: number
+  }
 }
 
 /** Error subclass carrying the broker's classified terminal payload, so the

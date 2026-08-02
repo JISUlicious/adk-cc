@@ -40,6 +40,7 @@ import {
   streamTurnFunctionResponse,
   streamTurnRun,
   type TurnError,
+  type TurnSnapshot,
 } from "@/shared/api/turns"
 import { ModelChip } from "@/shared/components/ModelChip"
 import { AnalysisEnvChip } from "@/shared/components/AnalysisEnvChip"
@@ -96,6 +97,11 @@ export function ChatPage({
   const [session, setSession] = useState<Session | null>(null)
   const [events, setEvents] = useState<RunEvent[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
+  // Model-layer wait state (rate-limit backoff) from the turn snapshot —
+  // rendered under the working indicator so a retry sleep is a visible
+  // countdown, not a dead spinner (#99).
+  const [modelStatus, setModelStatus] =
+    useState<TurnSnapshot["model_status"] | null>(null)
   const [refreshTick, setRefreshTick] = useState(0)
   const [error, setError] = useState<string | null>(null)
   // Broker-classified terminal error of the last turn (rate-limited etc.) —
@@ -205,6 +211,31 @@ export function ChatPage({
       cancelled = true
     }
   }, [appName, userId, session?.id])
+
+  // While a turn runs, poll its snapshot for model-layer wait state
+  // (rate-limit backoff). Same bounded-poll pattern as the sub-agents dock:
+  // only while streaming, cleared the moment the turn ends.
+  useEffect(() => {
+    if (!isStreaming || !appName || !session) {
+      setModelStatus(null)
+      return
+    }
+    let cancelled = false
+    const sid = session.id
+    const tick = () => {
+      void latestTurn(appName, userId, sid).then((t) => {
+        if (cancelled) return
+        setModelStatus(
+          t && t.status === "running" ? t.model_status ?? null : null)
+      })
+    }
+    tick()
+    const iv = setInterval(tick, 3000)
+    return () => {
+      cancelled = true
+      clearInterval(iv)
+    }
+  }, [isStreaming, appName, userId, session?.id])
 
   // Auto-scroll to bottom when events grow.
   useEffect(() => {
@@ -602,6 +633,7 @@ export function ChatPage({
               <Thread
                 events={events}
                 isStreaming={isStreaming}
+                modelStatus={modelStatus}
                 onSubmitFunctionResponse={handleSubmitFunctionResponse}
                 appName={appName ?? ""}
                 userId={userId}

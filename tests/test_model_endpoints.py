@@ -646,6 +646,110 @@ def test_retry_never_after_first_chunk():
     print("OK test_retry_never_after_first_chunk")
 
 
+def test_retry_publishes_visible_status_and_clears():
+    """#99: the backoff sleep must be VISIBLE — while sleeping, the session's
+    retry status is published (attempt, countdown, model); on recovery it is
+    gone. Measured live before the fix: 4+ minutes of "running" with zero
+    feedback."""
+    from adk_cc.models import retry_status, selectable as S
+
+    skey = "adk_cc/u1/s1"
+    seen = []
+
+    async def fake_sleep(d):
+        seen.append(retry_status.get_status(skey))
+
+    orig = S._retry_sleep
+    S._retry_sleep = fake_sleep
+    retry_status.set_current_session(skey)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = _FlakyLlm(failures=2)
+            sel = _retry_sel(tmp, fake)
+            async def main():
+                return [x async for x in sel.generate_content_async(object())]
+            out = asyncio.run(main())
+            assert out == ["ok"], out
+            # Both sleeps saw a published status with the right shape.
+            assert len(seen) == 2 and all(seen), seen
+            assert seen[0]["attempt"] == 1 and seen[1]["attempt"] == 2, seen
+            assert seen[0]["state"] == "rate_limited"
+            assert seen[0]["model"] == "openai/flaky"
+            assert seen[0]["resume_in_s"] > 0
+            # Recovered -> status cleared.
+            assert retry_status.get_status(skey) is None
+    finally:
+        S._retry_sleep = orig
+        retry_status.set_current_session(None)
+    print("OK test_retry_publishes_visible_status_and_clears")
+
+
+def test_retry_status_cleared_on_final_failure_and_unkeyed_noop():
+    """Exhausted retries must not leave a stale "retrying" status behind; and
+    out-of-band model calls (no session key bound) publish nothing."""
+    from adk_cc.models import retry_status, selectable as S
+
+    skey = "adk_cc/u1/s2"
+    async def fake_sleep(d): pass
+    orig = S._retry_sleep
+    S._retry_sleep = fake_sleep
+    retry_status.set_current_session(skey)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = _FlakyLlm(failures=99)      # never recovers
+            sel = _retry_sel(tmp, fake)
+            async def main():
+                return [x async for x in sel.generate_content_async(object())]
+            try:
+                asyncio.run(main())
+                assert False, "expected exhaustion to raise"
+            except _RL:
+                pass
+            assert retry_status.get_status(skey) is None, "stale status leaked"
+
+            # No session bound -> publish is a no-op (titles, memory, warmup).
+            retry_status.set_current_session(None)
+            fake2 = _FlakyLlm(failures=1)
+            sel2 = _retry_sel(tmp, fake2)
+            async def main2():
+                return [x async for x in sel2.generate_content_async(object())]
+            out = asyncio.run(main2())
+            assert out == ["ok"]
+            assert retry_status._status == {}, retry_status._status
+    finally:
+        S._retry_sleep = orig
+        retry_status.set_current_session(None)
+    print("OK test_retry_status_cleared_on_final_failure_and_unkeyed_noop")
+
+
+def test_turn_snapshot_carries_model_status():
+    """The broker snapshot serves the retry status to the UI — only while the
+    turn is running, and only when a status exists for its session."""
+    from adk_cc.models import retry_status
+    from adk_cc.service.turns import Turn
+
+    t = Turn(app_name="adk_cc", user_id="u9", session_id="s9",
+             new_message=None)
+    key = "adk_cc/u9/s9"
+    assert "model_status" not in t.snapshot()
+
+    retry_status.set_current_session(key)
+    try:
+        retry_status.publish_retry(model="openai/x", attempt=2, of=3,
+                                   delay_s=60.0, kind="upstream")
+        snap = t.snapshot()
+        ms = snap.get("model_status")
+        assert ms and ms["attempt"] == 2 and ms["of"] == 3, snap
+        assert 0 < ms["resume_in_s"] <= 60.0, ms
+
+        t.status = "done"          # finished turns never carry it
+        assert "model_status" not in t.snapshot()
+    finally:
+        retry_status.clear_retry()
+        retry_status.set_current_session(None)
+    print("OK test_turn_snapshot_carries_model_status")
+
+
 def test_retry_only_rate_limits_and_exhaustion():
     from adk_cc.models import selectable as S
     sleeps = []
@@ -792,6 +896,9 @@ if __name__ == "__main__":
     test_model_session_plugin_sets_and_clears()
     test_retry_recovers_from_pre_stream_429()
     test_retry_never_after_first_chunk()
+    test_retry_publishes_visible_status_and_clears()
+    test_retry_status_cleared_on_final_failure_and_unkeyed_noop()
+    test_turn_snapshot_carries_model_status()
     test_retry_only_rate_limits_and_exhaustion()
     test_retry_honors_retry_after_hint()
     test_429_classification_and_ladders()

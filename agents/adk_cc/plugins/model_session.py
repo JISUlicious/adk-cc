@@ -36,6 +36,7 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 
+from ..models.retry_status import set_current_session
 from ..models.selectable import set_session_model_override
 
 STATE_ENDPOINT_KEY = "model_endpoint"
@@ -68,4 +69,13 @@ class ModelSessionPlugin(BasePlugin):
             # ALWAYS clear when unpinned — the contextvar must reflect THIS
             # call's session, never a previous one on a reused task.
             set_session_model_override(None)
+        # Bind the session key for retry-status publication (same
+        # set-or-clear discipline as the pin above).
+        skey = None
+        try:
+            sess = callback_context._invocation_context.session
+            skey = f"{sess.app_name}/{sess.user_id}/{sess.id}"
+        except Exception:  # noqa: BLE001
+            pass
+        set_current_session(skey)
         return None

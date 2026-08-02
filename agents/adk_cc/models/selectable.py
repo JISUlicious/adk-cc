@@ -479,6 +479,21 @@ class SelectableLlm(BaseLlm):
     async def generate_content_async(
         self, llm_request: "LlmRequest", stream: bool = False
     ) -> "AsyncGenerator[LlmResponse, None]":
+        from . import retry_status
+
+        try:
+            async for resp in self._generate_with_retry(llm_request, stream):
+                yield resp
+        finally:
+            # Success, final failure, or a caller abort mid-backoff — the
+            # session must never keep showing a "retrying" status.
+            retry_status.clear_retry()
+
+    async def _generate_with_retry(
+        self, llm_request: "LlmRequest", stream: bool
+    ) -> "AsyncGenerator[LlmResponse, None]":
+        from . import retry_status
+
         attempt = 0  # retries used so far (rate-limit failures only)
         while True:
             await _pace_model_call()  # opt-in global rate-limit throttle
@@ -504,6 +519,10 @@ class SelectableLlm(BaseLlm):
             yielded = False
             try:
                 async for resp in delegate.generate_content_async(llm_request, stream=stream):
+                    if not yielded:
+                        # First chunk after a backoff: the wait is over NOW,
+                        # not when the (possibly minutes-long) stream ends.
+                        retry_status.clear_retry()
                     # Root cause for tolerant_tool_json's truncation recovery: a
                     # MAX_TOKENS finish means the model ran out of output budget —
                     # likely mid tool-call. Log it AND escalate the cap
@@ -537,6 +556,13 @@ class SelectableLlm(BaseLlm):
                     getattr(delegate, "model", "?"), kind, attempt, _retry_count(),
                     delay, str(e)[:200],
                 )
+                # Surface the wait: the broker snapshot serves this to the UI,
+                # so the backoff is a visible countdown instead of a dead
+                # "running" spinner (measured live: 4+ silent minutes).
+                retry_status.publish_retry(
+                    model=str(getattr(delegate, "model", "?")),
+                    attempt=attempt, of=_retry_count(), delay_s=delay,
+                    kind=kind)
                 await _retry_sleep(delay)
 
     async def warm(self) -> None:
