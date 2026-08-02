@@ -79,6 +79,7 @@ from .plugins import (
     ContextGuardPlugin,
     McpExportArtifactPlugin,
     MicrocompactPlugin,
+    PrecompactPlugin,
     PermissionPlugin,
     PlanModeReminderPlugin,
     QuotaPlugin,
@@ -1379,6 +1380,13 @@ _app_kwargs = dict(
         # tier. Runs BEFORE ContextGuard so the shrink is reflected in its
         # token count (can defer WARN/REJECT and ADK's summarizer entirely).
         MicrocompactPlugin(),
+        # Pre-invocation compaction: an oversized INHERITED history is
+        # summarized before the turn's first model call — measured
+        # payload-inclusively, because the post-turn trigger's usage-based
+        # counter goes stale exactly when a session gets poisoned (the
+        # 2026-08-02 overflow left a session that would never compact and
+        # always overflow). Rides the same summarizer stack as compaction.
+        PrecompactPlugin(),
         # Pre-flight context-length guardrail: WARN at 75% of MAX,
         # REJECT at 95%. ADK's EventsCompactionConfig (set above) is
         # the primary defense; this is the fail-soft safety net.

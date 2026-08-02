@@ -159,13 +159,67 @@ export function ChatPage({
     fetchContextLimits().then(setCtxLimits).catch(() => setCtxLimits(null))
   }, [])
   const ctxTokens = useMemo(() => {
-    let n = 0
+    // Two readings, take the max. The model-reported usage is exact but goes
+    // STALE when a burst of tool payloads lands after the last successful
+    // call — the 2026-08-02 overflow showed 38% (stale usage) while the wire
+    // carried ~145% of the window. The measured estimate mirrors the
+    // server's estimate_events_tokens: payload-inclusive chars/4 over the
+    // events a request would actually replay (respecting the latest
+    // compaction range).
+    let usage = 0
+    let cutoff = 0
+    let summaryChars = 0
     for (const e of events) {
       const um = (e as { usageMetadata?: { promptTokenCount?: number } }).usageMetadata
-      if (typeof um?.promptTokenCount === "number") n = um.promptTokenCount
+      if (typeof um?.promptTokenCount === "number") usage = um.promptTokenCount
+      const comp = (e as { actions?: { compaction?: {
+        endTimestamp?: number; compactedContent?: unknown } } }).actions?.compaction
+      if (comp) {
+        const end = comp.endTimestamp ?? 0
+        if (end >= cutoff) {
+          cutoff = end
+          summaryChars = extractCompactionLength(comp.compactedContent)
+        }
+      }
     }
-    return n
+    let chars = summaryChars
+    for (const e of events) {
+      const ev = e as {
+        timestamp?: number
+        actions?: { compaction?: unknown }
+        content?: { parts?: Array<{
+          text?: string
+          functionCall?: { args?: unknown }
+          functionResponse?: { response?: unknown }
+        }> }
+      }
+      if (ev.actions?.compaction) continue
+      if (cutoff && (ev.timestamp ?? 0) <= cutoff) continue
+      for (const p of ev.content?.parts ?? []) {
+        if (p.text) chars += p.text.length
+        if (p.functionCall?.args) chars += safeJsonLength(p.functionCall.args)
+        if (p.functionResponse?.response) chars += safeJsonLength(p.functionResponse.response)
+      }
+    }
+    return Math.max(usage, Math.floor(chars / 4))
   }, [events])
+  function safeJsonLength(v: unknown): number {
+    try {
+      return JSON.stringify(v)?.length ?? 0
+    } catch {
+      return String(v).length
+    }
+  }
+
+  function extractCompactionLength(content: unknown): number {
+    if (typeof content === "string") return content.length
+    const parts = (content as { parts?: Array<{ text?: string }> })?.parts
+    if (Array.isArray(parts)) {
+      return parts.reduce((n, p) => n + (p.text?.length ?? 0), 0)
+    }
+    return 0
+  }
+
   // Compaction history (P3): count + last end-timestamp, live from the stream.
   const compactions = useMemo(() => {
     let count = 0

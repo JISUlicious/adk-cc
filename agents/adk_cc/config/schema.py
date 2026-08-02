@@ -223,8 +223,21 @@ FIELDS: list[Var] = [
         "Events to keep when compacting (must be set together with TOKEN_THRESHOLD).",
         default=None, parse=as_int, default_display="off"),
     Var("ADK_CC_MICROCOMPACT", Tier.ADVANCED, "Context",
-        "Enable zero-cost tool-result eviction tier.",
-        default=False, parse=as_bool),
+        "Rewrite old, large tool results out of the outgoing request "
+        "(summaries when available, stubs otherwise). Covers same-agent "
+        "results AND a transferred sub-agent's results replayed as text — "
+        "the 2026-08-02 overflow shape. Default ON since that incident.",
+        default=True, parse=as_bool),
+    Var("ADK_CC_RESULT_SUMMARIES", Tier.ADVANCED, "Context",
+        "Condense rewritten tool results with a cheap model call (cached "
+        "by content digest, computed once ever) instead of stubbing them. "
+        "0 = stubs only, no summarizer calls.",
+        default=True, parse=as_bool),
+    Var("ADK_CC_PRECOMPACT", Tier.ADVANCED, "Context",
+        "Summarize an oversized inherited history BEFORE the turn's first "
+        "model call (measured payload-inclusively; needs "
+        "ADK_CC_COMPACTION_TOKEN_THRESHOLD).",
+        default=True, parse=as_bool),
 
     # --- Permissions -----------------------------------------------------
     Var("ADK_CC_PERMISSION_MODE", Tier.COMMON, "Permissions",

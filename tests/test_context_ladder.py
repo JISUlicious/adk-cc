@@ -67,7 +67,10 @@ def test_explicit_warn_reject_override():
 import asyncio
 
 from adk_cc.permissions.token_counter import estimate_request_tokens
-from adk_cc.plugins.context_guard import _evict_tool_results
+from adk_cc.plugins.microcompact import rewrite_request
+
+# Guard tests must not reach a real summarizer.
+os.environ.setdefault("ADK_CC_RESULT_SUMMARIES", "0")
 
 
 def _foreign_result_part(n_chars: int, tool: str = "web_fetch") -> types.Part:
@@ -117,23 +120,24 @@ def test_incident_replay_guard_now_intervenes():
     assert evicted >= 1 and kept >= 2, (evicted, kept)
 
 
-def test_evict_keeps_newest_and_stops_at_target():
+def test_rewrite_keeps_newest_and_stops_at_budget():
     parts = [types.Part(
         function_response=types.FunctionResponse(
             id=f"c{i}", name="web_fetch", response={"content": "x" * 20_000}))
         for i in range(5)]
     req = SimpleNamespace(contents=[types.Content(role="user", parts=parts)])
-    cur = estimate_request_tokens(req)
-    n, saved = _evict_tool_results(req, target=cur - 9_000, current=cur)
-    # Two evictions (~5k tokens each) reach the target; newest two untouched.
-    assert n == 2 and saved > 8_000, (n, saved)
-    assert parts[0].function_response.response.get("evicted")
-    assert parts[1].function_response.response.get("evicted")
+    stats = asyncio.run(rewrite_request(
+        req, keep_recent=2, min_tokens=256, allow_summaries=False,
+        budget_tokens=9_000))
+    # Two stubs (~5k tokens each) reach the budget; newest two untouched.
+    assert stats["rewritten"] == 2 and stats["freed"] > 8_000, stats
+    assert parts[0].function_response.response.get("status") == "cleared"
+    assert parts[1].function_response.response.get("status") == "cleared"
     assert "content" in parts[3].function_response.response
     assert "content" in parts[4].function_response.response
 
 
-def test_evict_never_touches_small_results_or_prose():
+def test_rewrite_never_touches_small_results_or_prose():
     parts = [
         types.Part(text="A genuine long user message. " * 200),  # prose >2KB
         types.Part(function_response=types.FunctionResponse(
@@ -144,10 +148,11 @@ def test_evict_never_touches_small_results_or_prose():
             id="c3", name="web_fetch", response={"content": "z" * 20_000})),
     ]
     req = SimpleNamespace(contents=[types.Content(role="user", parts=parts)])
-    n, _ = _evict_tool_results(req, target=0, current=99_999)
-    # Only the two big fetches are candidates, and both sit in the
-    # keep-newest window — nothing may be evicted.
-    assert n == 0
+    stats = asyncio.run(rewrite_request(
+        req, keep_recent=2, min_tokens=256, allow_summaries=False))
+    # The two big fetches are the only candidates and both sit in the
+    # keep-newest window; the small result is below the floor either way.
+    assert stats["rewritten"] == 0, stats
     assert parts[0].text.startswith("A genuine")
     assert parts[1].function_response.response == {"exit": 0}
 

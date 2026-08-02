@@ -81,7 +81,11 @@ def test_defaults_mirror_current_behavior():
         "ADK_CC_ADMIN_PANEL": False,
         "ADK_CC_AUTHZ": False,
         "ADK_CC_SERVE_UI": False,
-        "ADK_CC_MICROCOMPACT": False,
+        # Default ON since the 2026-08-02 boundary overflow: a disabled
+        # request rewriter was a context-window footgun.
+        "ADK_CC_MICROCOMPACT": True,
+        "ADK_CC_RESULT_SUMMARIES": True,
+        "ADK_CC_PRECOMPACT": True,
         "ADK_CC_TENANCY_MODE": "single",
         "ADK_CC_GLOBAL_TENANT_ID": "local",
     }

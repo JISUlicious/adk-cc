@@ -153,6 +153,54 @@ def estimate_request_tokens(llm_request: Any) -> int:
     return total // 4 if total > 0 else 0
 
 
+def estimate_events_tokens(events: Iterable[Any]) -> int:
+    """Payload-inclusive estimate of what a request REBUILT from these
+    session events would weigh — the pre-invocation analogue of
+    `estimate_request_tokens`. Respects compaction: events at or before the
+    latest compaction's end_timestamp are replaced by its summary in real
+    requests, so they are skipped here and the summary text is counted
+    instead. No usage-metadata shortcut (that staleness is the incident's
+    root cause)."""
+    import json as _json
+
+    events_list = list(events or [])
+    cutoff = 0.0
+    summary_len = 0
+    for ev in events_list:
+        comp = getattr(getattr(ev, "actions", None), "compaction", None)
+        if comp is None:
+            continue
+        end = getattr(comp, "end_timestamp", None) or getattr(
+            comp, "compacted_until", None) or 0.0
+        if end and end >= cutoff:
+            cutoff = end
+            summary_len = len(getattr(comp, "compacted_content", "") or "")
+
+    total = summary_len
+    for ev in events_list:
+        if getattr(getattr(ev, "actions", None), "compaction", None) is not None:
+            continue
+        if cutoff and (getattr(ev, "timestamp", 0.0) or 0.0) <= cutoff:
+            continue
+        for part in (getattr(getattr(ev, "content", None), "parts", None) or []):
+            text = getattr(part, "text", None)
+            if text:
+                total += len(text)
+            fc = getattr(part, "function_call", None)
+            if fc is not None:
+                try:
+                    total += len(_json.dumps(getattr(fc, "args", None) or {}, default=str))
+                except Exception:
+                    pass
+            fr = getattr(part, "function_response", None)
+            if fr is not None:
+                try:
+                    total += len(_json.dumps(getattr(fr, "response", None) or {}, default=str))
+                except Exception:
+                    pass
+    return total // 4 if total > 0 else 0
+
+
 def estimate_prompt_tokens_full(
     llm_request: Any,
     session_events: Optional[Iterable[Any]] = None,

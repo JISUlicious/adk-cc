@@ -11,6 +11,7 @@ from .context_guard import ContextGuardPlugin
 from .mcp_export_artifact import McpExportArtifactPlugin
 from .memory import MemoryPlugin
 from .microcompact import MicrocompactPlugin
+from .precompact import PrecompactPlugin
 from .model_io_trace import ModelIOTracePlugin
 from .permissions import PermissionPlugin
 from .plan_mode import PlanModeReminderPlugin
@@ -43,6 +44,7 @@ __all__ = [
     "McpExportArtifactPlugin",
     "MemoryPlugin",
     "MicrocompactPlugin",
+    "PrecompactPlugin",
     "ModelIOTracePlugin",
     "PermissionPlugin",
     "PlanModeReminderPlugin",

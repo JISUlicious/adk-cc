@@ -14,14 +14,15 @@ Three interventions, no LLM call:
 
   - **WARN** (default 75% of `ADK_CC_MAX_CONTEXT_TOKENS`): structured
     log line so observability picks it up. Telemetry only.
-  - **EVICT** (at the REJECT line): before rejecting, replace the
-    OLDEST oversized tool results in the outgoing request — both
+  - **EVICT** (at the REJECT line): before rejecting, shrink the
+    request via the shared rewriter (`plugins/microcompact.py`) — both
     same-agent `function_response` payloads and ADK's text renderings
     of ANOTHER agent's tool results ("[Explore] `web_fetch` tool
-    returned result: …") — with a short eviction note, newest results
-    kept. Mutates only this call's `llm_request`; session events are
-    untouched (the next call rebuilds from them). Turns a fatal
-    mid-turn overflow into a degraded-but-working call.
+    returned result: …") are replaced with cached summaries when the
+    summarizer is available, mechanical stubs otherwise; newest
+    results kept. Mutates only this call's `llm_request`; session
+    events are untouched (the next call rebuilds from them). Turns a
+    fatal mid-turn overflow into a degraded-but-working call.
   - **REJECT** (default 95%): only when eviction can't get under the
     line — return an early `LlmResponse` with a "context near full"
     message instead of a 500 from the model server.
@@ -160,86 +161,6 @@ def resolved_limits() -> Optional[dict]:
     }
 
 
-# Tool results below this size are never evicted (small results are cheap
-# and often load-bearing: exit codes, short answers).
-_EVICT_MIN_CHARS = 2048
-# The newest evictable results stay — recency is what the model is acting on.
-_EVICT_KEEP_NEWEST = 2
-# ADK renders ANOTHER agent's tool result as text:
-#   "[Explore] `web_fetch` tool returned result: {...}"
-# (flows/llm_flows/contents.py _present_other_agent_message). Matching that
-# exact shape keeps eviction away from genuine prose.
-_FOREIGN_RESULT_RE = None  # compiled lazily below
-
-
-def _is_foreign_tool_result(text: str) -> bool:
-    global _FOREIGN_RESULT_RE
-    if _FOREIGN_RESULT_RE is None:
-        import re
-        _FOREIGN_RESULT_RE = re.compile(
-            r"^\[[^\]\n]{1,80}\] `[^`\n]{1,80}` tool returned result: ")
-    return bool(_FOREIGN_RESULT_RE.match(text))
-
-
-def _evict_tool_results(llm_request, *, target: int, current: int) -> tuple[int, int]:
-    """Shrink the outgoing request by replacing the OLDEST oversized tool
-    results with a short eviction note, until the estimate reaches `target`.
-
-    Two shapes are evictable — both are tool output by construction:
-      - `function_response` parts with a payload over _EVICT_MIN_CHARS
-        (same-agent history);
-      - text parts matching ADK's foreign-tool-result rendering
-        (a sub-agent's results replayed into this agent's request).
-
-    The newest _EVICT_KEEP_NEWEST evictable results are always kept.
-    Mutates `llm_request.contents` IN PLACE — this affects only the call
-    being built; session events are untouched and the next call rebuilds
-    from them. Returns (evicted_count, tokens_saved_estimate).
-    """
-    import json as _json
-
-    candidates = []  # (order, part, kind, size_chars)
-    order = 0
-    for content in getattr(llm_request, "contents", None) or []:
-        for part in getattr(content, "parts", None) or []:
-            order += 1
-            fr = getattr(part, "function_response", None)
-            if fr is not None:
-                try:
-                    size = len(_json.dumps(getattr(fr, "response", None) or {},
-                                           default=str))
-                except Exception:
-                    continue
-                if size >= _EVICT_MIN_CHARS:
-                    candidates.append((order, part, "response", size))
-                continue
-            text = getattr(part, "text", None)
-            if text and len(text) >= _EVICT_MIN_CHARS and _is_foreign_tool_result(text):
-                candidates.append((order, part, "text", len(text)))
-
-    if len(candidates) <= _EVICT_KEEP_NEWEST:
-        return 0, 0
-
-    evicted = saved_chars = 0
-    for _, part, kind, size in candidates[:-_EVICT_KEEP_NEWEST]:
-        if current - (saved_chars // 4) <= target:
-            break
-        if kind == "response":
-            note = (f"[tool result evicted: {size} chars dropped to fit the "
-                    "context window — re-run the tool if this is still needed]")
-            part.function_response.response = {"evicted": note}
-            saved_chars += max(0, size - len(note) - 20)
-        else:
-            head = part.text[:200]
-            note = (f"\n…[{size} chars evicted to fit the context window — "
-                    "re-run the tool if this is still needed]")
-            part.text = head + note
-            saved_chars += max(0, size - len(head) - len(note))
-        evicted += 1
-
-    return evicted, saved_chars // 4
-
-
 class ContextGuardPlugin(BasePlugin):
     """WARN at threshold, REJECT at hard limit. ADK compaction does the rest."""
 
@@ -340,22 +261,32 @@ class ContextGuardPlugin(BasePlugin):
 
         if tokens >= self._reject:
             session_id = self._session_id(callback_context)
-            # Before rejecting, try to SHRINK the request: evict the oldest
-            # oversized tool results (this call only — session events are
-            # untouched). A degraded call beats both a REJECT and the
-            # context-window overflow the model server would return.
-            evicted, saved = _evict_tool_results(
-                llm_request, target=self._warn, current=request_est)
-            if evicted:
-                request_est -= saved
-                # base reflects the PRE-eviction conversation (the server
+            # Before rejecting, SHRINK the request via the shared rewriter
+            # (microcompact module: summaries when available, stubs
+            # otherwise; this call only — session events are untouched). The
+            # always-on microcompact pass normally runs first (plugin order)
+            # with keep_recent=4; the reject line retries harder
+            # (keep_recent=2, no size a rewrite can hide behind) and runs
+            # even when the operator disabled the always-on pass. A degraded
+            # call beats both a REJECT and the context-window overflow the
+            # model server would return.
+            from .microcompact import rewrite_request
+
+            stats = await rewrite_request(
+                llm_request, keep_recent=2, min_tokens=256,
+                budget_tokens=max(0, request_est - self._warn),
+            )
+            if stats["rewritten"]:
+                request_est = max(0, request_est - stats["freed"])
+                # base reflects the PRE-rewrite conversation (the server
                 # already accepted a call that big); the measured
-                # post-eviction request decides now.
+                # post-rewrite request decides now.
                 tokens = request_est
                 _log.warning(
-                    "ContextGuardPlugin EVICT: dropped %d old tool result(s) "
-                    "(~%d tokens) — request now ~%d, session_id=%s",
-                    evicted, saved, request_est, session_id,
+                    "ContextGuardPlugin EVICT: rewrote %d old tool result(s) "
+                    "(%d summarized, ~%d tokens) — request now ~%d, session_id=%s",
+                    stats["rewritten"], stats["summarized"], stats["freed"],
+                    request_est, session_id,
                 )
             if tokens >= self._reject:
                 _log.warning(
