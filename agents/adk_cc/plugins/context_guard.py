@@ -76,8 +76,16 @@ from ..permissions.token_counter import (
 _log = logging.getLogger(__name__)
 
 _REJECT_TEXT = (
-    "This session's context is near full. Please summarize key findings "
-    "and start a fresh session."
+    "This session's context is near full and could not be shrunk enough "
+    "for this call. Automatic history compression will run at the start "
+    "of the next message — send it again, or start a fresh session."
+)
+# The physics floor: one single part larger than the effective window can
+# never be sent, compressed or not. Promising auto-recovery would be a lie.
+_REJECT_OVERSIZED_TEXT = (
+    "A single message or result in this request is larger than the model's "
+    "context window and cannot be sent. Remove or shorten it (e.g. re-ask "
+    "without the oversized paste), or start a fresh session."
 )
 
 
@@ -289,15 +297,36 @@ class ContextGuardPlugin(BasePlugin):
                     request_est, session_id,
                 )
             if tokens >= self._reject:
+                # Desperation pass: keep NOTHING recent, floor at 64 tokens —
+                # every evictable byte goes before we ever reject. Reject
+                # without this was a one-way door (reported): retrying reran
+                # the identical pipeline forever.
+                stats2 = await rewrite_request(
+                    llm_request, keep_recent=0, min_tokens=64)
+                if stats2["rewritten"]:
+                    request_est = max(0, request_est - stats2["freed"])
+                    tokens = request_est
+                    _log.warning(
+                        "ContextGuardPlugin EVICT(desperation): %d more "
+                        "rewrite(s), ~%d tokens — request now ~%d, session_id=%s",
+                        stats2["rewritten"], stats2["freed"], request_est,
+                        session_id,
+                    )
+            if tokens >= self._reject:
+                oversized = self._has_oversized_single_part(llm_request)
                 _log.warning(
                     "ContextGuardPlugin REJECT: tokens=%d (base=%d request=%d) "
-                    "effective=%d ratio=%.2f session_id=%s",
-                    tokens, base, request_est, self._effective, ratio, session_id,
+                    "effective=%d ratio=%.2f oversized_part=%s session_id=%s "
+                    "— precompact force mode recovers this session next turn",
+                    tokens, base, request_est, self._effective, ratio,
+                    oversized, session_id,
                 )
                 return LlmResponse(
                     content=types.Content(
                         role="model",
-                        parts=[types.Part(text=_REJECT_TEXT)],
+                        parts=[types.Part(
+                            text=(_REJECT_OVERSIZED_TEXT if oversized
+                                  else _REJECT_TEXT))],
                     ),
                 )
             return None
@@ -311,6 +340,27 @@ class ContextGuardPlugin(BasePlugin):
             )
 
         return None
+
+    def _has_oversized_single_part(self, llm_request: LlmRequest) -> bool:
+        """True when ONE part alone exceeds the effective window — the
+        physics floor no amount of compression around it can fix."""
+        import json as _json
+
+        limit_chars = self._effective * 4
+        for content in getattr(llm_request, "contents", None) or []:
+            for part in getattr(content, "parts", None) or []:
+                text = getattr(part, "text", None)
+                if text and len(text) >= limit_chars:
+                    return True
+                fr = getattr(part, "function_response", None)
+                if fr is not None:
+                    try:
+                        if len(_json.dumps(getattr(fr, "response", None) or {},
+                                           default=str)) >= limit_chars:
+                            return True
+                    except Exception:  # noqa: BLE001
+                        pass
+        return False
 
     def _count_tokens_via_litellm(self, llm_request: LlmRequest) -> int:
         """Per-model accurate count via litellm; chars/4 fallback on

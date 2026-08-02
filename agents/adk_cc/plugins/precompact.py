@@ -47,6 +47,73 @@ def _enabled() -> bool:
     return env_bool("ADK_CC_PRECOMPACT", default=True)
 
 
+def _guard_reject_line() -> Optional[int]:
+    """The context guard's REJECT watermark — force-mode trigger. None when
+    the guard is disabled (no reject, no loop to exit)."""
+    try:
+        from .context_guard import resolved_limits
+
+        limits = resolved_limits()
+        return int(limits["reject"]) if limits else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _mechanical_compaction_event(head: list[Any]) -> Any:
+    """A compaction event built WITHOUT a model — the guaranteed exit when
+    the summarizer is dead or the material exceeds its own window. Content
+    is a bounded per-event digest: text heads verbatim, tool results as
+    their cached summaries when the rewriter already paid for one, heads
+    otherwise. Lossier than an LLM summary, better than a dead session."""
+    import json as _json
+
+    from google.adk.events.event import Event
+    from google.adk.events.event_actions import EventActions, EventCompaction
+    from google.genai import types
+
+    from ..context import result_summaries
+
+    lines = ["[Mechanically condensed history — the summarizer was "
+             "unavailable; details are lossy. Re-run tools if specifics "
+             "are needed.]"]
+    budget = 12_000
+    for ev in head:
+        if sum(len(x) for x in lines) > budget:
+            lines.append("[…further events truncated]")
+            break
+        author = getattr(ev, "author", "?")
+        for part in (getattr(getattr(ev, "content", None), "parts", None) or []):
+            text = getattr(part, "text", None)
+            if text and not getattr(part, "thought", False):
+                lines.append(f"[{author}] {text[:300]}")
+                continue
+            fc = getattr(part, "function_call", None)
+            if fc is not None:
+                lines.append(f"[{author}] called {getattr(fc, 'name', '?')}")
+                continue
+            fr = getattr(part, "function_response", None)
+            if fr is not None:
+                try:
+                    raw = _json.dumps(getattr(fr, "response", None) or {},
+                                      default=str)
+                except Exception:  # noqa: BLE001
+                    raw = str(getattr(fr, "response", None))
+                summary = result_summaries.cached(raw)
+                body = summary if summary else raw[:200]
+                lines.append(f"[{author}] {getattr(fr, 'name', '?')} -> {body}")
+
+    return Event(
+        author="user",
+        invocation_id=Event.new_id(),
+        actions=EventActions(compaction=EventCompaction(
+            start_timestamp=getattr(head[0], "timestamp", 0.0),
+            end_timestamp=getattr(head[-1], "timestamp", 0.0),
+            compacted_content=types.Content(
+                role="model", parts=[types.Part(text="\n".join(lines))]),
+        )),
+    )
+
+
 def _threshold() -> Optional[int]:
     raw = os.environ.get("ADK_CC_COMPACTION_TOKEN_THRESHOLD")
     try:
@@ -65,32 +132,55 @@ class PrecompactPlugin(BasePlugin):
         if not _enabled():
             return None
         threshold = _threshold()
-        if not threshold:
+        force_line = _guard_reject_line()
+        if not threshold and not force_line:
             return None
         try:
             session = invocation_context.session
             events = list(getattr(session, "events", None) or [])
-            if len(events) <= _KEEP_TAIL:
+            if len(events) <= 3:
                 return None
             measured = estimate_events_tokens(events)
-            if measured < threshold:
+            # FORCE mode — the reject-loop exit (reported: a guard REJECT
+            # reran the identical pipeline forever). At the guard's reject
+            # watermark this plugin compacts regardless of whether normal
+            # compaction is configured, keeps a minimal tail, and if the
+            # summarizer cannot help, falls back to a MECHANICAL (model-free)
+            # digest — the session ALWAYS durably shrinks, so the next call
+            # gets a smaller request instead of the same rejection.
+            force = bool(force_line) and measured >= force_line
+            if not force and (not threshold or measured < threshold):
                 return None
 
-            head = events[:-_KEEP_TAIL]
+            keep_tail = 2 if force else _KEEP_TAIL
+            if len(events) <= keep_tail:
+                return None
+            head = events[:-keep_tail]
             _log.info(
-                "precompact: session %s measures ~%d tokens (threshold %d) — "
-                "summarizing %d event(s) before the turn",
-                getattr(session, "id", "?"), measured, threshold, len(head),
+                "precompact%s: session %s measures ~%d tokens (threshold %s, "
+                "force_line %s) — summarizing %d event(s) before the turn",
+                " FORCE" if force else "", getattr(session, "id", "?"),
+                measured, threshold, force_line, len(head),
             )
             # Lazy import: agent.py imports this module at load time.
             from ..agent import _make_compaction_summarizer
 
             summarizer = _make_compaction_summarizer()
-            compaction_event = await summarizer.maybe_summarize_events(events=head)
+            try:
+                compaction_event = await summarizer.maybe_summarize_events(events=head)
+            except Exception as e:  # noqa: BLE001
+                _log.warning("precompact: summarizer raised (%s: %s)",
+                             type(e).__name__, str(e)[:150])
+                compaction_event = None
             if compaction_event is None:
-                # Summarizer declined (churn floor, breaker, failure) — the
-                # per-call layers still protect this turn.
-                return None
+                if not force:
+                    # Summarizer declined (churn floor, breaker, failure) —
+                    # the per-call layers still protect this turn.
+                    return None
+                compaction_event = _mechanical_compaction_event(head)
+                _log.warning(
+                    "precompact FORCE: summarizer unavailable — appended a "
+                    "MECHANICAL digest of %d event(s)", len(head))
             svc = getattr(invocation_context, "session_service", None)
             if svc is None:
                 return None

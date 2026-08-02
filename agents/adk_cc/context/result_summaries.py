@@ -132,6 +132,23 @@ def _disk_put(digest: str, summary: str) -> None:
         pass
 
 
+def cached(text: str) -> Optional[str]:
+    """Cache-only lookup (memory, then disk) — no model call ever. For
+    callers that must stay synchronous or model-free (the mechanical
+    compaction fallback assembles its digest from these)."""
+    if not text:
+        return None
+    digest = _digest(text)
+    hit = _mem.get(digest)
+    if hit is not None:
+        _mem.move_to_end(digest)
+        return hit
+    disk = _disk_get(digest)
+    if disk:
+        _mem_put(digest, disk)
+    return disk
+
+
 async def summarize(text: str, *, tool: str = "tool") -> Optional[str]:
     """A condensed form of `text`, or None (disabled / failed / timed out).
     Cache-first; concurrent requests for the same digest share one call."""

@@ -170,6 +170,59 @@ def main() -> int:
         _run(PrecompactPlugin(), ictx6)
         check("without a compaction threshold the plugin is inert",
               fake6.calls == 0)
+        # ---- FORCE mode: the reject-loop exit --------------------------
+        # No compaction threshold at all; the guard's reject line alone
+        # (MAX=1000 -> reject 950) must trigger, with a minimal tail.
+        os.environ["ADK_CC_MAX_CONTEXT_TOKENS"] = "1000"
+        try:
+            fake7 = _FakeSummarizer()
+            agent_mod._make_compaction_summarizer = lambda: fake7
+            ictx7, svc7 = _ictx(big)
+            _run(PrecompactPlugin(), ictx7)
+            check("force mode fires on the guard's reject line alone",
+                  fake7.calls == 1 and svc7.appended == ["COMPACTION-EVENT"])
+            check("force mode keeps only a minimal tail of 2",
+                  len(fake7.seen) == len(big) - 2, len(fake7.seen))
+
+            # Summarizer dead -> MECHANICAL digest still lands: the session
+            # durably shrinks with no model at all (the guaranteed exit).
+            from adk_cc.context import result_summaries as rs
+            import json as _json
+            raw = _json.dumps({"content": "x" * 4000}, ensure_ascii=False)
+            rs._mem_put(rs._digest(raw), "CACHED FINDINGS")
+            fake8 = _FakeSummarizer(event=None)
+            agent_mod._make_compaction_summarizer = lambda: fake8
+            ictx8, svc8 = _ictx(big)
+            before = estimate_events_tokens(ictx8.session.events)
+            _run(PrecompactPlugin(), ictx8)
+            check("dead summarizer -> mechanical compaction appended",
+                  len(svc8.appended) == 1
+                  and svc8.appended[0].actions.compaction is not None)
+            content = svc8.appended[0].actions.compaction.compacted_content
+            digest_text = "".join(pt.text or "" for pt in content.parts)
+            check("mechanical digest is labeled and uses cached summaries",
+                  "Mechanically condensed" in digest_text
+                  and "CACHED FINDINGS" in digest_text, digest_text[:200])
+            after = estimate_events_tokens(ictx8.session.events)
+            # The compacted HEAD is gone; what remains is the (kept) tail
+            # plus a small digest. A tail whose own payloads still exceed
+            # the line is the per-call rewriter's job (desperation pass) —
+            # durable shrink here, mechanical stubbing there, is the exit.
+            check("the head's weight is durably gone (exit ratio > 4x)",
+                  after < before / 4, (before, after))
+
+            # A RAISING summarizer takes the same mechanical path in force.
+            class _Boom2:
+                async def maybe_summarize_events(self, *, events):
+                    raise RuntimeError("dead endpoint")
+
+            agent_mod._make_compaction_summarizer = lambda: _Boom2()
+            ictx9, svc9 = _ictx(big)
+            _run(PrecompactPlugin(), ictx9)
+            check("raising summarizer in force mode -> mechanical fallback",
+                  len(svc9.appended) == 1)
+        finally:
+            os.environ.pop("ADK_CC_MAX_CONTEXT_TOKENS", None)
     finally:
         agent_mod._make_compaction_summarizer = orig
         os.environ.pop("ADK_CC_COMPACTION_TOKEN_THRESHOLD", None)

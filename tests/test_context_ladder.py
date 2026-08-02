@@ -157,14 +157,47 @@ def test_rewrite_never_touches_small_results_or_prose():
     assert parts[1].function_response.response == {"exit": 0}
 
 
-def test_reject_when_eviction_cannot_save_enough():
+def test_reject_oversized_single_part_says_so():
     g = _guard(ADK_CC_MAX_CONTEXT_TOKENS=1000)
-    # One enormous NON-evictable part (genuine text, not a tool replay).
+    # One enormous NON-evictable part: the physics floor. The reject text
+    # must NOT promise auto-recovery it cannot deliver.
     req = SimpleNamespace(contents=[types.Content(role="user", parts=[
         types.Part(text="p" * 400_000)])], config=None, model="m")
     out = asyncio.run(g.before_model_callback(
         callback_context=_cb_ctx(10), llm_request=req))
-    assert out is not None and "near full" in out.content.parts[0].text
+    assert out is not None
+    assert "cannot be sent" in out.content.parts[0].text
+
+
+def test_reject_recoverable_promises_compression():
+    g = _guard(ADK_CC_MAX_CONTEXT_TOKENS=1000)
+    # Many medium prose parts: not evictable, none individually oversized —
+    # precompact force mode CAN durably shrink this next turn, and the
+    # reject text says so (the exit from the reject-retry loop).
+    req = SimpleNamespace(contents=[types.Content(role="user", parts=[
+        types.Part(text="prose " * 500) for _ in range(20)])],
+        config=None, model="m")
+    out = asyncio.run(g.before_model_callback(
+        callback_context=_cb_ctx(10), llm_request=req))
+    assert out is not None
+    assert "compression will run" in out.content.parts[0].text
+
+
+def test_desperation_pass_rescues_before_reject():
+    """keep-2 leaves the request over the line; the desperation pass
+    (keep 0) must stub the newest results too and let the call through
+    instead of rejecting."""
+    g = _guard(ADK_CC_MAX_CONTEXT_TOKENS=10_000)
+    parts = [types.Part(function_response=types.FunctionResponse(
+        id=f"c{i}", name="web_fetch", response={"content": "x" * 60_000}))
+        for i in range(3)]
+    req = SimpleNamespace(contents=[types.Content(role="user", parts=parts)],
+                          config=None, model="m")
+    out = asyncio.run(g.before_model_callback(
+        callback_context=_cb_ctx(10), llm_request=req))
+    assert out is None, "desperation pass should have rescued the call"
+    assert all(p.function_response.response.get("status") == "cleared"
+               for p in parts), [p.function_response.response for p in parts]
 
 
 # ---- enforced self-heal (_normalize_ladder) ----
