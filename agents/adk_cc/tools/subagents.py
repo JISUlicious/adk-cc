@@ -74,13 +74,26 @@ def _reset_gate_for_test(n: int) -> None:
 
 # --- registry --------------------------------------------------------------
 class _Child:
-    __slots__ = ("id", "task_text", "atask", "started", "invocation_id")
+    __slots__ = ("id", "task_text", "atask", "started", "invocation_id",
+                 "finished")
 
     def __init__(self, id: str, task_text: str, atask: asyncio.Task,
                  invocation_id: str) -> None:
         self.id, self.task_text, self.atask = id, task_text, atask
         self.started = time.perf_counter()
         self.invocation_id = invocation_id
+        # Freeze the clock at completion: a finished-but-uncollected child
+        # sits in the registry until collect, and the dock polls it — its
+        # counter must not keep ticking with the still-running ones.
+        self.finished: Optional[float] = None
+        atask.add_done_callback(self._on_done)
+
+    def _on_done(self, _t: "asyncio.Task") -> None:
+        self.finished = time.perf_counter()
+
+    def elapsed_s(self) -> float:
+        end = self.finished if self.finished is not None else time.perf_counter()
+        return round(end - self.started, 1)
 
 
 # session key -> {child_id: _Child}. Keyed by SESSION so abort (which knows
@@ -109,7 +122,7 @@ def running_children(session_key: str) -> list[dict[str, Any]]:
     for c in (_REGISTRY.get(session_key) or {}).values():
         if not c.atask.done():
             out.append({"id": c.id, "task": c.task_text,
-                        "elapsed_s": round(time.perf_counter() - c.started, 1)})
+                        "elapsed_s": c.elapsed_s()})
     return out
 
 
@@ -122,7 +135,7 @@ def children_snapshot(session_key: str) -> list[dict[str, Any]]:
         out.append({
             "id": c.id,
             "task": c.task_text,
-            "elapsed_s": round(time.perf_counter() - c.started, 1),
+            "elapsed_s": c.elapsed_s(),
             "status": "done" if c.atask.done() else "running",
         })
     return out
@@ -433,7 +446,13 @@ class CollectExplorersTool(BaseTool):
         mode = str(args.get("wait") or "all")
         timeout = args.get("timeout_s")
         pending_tasks = {c.atask for c in children if not c.atask.done()}
-        if pending_tasks:
+        # first_done with a report ALREADY in hand must return it now:
+        # asyncio.wait only watches the pending set, so without this a child
+        # that finished before the collect call was invisible to
+        # FIRST_COMPLETED and the collect blocked until a DIFFERENT child
+        # finished (found by the elapsed-freeze regression test).
+        already_done = len(children) - len(pending_tasks)
+        if pending_tasks and not (mode == "first_done" and already_done):
             await asyncio.wait(
                 pending_tasks,
                 timeout=float(timeout) if timeout else None,
@@ -458,8 +477,7 @@ class CollectExplorersTool(BaseTool):
                 bucket.pop(c.id, None)
             else:
                 running.append({"id": c.id, "task": c.task_text,
-                                "elapsed_s": round(
-                                    time.perf_counter() - c.started, 1)})
+                                "elapsed_s": c.elapsed_s()})
 
         if not done and running and (mode == "first_done" or timeout):
             # Measured live: first_done + timeout_s=20 + cancel_remaining

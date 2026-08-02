@@ -111,8 +111,28 @@ async def _scenario():
         check("the registry sees three running children",
               len(sa.running_children(skey)) == 3)
 
-        # --- first_done: early resume --------------------------------------
+        # --- a finished child's clock freezes in the dock --------------------
+        # Reported live: a finished-but-uncollected explorer's counter kept
+        # ticking in the dock alongside the running ones — the snapshot
+        # computed now-started for everyone.
         finish["auth flow"].set()
+        for _ in range(3):          # let the child task actually finish
+            await asyncio.sleep(0)
+        snap1 = {c["id"]: c for c in sa.children_snapshot(skey)}
+        await asyncio.sleep(0.25)
+        snap2 = {c["id"]: c for c in sa.children_snapshot(skey)}
+        done_id = ids["auth flow"]
+        check("a finished child reports status=done in the dock",
+              snap1[done_id]["status"] == "done", snap1)
+        check("its elapsed FREEZES at completion",
+              snap1[done_id]["elapsed_s"] == snap2[done_id]["elapsed_s"],
+              (snap1[done_id], snap2[done_id]))
+        still = ids["sandbox backends"]
+        check("while a running sibling's elapsed keeps ticking",
+              snap2[still]["elapsed_s"] > snap1[still]["elapsed_s"],
+              (snap1[still], snap2[still]))
+
+        # --- first_done: early resume --------------------------------------
         got = await collect.run_async(args={"wait": "first_done"},
                                       tool_context=ctx)
         check("first_done returns as soon as one report exists",
