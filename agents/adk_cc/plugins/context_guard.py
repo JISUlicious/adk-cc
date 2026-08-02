@@ -10,13 +10,31 @@ that would jump from below threshold to over the model's window in a
 single step (e.g. a tool returning an unexpectedly large payload).
 ADK's compaction is reactive; this is preventive.
 
-Two interventions only — no trim, no LLM call. Both delegated to ADK:
+Three interventions, no LLM call:
 
   - **WARN** (default 75% of `ADK_CC_MAX_CONTEXT_TOKENS`): structured
     log line so observability picks it up. Telemetry only.
-  - **REJECT** (default 95%): return an early `LlmResponse` with a
-    "context near full" message. Catches the request before it would
-    otherwise 500 against the model server.
+  - **EVICT** (at the REJECT line): before rejecting, replace the
+    OLDEST oversized tool results in the outgoing request — both
+    same-agent `function_response` payloads and ADK's text renderings
+    of ANOTHER agent's tool results ("[Explore] `web_fetch` tool
+    returned result: …") — with a short eviction note, newest results
+    kept. Mutates only this call's `llm_request`; session events are
+    untouched (the next call rebuilds from them). Turns a fatal
+    mid-turn overflow into a degraded-but-working call.
+  - **REJECT** (default 95%): only when eviction can't get under the
+    line — return an early `LlmResponse` with a "context near full"
+    message instead of a 500 from the model server.
+
+The decision count is `max(ADK-aligned estimate, request estimate)`:
+the ADK-aligned estimator prefers the last event's model-reported
+usage (right for "how big has the conversation been", and keeps this
+layer agreeing with ADK compaction), while `estimate_request_tokens`
+measures the actual outgoing request, payloads included. Measured
+live (2026-08-02): a coordinator call carrying ~833KB of a
+sub-agent's web_fetch results (~289k server tokens) sailed past the
+guard because the stale usage number said 76,349 — then blew the
+model's real ~272k input window.
 
 Disabled gracefully when `ADK_CC_MAX_CONTEXT_TOKENS` is unset — the
 plugin attaches but does nothing. Plugin-chain wiring stays uniform
@@ -49,10 +67,9 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
-from ..config.schema import env_bool
 from ..permissions.token_counter import (
     estimate_prompt_tokens,
-    estimate_prompt_tokens_full,
+    estimate_request_tokens,
 )
 
 _log = logging.getLogger(__name__)
@@ -143,6 +160,86 @@ def resolved_limits() -> Optional[dict]:
     }
 
 
+# Tool results below this size are never evicted (small results are cheap
+# and often load-bearing: exit codes, short answers).
+_EVICT_MIN_CHARS = 2048
+# The newest evictable results stay — recency is what the model is acting on.
+_EVICT_KEEP_NEWEST = 2
+# ADK renders ANOTHER agent's tool result as text:
+#   "[Explore] `web_fetch` tool returned result: {...}"
+# (flows/llm_flows/contents.py _present_other_agent_message). Matching that
+# exact shape keeps eviction away from genuine prose.
+_FOREIGN_RESULT_RE = None  # compiled lazily below
+
+
+def _is_foreign_tool_result(text: str) -> bool:
+    global _FOREIGN_RESULT_RE
+    if _FOREIGN_RESULT_RE is None:
+        import re
+        _FOREIGN_RESULT_RE = re.compile(
+            r"^\[[^\]\n]{1,80}\] `[^`\n]{1,80}` tool returned result: ")
+    return bool(_FOREIGN_RESULT_RE.match(text))
+
+
+def _evict_tool_results(llm_request, *, target: int, current: int) -> tuple[int, int]:
+    """Shrink the outgoing request by replacing the OLDEST oversized tool
+    results with a short eviction note, until the estimate reaches `target`.
+
+    Two shapes are evictable — both are tool output by construction:
+      - `function_response` parts with a payload over _EVICT_MIN_CHARS
+        (same-agent history);
+      - text parts matching ADK's foreign-tool-result rendering
+        (a sub-agent's results replayed into this agent's request).
+
+    The newest _EVICT_KEEP_NEWEST evictable results are always kept.
+    Mutates `llm_request.contents` IN PLACE — this affects only the call
+    being built; session events are untouched and the next call rebuilds
+    from them. Returns (evicted_count, tokens_saved_estimate).
+    """
+    import json as _json
+
+    candidates = []  # (order, part, kind, size_chars)
+    order = 0
+    for content in getattr(llm_request, "contents", None) or []:
+        for part in getattr(content, "parts", None) or []:
+            order += 1
+            fr = getattr(part, "function_response", None)
+            if fr is not None:
+                try:
+                    size = len(_json.dumps(getattr(fr, "response", None) or {},
+                                           default=str))
+                except Exception:
+                    continue
+                if size >= _EVICT_MIN_CHARS:
+                    candidates.append((order, part, "response", size))
+                continue
+            text = getattr(part, "text", None)
+            if text and len(text) >= _EVICT_MIN_CHARS and _is_foreign_tool_result(text):
+                candidates.append((order, part, "text", len(text)))
+
+    if len(candidates) <= _EVICT_KEEP_NEWEST:
+        return 0, 0
+
+    evicted = saved_chars = 0
+    for _, part, kind, size in candidates[:-_EVICT_KEEP_NEWEST]:
+        if current - (saved_chars // 4) <= target:
+            break
+        if kind == "response":
+            note = (f"[tool result evicted: {size} chars dropped to fit the "
+                    "context window — re-run the tool if this is still needed]")
+            part.function_response.response = {"evicted": note}
+            saved_chars += max(0, size - len(note) - 20)
+        else:
+            head = part.text[:200]
+            note = (f"\n…[{size} chars evicted to fit the context window — "
+                    "re-run the tool if this is still needed]")
+            part.text = head + note
+            saved_chars += max(0, size - len(head) - len(note))
+        evicted += 1
+
+    return evicted, saved_chars // 4
+
+
 class ContextGuardPlugin(BasePlugin):
     """WARN at threshold, REJECT at hard limit. ADK compaction does the rest."""
 
@@ -175,21 +272,11 @@ class ContextGuardPlugin(BasePlugin):
             _normalize_ladder(self._max, reserve, warn_opt, reject_opt)
         )
 
-        # Opt-in: count function_call/function_response payloads in the REJECT
-        # decision (the ADK-consistent estimator ignores them, under-counting
-        # tool-heavy turns — a real REJECT-safety gap). Default off to preserve
-        # ADK-aligned behavior; the fuller number is always shown in the logs.
-        self._count_tool_payloads = (
-            env_bool("ADK_CC_CONTEXT_COUNT_TOOL_PAYLOADS")
-        )
-
         # Logged at startup so operators see the resolved ladder and can catch
         # typos / misordering immediately.
         _log.info(
-            "ContextGuardPlugin: MAX=%d RESERVE=%d EFFECTIVE=%d WARN=%d REJECT=%d "
-            "count_tool_payloads=%s",
+            "ContextGuardPlugin: MAX=%d RESERVE=%d EFFECTIVE=%d WARN=%d REJECT=%d",
             self._max, self._reserve, self._effective, self._warn, self._reject,
-            self._count_tool_payloads,
         )
         for c in corrections:
             _log.warning("ContextGuardPlugin ladder corrected: %s", c)
@@ -225,10 +312,11 @@ class ContextGuardPlugin(BasePlugin):
 
         session_events = self._session_events(callback_context)
         base = estimate_prompt_tokens(llm_request, session_events=session_events)
-        # Payload-inclusive estimate (counts tool args/results the ADK-consistent
-        # count ignores). Used for the decision only when opted in; always shown.
-        full = estimate_prompt_tokens_full(llm_request, session_events=session_events)
-        tokens = full if self._count_tool_payloads else base
+        # The outgoing request itself, payloads included, no stale-usage
+        # shortcut. max() so a mid-invocation payload burst can't hide
+        # behind the previous call's smaller usage number.
+        request_est = estimate_request_tokens(llm_request)
+        tokens = max(base, request_est)
         ratio = tokens / self._effective if self._effective else 0.0
 
         # Diagnostic-only: when DEBUG is on, also compute the
@@ -252,24 +340,43 @@ class ContextGuardPlugin(BasePlugin):
 
         if tokens >= self._reject:
             session_id = self._session_id(callback_context)
-            _log.warning(
-                "ContextGuardPlugin REJECT: tokens=%d (base=%d full=%d) "
-                "effective=%d ratio=%.2f session_id=%s",
-                tokens, base, full, self._effective, ratio, session_id,
-            )
-            return LlmResponse(
-                content=types.Content(
-                    role="model",
-                    parts=[types.Part(text=_REJECT_TEXT)],
-                ),
-            )
+            # Before rejecting, try to SHRINK the request: evict the oldest
+            # oversized tool results (this call only — session events are
+            # untouched). A degraded call beats both a REJECT and the
+            # context-window overflow the model server would return.
+            evicted, saved = _evict_tool_results(
+                llm_request, target=self._warn, current=request_est)
+            if evicted:
+                request_est -= saved
+                # base reflects the PRE-eviction conversation (the server
+                # already accepted a call that big); the measured
+                # post-eviction request decides now.
+                tokens = request_est
+                _log.warning(
+                    "ContextGuardPlugin EVICT: dropped %d old tool result(s) "
+                    "(~%d tokens) — request now ~%d, session_id=%s",
+                    evicted, saved, request_est, session_id,
+                )
+            if tokens >= self._reject:
+                _log.warning(
+                    "ContextGuardPlugin REJECT: tokens=%d (base=%d request=%d) "
+                    "effective=%d ratio=%.2f session_id=%s",
+                    tokens, base, request_est, self._effective, ratio, session_id,
+                )
+                return LlmResponse(
+                    content=types.Content(
+                        role="model",
+                        parts=[types.Part(text=_REJECT_TEXT)],
+                    ),
+                )
+            return None
 
         if tokens >= self._warn:
             session_id = self._session_id(callback_context)
             _log.warning(
-                "ContextGuardPlugin WARN: tokens=%d (base=%d full=%d) "
+                "ContextGuardPlugin WARN: tokens=%d (base=%d request=%d) "
                 "effective=%d ratio=%.2f session_id=%s",
-                tokens, base, full, self._effective, ratio, session_id,
+                tokens, base, request_est, self._effective, ratio, session_id,
             )
 
         return None

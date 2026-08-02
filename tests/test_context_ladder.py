@@ -22,7 +22,7 @@ def _guard(**env):
     # set env, build a fresh plugin, restore env
     keys = ["ADK_CC_MAX_CONTEXT_TOKENS", "ADK_CC_CONTEXT_RESERVE_TOKENS",
             "ADK_CC_CONTEXT_WARN_TOKENS", "ADK_CC_CONTEXT_REJECT_TOKENS",
-            "ADK_CC_CONTEXT_COUNT_TOOL_PAYLOADS", "ADK_CC_COMPACTION_TOKEN_THRESHOLD"]
+            "ADK_CC_COMPACTION_TOKEN_THRESHOLD"]
     saved = {k: os.environ.get(k) for k in keys}
     try:
         for k in keys:
@@ -63,10 +63,103 @@ def test_explicit_warn_reject_override():
     assert g._warn == 42000 and g._reject == 80000
 
 
-def test_count_tool_payloads_flag():
-    assert _guard(ADK_CC_MAX_CONTEXT_TOKENS=1000)._count_tool_payloads is False
-    assert _guard(ADK_CC_MAX_CONTEXT_TOKENS=1000,
-                  ADK_CC_CONTEXT_COUNT_TOOL_PAYLOADS=1)._count_tool_payloads is True
+# ---- the incident (2026-08-02): stale usage hid a 289k-token request ----
+import asyncio
+
+from adk_cc.permissions.token_counter import estimate_request_tokens
+from adk_cc.plugins.context_guard import _evict_tool_results
+
+
+def _foreign_result_part(n_chars: int, tool: str = "web_fetch") -> types.Part:
+    """A sub-agent tool result as ADK renders it into the coordinator's
+    request (flows/llm_flows/contents.py _present_other_agent_message)."""
+    return types.Part(text=(
+        f"[Explore] `{tool}` tool returned result: " + "{'content': '"
+        + "w" * n_chars + "'}"))
+
+
+def _cb_ctx(usage: int):
+    ev = SimpleNamespace(usage_metadata=SimpleNamespace(prompt_token_count=usage))
+    return SimpleNamespace(session=SimpleNamespace(events=[ev], id="s-incident"))
+
+
+def test_request_estimator_ignores_stale_usage():
+    req = SimpleNamespace(contents=[types.Content(role="user", parts=[
+        _foreign_result_part(400_000)])])
+    # The usage-preferring estimators would say 76,349 here; the request
+    # estimator measures the actual outgoing bytes.
+    assert estimate_request_tokens(req) > 90_000
+
+
+def test_incident_replay_guard_now_intervenes():
+    """Faithful miniature of the failing coordinator call: last usage 76,349
+    (Explore's smaller call), outgoing request ~800KB of replayed fetch
+    results. Pre-fix the guard was silent; now it must EVICT the oldest
+    results and let a shrunken call through (or REJECT, never silence)."""
+    g = _guard(ADK_CC_MAX_CONTEXT_TOKENS=200000)
+    parts = [types.Part(text="For context:")] + [
+        _foreign_result_part(90_000) for _ in range(9)]
+    req = SimpleNamespace(contents=[types.Content(role="user", parts=parts)],
+                          config=None, model="gpt-5.4-mini")
+    before = estimate_request_tokens(req)
+    assert before > g._reject, (before, g._reject)   # genuinely over the line
+
+    out = asyncio.run(g.before_model_callback(
+        callback_context=_cb_ctx(76_349), llm_request=req))
+    after = estimate_request_tokens(req)
+    # Eviction shrank the request under REJECT and the call proceeds.
+    assert out is None, "guard rejected instead of evicting"
+    assert after < g._reject, (after, g._reject)
+    evicted = sum(1 for p in req.contents[0].parts
+                  if p.text and "evicted" in p.text)
+    kept = sum(1 for p in req.contents[0].parts
+               if p.text and p.text.startswith("[Explore]") and "evicted" not in p.text)
+    assert evicted >= 1 and kept >= 2, (evicted, kept)
+
+
+def test_evict_keeps_newest_and_stops_at_target():
+    parts = [types.Part(
+        function_response=types.FunctionResponse(
+            id=f"c{i}", name="web_fetch", response={"content": "x" * 20_000}))
+        for i in range(5)]
+    req = SimpleNamespace(contents=[types.Content(role="user", parts=parts)])
+    cur = estimate_request_tokens(req)
+    n, saved = _evict_tool_results(req, target=cur - 9_000, current=cur)
+    # Two evictions (~5k tokens each) reach the target; newest two untouched.
+    assert n == 2 and saved > 8_000, (n, saved)
+    assert parts[0].function_response.response.get("evicted")
+    assert parts[1].function_response.response.get("evicted")
+    assert "content" in parts[3].function_response.response
+    assert "content" in parts[4].function_response.response
+
+
+def test_evict_never_touches_small_results_or_prose():
+    parts = [
+        types.Part(text="A genuine long user message. " * 200),  # prose >2KB
+        types.Part(function_response=types.FunctionResponse(
+            id="c1", name="run_bash", response={"exit": 0})),    # small
+        types.Part(function_response=types.FunctionResponse(
+            id="c2", name="web_fetch", response={"content": "y" * 20_000})),
+        types.Part(function_response=types.FunctionResponse(
+            id="c3", name="web_fetch", response={"content": "z" * 20_000})),
+    ]
+    req = SimpleNamespace(contents=[types.Content(role="user", parts=parts)])
+    n, _ = _evict_tool_results(req, target=0, current=99_999)
+    # Only the two big fetches are candidates, and both sit in the
+    # keep-newest window — nothing may be evicted.
+    assert n == 0
+    assert parts[0].text.startswith("A genuine")
+    assert parts[1].function_response.response == {"exit": 0}
+
+
+def test_reject_when_eviction_cannot_save_enough():
+    g = _guard(ADK_CC_MAX_CONTEXT_TOKENS=1000)
+    # One enormous NON-evictable part (genuine text, not a tool replay).
+    req = SimpleNamespace(contents=[types.Content(role="user", parts=[
+        types.Part(text="p" * 400_000)])], config=None, model="m")
+    out = asyncio.run(g.before_model_callback(
+        callback_context=_cb_ctx(10), llm_request=req))
+    assert out is not None and "near full" in out.content.parts[0].text
 
 
 # ---- enforced self-heal (_normalize_ladder) ----

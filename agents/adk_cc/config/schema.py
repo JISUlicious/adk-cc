@@ -206,7 +206,12 @@ FIELDS: list[Var] = [
 
     # --- Compaction / context (representative advanced knobs) ------------
     Var("ADK_CC_MAX_CONTEXT_TOKENS", Tier.COMMON, "Context",
-        "Enable the context-guard ladder at this token budget. Unset = guard off.",
+        "Enable the context-guard ladder at this token budget. Unset = guard "
+        "off. Set BELOW the model's real input window: chars/4 estimation "
+        "runs ~1.4x optimistic on tool payloads (measured), so the gap is "
+        "the safety margin. Measured 2026-08-02: gpt-5.4-mini on the "
+        "chatgpt-codex backend accepts ~272k input tokens (400k total minus "
+        "128k output/reasoning reserve); 200000 is a sound ladder for it.",
         default=None, parse=as_int, default_display="off"),
     Var("ADK_CC_COMPACTION_TOKEN_THRESHOLD", Tier.ADVANCED, "Context",
         "Token threshold that triggers conversation compaction. Requires EVENT_RETENTION set too.",
@@ -401,8 +406,6 @@ FIELDS: list[Var] = [
     Var("ADK_CC_CONTEXT_REJECT_TOKENS", Tier.ADVANCED, "Context",
         "Context-guard hard-stop threshold (derived ~95% if unset).", default=None, parse=as_int,
         default_display="derived"),
-    Var("ADK_CC_CONTEXT_COUNT_TOOL_PAYLOADS", Tier.ADVANCED, "Context",
-        "Count tool payloads in context sizing (opt-in).", default=False, parse=as_bool),
     Var("ADK_CC_CONTEXT_FILES", Tier.ADVANCED, "Context",
         "Extra absolute context files (comma-separated) layered on discovery.",
         default=None, parse=as_csv),

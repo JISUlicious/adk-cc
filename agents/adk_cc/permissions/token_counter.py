@@ -116,6 +116,43 @@ def _count_text_chars_in_content(content: Any) -> int:
     return total
 
 
+def estimate_request_tokens(llm_request: Any) -> int:
+    """Payload-inclusive estimate of THE REQUEST ABOUT TO BE SENT — text,
+    function_call args, and function_response payloads — with NO
+    usage-metadata shortcut.
+
+    The usage-preferring estimators answer "how big has this conversation
+    been"; this answers "how big is this call". The two diverge exactly when
+    it matters: a burst of tool payloads lands within one invocation, or the
+    request replays ANOTHER agent's tool traffic (ADK renders foreign tool
+    results as text). Measured live: the last session usage said 76,349
+    while the outgoing request was ~289k server tokens — the stale number
+    won and the guard stayed silent into a context-window overflow."""
+    if llm_request is None:
+        return 0
+    import json as _json
+
+    total = 0
+    for content in getattr(llm_request, "contents", None) or []:
+        for part in getattr(content, "parts", None) or []:
+            text = getattr(part, "text", None)
+            if text:
+                total += len(text)
+            fc = getattr(part, "function_call", None)
+            if fc is not None:
+                try:
+                    total += len(_json.dumps(getattr(fc, "args", None) or {}, default=str))
+                except Exception:
+                    pass
+            fr = getattr(part, "function_response", None)
+            if fr is not None:
+                try:
+                    total += len(_json.dumps(getattr(fr, "response", None) or {}, default=str))
+                except Exception:
+                    pass
+    return total // 4 if total > 0 else 0
+
+
 def estimate_prompt_tokens_full(
     llm_request: Any,
     session_events: Optional[Iterable[Any]] = None,
