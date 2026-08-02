@@ -50,12 +50,13 @@ export function PlanCard({
   op,
   args,
   response,
-  callId,
 }: {
   op: Op
   args: unknown
   response: unknown
-  callId: string
+  // callId still arrives from Thread's paired-renderer signature; it is
+  // deliberately NOT displayed (a raw "call_XXX" prefix reads as debug noise).
+  callId?: string
 }) {
   const [open, setOpen] = useState(true)
   const [historyOpen, setHistoryOpen] = useState(false)
@@ -102,11 +103,6 @@ export function PlanCard({
           {failed && (
             <span className="rounded-sm bg-destructive/15 text-destructive px-1.5 py-0.5 text-[10px] font-medium">
               denied
-            </span>
-          )}
-          {callId && (
-            <span className="font-mono text-[10px] text-muted-foreground shrink-0">
-              {callId.slice(0, 8)}
             </span>
           )}
         </button>

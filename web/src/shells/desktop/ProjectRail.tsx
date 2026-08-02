@@ -63,6 +63,9 @@ export function ProjectRail({
       const xs = await listSessions(appName, projectId)
       xs.sort((a, b) => (b.lastUpdateTime || 0) - (a.lastUpdateTime || 0))
       setSessionsByProject((m) => ({ ...m, [projectId]: xs }))
+      // One transient fetch failure must not leave a sticky banner (seen
+      // live: "Failed to load sessions" pinned above a healthy list).
+      setError(null)
       return xs
     } catch (e) {
       setError(`Failed to load sessions: ${(e as Error).message}`)
