@@ -342,11 +342,16 @@ class ContextGuardPlugin(BasePlugin):
         return None
 
     def _has_oversized_single_part(self, llm_request: LlmRequest) -> bool:
-        """True when ONE part alone exceeds the effective window — the
-        physics floor no amount of compression around it can fix."""
+        """True when ONE part alone exceeds the REJECT watermark — the
+        physics floor no amount of compression AROUND it can fix. The
+        reject line (not the full window) is the bound: a part that can
+        never pass the guard is unfixable in this configuration, and
+        promising next-turn compression would be false — force precompact
+        cannot compact a session whose whole weight sits in the tail
+        message itself (found by the live reject drill)."""
         import json as _json
 
-        limit_chars = self._effective * 4
+        limit_chars = self._reject * 4
         for content in getattr(llm_request, "contents", None) or []:
             for part in getattr(content, "parts", None) or []:
                 text = getattr(part, "text", None)

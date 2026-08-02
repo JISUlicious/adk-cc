@@ -183,6 +183,21 @@ def test_reject_recoverable_promises_compression():
     assert "compression will run" in out.content.parts[0].text
 
 
+def test_oversized_bound_is_the_reject_watermark():
+    """Found by the live drill: a single part between REJECT*4 and
+    EFFECTIVE*4 chars can never pass the guard, yet force precompact
+    cannot help (the whole weight sits in the tail message) — promising
+    compression would loop. The physics-floor text must apply from the
+    REJECT watermark, not the full window."""
+    g = _guard(ADK_CC_MAX_CONTEXT_TOKENS=1000)   # reject 950 -> 3800 chars
+    req = SimpleNamespace(contents=[types.Content(role="user", parts=[
+        types.Part(text="q" * 3900)])], config=None, model="m")
+    out = asyncio.run(g.before_model_callback(
+        callback_context=_cb_ctx(10), llm_request=req))
+    assert out is not None
+    assert "cannot be sent" in out.content.parts[0].text
+
+
 def test_desperation_pass_rescues_before_reject():
     """keep-2 leaves the request over the line; the desperation pass
     (keep 0) must stub the newest results too and let the call through
