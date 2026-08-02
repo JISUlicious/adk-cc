@@ -171,8 +171,13 @@ def test_reject_short_circuits():
     assert isinstance(result, LlmResponse), f"expected LlmResponse, got {type(result)}"
     parts = result.content.parts if result.content else []
     text = "".join(p.text or "" for p in parts)
-    assert "context" in text.lower() and "full" in text.lower(), \
-        f"expected friendly stop text, got: {text!r}"
+    # Two honest variants since the reject-loop exit work: a recoverable
+    # overflow promises next-turn compression; a single part bigger than
+    # the window (this test's shape: ONE 40k-char text under a 10k-token
+    # window) states the physics floor instead.
+    assert "context" in text.lower() and (
+        "full" in text.lower() or "cannot be sent" in text.lower()
+    ), f"expected friendly stop text, got: {text!r}"
     print("OK")
 
 
