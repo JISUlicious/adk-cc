@@ -163,6 +163,17 @@ def estimate_events_tokens(events: Iterable[Any]) -> int:
     root cause)."""
     import json as _json
 
+    def _content_len(raw: Any) -> int:
+        # ADK's EventCompaction.compacted_content is a types.Content in
+        # newer releases (a plain string historically) — measured live:
+        # len() on a Content raised and aborted the post-append accounting.
+        if raw is None:
+            return 0
+        if isinstance(raw, str):
+            return len(raw)
+        parts = getattr(raw, "parts", None) or []
+        return sum(len(getattr(p, "text", "") or "") for p in parts)
+
     events_list = list(events or [])
     cutoff = 0.0
     summary_len = 0
@@ -174,7 +185,7 @@ def estimate_events_tokens(events: Iterable[Any]) -> int:
             comp, "compacted_until", None) or 0.0
         if end and end >= cutoff:
             cutoff = end
-            summary_len = len(getattr(comp, "compacted_content", "") or "")
+            summary_len = _content_len(getattr(comp, "compacted_content", None))
 
     total = summary_len
     for ev in events_list:

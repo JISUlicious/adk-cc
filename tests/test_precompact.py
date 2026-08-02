@@ -103,6 +103,15 @@ def main() -> int:
     est_after = estimate_events_tokens(with_comp)
     check("events inside the compacted range are not double-counted",
           est_after < est_all / 2, (est_after, est_all))
+    # ADK's newer EventCompaction carries a types.Content, not a str —
+    # measured live: len(Content) raised and aborted post-append accounting.
+    comp2 = SimpleNamespace(
+        end_timestamp=8.0,
+        compacted_content=types.Content(role="model", parts=[
+            types.Part(text="tiny summary")]))
+    est_content = estimate_events_tokens(big + [_ev(ts=9.5, compaction=comp2)])
+    check("Content-typed compacted_content is measured, not crashed",
+          est_content == est_after, (est_content, est_after))
 
     # --- above threshold -> summarize head, append, keep tail ------------
     fake = _FakeSummarizer()
