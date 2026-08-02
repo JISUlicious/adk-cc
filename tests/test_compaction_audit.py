@@ -511,6 +511,52 @@ def test_seed_summary_does_not_count_as_new_content() -> None:
     print("OK test_seed_summary_does_not_count_as_new_content")
 
 
+def test_payload_heavy_marginal_is_not_trivial() -> None:
+    """Measured live: the incident session's head was 833KB of tool payloads
+    and 2,235 chars of TEXT — a text-only marginal counter skipped it as
+    trivial and starved precompact on exactly the session it exists for.
+    Payloads must count toward the marginal."""
+    class _FrPart:
+        text = None
+        thought = False
+
+        def __init__(self, payload):
+            self.function_call = None
+            self.function_response = type(
+                "FR", (), {"response": payload, "name": "web_fetch"})()
+
+    class _FrEvent:
+        def __init__(self, payload, ts=1.0):
+            self.content = type("C", (), {"parts": [_FrPart(payload)]})()
+            self.timestamp = ts
+
+    events, sink = _capture()
+    set_global_sink(sink)
+    try:
+        summarizer = _make_summarizer()
+        seed = _FakeInputEvent(
+            1.0,
+            text="[The following condenses earlier messages in this "
+                 "session to save context.] " + "old summary " * 1000)
+        haul = _FrEvent({"content": "w" * 50_000}, ts=2.0)
+
+        async def fake_summarize(self, *, events):  # noqa: ANN001
+            return _FakeReturnedEvent("condensed haul")
+
+        with patch(
+            "google.adk.apps.llm_event_summarizer.LlmEventSummarizer.maybe_summarize_events",
+            new=fake_summarize,
+        ):
+            result = asyncio.run(
+                summarizer.maybe_summarize_events(events=[seed, haul]))
+    finally:
+        clear_global_sink()
+    assert result is not None, "payload-heavy span must reach the summarizer"
+    assert [e["event"] for e in events] == [
+        "compaction_triggered", "compaction_success"]
+    print("OK test_payload_heavy_marginal_is_not_trivial")
+
+
 def test_min_new_chars_zero_disables_guard() -> None:
     """ADK_CC_COMPACTION_MIN_NEW_CHARS=0 opts out — even a trivial
     marginal proceeds to the summarizer."""
@@ -554,6 +600,7 @@ def main() -> None:
     test_env_var_invalid_falls_back_to_default()
     test_trivial_marginal_skips_before_any_model_call()
     test_seed_summary_does_not_count_as_new_content()
+    test_payload_heavy_marginal_is_not_trivial()
     test_min_new_chars_zero_disables_guard()
     print("\nall compaction-audit tests passed")
 

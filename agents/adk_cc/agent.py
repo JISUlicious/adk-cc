@@ -44,6 +44,7 @@ Discovered by `adk web` / `adk run` via the module-level `root_agent`.
 
 from __future__ import annotations
 
+import json as _json_mod
 import os
 import uuid
 from typing import Optional
@@ -962,6 +963,25 @@ def _make_lazy_summarizer_class():
                 if text.startswith("[The following condenses earlier messages"):
                     continue        # the rolling seed, not new content
                 marginal += len(text)
+                # Payloads count too: a tool-heavy span (the 2026-08-02
+                # incident head was 833KB of fetch results and 2,235 chars of
+                # text) is NOT trivial — a text-only counter here starved
+                # precompact on exactly the sessions it exists for.
+                for pt in parts:
+                    fc = getattr(pt, "function_call", None)
+                    if fc is not None:
+                        try:
+                            marginal += len(_json_mod.dumps(
+                                getattr(fc, "args", None) or {}, default=str))
+                        except Exception:  # noqa: BLE001
+                            pass
+                    fr = getattr(pt, "function_response", None)
+                    if fr is not None:
+                        try:
+                            marginal += len(_json_mod.dumps(
+                                getattr(fr, "response", None) or {}, default=str))
+                        except Exception:  # noqa: BLE001
+                            pass
             _min_new = int(os.environ.get("ADK_CC_COMPACTION_MIN_NEW_CHARS", "4000"))
             if marginal < _min_new:
                 _compaction_log.info(
