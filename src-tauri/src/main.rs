@@ -37,10 +37,35 @@ fn main() {
             let data = data_dir(app.handle());
             std::fs::create_dir_all(&data).ok();
 
+            // #98: own the port. A stale orphan from an unclean exit used to
+            // hold 8765 — the fresh child died on bind failure and the
+            // splash-wait silently adopted YESTERDAY'S code. Reclaim first.
+            match reclaim_port(&data) {
+                PortState::Free => {}
+                PortState::OtherInstanceAlive => {
+                    show_error(app.handle(), "adk-cc desktop is already running.");
+                    return Ok(());
+                }
+                PortState::Foreign(who) => {
+                    show_error(
+                        app.handle(),
+                        &format!(
+                            "Port {PORT} is in use by another process:<br><code>{who}</code><br>\
+                             Quit it and relaunch adk-cc desktop."
+                        ),
+                    );
+                    return Ok(());
+                }
+            }
+
             let child = spawn_backend(&data).expect("failed to spawn adk-cc backend");
+            let child_pid = child.id();
+            let _ = std::fs::write(pidfile(&data), child_pid.to_string());
             app.manage(BackendChild(Mutex::new(Some(child))));
 
-            // Wait for the sidecar, then swap the splash for the served UI.
+            // Wait for the sidecar, then swap the splash for the served UI —
+            // but only after verifying the responder IS the child we spawned
+            // (pid via /api/desktop/version), never whatever answers HTTP.
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 for _ in 0..240 {
@@ -49,10 +74,20 @@ fn main() {
                     }
                     std::thread::sleep(Duration::from_millis(500));
                 }
-                if let Some(w) = handle.get_webview_window("main") {
-                    let _ = w.eval(&format!(
-                        "window.location.replace('http://127.0.0.1:{PORT}/')"
-                    ));
+                if backend_pid_matches(PORT, child_pid) {
+                    if let Some(w) = handle.get_webview_window("main") {
+                        let _ = w.eval(&format!(
+                            "window.location.replace('http://127.0.0.1:{PORT}/')"
+                        ));
+                    }
+                } else {
+                    show_error(
+                        &handle,
+                        &format!(
+                            "The process answering on port {PORT} is not the \
+                             backend this app started. Refusing to attach."
+                        ),
+                    );
                 }
             });
             Ok(())
@@ -65,12 +100,130 @@ fn main() {
             if let Some(state) = handle.try_state::<BackendChild>() {
                 if let Ok(mut guard) = state.0.lock() {
                     if let Some(mut child) = guard.take() {
-                        let _ = child.kill();
+                        // TERM first (uvicorn shuts down cleanly), KILL as
+                        // the backstop. The pidfile goes with the child.
+                        terminate_child(&mut child);
                     }
                 }
             }
+            let data = data_dir(handle);
+            let _ = std::fs::remove_file(pidfile(&data));
         }
     });
+}
+
+fn pidfile(data: &PathBuf) -> PathBuf {
+    data.join("backend.pid")
+}
+
+/// TERM → up to 3s grace → KILL.
+fn terminate_child(child: &mut Child) {
+    let pid = child.id().to_string();
+    let _ = Command::new("kill").args(["-TERM", &pid]).status();
+    for _ in 0..30 {
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+enum PortState {
+    Free,
+    OtherInstanceAlive,
+    Foreign(String),
+}
+
+/// If something already answers on PORT, decide what it is via the pidfile
+/// and clear it when it is OUR stale orphan. Never adopt.
+fn reclaim_port(data: &PathBuf) -> PortState {
+    if TcpStream::connect(("127.0.0.1", PORT)).is_err() {
+        return PortState::Free; // nothing listening
+    }
+    let recorded = std::fs::read_to_string(pidfile(data))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    let Some(pid) = recorded else {
+        return PortState::Foreign(format!("unknown (no pidfile) on port {PORT}"));
+    };
+    let command = ps_field(pid, "command=").unwrap_or_default();
+    if !(command.contains("uvicorn") && command.contains("adk_cc")) {
+        // Pid was reused by an unrelated process, or the listener isn't ours.
+        return PortState::Foreign(if command.is_empty() {
+            format!("unknown (pid {pid} gone, port still bound)")
+        } else {
+            command
+        });
+    }
+    // A backend whose parent app still lives means a SECOND app instance —
+    // killing its backend out from under it would be worse than declining.
+    if let Some(ppid) = ps_field(pid, "ppid=").and_then(|s| s.trim().parse::<u32>().ok()) {
+        if ppid != 1 {
+            return PortState::OtherInstanceAlive;
+        }
+    }
+    // Our orphan (re-parented to launchd). TERM → grace → KILL, wait for the
+    // port to free.
+    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    for _ in 0..30 {
+        if TcpStream::connect(("127.0.0.1", PORT)).is_err() {
+            return PortState::Free;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+    for _ in 0..20 {
+        if TcpStream::connect(("127.0.0.1", PORT)).is_err() {
+            return PortState::Free;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    PortState::Foreign(format!("stale backend pid {pid} refused to die"))
+}
+
+fn ps_field(pid: u32, field: &str) -> Option<String> {
+    let out = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", field])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// GET /api/desktop/version and check the reported pid — "the responder is
+/// the child I spawned", not "something answered HTTP".
+fn backend_pid_matches(port: u16, expect_pid: u32) -> bool {
+    let Some(body) = http_get(port, "/api/desktop/version") else {
+        return false;
+    };
+    body.contains(&format!("\"pid\":{expect_pid}"))
+        || body.contains(&format!("\"pid\": {expect_pid}"))
+}
+
+fn http_get(port: u16, path: &str) -> Option<String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let req = format!(
+        "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+    let mut body = String::new();
+    let _ = stream.read_to_string(&mut body);
+    Some(body)
+}
+
+fn show_error(handle: &tauri::AppHandle, message: &str) {
+    if let Some(w) = handle.get_webview_window("main") {
+        let html = format!(
+            "document.body.innerHTML = '<div style=\"font-family:system-ui;\
+             padding:3em;max-width:34em;margin:auto\"><h2>adk-cc desktop</h2>\
+             <p>{}</p></div>'",
+            message.replace('\'', "\\'")
+        );
+        let _ = w.eval(&html);
+    }
 }
 
 /// Per-user data dir: `~/.adk-cc-desktop` (no spaces — keeps the sqlite URL
@@ -171,6 +324,9 @@ fn spawn_backend(data: &PathBuf) -> std::io::Result<Child> {
         ])
         .env("ADK_CC_AGENTS_DIR", &layout.agents)
         .env("ADK_CC_ALLOW_NO_AUTH", "1")
+        // #98: the backend's parent watchdog exits the child when this pid
+        // dies — no orphan can hold the port, even after SIGKILL of the app.
+        .env("ADK_CC_PARENT_PID", std::process::id().to_string())
         .env("ADK_CC_DESKTOP", "1")
         .env("ADK_CC_DESKTOP_DATA", data)
         .env("ADK_CC_TENANCY_MODE", "single")

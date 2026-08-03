@@ -22,9 +22,20 @@ configuration is env-driven and applied at agent.py module load:
 from __future__ import annotations
 
 import os
+import time
+import uuid
 from pathlib import Path
 from typing import Optional
 from ..config.schema import env_bool
+
+# Instance identity for /api/desktop/version (#98): computed once per
+# process so the desktop app can tell "my freshly spawned child" apart from
+# a stale orphan or a foreign process answering on the port.
+_INSTANCE_INFO = {
+    "pid": os.getpid(),
+    "boot_id": uuid.uuid4().hex,
+    "started_at": time.time(),
+}
 
 
 def build_fastapi_app(
@@ -152,6 +163,14 @@ def build_fastapi_app(
     def _context_limits():  # noqa: ANN202
         from ..plugins.context_guard import resolved_limits
         return resolved_limits() or {}
+
+    # Instance identity (#98): lets the desktop app verify "the backend I
+    # reach is the child I just spawned" (pid + per-boot id) instead of
+    # adopting whatever answers on the port — a stale orphan served old code
+    # silently, and a foreign process would have become the app's UI.
+    @fastapi_app.get("/api/desktop/version", include_in_schema=False)
+    def _desktop_version():  # noqa: ANN202
+        return dict(_INSTANCE_INFO)
 
     # Knowledge-graph endpoints (opt-in, ADK_CC_KNOWLEDGE_UI=1). No-op otherwise.
     from .graph_routes import mount_knowledge_routes
@@ -410,6 +429,10 @@ def make_app():
     # `_boot_config_check`), before this factory is even reachable — so it
     # covers `adk web`/`adk run` and the desktop sidecar too, and genuinely
     # precedes the agent-graph construction.
+    # Die with the desktop app (#98): no-op unless ADK_CC_PARENT_PID is set.
+    from .parent_watchdog import start_parent_watchdog
+
+    start_parent_watchdog()
     agents_dir = os.environ.get("ADK_CC_AGENTS_DIR")
     if not agents_dir:
         # Default to this package's own agents/ dir — in a SOURCE checkout

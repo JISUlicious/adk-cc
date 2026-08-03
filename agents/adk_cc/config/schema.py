@@ -335,6 +335,10 @@ FIELDS: list[Var] = [
     Var("ADK_CC_ARTIFACT_STORAGE_URI", Tier.COMMON, "Deployment",
         "Artifact persistence URI (file://, gs://, s3://). Unset = in-memory.",
         default=None, default_display="in-memory"),
+    Var("ADK_CC_PARENT_PID", Tier.ADVANCED, "Deployment",
+        "Set by the desktop app to its own pid: the backend exits when that "
+        "process dies, so no orphan ever holds the port (works even after "
+        "SIGKILL of the app).", default=None, parse=as_int),
     Var("ADK_CC_DESKTOP_DATA", Tier.ADVANCED, "Deployment",
         "Desktop data root (sessions, settings, secrets, checkpoints).",
         default=None, parse=as_path, default_display="~/.adk-cc-desktop", profile=Profile.DESKTOP),
