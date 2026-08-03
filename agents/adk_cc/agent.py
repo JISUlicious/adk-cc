@@ -465,9 +465,13 @@ explore_agent = LlmAgent(
     name="Explore",
     model=MODEL,
     description=(
-        "Fast read-only codebase explorer. Use for broad searches across files "
-        "or when a question will take more than ~3 directed queries to answer. "
-        "Returns a written report; does not modify files."
+        "Fast read-only explorer of THIS project's codebase. Use for broad "
+        "searches across files or when a code question will take more than "
+        "~3 directed queries to answer. NOT for web research or general "
+        "knowledge — spawn_explorers handles those in parallel with only "
+        "their reports entering your context, where a transfer replays its "
+        "whole trajectory into yours. Returns a written report; does not "
+        "modify files."
     ),
     instruction=prompts.EXPLORE_INSTRUCTION,
     tools=[_read_file, _glob_files, _grep, _web_fetch],
@@ -600,8 +604,11 @@ if os.environ.get("ADK_CC_SUBAGENTS") == "1":
         "or separate research ('in parallel', 'separately', 'spawn "
         "explorers'), honour it with spawn_explorers — not a transfer and not "
         "an inline fan-out of greps, which serializes what they asked to "
-        "parallelize. Each task string is the explorer's entire briefing; it "
-        "shares no chat history."
+        "parallelize. Route by SUBJECT too: web research and general-"
+        "knowledge questions go to spawn_explorers (only their reports enter "
+        "your context); the Explore transfer is for THIS project's code. "
+        "Each task string is the explorer's entire briefing; it shares no "
+        "chat history."
     )
 
 
@@ -916,7 +923,7 @@ def _make_lazy_summarizer_class():
         # value.
         timeout_seconds: float = 30.0
 
-        async def maybe_summarize_events(self, *, events):
+        async def maybe_summarize_events(self, *, events, force=False):
             from google.adk.apps.llm_event_summarizer import LlmEventSummarizer
 
             event_count = len(events) if events else 0
@@ -983,7 +990,12 @@ def _make_lazy_summarizer_class():
                         except Exception:  # noqa: BLE001
                             pass
             _min_new = int(os.environ.get("ADK_CC_COMPACTION_MIN_NEW_CHARS", "4000"))
-            if marginal < _min_new:
+            # `force` (precompact FORCE mode) bypasses the churn floor: it
+            # exists to stop pointless RE-compaction, but a first forced
+            # compaction of a digested payload session is small by DESIGN —
+            # measured live: the floor pushed a recoverable session onto the
+            # lossier mechanical path for nothing. Breaker/timeout still apply.
+            if not force and marginal < _min_new:
                 _compaction_log.info(
                     "compaction_skipped model=%s reason=trivial_marginal "
                     "new_chars=%d floor=%d", self.model_id, marginal, _min_new)

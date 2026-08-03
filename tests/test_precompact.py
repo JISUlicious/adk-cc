@@ -68,9 +68,10 @@ class _FakeSummarizer:
         self.event = event
         self.calls = 0
 
-    async def maybe_summarize_events(self, *, events):
+    async def maybe_summarize_events(self, *, events, force=False):
         self.calls += 1
         self.seen = list(events)
+        self.forced = force
         return self.event
 
 
@@ -143,7 +144,7 @@ def main() -> int:
 
         # --- summarizer raising must not block the turn -------------------
         class _Boom:
-            async def maybe_summarize_events(self, *, events):
+            async def maybe_summarize_events(self, *, events, force=False):
                 raise RuntimeError("summarizer exploded")
 
         agent_mod._make_compaction_summarizer = lambda: _Boom()
@@ -181,6 +182,8 @@ def main() -> int:
             _run(PrecompactPlugin(), ictx7)
             check("force mode fires on the guard's reject line alone",
                   fake7.calls == 1 and svc7.appended == ["COMPACTION-EVENT"])
+            check("force mode passes force=True (churn floor bypassed)",
+                  fake7.forced is True)
             check("force mode keeps only a minimal tail of 2",
                   len(fake7.seen) == len(big) - 2, len(fake7.seen))
 
@@ -226,6 +229,75 @@ def main() -> int:
     finally:
         agent_mod._make_compaction_summarizer = orig
         os.environ.pop("ADK_CC_COMPACTION_TOKEN_THRESHOLD", None)
+
+    # ---- P1.5: digest-before-summarize --------------------------------
+    import json as _json
+    from google.adk.events.event import Event
+    from adk_cc.context import result_summaries as rs
+    from adk_cc.plugins.precompact import _digest_head_for_summary
+
+    raw_payload = {"content": "x" * 9000}
+    raw_json = _json.dumps(raw_payload, default=str)
+    rs._mem_put(rs._digest(raw_json), "CACHED FETCH SUMMARY")
+    prose = "genuine long conversation " * 200
+    foreign = "[Explore] `web_fetch` tool returned result: " + "y" * 9000
+    ev1 = Event(author="coordinator", invocation_id="i1",
+                content=types.Content(role="model",
+                                      parts=[types.Part(text=prose)]))
+    ev2 = Event(author="Explore", invocation_id="i1",
+                content=types.Content(role="user", parts=[
+                    types.Part(function_response=types.FunctionResponse(
+                        id="c1", name="web_fetch", response=raw_payload)),
+                    types.Part(text=foreign)]))
+    digested, saved = asyncio.run(_digest_head_for_summary([ev1, ev2]))
+    check("digest: genuine prose is untouched",
+          digested[0].content.parts[0].text == prose)
+    check("digest: payload swapped for its cached summary",
+          digested[1].content.parts[0].function_response.response
+          == {"summary": "CACHED FETCH SUMMARY"})
+    check("digest: foreign text condensed",
+          len(digested[1].content.parts[1].text) < 1000)
+    check("digest: savings reported", saved > 15_000, saved)
+    check("digest: ORIGINAL events untouched",
+          ev2.content.parts[0].function_response.response == raw_payload
+          and ev2.content.parts[1].text == foreign)
+    check("digest: author survives the copy", digested[1].author == "Explore")
+    os.environ["ADK_CC_RESULT_SUMMARIES"] = "0"   # uncached path, no model
+    check("digest: uncached payload becomes a head, not a crash",
+          asyncio.run(_digest_head_for_summary([Event(
+              author="a", invocation_id="i2",
+              content=types.Content(role="user", parts=[
+                  types.Part(function_response=types.FunctionResponse(
+                      id="c9", name="grep",
+                      response={"content": "z" * 9000}))]))]))[0][0]
+          .content.parts[0].function_response.response.get("head") is not None)
+    os.environ.pop("ADK_CC_RESULT_SUMMARIES", None)
+
+    # Uncached + summaries ENABLED -> the digest COMPUTES the summary
+    # (measured live: head-only digests dropped the very facts the next
+    # question needed).
+    class _FakeSum:
+        calls = 0
+
+        async def __call__(self, text, *, tool="tool"):
+            _FakeSum.calls += 1
+            return "COMPUTED NOW"
+
+    orig_summarize = rs.summarize
+    rs.summarize = _FakeSum()
+    try:
+        from adk_cc.plugins import precompact as pc_mod
+        dg, _ = asyncio.run(pc_mod._digest_head_for_summary([Event(
+            author="a", invocation_id="i3",
+            content=types.Content(role="user", parts=[
+                types.Part(function_response=types.FunctionResponse(
+                    id="c8", name="web_fetch",
+                    response={"content": "q" * 9000}))]))]))
+        check("digest computes missing summaries when enabled",
+              dg[0].content.parts[0].function_response.response
+              == {"summary": "COMPUTED NOW"} and _FakeSum.calls == 1)
+    finally:
+        rs.summarize = orig_summarize
 
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0

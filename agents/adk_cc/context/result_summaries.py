@@ -50,7 +50,12 @@ _NEG_TTL_S = 300.0            # a failed digest is not retried for this long
 _mem: "OrderedDict[str, str]" = OrderedDict()
 _neg: dict[str, float] = {}
 _inflight: dict[str, "asyncio.Task[Optional[str]]"] = {}
-_sem = asyncio.Semaphore(4)
+# Two concurrent summarizer calls: measured live, four-way concurrency
+# against a free-tier endpoint tripped 429s that negative-cached every
+# digest for five minutes and starved the digest path down to heads.
+_sem = asyncio.Semaphore(2)
+# Backoff schedule for rate-limited attempts (seconds between tries).
+_RETRY_SLEEPS = (20.0, 40.0)
 _model = None                 # lazily built, config-keyed
 _model_key: Optional[tuple] = None
 
@@ -183,8 +188,11 @@ async def _generate(digest: str, text: str, tool: str) -> Optional[str]:
 
     from ..memory.llm_text import final_response_text
 
+    from ..models.selectable import _is_rate_limited
+
     t0 = time.perf_counter()
     try:
+        summary = ""
         async with _sem:
             req = LlmRequest(
                 contents=[types.Content(role="user", parts=[types.Part(
@@ -193,10 +201,21 @@ async def _generate(digest: str, text: str, tool: str) -> Optional[str]:
                 config=types.GenerateContentConfig(),
             )
             timeout = _timeout_s()
-            coro = final_response_text(_resolve_model(), req)
-            raw = (await asyncio.wait_for(coro, timeout) if timeout
-                   else await coro)
-        summary = (raw or "").strip()
+            # Rate limits get a short backoff ladder (measured live: bare
+            # 429s negative-cached whole batches); other failures fail fast.
+            for attempt, sleep_s in enumerate((*_RETRY_SLEEPS, None)):
+                try:
+                    coro = final_response_text(_resolve_model(), req)
+                    raw = (await asyncio.wait_for(coro, timeout) if timeout
+                           else await coro)
+                    summary = (raw or "").strip()
+                    break
+                except Exception as e:  # noqa: BLE001
+                    if sleep_s is None or not _is_rate_limited(e):
+                        raise
+                    _log.info("result_summaries: rate-limited (attempt %d) — "
+                              "retrying in %.0fs", attempt + 1, sleep_s)
+                    await asyncio.sleep(sleep_s)
         if not summary:
             raise ValueError("empty summary")
         _mem_put(digest, summary)

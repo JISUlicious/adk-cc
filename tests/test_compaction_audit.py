@@ -557,6 +557,35 @@ def test_payload_heavy_marginal_is_not_trivial() -> None:
     print("OK test_payload_heavy_marginal_is_not_trivial")
 
 
+def test_force_bypasses_churn_floor() -> None:
+    """precompact FORCE passes force=True: the churn floor guards against
+    pointless RE-compaction, not against a first forced compaction of
+    deliberately-small digested input (measured live: the floor pushed a
+    recoverable session onto the lossier mechanical path)."""
+    events, sink = _capture()
+    set_global_sink(sink)
+    try:
+        summarizer = _make_summarizer()
+        tiny = _FakeInputEvent(1.0, text="tiny digested input")
+
+        async def fake_summarize(self, *, events):  # noqa: ANN001
+            return _FakeReturnedEvent("forced summary")
+
+        with patch(
+            "google.adk.apps.llm_event_summarizer.LlmEventSummarizer.maybe_summarize_events",
+            new=fake_summarize,
+        ):
+            skipped = asyncio.run(
+                summarizer.maybe_summarize_events(events=[tiny]))
+            forced = asyncio.run(
+                summarizer.maybe_summarize_events(events=[tiny], force=True))
+    finally:
+        clear_global_sink()
+    assert skipped is None, "unforced tiny input must still be skipped"
+    assert forced is not None, "force must bypass the churn floor"
+    print("OK test_force_bypasses_churn_floor")
+
+
 def test_min_new_chars_zero_disables_guard() -> None:
     """ADK_CC_COMPACTION_MIN_NEW_CHARS=0 opts out — even a trivial
     marginal proceeds to the summarizer."""
@@ -601,6 +630,7 @@ def main() -> None:
     test_trivial_marginal_skips_before_any_model_call()
     test_seed_summary_does_not_count_as_new_content()
     test_payload_heavy_marginal_is_not_trivial()
+    test_force_bypasses_churn_floor()
     test_min_new_chars_zero_disables_guard()
     print("\nall compaction-audit tests passed")
 

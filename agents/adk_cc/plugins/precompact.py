@@ -41,6 +41,9 @@ _log = logging.getLogger(__name__)
 # retention idea of ADK's compaction config (recent events are what the
 # model is actively working from).
 _KEEP_TAIL = 6
+# Uncached results the digest may summarize inline per precompact (each is
+# cached forever, so this is a per-episode bound, not a recurring cost).
+_MAX_COMPUTED_SUMMARIES = 12
 
 
 def _enabled() -> bool:
@@ -57,6 +60,68 @@ def _guard_reject_line() -> Optional[int]:
         return int(limits["reject"]) if limits else None
     except Exception:  # noqa: BLE001
         return None
+
+
+async def _digest_head_for_summary(head: list[Any]) -> tuple[list[Any], int]:
+    """Deep-copied head events with TOOL material swapped for its cached
+    summaries (heads when uncached): function_response payloads and ADK's
+    foreign-tool-result text renderings. Genuine prose is left intact —
+    condensing conversation is exactly the summarizer's job.
+
+    P1.5: the whole-window summarizer previously re-read raw bulk the
+    per-call rewriter had already paid to summarize — and on payload-heavy
+    heads could exceed its own window. Digested input is always small.
+    Originals are untouched (the compaction range still reads the real
+    events; only the summarizer's INPUT is condensed)."""
+    import json as _json
+
+    from ..context import result_summaries
+    from .microcompact import _FOREIGN_RESULT_RE
+
+    out: list[Any] = []
+    saved = 0
+    computed = 0
+    for ev in head:
+        try:
+            copy = ev.model_copy(deep=True)
+        except Exception:  # noqa: BLE001 — undigested beats broken
+            out.append(ev)
+            continue
+        for part in (getattr(getattr(copy, "content", None), "parts", None) or []):
+            fr = getattr(part, "function_response", None)
+            if fr is not None:
+                try:
+                    raw = _json.dumps(getattr(fr, "response", None) or {},
+                                      default=str)
+                except Exception:  # noqa: BLE001
+                    continue
+                if len(raw) < 2048:
+                    continue
+                summary = result_summaries.cached(raw)
+                if summary is None and computed < _MAX_COMPUTED_SUMMARIES:
+                    # Compute the missing summary NOW (cached forever).
+                    # Measured live: head-only digests dropped the very facts
+                    # the next question needed — the model then answered
+                    # confidently wrong from partial material.
+                    summary = await result_summaries.summarize(
+                        raw, tool=getattr(fr, "name", None) or "tool")
+                    if summary is not None:
+                        computed += 1
+                fr.response = ({"summary": summary} if summary
+                               else {"head": raw[:300]})
+                saved += len(raw)
+                continue
+            text = getattr(part, "text", None)
+            if text and len(text) >= 2048 and _FOREIGN_RESULT_RE.match(text):
+                summary = result_summaries.cached(text)
+                if summary is None and computed < _MAX_COMPUTED_SUMMARIES:
+                    summary = await result_summaries.summarize(text, tool="tool")
+                    if summary is not None:
+                        computed += 1
+                part.text = summary if summary else text[:300]
+                saved += len(text) - len(part.text)
+        out.append(copy)
+    return out, saved
 
 
 def _mechanical_compaction_event(head: list[Any]) -> Any:
@@ -166,8 +231,19 @@ class PrecompactPlugin(BasePlugin):
             from ..agent import _make_compaction_summarizer
 
             summarizer = _make_compaction_summarizer()
+            digested, digest_saved = await _digest_head_for_summary(head)
+            if digest_saved:
+                _log.info(
+                    "precompact: digested head for summarization (~%d chars "
+                    "of tool material swapped for cached summaries/heads)",
+                    digest_saved)
             try:
-                compaction_event = await summarizer.maybe_summarize_events(events=head)
+                # force=True in FORCE mode: the churn floor guards against
+                # pointless re-compaction, not against a first compaction of
+                # deliberately-small digested input (measured live: it pushed
+                # a recoverable session onto the lossier mechanical path).
+                compaction_event = await summarizer.maybe_summarize_events(
+                    events=digested, force=force)
             except Exception as e:  # noqa: BLE001
                 _log.warning("precompact: summarizer raised (%s: %s)",
                              type(e).__name__, str(e)[:150])

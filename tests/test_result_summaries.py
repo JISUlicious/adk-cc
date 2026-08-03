@@ -99,6 +99,43 @@ async def _scenario(tmp):
     finally:
         os.environ.pop("ADK_CC_COMPACTION_TIMEOUT_S", None)
 
+    # --- rate limits retry with backoff, then succeed --------------------
+    rs._RETRY_SLEEPS = (0.01, 0.01)          # fast schedule under test
+
+    class _RL(Exception):
+        status_code = 429
+
+    class _FlakyModel:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate_content_async(self, req, stream=False):
+            self.calls += 1
+            if self.calls <= 2:
+                raise _RL("429 too many requests")
+            yield LlmResponse(content=types.Content(
+                role="model", parts=[types.Part(text="AFTER RETRIES")]),
+                partial=False)
+
+    mf = _with_model(_FlakyModel())
+    out_rl = await rs.summarize("r" * 20_000, tool="web_fetch")
+    check("rate-limited attempts retry and then succeed",
+          out_rl == "AFTER RETRIES" and mf.calls == 3, (out_rl, mf.calls))
+
+    class _AlwaysRL:
+        def __init__(self):
+            self.calls = 0
+
+        async def generate_content_async(self, req, stream=False):
+            self.calls += 1
+            raise _RL("429")
+            yield  # pragma: no cover
+
+    ma = _with_model(_AlwaysRL())
+    out_rl2 = await rs.summarize("s" * 20_000, tool="web_fetch")
+    check("exhausted rate-limit retries degrade to None",
+          out_rl2 is None and ma.calls == 3, (out_rl2, ma.calls))
+
     # --- empty reply degrades the same way ------------------------------
     m5 = _with_model(_FakeModel(reply=""))
     check("empty model reply -> None",
