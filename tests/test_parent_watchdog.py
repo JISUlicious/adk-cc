@@ -67,6 +67,30 @@ def main() -> int:
     check("a second start is a no-op",
           pw.start_parent_watchdog(getppid=lambda: 4242) is False)
 
+    # --- default orphan action: group kill only as the LEADER ------------
+    calls = []
+    real = (pw.os.getpgrp, pw.os.killpg, pw.os._exit, pw.time.sleep)
+    try:
+        pw.os.getpgrp = lambda: 999
+        pw.os.getpid = lambda: 999          # leader: pgid == pid
+        pw.os.killpg = lambda pg, sig: calls.append(("killpg", pg, sig))
+        pw.os._exit = lambda code: calls.append(("exit", code))
+        pw.time.sleep = lambda s: None
+        pw._default_orphan_action()
+        import signal as _sig
+        check("as group leader: TERM then KILL the whole group",
+              calls == [("killpg", 999, _sig.SIGTERM),
+                        ("killpg", 999, _sig.SIGKILL)], calls)
+
+        calls.clear()
+        pw.os.getpid = lambda: 1000         # NOT the leader
+        pw._default_orphan_action()
+        check("not the leader: plain exit, killpg never touches the shell",
+              calls == [("exit", 0)], calls)
+    finally:
+        pw.os.getpgrp, pw.os.killpg, pw.os._exit, pw.time.sleep = real
+        del pw.os.getpid  # restore the real os.getpid attribute lookup
+
     os.environ.pop("ADK_CC_PARENT_PID", None)
     pw._reset_for_test()
     print(f"\n{_passed} passed, {_failed} failed")

@@ -50,7 +50,7 @@ def start_parent_watchdog(
         _log.warning("parent_watchdog: ADK_CC_PARENT_PID=%r is not a pid", raw)
         return False
 
-    action = on_orphaned or (lambda: os._exit(0))
+    action = on_orphaned or _default_orphan_action
 
     def _watch() -> None:
         while True:
@@ -68,6 +68,29 @@ def start_parent_watchdog(
     _started = True
     _log.info("parent_watchdog: armed for parent pid %d", parent)
     return True
+
+
+def _default_orphan_action() -> None:
+    """Take the whole process GROUP down, not just this process.
+
+    The backend spawns its own children (run_bash commands, provisioning
+    subprocesses); a bare os._exit would re-orphan them one level down. The
+    app spawns us as a group leader (process_group(0)), so when we ARE the
+    leader, TERM the group (uvicorn gets a graceful-shutdown window, which
+    also closes the torn-JSONL risk of exiting mid-append), then KILL it.
+    When we are NOT the leader (legacy launch, dev shell), killpg would hit
+    unrelated shell members — fall back to a plain exit."""
+    import signal
+
+    try:
+        if os.getpgrp() == os.getpid():
+            os.killpg(os.getpgrp(), signal.SIGTERM)
+            time.sleep(3.0)
+            os.killpg(os.getpgrp(), signal.SIGKILL)
+            return  # unreachable — SIGKILL took us with the group
+    except Exception:  # noqa: BLE001 — dying must not fail
+        pass
+    os._exit(0)
 
 
 def _reset_for_test() -> None:

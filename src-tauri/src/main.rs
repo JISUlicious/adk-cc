@@ -18,6 +18,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::Mutex;
@@ -40,7 +41,7 @@ fn main() {
             // #98: own the port. A stale orphan from an unclean exit used to
             // hold 8765 — the fresh child died on bind failure and the
             // splash-wait silently adopted YESTERDAY'S code. Reclaim first.
-            match reclaim_port(&data) {
+            match reclaim_port() {
                 PortState::Free => {}
                 PortState::OtherInstanceAlive => {
                     show_error(app.handle(), "adk-cc desktop is already running.");
@@ -97,17 +98,29 @@ fn main() {
 
     app.run(|handle, event| {
         if let tauri::RunEvent::Exit = event {
+            let mut our_pid: Option<u32> = None;
             if let Some(state) = handle.try_state::<BackendChild>() {
                 if let Ok(mut guard) = state.0.lock() {
                     if let Some(mut child) = guard.take() {
+                        our_pid = Some(child.id());
                         // TERM first (uvicorn shuts down cleanly), KILL as
-                        // the backstop. The pidfile goes with the child.
+                        // the backstop.
                         terminate_child(&mut child);
                     }
                 }
             }
-            let data = data_dir(handle);
-            let _ = std::fs::remove_file(pidfile(&data));
+            // Remove the pidfile ONLY if it is ours: an instance that lost
+            // the port race (error page, no child) must not delete the
+            // winner's pidfile on quit.
+            if let Some(pid) = our_pid {
+                let data = data_dir(handle);
+                let recorded = std::fs::read_to_string(pidfile(&data))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok());
+                if recorded == Some(pid) {
+                    let _ = std::fs::remove_file(pidfile(&data));
+                }
+            }
         }
     });
 }
@@ -116,17 +129,19 @@ fn pidfile(data: &PathBuf) -> PathBuf {
     data.join("backend.pid")
 }
 
-/// TERM → up to 3s grace → KILL.
+/// TERM the child's process GROUP → up to 3s grace → KILL the group.
+/// Group-wide so the backend's own children (in-flight run_bash commands)
+/// go with it; the backend is spawned as its group leader (pgid == pid).
 fn terminate_child(child: &mut Child) {
-    let pid = child.id().to_string();
-    let _ = Command::new("kill").args(["-TERM", &pid]).status();
+    let group = format!("-{}", child.id());
+    let _ = Command::new("kill").args(["-TERM", "--", &group]).status();
     for _ in 0..30 {
         if let Ok(Some(_)) = child.try_wait() {
-            return;
+            break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let _ = child.kill();
+    let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
     let _ = child.wait();
 }
 
@@ -136,51 +151,69 @@ enum PortState {
     Foreign(String),
 }
 
-/// If something already answers on PORT, decide what it is via the pidfile
-/// and clear it when it is OUR stale orphan. Never adopt.
-fn reclaim_port(data: &PathBuf) -> PortState {
+/// If something already answers on PORT, classify THE PROCESS THAT OWNS THE
+/// PORT (via lsof) — never the pidfile's claim: a recycled or copy-pasted
+/// pid could name an innocent adk-cc process bound elsewhere (e.g. a test
+/// server on another port), and killing it while the real owner survived
+/// would be worse than the bug this fixes. The pidfile is corroboration
+/// only. Never adopt.
+fn reclaim_port() -> PortState {
     if TcpStream::connect(("127.0.0.1", PORT)).is_err() {
         return PortState::Free; // nothing listening
     }
-    let recorded = std::fs::read_to_string(pidfile(data))
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok());
-    let Some(pid) = recorded else {
-        return PortState::Foreign(format!("unknown (no pidfile) on port {PORT}"));
+    let Some(owner) = port_owner(PORT) else {
+        return PortState::Foreign(format!("unknown listener on port {PORT}"));
     };
-    let command = ps_field(pid, "command=").unwrap_or_default();
+    let command = ps_field(owner, "command=").unwrap_or_default();
     if !(command.contains("uvicorn") && command.contains("adk_cc")) {
-        // Pid was reused by an unrelated process, or the listener isn't ours.
         return PortState::Foreign(if command.is_empty() {
-            format!("unknown (pid {pid} gone, port still bound)")
+            format!("pid {owner} on port {PORT}")
         } else {
             command
         });
     }
     // A backend whose parent app still lives means a SECOND app instance —
     // killing its backend out from under it would be worse than declining.
-    if let Some(ppid) = ps_field(pid, "ppid=").and_then(|s| s.trim().parse::<u32>().ok()) {
+    if let Some(ppid) = ps_field(owner, "ppid=").and_then(|s| s.trim().parse::<u32>().ok()) {
         if ppid != 1 {
             return PortState::OtherInstanceAlive;
         }
     }
-    // Our orphan (re-parented to launchd). TERM → grace → KILL, wait for the
-    // port to free.
-    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    // Our orphan (an adk-cc backend, re-parented to launchd, HOLDING our
+    // port). Group TERM → grace → group KILL → per-pid KILL fallback for
+    // legacy orphans that were not group leaders.
+    let group = format!("-{owner}");
+    let _ = Command::new("kill").args(["-TERM", "--", &group]).status();
+    let _ = Command::new("kill").args(["-TERM", &owner.to_string()]).status();
     for _ in 0..30 {
         if TcpStream::connect(("127.0.0.1", PORT)).is_err() {
             return PortState::Free;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).status();
+    let _ = Command::new("kill").args(["-KILL", "--", &group]).status();
+    let _ = Command::new("kill").args(["-KILL", &owner.to_string()]).status();
     for _ in 0..20 {
         if TcpStream::connect(("127.0.0.1", PORT)).is_err() {
             return PortState::Free;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    PortState::Foreign(format!("stale backend pid {pid} refused to die"))
+    PortState::Foreign(format!("stale backend pid {owner} refused to die"))
+}
+
+/// Pid that owns the LISTEN socket on `port` (lsof; macOS/Linux).
+fn port_owner(port: u16) -> Option<u32> {
+    let out = Command::new("lsof")
+        .args(["-tnP", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .parse::<u32>()
+        .ok()
 }
 
 fn ps_field(pid: u32, field: &str) -> Option<String> {
@@ -193,13 +226,23 @@ fn ps_field(pid: u32, field: &str) -> Option<String> {
 }
 
 /// GET /api/desktop/version and check the reported pid — "the responder is
-/// the child I spawned", not "something answered HTTP".
+/// the child I spawned", not "something answered HTTP". Retries briefly so
+/// one dropped request during a cold boot can't strand a healthy pair on
+/// the error page.
 fn backend_pid_matches(port: u16, expect_pid: u32) -> bool {
-    let Some(body) = http_get(port, "/api/desktop/version") else {
-        return false;
-    };
-    body.contains(&format!("\"pid\":{expect_pid}"))
-        || body.contains(&format!("\"pid\": {expect_pid}"))
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(700));
+        }
+        if let Some(body) = http_get(port, "/api/desktop/version") {
+            if body.contains(&format!("\"pid\":{expect_pid}"))
+                || body.contains(&format!("\"pid\": {expect_pid}"))
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn http_get(port: u16, path: &str) -> Option<String> {
@@ -353,6 +396,11 @@ fn spawn_backend(data: &PathBuf) -> std::io::Result<Child> {
     if layout.bundled {
         cmd.env("PYTHONPATH", &layout.agents);
     }
+    // Own process group: the backend's own children (run_bash commands,
+    // provisioning subprocesses) die with it — group TERM/KILL from both the
+    // watchdog and our exit path reaches them, and a killpg can never touch
+    // an unrelated shell.
+    cmd.process_group(0);
     cmd.spawn()
 }
 
