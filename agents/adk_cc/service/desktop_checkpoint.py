@@ -62,6 +62,32 @@ _GIT_CONF = [
 
 _LOG_NAME = "adk_cc_checkpoints.json"
 
+# What a checkpoint must NEVER stage. Measured live (multi-project battery,
+# 2026-08-03): with only `/.git/` excluded, `add -A` committed adk-cc's own
+# machinery into undo history — `.adk-cc/code/scratch-*.py` and the whole
+# materialized `.adk-cc/skill-runtime/<skill>/<digest>/` tree — and the
+# 386MB `.adk-cc/analysis-env` escaped ONLY because `python -m venv` writes
+# a self-ignoring `.gitignore`. Undo restores the USER'S work, never ours;
+# and a huge tree also risks blowing _ADD_TIMEOUT, which silently disables
+# checkpointing for that turn.
+#
+# The heavy-dir entries are a bonus: a node_modules/ or .venv/ in the user's
+# project has no business in an undo snapshot either.
+_EXCLUDE_LINES = (
+    "/.git/",
+    "/.adk-cc/",        # our workspace: scratch execs, skill runtime, envs
+    "/.sessions/",      # per-session scratch the agent writes for verification
+    "node_modules/",
+    ".venv/",
+    "venv/",
+    "__pycache__/",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    ".DS_Store",
+)
+_EXCLUDE_TEXT = "".join(f"{line}\n" for line in _EXCLUDE_LINES)
+
 
 def enabled() -> bool:
     """Checkpointing is on by default in desktop mode; ADK_CC_CHECKPOINT=0 kills it."""
@@ -100,19 +126,35 @@ def _run_git(
 
 
 def _ensure_shadow(git_dir: Path, work_tree: str) -> None:
-    """Create the shadow repo once; make it idempotent + exclude the user's .git."""
-    if (git_dir / "HEAD").exists():
-        return
+    """Create the shadow repo once; keep its exclude list current every time.
+
+    The exclude REFRESH is deliberately outside the init-once guard: shadow
+    repos created by an earlier version carry the old `/.git/`-only list, and
+    they are exactly the ones already committing `.adk-cc/**`. Rewriting the
+    file is a few bytes and makes existing sessions self-heal.
+    """
+    fresh = not (git_dir / "HEAD").exists()
     git_dir.mkdir(parents=True, exist_ok=True)
-    # A bare-style store: we always pass GIT_WORK_TREE explicitly, so init the db
-    # directly in git_dir (not a nested `.git`).
-    _run_git(["init", "-q"], git_dir, work_tree, timeout=_QUERY_TIMEOUT)
-    # Belt-and-suspenders: git already skips a `.git` entry in the work tree, but
-    # exclude it (and our own log) explicitly so `add -A` can never descend into
-    # the user's real repo db.
+    if fresh:
+        # A bare-style store: we always pass GIT_WORK_TREE explicitly, so init
+        # the db directly in git_dir (not a nested `.git`).
+        _run_git(["init", "-q"], git_dir, work_tree, timeout=_QUERY_TIMEOUT)
     info = git_dir / "info"
     info.mkdir(parents=True, exist_ok=True)
-    (info / "exclude").write_text("/.git/\n", encoding="utf-8")
+    exclude = info / "exclude"
+    try:
+        if exclude.read_text(encoding="utf-8") == _EXCLUDE_TEXT:
+            return
+    except OSError:
+        pass
+    exclude.write_text(_EXCLUDE_TEXT, encoding="utf-8")
+    if not fresh:
+        # Anything staged/committed under the now-excluded paths by an older
+        # version stays in history but must stop tracking, or `add -A` keeps
+        # updating it (exclude only governs UNTRACKED files).
+        _run_git(["rm", "-r", "--cached", "-q", "--ignore-unmatch",
+                  ".adk-cc", ".sessions"], git_dir, work_tree,
+                 timeout=_QUERY_TIMEOUT)
 
 
 def _log_path(git_dir: Path) -> Path:
@@ -286,12 +328,15 @@ async def snapshot_remote(
         wt = _sh.quote(work_tree)
         base = f"git --git-dir {gd} --work-tree {wt}"
 
-        # One round trip: init-once (with the belt-and-suspenders /.git/
-        # exclude), stage everything.
+        # One round trip: init-once, ALWAYS refresh the exclude list (older
+        # shadow repos carry the `/.git/`-only version — see _ensure_shadow),
+        # untrack anything they already staged under it, then stage.
+        excl = _sh.quote(_EXCLUDE_TEXT)
         res = await transport.run(
-            f"[ -f {gd}/HEAD ] || {{ mkdir -p {gd} && git --git-dir {gd} init -q "
-            f"&& mkdir -p {gd}/info && printf '/.git/\\n' > {gd}/info/exclude; }} "
-            f"&& {base} add -A",
+            f"[ -f {gd}/HEAD ] || {{ mkdir -p {gd} && git --git-dir {gd} init -q; }} "
+            f"&& mkdir -p {gd}/info && printf %s {excl} > {gd}/info/exclude "
+            f"&& {base} rm -r --cached -q --ignore-unmatch .adk-cc .sessions "
+            f"; {base} add -A",
             timeout_s=_ADD_TIMEOUT,
         )
         if res.exit_code != 0:

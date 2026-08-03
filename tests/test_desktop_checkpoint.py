@@ -174,6 +174,77 @@ def test_restore_reverts_and_real_git_untouched() -> None:
     print("OK test_restore_reverts_and_real_git_untouched")
 
 
+def _tracked(project_id: str, session_id: str, repo: str) -> set:
+    gd = dc._shadow_dir(project_id, session_id)
+    out = _git(["--git-dir", str(gd), "--work-tree", repo,
+                "ls-tree", "-r", "HEAD", "--name-only"], repo)
+    return {ln for ln in out.stdout.splitlines() if ln}
+
+
+def test_adk_cc_machinery_never_snapshotted() -> None:
+    """Measured live (multi-project battery, 2026-08-03): with only `/.git/`
+    excluded, checkpoints committed adk-cc's OWN workspace — scratch execs and
+    the materialized skill runtime — and a 386MB analysis env escaped only
+    because venv self-ignores. Undo restores the USER'S work, never ours."""
+    repo = _make_repo("proj_machinery")
+    _register("proj_machinery", repo)
+    for rel in (".adk-cc/code/scratch-abc123.py",
+                ".adk-cc/skill-runtime/web-smoke/deadbeef/scripts/run.mjs",
+                ".adk-cc/analysis-env/bin/python",
+                ".sessions/smoke-check.mjs",
+                "node_modules/left-pad/index.js",
+                "__pycache__/mod.cpython-312.pyc"):
+        path = os.path.join(repo, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("machinery\n")
+    with open(os.path.join(repo, "user_file.py"), "w") as f:
+        f.write("print('mine')\n")
+
+    dc.snapshot("proj_machinery", "s1", repo, reason="write_file",
+                invocation_id="inv-1")
+    tracked = _tracked("proj_machinery", "s1", repo)
+    leaked = {t for t in tracked
+              if t.startswith((".adk-cc/", ".sessions/", "node_modules/",
+                               "__pycache__/"))}
+    assert not leaked, f"machinery leaked into the checkpoint: {sorted(leaked)[:5]}"
+    assert "user_file.py" in tracked, tracked
+    print("OK adk_cc_machinery_never_snapshotted")
+
+
+def test_legacy_shadow_untracks_machinery_on_next_snapshot() -> None:
+    """A shadow repo created by the OLD code already tracks `.adk-cc/**`;
+    exclude alone would not untrack it (exclude governs untracked files only).
+    The next snapshot must self-heal."""
+    repo = _make_repo("proj_legacy")
+    _register("proj_legacy", repo)
+    scratch = os.path.join(repo, ".adk-cc", "code", "scratch-legacy.py")
+    os.makedirs(os.path.dirname(scratch), exist_ok=True)
+    with open(scratch, "w") as f:
+        f.write("legacy\n")
+
+    # Simulate the old shadow: init with the /.git/-only exclude and commit.
+    gd = dc._shadow_dir("proj_legacy", "s1")
+    gd.mkdir(parents=True, exist_ok=True)
+    _git(["--git-dir", str(gd), "--work-tree", repo, "init", "-q"], repo)
+    (gd / "info").mkdir(parents=True, exist_ok=True)
+    (gd / "info" / "exclude").write_text("/.git/\n", encoding="utf-8")
+    _git(["--git-dir", str(gd), "--work-tree", repo, "add", "-A"], repo)
+    _git(["--git-dir", str(gd), "--work-tree", repo, "-c", "user.email=t@t",
+          "-c", "user.name=t", "commit", "-qm", "legacy"], repo)
+    assert any(t.startswith(".adk-cc/")
+               for t in _tracked("proj_legacy", "s1", repo)), "fixture wrong"
+
+    with open(os.path.join(repo, "README.md"), "w") as f:
+        f.write("v2\n")
+    dc.snapshot("proj_legacy", "s1", repo, reason="write_file",
+                invocation_id="inv-legacy")
+    tracked = _tracked("proj_legacy", "s1", repo)
+    assert not any(t.startswith(".adk-cc/") for t in tracked), sorted(tracked)[:5]
+    assert "README.md" in tracked
+    print("OK legacy_shadow_untracks_machinery_on_next_snapshot")
+
+
 def test_checkpoint_routes() -> None:
     # The HTTP wrapper: validation (400/404) + wiring to list/restore. Mounts the
     # real desktop routes on a bare app (the e2e covers the git logic; this covers
@@ -281,6 +352,8 @@ def main() -> None:
     test_no_snapshot_for_scratch()
     test_disabled_by_env()
     test_restore_reverts_and_real_git_untouched()
+    test_adk_cc_machinery_never_snapshotted()
+    test_legacy_shadow_untracks_machinery_on_next_snapshot()
     test_checkpoint_routes()
     print("\nall desktop checkpoint tests passed")
 
