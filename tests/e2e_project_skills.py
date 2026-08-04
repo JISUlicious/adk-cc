@@ -106,6 +106,14 @@ def main() -> int:
             requests.patch(sess, json={"state_delta": {
                 "model_endpoint": "chatgpt-codex",
                 "model_id": "chatgpt-codex/gpt-5.4-mini"}}, timeout=30)
+            # A project's skills ship with the repo, so they are WITHHELD until
+            # the user takes responsibility for them (skill_trust). This test
+            # predates that gate and was asserting skills would appear
+            # untrusted — they never can. Grant it the way the UI does, rather
+            # than with ADK_CC_TRUST_PROJECT_SKILLS, so the real path (trust →
+            # cache cleared → skills offered) is what gets exercised.
+            requests.post(f"{BASE}/desktop/settings/skills/trust",
+                          json={"root": str(path), "trusted": True}, timeout=15)
             t = requests.post(f"{BASE}/api/turns", timeout=60, json={
                 "appName": "adk_cc", "userId": pid, "sessionId": sid,
                 "newMessage": {"role": "user", "parts": [{"text":
