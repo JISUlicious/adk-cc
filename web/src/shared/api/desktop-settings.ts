@@ -108,6 +108,19 @@ export function getUntrustedProjectSkills(
   const q = projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""
   return apiFetch(`/desktop/settings/skills/untrusted${q}`)
 }
+/** Re-scan the skills directories. Skill BODIES are always read fresh at load
+ * time; DISCOVERY (a skill added, renamed or removed on disk) is cached per
+ * project root, so this is what makes a new folder appear. Returns what the
+ * agent will now see, so the caller can show it rather than assert success. */
+export function reloadSkills(
+  root?: string,
+  projectId?: string,
+): Promise<{ reloaded: boolean; root: string; skills: string[] }> {
+  return apiFetch(`/desktop/settings/skills/reload`, {
+    method: "POST",
+    body: JSON.stringify({ root: root ?? "", project_id: projectId ?? "" }),
+  })
+}
 export function trustProjectSkills(
   root: string,
   trusted: boolean,

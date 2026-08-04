@@ -68,6 +68,52 @@ def main() -> None:
     assert "gamma" in E.disabled_names({"temp:tenant_context": None})
     print("OK the agent's deny-list reflects the API write")
 
+    # ---- rescan: a skill folder added on disk becomes visible -------------
+    # Investigated 2026-08-04: skill BODIES are read fresh at load time, but
+    # DISCOVERY is cached per project root, and the only thing that dropped
+    # that cache was the trust endpoint — so a user who added a folder had no
+    # honest way to make it appear.
+    from adk_cc.tools import skills as _skills
+
+    proj = Path(_TMP, "proj_rescan")
+    (proj / ".adk-cc" / "skills" / "late-skill").mkdir(parents=True, exist_ok=True)
+    (proj / ".adk-cc" / "skills" / "late-skill" / "SKILL.md").write_text(
+        "---\nname: late-skill\ndescription: added after the cache warmed.\n---\n\nBody.\n",
+        encoding="utf-8")
+    os.environ["ADK_CC_TRUST_PROJECT_SKILLS"] = "1"
+    try:
+        # Warm the per-root cache WITHOUT the new skill by pointing discovery
+        # at the root before it existed is not possible here, so warm it now
+        # and then add a second skill — the cache must hide it until reload.
+        first = _skills._skills_for_root(str(proj))
+        assert first and "late-skill" in first[1], "fixture: first discovery failed"
+        (proj / ".adk-cc" / "skills" / "later-skill").mkdir(parents=True, exist_ok=True)
+        (proj / ".adk-cc" / "skills" / "later-skill" / "SKILL.md").write_text(
+            "---\nname: later-skill\ndescription: added later still.\n---\n\nBody.\n",
+            encoding="utf-8")
+        cached = _skills._skills_for_root(str(proj))
+        assert cached and "later-skill" not in cached[1], \
+            "expected the per-root cache to hide a newly added skill"
+        print("OK a new folder is hidden by the cache (the bug the button fixes)")
+
+        r = client.post("/desktop/settings/skills/reload", json={"root": str(proj)})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["reloaded"] is True
+        assert "later-skill" in body["skills"], body["skills"]
+        assert "late-skill" in body["skills"], body["skills"]
+        print("OK reload re-scans and reports what the agent will see")
+
+        after = _skills._skills_for_root(str(proj))
+        assert after and "later-skill" in after[1], "cache not refreshed for the agent"
+        print("OK the agent's own resolution sees it too")
+    finally:
+        os.environ.pop("ADK_CC_TRUST_PROJECT_SKILLS", None)
+
+    # No body at all must not 500 — the button may fire with nothing to scope by.
+    assert client.post("/desktop/settings/skills/reload").status_code == 200
+    print("OK reload without a root still clears the cache")
+
     r = client.patch("/desktop/settings/skills/gamma/enabled", json={"enabled": True})
     assert r.status_code == 200 and r.json()["enabled"] is True
     assert "gamma" not in E.disabled_names({})

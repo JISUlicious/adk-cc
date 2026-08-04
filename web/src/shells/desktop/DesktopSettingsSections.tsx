@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type ChangeEvent } from "react"
-import { ChevronRight, Trash2, Upload, Plus } from "lucide-react"
+import { ChevronRight, Trash2, Upload, Plus, RefreshCw } from "lucide-react"
 import { Button } from "@/shared/components/ui/button"
 import { Input } from "@/shared/components/ui/input"
 import { listProjects, type Project } from "@/shared/api/projects"
@@ -11,7 +11,7 @@ import {
   listDesktopMcp, setDesktopMcp, deleteDesktopMcp, type DesktopMcpServer,
   listDesktopSkills, uploadDesktopSkill, deleteDesktopSkill, addDesktopSkillFromDir,
   getDesktopSkillCatalog, setDesktopSkillEnabled, type SkillCatalogEntry,
-  trustProjectSkills, getUntrustedProjectSkills, type UntrustedSkills,
+  trustProjectSkills, getUntrustedProjectSkills, reloadSkills, type UntrustedSkills,
   listWorkingDirs, addWorkingDir, removeWorkingDir,
 } from "@/shared/api/desktop-settings"
 
@@ -170,6 +170,7 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
   const [untrusted, setUntrusted] = useState<UntrustedSkills[]>([])
   const [installed, setInstalled] = useState<string[]>([])
   const [err, setErr] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
   const reload = useCallback(() => {
@@ -213,6 +214,20 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
     setSkills((prev) => prev.map((s) => (s.name === name ? { ...s, enabled } : s)))
     try { await setDesktopSkillEnabled(name, enabled, scope, projectId) } catch (e) { setErr(errMsg(e)) }
     reload()
+  }
+  async function rescan() {
+    setErr(null); setNote(null); setBusy(true)
+    try {
+      // The untrusted rows carry the project root; without one the server
+      // still drops its cache, it just cannot report the per-project list.
+      const root = untrusted[0]?.root
+      const r = await reloadSkills(root, projectId)
+      // Report what the agent will actually see, not "done".
+      setNote(r.skills.length
+        ? `Rescanned — ${r.skills.length} skills visible`
+        : "Rescanned")
+      reload()
+    } catch (e) { setErr(errMsg(e)) } finally { setBusy(false) }
   }
   async function trust(root: string) {
     setErr(null); setBusy(true)
@@ -373,7 +388,16 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
         <Button size="sm" variant="outline" disabled={busy} onClick={() => fileRef.current?.click()}>
           <Upload className="h-3.5 w-3.5" /> {busy ? "Uploading…" : "Upload .zip"}
         </Button>
+        {/* Editing a skill's SKILL.md takes effect on the next call by itself;
+            ADDING or removing a folder does not, because discovery is cached
+            per project root. Before this button the only way to pick that up
+            was toggling trust or restarting the app. */}
+        <Button size="sm" variant="outline" disabled={busy} onClick={rescan}
+                title="Re-scan skill folders — needed after adding or removing a skill on disk">
+          <RefreshCw className="h-3.5 w-3.5" /> {busy ? "Rescanning…" : "Rescan folders"}
+        </Button>
       </div>
+      {note && <p className="text-xs text-muted-foreground">{note}</p>}
       {err && <p className="text-xs text-destructive">{err}</p>}
     </div>
   )

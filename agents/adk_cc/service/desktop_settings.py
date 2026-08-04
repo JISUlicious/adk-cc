@@ -214,6 +214,57 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
         the project, not of the settings scope being viewed."""
         return {"untrusted": _withheld_rows(request)}
 
+    @app.post("/desktop/settings/skills/reload", include_in_schema=False)
+    async def reload_skills(request: Request):  # noqa: ANN202
+        """Re-scan the skills directories now.
+
+        Skill BODIES are read from disk at load time, so edits to an existing
+        skill are always live; it is DISCOVERY (a skill added, renamed, or
+        removed) that is cached per project root. Investigated 2026-08-04:
+        the only thing that dropped that cache was the trust endpoint, so a
+        user who added a skill folder had no honest way to make it appear.
+        This is that way.
+
+        Returns the freshly discovered skill names so the caller can show
+        what the agent will actually see — the point is to make the result
+        checkable, not to claim success.
+        """
+        from ..tools import skills as _skills
+
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 — body is optional
+            pass
+        _skills.clear_project_skill_cache()
+
+        root = str(body.get("root") or "").strip()
+        if not root:
+            # The UI usually knows the project, not its path — resolve it here
+            # rather than making the client fetch the registry to name a dir
+            # the server already knows.
+            pid = str(body.get("project_id") or "").strip()
+            if pid:
+                try:
+                    from .desktop_routes import load_projects
+
+                    for it in load_projects():
+                        if it.get("id") == pid:
+                            root = str(it.get("repo_path") or "")
+                            break
+                except Exception:  # noqa: BLE001
+                    pass
+        names: list[str] = []
+        if root:
+            try:
+                resolved = _skills._skills_for_root(root)
+                if resolved:
+                    names = sorted(resolved[1])
+            except Exception:  # noqa: BLE001 — a bad root must not 500
+                _log.debug("reload: discovery failed for %r", root, exc_info=True)
+        _log.info("skills reloaded (root=%s, %d visible)", root or "-", len(names))
+        return {"reloaded": True, "root": root, "skills": names}
+
     @app.post("/desktop/settings/skills/trust", include_in_schema=False)
     async def trust_project_skills(request: Request):  # noqa: ANN202
         """Agree (or refuse) to run the skills a project folder ships.
