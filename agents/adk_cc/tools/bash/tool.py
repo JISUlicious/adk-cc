@@ -84,6 +84,27 @@ def _skill_script_hint(command: str, stderr: str) -> Optional[str]:
     return None
 
 
+def _session_key(ctx) -> str:
+    """`app/user/session` — the same key shape the sub-agents registry uses."""
+    try:
+        sess = ctx._invocation_context.session
+        return f"{sess.app_name}/{sess.user_id}/{sess.id}"
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _project_id(ctx) -> str:
+    """Desktop runs each project as its own user_id, so that IS the project.
+
+    Background processes are listed per PROJECT rather than per session: a dev
+    server started in one session is still what occupies the port in the next.
+    """
+    try:
+        return str(ctx._invocation_context.session.user_id or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 class BashTool(AdkCcTool):
     """Shell command execution, delegated to the active SandboxBackend.
 
@@ -176,6 +197,55 @@ class BashTool(AdkCcTool):
         over = dg.oversized(dg.parse_sizes(getattr(probe, "stdout", "") or ""))
         return dg.refusal(over) if over else None
 
+    async def _start_background(self, backend, ws, args: RunBashArgs,
+                                ctx: ToolContext) -> dict[str, Any]:
+        """Hand off to the backend's detached-start path and report the record.
+
+        A backend that cannot detach (or cannot signal afterwards) says so
+        rather than silently running the command in the foreground — a dev
+        server started "in the background" that actually blocks the turn would
+        be the worst of both."""
+        if not getattr(backend, "supports_background", False):
+            return {
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": (
+                    f"the active sandbox backend ({type(backend).__name__}) "
+                    "cannot run background processes; run the command in the "
+                    "foreground with a timeout instead"),
+                "timed_out": False,
+                "error_code": "BACKGROUND_UNSUPPORTED",
+            }
+        rec = await backend.start_background(
+            args.command,
+            fs_write=ws.fs_write_config(),
+            network=NetworkConfig(),
+            cwd=ws.abs_path,
+            label=args.label or "",
+            session_key=_session_key(ctx),
+            project_id=_project_id(ctx),
+        )
+        from ...sandbox.process_registry import get_registry
+
+        log_tail = get_registry().read_log(rec["id"], tail_bytes=2000)
+        port = rec.get("port")
+        return {
+            "exit_code": 0,
+            "stdout": (
+                f"started background process {rec['id']} ({rec['label']})"
+                + (f" on port {port}" if port else "")
+                + (f"\n--- first output ---\n{log_tail}" if log_tail else "")
+            ),
+            "stderr": "",
+            "timed_out": False,
+            "process": {
+                "id": rec["id"], "label": rec["label"], "status": rec["status"],
+                "pid": rec.get("pid"), "port": port,
+            },
+            "next": ("it keeps running after this turn — read_process_log(id) "
+                     "for output, stop_process(id) to end it"),
+        }
+
     async def _execute(self, args: RunBashArgs, ctx: ToolContext) -> dict[str, Any]:
         backend = get_backend(ctx)
         ws = get_workspace(ctx)
@@ -191,6 +261,13 @@ class BashTool(AdkCcTool):
                 "timed_out": False,
                 "error_code": "DATASET_TOO_LARGE",
             }
+        # Background: a long-lived process (dev server, watcher). Branches
+        # BEFORE the exec paths because it does not produce an ExecResult —
+        # nothing waits for it, and its output goes to a log file the UI and
+        # `read_process_log` read later.
+        if getattr(args, "background", False):
+            return await self._start_background(backend, ws, args, ctx)
+
         # Network policy is intentionally empty here — bash with no
         # explicit network allowlist gets no egress in real backends.
         # Operators wanting outbound for builds (apt, pip) configure

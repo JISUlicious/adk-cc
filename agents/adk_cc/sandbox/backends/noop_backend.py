@@ -115,11 +115,110 @@ def _kill_group(proc) -> None:
             continue
 
 
+# Strong refs to the log-pump tasks: an asyncio task with no reference can
+# be garbage-collected mid-flight, which would silently stop logging a
+# process that is still running.
+_BG_PUMPS: set = set()
+
+
 class NoopBackend(SandboxBackend):
     name = "noop"
 
     async def ensure_workspace(self, ws: "WorkspaceRoot") -> None:
         Path(ws.abs_path).mkdir(parents=True, exist_ok=True)
+
+    supports_background = True
+
+    async def start_background(
+        self,
+        cmd: str,
+        *,
+        fs_write: FsWriteConfig,
+        network: NetworkConfig,
+        cwd: str,
+        label: str = "",
+        session_key: str = "",
+        project_id: str = "",
+    ) -> dict:
+        """Start a long-lived process (dev server, watcher) and return at once.
+
+        The same guards as `exec` apply — a background process is MORE
+        dangerous than a foreground one, not less, since nothing reaps it at
+        the end of the turn.
+
+        Output is pumped to the process log by a detached task rather than
+        returned: the caller is not waiting, and the file is what the UI and
+        the agent read later. `start_new_session=True` gives the process its
+        own group (pgid == pid), which is what makes a later group-kill
+        actually reach a server that forked.
+        """
+        import asyncio as _asyncio
+
+        from ..process_registry import get_registry
+
+        if _is_prod_shaped(cwd) and not deployment.noop_ack_host_exec():
+            raise SandboxViolation(
+                f"NoopBackend: refusing to exec in prod-shaped path {cwd!r}."
+            )
+        cwd_p = Path(cwd)
+        if not cwd_p.is_dir():
+            raise SandboxViolation(f"NoopBackend: cwd not a directory: {cwd!r}")
+
+        reg = get_registry()
+        rec = reg.create(session_key=session_key, project_id=project_id,
+                         label=label, command=cmd, cwd=cwd, backend="noop",
+                         can_terminate=True)
+
+        runtime_env = await self._runtime_env()
+        # PYTHONUNBUFFERED: a piped Python child BLOCK-buffers stdout, so a
+        # server's "listening on :8000" banner sits in a 4KB buffer and the
+        # log looks empty for as long as the process is quiet — measured on
+        # the first live run of this path. Costs nothing for non-Python
+        # children, and unbuffered output is what a live log is for.
+        child_env = {**os.environ, **(runtime_env or {}), "PYTHONUNBUFFERED": "1"}
+        try:
+            proc = await _asyncio.create_subprocess_shell(
+                cmd,
+                cwd=cwd,
+                stdout=_asyncio.subprocess.PIPE,
+                stderr=_asyncio.subprocess.STDOUT,   # one interleaved log
+                env=child_env,
+                start_new_session=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            reg.mark_exited(rec.id, exit_code=None, status="failed")
+            reg.append_log(rec.id, f"failed to start: {e}\n".encode())
+            raise
+
+        reg.mark_started(rec.id, pid=proc.pid, pgid=proc.pid)
+
+        async def _pump() -> None:
+            try:
+                while True:
+                    chunk = await proc.stdout.read(8192)
+                    if not chunk:
+                        break
+                    reg.append_log(rec.id, chunk)
+            except Exception:  # noqa: BLE001 — the process outlives the pump
+                pass
+            finally:
+                code = await proc.wait()
+                cur = reg.get(rec.id)
+                # A user Stop already recorded "killed"; don't overwrite it
+                # with the exit code the kill produced.
+                if cur is not None and cur.status in ("running", "starting"):
+                    reg.mark_exited(rec.id, exit_code=code,
+                                    status="exited" if code == 0 else "failed")
+
+        task = _asyncio.create_task(_pump())
+        _BG_PUMPS.add(task)
+        task.add_done_callback(_BG_PUMPS.discard)
+
+        # A moment for the first output (a server usually prints its port
+        # immediately) so the tool result can already show it.
+        await _asyncio.sleep(0.6)
+        out = reg.get(rec.id)
+        return out.public() if out else rec.public()
 
     async def exec(
         self,

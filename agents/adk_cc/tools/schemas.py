@@ -69,6 +69,25 @@ class RunBashArgs(BaseModel):
     timeout_seconds: int = Field(
         default=30, description="Max wall time before the process is killed."
     )
+    background: bool = Field(
+        default=False,
+        description=(
+            "Start the command as a long-running background process instead "
+            "of waiting for it: use for dev/API servers, watchers and "
+            "monitoring scripts. Returns a process id immediately; the "
+            "process keeps running after this turn, its output goes to a log "
+            "you can read with read_process_log, and it can be stopped with "
+            "stop_process. Do NOT use for ordinary commands — a build or a "
+            "test run should finish in the foreground."
+        ),
+    )
+    label: str = Field(
+        default="",
+        description=(
+            "Short human label for a background process ('dev server', "
+            "'test watcher'). Shown in the UI; ignored otherwise."
+        ),
+    )
 
 
 class WebFetchArgs(BaseModel):

@@ -90,6 +90,11 @@ from .plugins import (
 )
 from .plugins.model_session import ModelSessionPlugin
 from .plugins.secret_redaction import SecretRedactionPlugin
+from .tools.processes import (
+    ListProcessesTool,
+    ReadProcessLogTool,
+    StopProcessTool,
+)
 from .tools.subagents import SubagentCleanupPlugin
 from .plugins.truncated_tool_call import TruncatedToolCallPlugin
 from .credentials import credential_provider_from_env
@@ -296,6 +301,11 @@ _grep = GrepTool()
 _write_file = WriteFileTool()
 _edit_file = EditFileTool()
 _run_bash = BashTool()
+# Long-running background processes (#108): list/read-log/stop. `run_bash(
+# background=True)` is the fourth verb and lives with bash.
+_list_processes = ListProcessesTool()
+_read_process_log = ReadProcessLogTool()
+_stop_process = StopProcessTool()
 _web_fetch = WebFetchTool()
 _ask_user = AskUserQuestionTool()
 _task_create = TaskCreateTool()
@@ -507,6 +517,9 @@ _coordinator_tools: list = [
     _write_file,
     _edit_file,
     _run_bash,
+    _list_processes,
+    _read_process_log,
+    _stop_process,
     _web_fetch,
     _ask_user,
     _task_create,

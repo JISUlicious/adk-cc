@@ -31,6 +31,9 @@ import {
 } from "@/shared/api/desktop-checkpoint"
 import { RightPanelShell, type RightPanelProps } from "@/shared/components/RightPanelShell"
 import { SubagentsDock } from "@/shared/components/SubagentsDock"
+import { ProcessDock } from "@/shared/components/ProcessDock"
+import { ProcessLogDrawer } from "@/shared/components/ProcessLogDrawer"
+import type { ProcessRow } from "@/shared/components/ProcessDock"
 import { SandboxedHtml } from "@/shared/components/SandboxedHtml"
 import { Database } from "lucide-react"
 import { listProjects } from "@/shared/api/projects"
@@ -104,6 +107,8 @@ export function FileTreeSidePanel({
   events,
 }: RightPanelProps) {
   // Loaded directory listings, keyed by relative path ("" = root).
+  // Which background process's log is open over the panel (#108).
+  const [logProcess, setLogProcess] = useState<ProcessRow | null>(null)
   const [dirs, setDirs] = useState<Record<string, DirEntry[]>>({})
   // Git working-tree status per changed file (workspace-relative path → status).
   const [statuses, setStatuses] = useState<Record<string, FileStatus>>({})
@@ -499,7 +504,15 @@ export function FileTreeSidePanel({
 
   return (
     <RightPanelShell
-      footer={<SubagentsDock appName={appName} userId={projectId} sessionId={sessionId} />}
+      footer={
+        <>
+          <SubagentsDock appName={appName} userId={projectId} sessionId={sessionId} />
+          {/* Stacked below sub-agents: they answer different questions —
+              "is the agent still thinking" vs "what is running on my
+              machine" — and processes outlive the turn. */}
+          <ProcessDock projectId={projectId} onOpenLog={setLogProcess} />
+        </>
+      }
       title={
         <span className="flex min-w-0 items-baseline gap-1.5">
           Files
@@ -518,6 +531,7 @@ export function FileTreeSidePanel({
       onClose={onClose}
       headerRight={headerRight}
     >
+      <ProcessLogDrawer process={logProcess} onClose={() => setLogProcess(null)} />
       <RunsSection
         appName={appName}
         userId={projectId}

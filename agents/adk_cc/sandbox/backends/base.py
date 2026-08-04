@@ -139,6 +139,32 @@ class SandboxBackend(ABC):
     ) -> ExecResult:
         ...
 
+    # ---- long-running background processes (#108) --------------------
+    # Distinct from `exec`: these deliberately OUTLIVE the turn, so they are
+    # registered, logged to a file, and killable. Backends that cannot detach
+    # a process (or cannot signal one afterwards) leave `supports_background`
+    # False and the UI hides the control rather than showing one that lies.
+    supports_background: bool = False
+
+    async def start_background(
+        self,
+        cmd: str,
+        *,
+        fs_write: "FsWriteConfig",
+        network: "NetworkConfig",
+        cwd: str,
+        label: str = "",
+        session_key: str = "",
+        project_id: str = "",
+    ) -> dict:
+        """Start `cmd` detached and return its registry record.
+
+        Default: unsupported. Implemented by backends that can both detach and
+        later signal (local today; container/ssh/daytona via the pgid + `kill`
+        mechanism — see analysis/process-management-plan.md)."""
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot run background processes")
+
     async def exec_stream(
         self,
         cmd: str,

@@ -321,6 +321,63 @@ def mount_desktop_routes(app) -> None:
             raise HTTPException(status_code=400, detail="project has no bound repo")
         return repo
 
+    # ---- long-running background processes (#108) --------------------
+    # Scoped by PROJECT, not session: a dev server started in one session is
+    # still what occupies the port in the next, and per-session scoping is how
+    # a forgotten process stays forgotten.
+    @app.get("/api/processes", include_in_schema=False)
+    async def list_processes(request: Request):  # noqa: ANN202
+        from ..sandbox.process_registry import get_registry
+
+        project_id = request.query_params.get("project_id") or None
+        rows = get_registry().list(project_id=project_id)
+        return {"processes": [r.public() for r in rows]}
+
+    @app.get("/api/processes/{process_id}", include_in_schema=False)
+    async def get_process(process_id: str):  # noqa: ANN202
+        from ..sandbox.process_registry import get_registry
+
+        rec = get_registry().get(process_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="unknown process")
+        return rec.public()
+
+    @app.get("/api/processes/{process_id}/log", include_in_schema=False)
+    async def get_process_log(process_id: str, tail_bytes: int = 64000):  # noqa: ANN202
+        from ..sandbox.process_registry import get_registry
+
+        reg = get_registry()
+        if reg.get(process_id) is None:
+            raise HTTPException(status_code=404, detail="unknown process")
+        return {"id": process_id, "log": reg.read_log(process_id,
+                                                      tail_bytes=tail_bytes)}
+
+    @app.post("/api/processes/{process_id}/terminate", include_in_schema=False)
+    async def terminate_process(process_id: str):  # noqa: ANN202
+        from ..sandbox.process_registry import get_registry
+
+        reg = get_registry()
+        rec = reg.get(process_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="unknown process")
+        if not rec.can_terminate:
+            raise HTTPException(
+                status_code=409,
+                detail=f"the {rec.backend} backend cannot stop this process")
+        reg.terminate(process_id)
+        after = reg.get(process_id)
+        return after.public() if after else {"id": process_id, "status": "killed"}
+
+    @app.post("/api/processes/{process_id}/forget", include_in_schema=False)
+    async def forget_process(process_id: str):  # noqa: ANN202
+        """Drop a FINISHED record from the list; the log file stays on disk."""
+        from ..sandbox.process_registry import get_registry
+
+        if not get_registry().forget(process_id):
+            raise HTTPException(
+                status_code=409, detail="still running (stop it first)")
+        return {"id": process_id, "forgotten": True}
+
     @app.get("/desktop/checkpoint/list", include_in_schema=False)
     async def checkpoint_list(request: Request):  # noqa: ANN202
         q = request.query_params
