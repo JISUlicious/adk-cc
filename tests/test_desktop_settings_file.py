@@ -76,6 +76,9 @@ def test_bootstrap_loads_filled_settings_end_to_end() -> None:
     sf = Path(_TMP) / "filled.env"
     sf.write_text("ADK_CC_TEST_MARKER=from-settings\n")
     env = dict(os.environ)
+    # The suite runs with ADK_CC_SKIP_DOTENV=1, and the child inherits it —
+    # which disables the very bootstrap this test exercises.
+    env.pop("ADK_CC_SKIP_DOTENV", None)
     env["ADK_CC_SETTINGS_FILE"] = str(sf)
     out = subprocess.run(
         [sys.executable, "-c", "import adk_cc, os; print(os.environ.get('ADK_CC_TEST_MARKER'))"],

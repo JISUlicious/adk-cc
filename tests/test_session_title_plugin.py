@@ -27,18 +27,29 @@ from google.genai import types
 from adk_cc.plugins.session_title import SessionTitlePlugin, _clean_title
 
 
+# Call counter lives OUTSIDE the model: `calls` was a pydantic FIELD, so
+# `type(self).calls += 1` raised AttributeError on the class (pydantic v2
+# does not keep field defaults as class attributes) — the plugin swallowed it
+# as "generation failed" and the title was never written, which looked like a
+# product bug but was entirely the fake's.
+_CALLS = {"n": 0}
+
+
 class _FakeLlm(BaseLlm):
     """Returns a canned title after `delay`s; counts calls; can explode."""
 
     reply: str = '  "Fizzbuzz Script Demo."  \nignored second line'
     delay: float = 0.0
     explode: bool = False
-    calls: int = 0
+
+    @property
+    def calls(self) -> int:
+        return _CALLS["n"]
 
     async def generate_content_async(
         self, llm_request, stream: bool = False
     ) -> AsyncGenerator[LlmResponse, None]:
-        type(self).calls += 1
+        _CALLS["n"] += 1
         if self.delay:
             await asyncio.sleep(self.delay)
         if self.explode:
@@ -77,17 +88,23 @@ async def _make_ictx(*events: Event, state=None, llm: _FakeLlm = None,
 async def _full_run(plugin: SessionTitlePlugin, ictx):
     await plugin.before_run_callback(invocation_context=ictx)
     await plugin.after_run_callback(invocation_context=ictx)
+    # Persisting is DETACHED when the title call has not finished by the end of
+    # the run — deliberately, so the SSE stream (and the "agent is working…"
+    # indicator) is not held open for the title round-trip. Tests therefore
+    # have to drain it before asserting on session state.
+    for t in list(getattr(plugin, "_detached", ())):
+        await asyncio.gather(t, return_exceptions=True)
 
 
 def test_titles_after_first_turn():
     async def run():
-        _FakeLlm.calls = 0
+        _CALLS["n"] = 0
         ictx, svc, session = await _make_ictx(_user_event("make a fizzbuzz script"))
         await _full_run(SessionTitlePlugin(), ictx)
         fresh = await svc.get_session(app_name="t", user_id="u", session_id=session.id)
         # quotes/period/second-line stripped by _clean_title
         assert fresh.state.get("session_title") == "Fizzbuzz Script Demo", fresh.state
-        assert _FakeLlm.calls == 1
+        assert _CALLS["n"] == 1
         # persisted via a content-less event (renders nothing in the thread)
         last = fresh.events[-1]
         assert last.author == "adk_cc_session_title" and last.content is None
@@ -99,7 +116,7 @@ def test_generation_overlaps_the_turn():
     """The titling call runs CONCURRENTLY with the (simulated) agent turn:
     a 0.3s title call + a 0.3s turn complete in ~0.3s, not ~0.6s."""
     async def run():
-        _FakeLlm.calls = 0
+        _CALLS["n"] = 0
         ictx, svc, session = await _make_ictx(
             _user_event("hi"), llm=_FakeLlm(model="fake/model", delay=0.3))
         plugin = SessionTitlePlugin()
@@ -107,7 +124,10 @@ def test_generation_overlaps_the_turn():
         await plugin.before_run_callback(invocation_context=ictx)  # spawn
         await asyncio.sleep(0.3)                                   # the "turn"
         await plugin.after_run_callback(invocation_context=ictx)   # persist
-        elapsed = time.perf_counter() - t0
+        elapsed = time.perf_counter() - t0        # measured BEFORE draining:
+        # the point of the test is that the RUN does not wait for the title.
+        for t in list(getattr(plugin, "_detached", ())):
+            await asyncio.gather(t, return_exceptions=True)
         fresh = await svc.get_session(app_name="t", user_id="u", session_id=session.id)
         assert fresh.state.get("session_title"), fresh.state
         assert elapsed < 0.5, f"not overlapped: {elapsed:.3f}s (~0.6s = serial)"
@@ -118,45 +138,45 @@ def test_generation_overlaps_the_turn():
 
 def test_skips_when_already_titled():
     async def run():
-        _FakeLlm.calls = 0
+        _CALLS["n"] = 0
         ictx, svc, session = await _make_ictx(
             _user_event("hello"), state={"session_title": "Existing"})
         await _full_run(SessionTitlePlugin(), ictx)
         fresh = await svc.get_session(app_name="t", user_id="u", session_id=session.id)
         assert fresh.state["session_title"] == "Existing"
-        assert _FakeLlm.calls == 0, "must not even spawn the model call"
+        assert _CALLS["n"] == 0, "must not even spawn the model call"
     asyncio.run(run())
     print("OK skips_when_already_titled")
 
 
 def test_skips_without_user_content():
     async def run():
-        _FakeLlm.calls = 0
+        _CALLS["n"] = 0
         ictx, svc, session = await _make_ictx(user_text=None)
         await _full_run(SessionTitlePlugin(), ictx)
         fresh = await svc.get_session(app_name="t", user_id="u", session_id=session.id)
         assert "session_title" not in fresh.state
-        assert _FakeLlm.calls == 0
+        assert _CALLS["n"] == 0
     asyncio.run(run())
     print("OK skips_without_user_content")
 
 
 def test_skips_old_sessions():
     async def run():
-        _FakeLlm.calls = 0
+        _CALLS["n"] = 0
         events = [_user_event(f"msg {i}", i) for i in range(6)]  # > _MAX_USER_TURNS
         ictx, svc, session = await _make_ictx(*events)
         await _full_run(SessionTitlePlugin(), ictx)
         fresh = await svc.get_session(app_name="t", user_id="u", session_id=session.id)
         assert "session_title" not in fresh.state
-        assert _FakeLlm.calls == 0
+        assert _CALLS["n"] == 0
     asyncio.run(run())
     print("OK skips_old_sessions")
 
 
 def test_model_failure_never_breaks_run():
     async def run():
-        _FakeLlm.calls = 0
+        _CALLS["n"] = 0
         ictx, svc, session = await _make_ictx(
             _user_event("hi"), llm=_FakeLlm(model="fake/model", explode=True))
         await _full_run(SessionTitlePlugin(), ictx)  # must not raise

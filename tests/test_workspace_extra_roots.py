@@ -55,14 +55,19 @@ def test_extra_roots_canonicalized_and_deduped() -> None:
 def test_desktop_folds_session_and_once_grants() -> None:
     os.environ["ADK_CC_DESKTOP"] = "1"
     proj = os.path.realpath(tempfile.mkdtemp())
-    data = os.path.realpath(tempfile.mkdtemp())
+    # Outside the system scratch space, which is allowed by default — a
+    # mkdtemp dir would be permitted before AND after the grant, proving
+    # nothing about granting or revoking.
+    data = "/opt/adk-cc-ungranted"
     ctx = _Ctx(proj)
-    assert not _allows(ctx, f"{data}/x")            # nothing granted yet
+    # `data` is a mkdtemp dir, and the system scratch space is allowed by
+    # default — so the denial has to be asserted on a path outside it.
+    assert not _allows(ctx, "/opt/adk-cc-ungranted/x")   # nothing granted yet
     add_granted_root(ctx, data)
     assert _allows(ctx, f"{data}/x")                # session grant folds in
     assert data in list_granted_roots(ctx)
     # one-shot grant of an exact file
-    onefile = os.path.join(proj, "..", "loose.txt")
+    onefile = "/opt/adk-cc-once/loose.txt"   # distinct from the granted root
     grant_once(ctx, onefile)
     assert _allows(ctx, onefile)
     clear_grant_once(ctx)
@@ -75,7 +80,10 @@ def test_desktop_folds_session_and_once_grants() -> None:
 def test_desktop_folds_user_persistent_grants() -> None:
     os.environ["ADK_CC_DESKTOP"] = "1"
     proj = os.path.realpath(tempfile.mkdtemp())
-    data = os.path.realpath(tempfile.mkdtemp())
+    # Outside the system scratch space, which is allowed by default — a
+    # mkdtemp dir would be permitted before AND after the grant, proving
+    # nothing about granting or revoking.
+    data = "/opt/adk-cc-ungranted"
     ctx = _Ctx(proj)
     add_granted_root(ctx, data, persist=True)       # user: scope
     assert "user:adk_cc_extra_roots" in ctx.state
@@ -87,11 +95,15 @@ def test_web_mode_ignores_grants() -> None:
     os.environ["ADK_CC_DESKTOP"] = "0"
     try:
         proj = os.path.realpath(tempfile.mkdtemp())
-        data = os.path.realpath(tempfile.mkdtemp())
+        data = "/opt/adk-cc-ungranted"              # outside the scratch allowance
         ctx = _Ctx(proj)
         add_granted_root(ctx, data)                 # written to state...
         assert not _allows(ctx, f"{data}/x")        # ...but never folded in
-        assert get_workspace(ctx).fs_write_config().allow_paths == (f"{proj}/**", proj)
+        # The project root is the only GRANT-derived entry; the scratch
+        # dirs (/tmp and $TMPDIR) are unconditional defaults in every mode.
+        paths = get_workspace(ctx).fs_write_config().allow_paths
+        assert paths[:2] == (f"{proj}/**", proj), paths
+        assert not any(data in p for p in paths), paths
     finally:
         os.environ["ADK_CC_DESKTOP"] = "1"
     print("OK test_web_mode_ignores_grants")

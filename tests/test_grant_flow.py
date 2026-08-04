@@ -113,7 +113,10 @@ def test_out_of_scope_write_prompts_to_grant() -> None:
     """An out-of-project write pauses with a single_select grant prompt whose
     options are grant_folder / grant_once / grant_deny."""
     proj = os.path.realpath(tempfile.mkdtemp(prefix="proj-"))
-    outside = os.path.realpath(tempfile.mkdtemp(prefix="outside-"))
+    # NOT a temp dir: /tmp and $TMPDIR are unconditional scratch allowances,
+    # so a mkdtemp "outside" is inside the workspace scope and never triggers
+    # the scope gate this test is about.
+    outside = "/opt/adk-cc-outside"
     ctx = _Ctx(project=proj)
     res = _call(_plugin(), _FakeWrite(), {"path": f"{outside}/x.txt", "content": "hi"}, ctx)
     assert res["status"] == "needs_confirmation", res
@@ -129,7 +132,10 @@ def test_scope_prompt_fires_even_in_bypass() -> None:
     """Scope expansion needs consent even under bypassPermissions (the gate runs
     before the mode short-circuit)."""
     proj = os.path.realpath(tempfile.mkdtemp(prefix="proj-"))
-    outside = os.path.realpath(tempfile.mkdtemp(prefix="outside-"))
+    # NOT a temp dir: /tmp and $TMPDIR are unconditional scratch allowances,
+    # so a mkdtemp "outside" is inside the workspace scope and never triggers
+    # the scope gate this test is about.
+    outside = "/opt/adk-cc-outside"
     ctx = _Ctx(project=proj, mode="bypassPermissions")
     res = _call(_plugin(), _FakeWrite(), {"path": f"{outside}/x.txt"}, ctx)
     assert res["status"] == "needs_confirmation", res
@@ -140,7 +146,10 @@ def test_grant_folder_widens_scope_and_stops_prompting() -> None:
     """grant_folder adds the parent to granted roots + <dir>/* allow rules; a
     second file in that dir is then in-scope and auto-allowed (no prompt)."""
     proj = os.path.realpath(tempfile.mkdtemp(prefix="proj-"))
-    outside = os.path.realpath(tempfile.mkdtemp(prefix="outside-"))
+    # NOT a temp dir: /tmp and $TMPDIR are unconditional scratch allowances,
+    # so a mkdtemp "outside" is inside the workspace scope and never triggers
+    # the scope gate this test is about.
+    outside = "/opt/adk-cc-outside"
     plugin = _plugin()
     ctx = _Ctx(project=proj)
     # Second HITL call: user chose grant_folder.
@@ -162,7 +171,10 @@ def test_grant_once_is_single_use() -> None:
     """grant_once allows exactly one op; the after_tool_callback clears it, so a
     later op re-prompts."""
     proj = os.path.realpath(tempfile.mkdtemp(prefix="proj-"))
-    outside = os.path.realpath(tempfile.mkdtemp(prefix="outside-"))
+    # NOT a temp dir: /tmp and $TMPDIR are unconditional scratch allowances,
+    # so a mkdtemp "outside" is inside the workspace scope and never triggers
+    # the scope gate this test is about.
+    outside = "/opt/adk-cc-outside"
     plugin = _plugin()
     ctx = _Ctx(project=proj)
     ctx.tool_confirmation = _Confirm(payload={"chose_id": "grant_once"})
@@ -179,7 +191,10 @@ def test_grant_once_is_single_use() -> None:
 
 def test_grant_deny_denies() -> None:
     proj = os.path.realpath(tempfile.mkdtemp(prefix="proj-"))
-    outside = os.path.realpath(tempfile.mkdtemp(prefix="outside-"))
+    # NOT a temp dir: /tmp and $TMPDIR are unconditional scratch allowances,
+    # so a mkdtemp "outside" is inside the workspace scope and never triggers
+    # the scope gate this test is about.
+    outside = "/opt/adk-cc-outside"
     ctx = _Ctx(project=proj)
     ctx.tool_confirmation = _Confirm(payload={"chose_id": "grant_deny"})
     res = _call(_plugin(), _FakeWrite(), {"path": f"{outside}/a.txt"}, ctx)
@@ -191,7 +206,10 @@ def test_read_out_of_scope_also_prompts() -> None:
     """Reads share the scope: an out-of-project read prompts to grant (it is NOT
     silently allowed by the read-only permission path)."""
     proj = os.path.realpath(tempfile.mkdtemp(prefix="proj-"))
-    outside = os.path.realpath(tempfile.mkdtemp(prefix="outside-"))
+    # NOT a temp dir: /tmp and $TMPDIR are unconditional scratch allowances,
+    # so a mkdtemp "outside" is inside the workspace scope and never triggers
+    # the scope gate this test is about.
+    outside = "/opt/adk-cc-outside"
     ctx = _Ctx(project=proj)
     res = _call(_plugin(), _FakeRead(), {"path": f"{outside}/notes.md"}, ctx)
     assert res["status"] == "needs_confirmation", res
@@ -231,7 +249,10 @@ def test_web_mode_no_grant_prompt() -> None:
     """With is_desktop() False the feature is fully off: no grant prompt (the
     hard sandbox handles out-of-workspace)."""
     proj = os.path.realpath(tempfile.mkdtemp(prefix="proj-"))
-    outside = os.path.realpath(tempfile.mkdtemp(prefix="outside-"))
+    # NOT a temp dir: /tmp and $TMPDIR are unconditional scratch allowances,
+    # so a mkdtemp "outside" is inside the workspace scope and never triggers
+    # the scope gate this test is about.
+    outside = "/opt/adk-cc-outside"
     os.environ["ADK_CC_DESKTOP"] = "0"
     try:
         ctx = _Ctx(project=proj)

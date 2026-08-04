@@ -908,14 +908,37 @@ async def test_create_injects_sandbox_env():
 
         rec = _Recorder(respond)
         backend = _make_backend(rec, credentials=prov, env_spec=spec)
+        # Credentials reach a sandbox through the on-demand runtime-env path
+        # (`configure_runtime_env`, wired in production by `wire_runtime_env`)
+        # since the per-user-secrets work — resolution is user-over-tenant and
+        # happens per exec, not at construction. Static + passthrough still
+        # come from the constructor spec, which is why they alone survived.
+        backend.configure_runtime_env(
+            credentials=prov, tenant_id="acme", user_id="", env_spec=spec)
         await backend.ensure_workspace(_make_workspace())
         env = captured["body"].get("env")
-        assert env == {
-            "TZ": "UTC",
-            "ADK_CC_DAYTONA_TEST_PT": "from-host",
-            "GITHUB_TOKEN": "ghp_secret",
-        }, env
+        # The spec's own three: static, host passthrough, and the
+        # credential MAPPED to its declared env name.
+        assert env["TZ"] == "UTC", env
+        assert env["ADK_CC_DAYTONA_TEST_PT"] == "from-host", env
+        assert env["GITHUB_TOKEN"] == "ghp_secret", env
+        # With no declared-keys allowlist the runtime-env path also injects the
+        # user's secrets under their OWN key names — the documented
+        # pre-declaration fallback in `configure_runtime_env`.
+        assert env.get("gh_pat") == "ghp_secret", env
         print("OK create_injects_sandbox_env")
+
+        # …and an allowlist narrows it: declaring nothing but TZ's absence of
+        # a credential means no raw secret key is pushed.
+        captured.clear()
+        backend2 = _make_backend(_Recorder(respond), credentials=prov, env_spec=spec)
+        backend2.configure_runtime_env(
+            credentials=prov, tenant_id="acme", user_id="",
+            env_spec=spec, declared_keys=set())
+        await backend2.ensure_workspace(_make_workspace())
+        env2 = captured["body"].get("env")
+        assert env2["GITHUB_TOKEN"] == "ghp_secret", env2   # spec mapping stays
+        print("OK create_env_respects_declared_keys")
     finally:
         os.environ.pop("ADK_CC_DAYTONA_TEST_PT", None)
 

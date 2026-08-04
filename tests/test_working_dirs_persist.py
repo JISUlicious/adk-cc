@@ -57,7 +57,9 @@ def test_persistent_dir_visible_in_fresh_session() -> None:
     assert got.state.get("user:adk_cc_extra_roots") == [granted], got.state
     # ...and get_workspace folds it into the sandbox scope.
     assert _allows(got.state, project, f"{granted}/x.txt")
-    assert not _allows(got.state, project, "/tmp/ungranted/x.txt")
+    # NOT under /tmp: the system scratch dir is an intentional default
+    # allowance, so a /tmp path proves nothing about granting.
+    assert not _allows(got.state, project, "/opt/adk-cc-ungranted/x.txt")
     print("OK test_persistent_dir_visible_in_fresh_session")
 
 

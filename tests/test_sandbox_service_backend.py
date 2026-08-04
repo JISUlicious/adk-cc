@@ -702,6 +702,23 @@ async def test_code_executor_uses_relative_path_in_cmd():
         if request.url.path.endswith("/exec"):
             body = json.loads(request.content.decode())
             captured_argv.append(body["argv"])
+            # Answer the analysis-env PROBE as "interpreter present": the
+            # executor probes first now, and a negative answer sends it down
+            # the provisioning path so the scratch exec this test asserts on
+            # never happens.
+            cmd = body["argv"][2] if len(body["argv"]) > 2 else ""
+            if "__PY_OK__" in cmd:
+                # Answer with the interpreter marker AND a matching tier token,
+                # which is what makes the probe short-circuit; a bare
+                # __PY_OK__ sends it into provisioning instead.
+                from adk_cc.sandbox import analysis_env as _ae
+
+                token = _ae._tier_token(_ae._tiers_for(None) if hasattr(_ae, "_tiers_for") else [])
+                return httpx.Response(
+                    200,
+                    json={"stdout": f"__PY_OK__\n{token}\n", "stderr": "",
+                          "exit_code": 0},
+                )
             return httpx.Response(
                 200, json={"stdout": "", "stderr": "", "exit_code": 0}
             )
@@ -746,13 +763,20 @@ async def test_code_executor_uses_relative_path_in_cmd():
     # The cmd inside the bash -lc wrapper must be relative — not
     # contain the agent-side abs path "/host/wks/...".
     assert captured_argv, "no exec request captured"
-    cmd_str = captured_argv[0][2]  # ["/bin/bash", "-lc", "<cmd>"]
-    assert "/host/wks/" not in cmd_str, (
-        f"agent-side absolute path baked into cmd — would fail in a real "
-        f"container: {cmd_str!r}"
-    )
-    assert ".adk-cc/code/scratch.py" in cmd_str, (
-        f"expected relative path .adk-cc/code/scratch.py in cmd: {cmd_str!r}"
+    # NOT argv[0]: the analysis-env probe (`test -x …/bin/python`) runs first
+    # now, and scratch files are content-addressed (`scratch-<sha12>.py`) since
+    # the concurrent-exec fix. Find the run by shape, and hold the
+    # no-host-path invariant across EVERY exec, which is stronger than the
+    # original single-command check.
+    cmds = [a[2] for a in captured_argv]
+    for c in cmds:
+        assert "/host/wks/" not in c, (
+            f"agent-side absolute path baked into cmd — would fail in a real "
+            f"container: {c!r}"
+        )
+    cmd_str = next((c for c in cmds if ".adk-cc/code/scratch" in c), "")
+    assert cmd_str, (
+        f"expected a relative .adk-cc/code/scratch* path in one of: {cmds!r}"
     )
     print("OK code_executor_uses_relative_path_in_cmd")
 

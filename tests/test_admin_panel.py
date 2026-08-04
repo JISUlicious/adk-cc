@@ -108,11 +108,17 @@ def test_unauthenticated_401():
 
 
 def test_admin_wrong_tenant_forbidden():
-    # An admin acting on a tenant other than the global one is rejected.
+    # The rule is org self-management (server.py `_make_admin_role_extractor`:
+    # "an admin may only manage their OWN tenant's resources"), so the
+    # violation to assert is CROSS-tenant: alice, admin of 'local', reaching
+    # into 'other'. dave (admin OF 'other') managing 'other' is legitimate and
+    # is checked alongside, so a regression either way is visible.
     with tempfile.TemporaryDirectory() as tmp:
         c, _ = _client(tmp)
-        r = c.get("/tenants/other/mcp-servers", headers=_h("othertenant"))
+        r = c.get("/tenants/other/mcp-servers", headers=_h("admintok"))
         assert r.status_code == 403, r.text
+        own = c.get("/tenants/other/mcp-servers", headers=_h("othertenant"))
+        assert own.status_code == 200, own.text
     print("OK test_admin_wrong_tenant_forbidden")
 
 
