@@ -82,10 +82,13 @@ class ProcessRecord:
     # on demand (a second long-lived channel per process would be worse).
     remote_log_path: str = ""
 
+    def elapsed_s(self) -> float:
+        """Wall-clock age: how long it ran, or has been running."""
+        return (self.finished_at or time.time()) - self.started_at
+
     def public(self) -> dict[str, Any]:
         d = asdict(self)
-        d["elapsed_s"] = round(
-            (self.finished_at or time.time()) - self.started_at, 1)
+        d["elapsed_s"] = round(self.elapsed_s(), 1)
         return d
 
 

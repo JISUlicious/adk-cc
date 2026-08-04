@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import datetime as _dt
 import os
 import subprocess
 import uuid
@@ -350,6 +351,31 @@ def mount_desktop_routes(app) -> None:
         except Exception:  # noqa: BLE001 — an unreachable host is not a 500
             return None
 
+    def _audit_process(kind: str, rec) -> None:  # noqa: ANN001
+        """Record a human's process action. A background process outlives the
+        turn that started it, so "who stopped my server" has no trace in the
+        session transcript — this is the only place it can be answered."""
+        try:
+            from ..plugins.audit import emit_audit_event, is_audit_enabled
+
+            if not is_audit_enabled():
+                return
+            emit_audit_event({
+                "event": kind,
+                "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "process_id": rec.id,
+                "project_id": rec.project_id,
+                "session_key": rec.session_key,
+                "backend": rec.backend,
+                "label": rec.label,
+                "command": rec.command,   # already redacted by the registry
+                "pid": rec.pid,
+                "elapsed_s": round(rec.elapsed_s(), 1),
+                "actor": "user",
+            })
+        except Exception:  # noqa: BLE001 — audit must never break a route
+            pass
+
     # ---- long-running background processes (#108) --------------------
     # Scoped by PROJECT, not session: a dev server started in one session is
     # still what occupies the port in the next, and per-session scoping is how
@@ -413,6 +439,7 @@ def mount_desktop_routes(app) -> None:
                 status_code=409,
                 detail=f"the {rec.backend} backend cannot stop this process")
         after = reg.get(process_id)
+        _audit_process("process_terminated", after or rec)
         return after.public() if after else {"id": process_id, "status": "killed"}
 
     @app.post("/api/processes/{process_id}/forget", include_in_schema=False)
