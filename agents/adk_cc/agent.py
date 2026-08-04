@@ -98,7 +98,7 @@ from .tools.processes import (
 from .tools.subagents import SubagentCleanupPlugin
 from .plugins.truncated_tool_call import TruncatedToolCallPlugin
 from .credentials import credential_provider_from_env
-from .config.schema import env_bool
+from .config.schema import env_bool, env_int, as_int
 from .service.tenancy import TenancyPlugin
 from .tools import (
     AskUserQuestionTool,
@@ -753,7 +753,7 @@ def _seed_memory_into_summary(event, events):
                 if query:
                     break
         try:
-            budget = max(0, int(os.environ.get("ADK_CC_COMPACTION_SEED_BUDGET", "")))
+            budget = max(0, as_int(os.environ.get("ADK_CC_COMPACTION_SEED_BUDGET", "")))
         except ValueError:
             budget = 300
         block = recall_context(
@@ -825,7 +825,7 @@ class _CompactionBreaker:
     @staticmethod
     def _threshold() -> int:
         try:
-            return max(0, int(os.environ.get("ADK_CC_COMPACTION_BREAKER_THRESHOLD", "")))
+            return max(0, as_int(os.environ.get("ADK_CC_COMPACTION_BREAKER_THRESHOLD", "")))
         except ValueError:
             return 3
 
@@ -1002,7 +1002,7 @@ def _make_lazy_summarizer_class():
                                 getattr(fr, "response", None) or {}, default=str))
                         except Exception:  # noqa: BLE001
                             pass
-            _min_new = int(os.environ.get("ADK_CC_COMPACTION_MIN_NEW_CHARS", "4000"))
+            _min_new = env_int("ADK_CC_COMPACTION_MIN_NEW_CHARS", 4000)
             # `force` (precompact FORCE mode) bypasses the churn floor: it
             # exists to stop pointless RE-compaction, but a first forced
             # compaction of a digested payload session is small by DESIGN —
@@ -1346,7 +1346,7 @@ _app_kwargs = dict(
         # Per-tenant tool-call rate cap. Runs after Permission so a
         # denied call doesn't count against the quota.
         QuotaPlugin(
-            calls_per_minute=int(
+            calls_per_minute=as_int(
                 os.environ.get("ADK_CC_QUOTA_PER_MINUTE", "120")
             )
         ),

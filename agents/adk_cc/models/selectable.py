@@ -22,6 +22,8 @@ import asyncio
 import contextvars
 import logging
 import os
+
+from ..config.schema import as_int
 import random
 import threading
 import time
@@ -60,7 +62,7 @@ _retry_sleep = asyncio.sleep
 
 def _retry_count() -> int:
     try:
-        return max(0, int(os.environ.get("ADK_CC_MODEL_RETRIES", "")))
+        return max(0, as_int(os.environ.get("ADK_CC_MODEL_RETRIES", "")))
     except ValueError:
         return _DEFAULT_MODEL_RETRIES
 

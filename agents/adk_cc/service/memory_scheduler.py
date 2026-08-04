@@ -39,7 +39,7 @@ import asyncio
 import contextlib
 import logging
 import os
-from ..config.schema import env_bool
+from ..config.schema import env_bool, as_int
 
 _log = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ def _delay_s() -> float:
 
 def _stale_days() -> int:
     try:
-        return max(1, int(os.environ.get("ADK_CC_MEMORY_STALE_DAYS", "")))
+        return max(1, as_int(os.environ.get("ADK_CC_MEMORY_STALE_DAYS", "")))
     except ValueError:
         return _DEFAULT_STALE_DAYS
 

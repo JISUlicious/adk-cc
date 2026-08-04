@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import json
 import os
+
+from ..config.schema import as_int
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -63,7 +65,7 @@ def wiki_root_from_env() -> str:
 
 def corroboration_default_from_env() -> int:
     try:
-        return max(1, int(os.environ.get("ADK_CC_WIKI_CORROBORATION_N", "")))
+        return max(1, as_int(os.environ.get("ADK_CC_WIKI_CORROBORATION_N", "")))
     except ValueError:
         return _DEFAULT_CORROBORATION_N
 

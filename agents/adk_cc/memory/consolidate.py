@@ -16,6 +16,8 @@ without a model — the live model is exercised in the e2e.
 from __future__ import annotations
 
 import os
+
+from ..config.schema import as_int
 import threading
 import time
 from dataclasses import dataclass, field
@@ -52,7 +54,7 @@ def _episodic_cap() -> int:
     Prevents the episodic tier (#5) from growing unbounded — older ones are
     reversibly archived (provenance survives in the semantic item's sources)."""
     try:
-        return max(0, int(os.environ.get("ADK_CC_MEMORY_EPISODIC_CAP", "")))
+        return max(0, as_int(os.environ.get("ADK_CC_MEMORY_EPISODIC_CAP", "")))
     except ValueError:
         return 0
 

@@ -55,7 +55,7 @@ from ..config import (
     SandboxViolation,
 )
 from .base import SandboxBackend
-from ...config.schema import env_bool
+from ...config.schema import env_bool, env_int
 
 if TYPE_CHECKING:
     from ..workspace import WorkspaceRoot
@@ -208,10 +208,10 @@ class DockerBackend(SandboxBackend):
             )
         image = os.environ.get("ADK_CC_SANDBOX_IMAGE", "adk-cc-sandbox:latest")
         mem_limit = os.environ.get("ADK_CC_SANDBOX_MEM_LIMIT", "4g")
-        cpu_quota = int(os.environ.get("ADK_CC_SANDBOX_CPU_QUOTA", "100000"))
+        cpu_quota = env_int("ADK_CC_SANDBOX_CPU_QUOTA", 100000)
         # 512 matches the local_container backend and the schema default —
         # one PID cap for the same concept across backends (was 256 here).
-        pids_limit = int(os.environ.get("ADK_CC_SANDBOX_PIDS_LIMIT", "512"))
+        pids_limit = env_int("ADK_CC_SANDBOX_PIDS_LIMIT", 512)
 
         volumes = {
             self._workspace_abs_path: {

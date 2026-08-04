@@ -295,6 +295,70 @@ def test_env_example_in_sync():
     print("OK env_example_in_sync")
 
 
+
+def check(name, ok, detail=""):
+    """This file uses bare asserts elsewhere; keep failures self-describing."""
+    assert ok, f"{name}: {detail}"
+
+
+def test_an_inline_comment_does_not_take_the_agent_down() -> None:
+    """Found by the live suite: `.env` carried
+
+        ADK_CC_MAX_CONTEXT_TOKENS=200000   # measured 2026-08-02: gpt-5.4-mini
+
+    and ContextGuard did a bare `int(...)` on it AT IMPORT TIME, so the whole
+    agent failed to import — an annotation in a config file stopped the
+    product. Numeric parsers now strip the comment.
+
+    Deliberately numeric-only: `#` cannot be part of a number, but a password
+    or token legitimately can contain one, so a global strip would corrupt
+    string values."""
+    from adk_cc.config.schema import as_float, as_int
+
+    check("an inline comment is stripped from an int",
+          as_int("200000   # measured 2026-08-02: gpt-5.4-mini") == 200000)
+    check("…and from a float", as_float("1.5  # why") == 1.5)
+    check("a plain value still parses", as_int(" 42 ") == 42)
+    check("a negative value survives", as_int("-3 # neg") == -3)
+
+
+def test_a_typo_in_one_knob_does_not_kill_the_process() -> None:
+    """env_int warns and falls back; the alternative is a stack trace at boot
+    for a single mistyped variable."""
+    import os
+
+    from adk_cc.config.schema import env_int
+
+    os.environ["ADK_CC_TEST_INT_X"] = "not-a-number"
+    try:
+        check("garbage falls back to the default",
+              env_int("ADK_CC_TEST_INT_X", 9) == 9)
+        os.environ["ADK_CC_TEST_INT_X"] = "7 # fine"
+        check("a commented value is read", env_int("ADK_CC_TEST_INT_X", 9) == 7)
+        os.environ["ADK_CC_TEST_INT_X"] = ""
+        check("empty means unset", env_int("ADK_CC_TEST_INT_X", 9) == 9)
+        check("missing means unset", env_int("ADK_CC_TEST_INT_NOPE", 5) == 5)
+    finally:
+        os.environ.pop("ADK_CC_TEST_INT_X", None)
+
+
+def test_no_numeric_env_var_is_read_with_a_bare_int() -> None:
+    """The class of bug, not just the instance: a bare `int(os.environ...)`
+    anywhere reintroduces the import-time crash."""
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent / "agents" / "adk_cc"
+    pat = re.compile(r"(?<![A-Za-z0-9_])int\(\s*os\.(environ\.get|getenv)\(")
+    offenders = []
+    for f in root.rglob("*.py"):
+        for i, line in enumerate(f.read_text().splitlines(), 1):
+            if pat.search(line):
+                offenders.append(f"{f.relative_to(root)}:{i}")
+    check("every numeric env read goes through env_int/as_int",
+          not offenders, "bare int() at " + ", ".join(offenders[:6]))
+
+
 def main():
     test_schema_wellformed()
     test_secret_flags()
@@ -307,6 +371,9 @@ def main():
     test_enum_choices_and_rules()
     test_gen_env_shape()
     test_effective_masks_secrets()
+    test_an_inline_comment_does_not_take_the_agent_down()
+    test_a_typo_in_one_knob_does_not_kill_the_process()
+    test_no_numeric_env_var_is_read_with_a_bare_int()
     print("\nall config-schema tests passed")
 
 

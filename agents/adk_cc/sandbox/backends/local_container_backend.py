@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+
+from ...config.schema import as_int
 import subprocess
 import time
 from pathlib import Path
@@ -473,7 +475,7 @@ def _maybe_reap_idle(runtime: Optional[Runtime]) -> None:
     deleted or the app restarts)."""
     global _last_reap
     try:
-        ttl = int(os.environ.get("ADK_CC_SANDBOX_IDLE_TTL_S", "0") or "0")
+        ttl = as_int(os.environ.get("ADK_CC_SANDBOX_IDLE_TTL_S", "0") or "0")
     except ValueError:
         ttl = 0
     if ttl <= 0:

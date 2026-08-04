@@ -68,6 +68,7 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
+from ..config.schema import env_int
 from ..permissions.token_counter import (
     estimate_prompt_tokens,
     estimate_request_tokens,
@@ -175,8 +176,10 @@ class ContextGuardPlugin(BasePlugin):
     def __init__(self, name: str = "adk_cc_context_guard") -> None:
         super().__init__(name=name)
 
-        max_str = os.environ.get("ADK_CC_MAX_CONTEXT_TOKENS")
-        self._max: Optional[int] = int(max_str) if max_str else None
+        # env_int, not int(): a bare int() here ran at IMPORT time, so an
+        # inline `# comment` on this var in .env stopped the agent from
+        # importing at all.
+        self._max: Optional[int] = env_int("ADK_CC_MAX_CONTEXT_TOKENS")
 
         if self._max is None:
             self._warn = None

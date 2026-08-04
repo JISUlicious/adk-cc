@@ -46,7 +46,7 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 
-from ..config.schema import env_bool
+from ..config.schema import env_bool, as_int
 from ..context import result_summaries
 
 _log = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ def _enabled() -> bool:
 
 def _int_env(name: str, default: int) -> int:
     try:
-        return max(0, int(os.environ.get(name, "")))
+        return max(0, as_int(os.environ.get(name, "")))
     except ValueError:
         return default
 

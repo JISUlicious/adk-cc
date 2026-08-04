@@ -65,7 +65,7 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 
 from .audit import emit_audit_event, is_audit_enabled
-from ..config.schema import env_bool
+from ..config.schema import env_bool, as_int
 
 _log = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ class ModelIOTracePlugin(BasePlugin):
             self._max_bytes = max_bytes
         else:
             try:
-                self._max_bytes = int(
+                self._max_bytes = as_int(
                     os.environ.get(_ENV_MAX_BYTES, _DEFAULT_MAX_BYTES)
                 )
             except ValueError:

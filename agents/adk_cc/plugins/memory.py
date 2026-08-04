@@ -41,7 +41,7 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
-from ..config.schema import env_bool
+from ..config.schema import env_bool, as_int
 from ..memory import (
     MemoryStore,
     consolidate_user,
@@ -64,14 +64,14 @@ def _consolidate_threshold() -> int:
     This is the responsive half of the hybrid; the periodic scheduler
     (service/memory_scheduler.py) is the time-based sweep + straggler net."""
     try:
-        return max(0, int(os.environ.get("ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD", "")))
+        return max(0, as_int(os.environ.get("ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD", "")))
     except ValueError:
         return 0
 
 
 def _stale_days() -> int:
     try:
-        return max(1, int(os.environ.get("ADK_CC_MEMORY_STALE_DAYS", "")))
+        return max(1, as_int(os.environ.get("ADK_CC_MEMORY_STALE_DAYS", "")))
     except ValueError:
         return _DEFAULT_STALE_DAYS
 
@@ -172,7 +172,7 @@ _CAPTURE_PROMPT = (
 
 def _recall_budget() -> int:
     try:
-        return max(0, int(os.environ.get("ADK_CC_MEMORY_RECALL_BUDGET_TOKENS", "")))
+        return max(0, as_int(os.environ.get("ADK_CC_MEMORY_RECALL_BUDGET_TOKENS", "")))
     except ValueError:
         return _DEFAULT_RECALL_BUDGET
 

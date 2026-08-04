@@ -33,6 +33,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+
+from ..config.schema import as_int
 import re
 import shlex
 import uuid
@@ -118,7 +120,7 @@ def _python_version() -> str:
 
 def _install_timeout_s() -> int:
     try:
-        return max(60, int(os.environ.get("ADK_CC_ANALYSIS_INSTALL_TIMEOUT_S", "")))
+        return max(60, as_int(os.environ.get("ADK_CC_ANALYSIS_INSTALL_TIMEOUT_S", "")))
     except ValueError:
         return 900
 

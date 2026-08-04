@@ -25,7 +25,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 
 from ..identity.provider import AccountPendingError
 from ..identity.ratelimit import FailureLockout, SlidingWindowLimiter
-from ..config.schema import env_bool
+from ..config.schema import env_bool, env_int
 
 _MAX_SKILL_ZIP = 10 * 1024 * 1024  # 10 MiB per personal skill upload
 _MAX_USER_RESOURCES = 50  # cap personal skills / MCP servers per user
@@ -82,10 +82,10 @@ def mount_identity_routes(app, identity, credentials=None) -> None:
     # ADK_CC_AUTH_RATELIMIT=0 disables (dev/tests).
     rl_enabled = env_bool("ADK_CC_AUTH_RATELIMIT", True)
     ip_limiter = SlidingWindowLimiter(
-        limit=int(os.environ.get("ADK_CC_AUTH_RATELIMIT_MAX", "30")),
+        limit=env_int("ADK_CC_AUTH_RATELIMIT_MAX", 30),
         window_s=float(os.environ.get("ADK_CC_AUTH_RATELIMIT_WINDOW_S", "60")))
     lockout = FailureLockout(
-        threshold=int(os.environ.get("ADK_CC_AUTH_LOCKOUT_THRESHOLD", "5")),
+        threshold=env_int("ADK_CC_AUTH_LOCKOUT_THRESHOLD", 5),
         lockout_s=float(os.environ.get("ADK_CC_AUTH_LOCKOUT_S", "300")))
 
     # Only trust X-Forwarded-For when explicitly deployed behind a proxy that

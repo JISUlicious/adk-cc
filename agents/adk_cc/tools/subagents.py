@@ -34,6 +34,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+
+from ..config.schema import as_int
 import time
 import uuid
 from typing import Any, Optional
@@ -52,7 +54,7 @@ _DEFAULT_MAX = 8
 
 def concurrency_limit() -> int:
     try:
-        return max(1, int(os.environ.get("ADK_CC_SUBAGENTS_MAX", _DEFAULT_MAX)))
+        return max(1, as_int(os.environ.get("ADK_CC_SUBAGENTS_MAX", _DEFAULT_MAX)))
     except (TypeError, ValueError):
         return _DEFAULT_MAX
 

@@ -32,6 +32,7 @@ pre-existing `settings_loader`). CLI: `python -m adk_cc.config <check|print|gen-
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
@@ -63,12 +64,29 @@ def as_str(raw: str) -> str:
     return raw
 
 
+def _strip_inline_comment(raw) -> str:  # noqa: ANN001
+    """`200000   # measured …` -> `200000`.
+
+    Safe for NUMBERS only: `#` can never be part of one, whereas a string
+    value (a password, a token, a URL fragment) may legitimately contain one.
+    That is why this is applied by the numeric parsers and not globally.
+
+    Found live: `.env` carried
+      `ADK_CC_MAX_CONTEXT_TOKENS=200000   # measured 2026-08-02: gpt-5.4-mini`
+    and ContextGuard's bare `int(...)` ran at import time, so an annotation in
+    a config file stopped the whole agent from importing."""
+    # Callers pass `os.environ.get(NAME, <default>)`, and some of those
+    # defaults are already ints — coerce rather than making every call site
+    # stringify its own default.
+    return str(raw).split("#", 1)[0].strip()
+
+
 def as_int(raw: str) -> int:
-    return int(raw.strip())
+    return int(_strip_inline_comment(raw))
 
 
 def as_float(raw: str) -> float:
-    return float(raw.strip())
+    return float(_strip_inline_comment(raw))
 
 
 _FALSY_TOKENS = ("0", "false", "no", "off")
@@ -79,6 +97,9 @@ def as_bool(raw: str) -> bool:
     flags and default-on kill switches — only the `default` differs (a kill
     switch has default=True and disables on '0'; an opt-in has default=False)."""
     return raw.strip().lower() not in _FALSY_TOKENS
+
+
+_log = logging.getLogger(__name__)
 
 
 def env_bool(name: str, default: bool = False, environ: Optional[dict] = None) -> bool:
@@ -95,6 +116,24 @@ def env_bool(name: str, default: bool = False, environ: Optional[dict] = None) -
     if raw is None or raw.strip() == "":
         return default
     return as_bool(raw)
+
+
+def env_int(name: str, default: Optional[int] = None,
+            environ: Optional[dict] = None) -> Optional[int]:
+    """THE canonical integer env read. Unparseable values WARN and fall back
+    to `default` rather than raising: a typo in one knob should not take the
+    process down."""
+    env = os.environ if environ is None else environ
+    raw = env.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return as_int(raw)
+    except ValueError:
+        # A typo in one knob must not take the process down — the whole point
+        # of routing these through a canonical reader.
+        _log.warning("%s=%r is not an integer — using %r", name, raw, default)
+        return default
 
 
 def as_csv(raw: str) -> tuple[str, ...]:

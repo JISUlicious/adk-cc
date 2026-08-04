@@ -29,7 +29,7 @@ from .store import (
     normalize_email,
 )
 from .tokens import TokenIssuer
-from ..config.schema import env_bool
+from ..config.schema import env_bool, env_int, as_int
 
 MEMBER_ROLE = "member"
 OWNER_ROLE = "owner"
@@ -108,7 +108,7 @@ class IdentityService:
             audience=os.environ.get("ADK_CC_AUTH_AUDIENCE") or None,
             # Short-lived access + long-lived revocable refresh: the SPA
             # silently refreshes, so a stolen access token ages out fast.
-            ttl_s=int(os.environ.get("ADK_CC_AUTH_TOKEN_TTL_S", "1800")),
+            ttl_s=env_int("ADK_CC_AUTH_TOKEN_TTL_S", 1800),
             user_claim=os.environ.get("ADK_CC_JWT_USER_CLAIM", "sub"),
             tenant_claim=os.environ.get("ADK_CC_JWT_TENANT_CLAIM", "tenant"),
             roles_claim=os.environ.get("ADK_CC_JWT_ROLES_CLAIM", "roles"),
@@ -125,10 +125,10 @@ class IdentityService:
         resets = JsonFileResetTokenStore(os.path.join(base, "reset_tokens.json"))
         svc = cls(provider=provider, issuer=issuer, mode=mode, invites=invites,
                   api_keys=api_keys, audit=audit, refresh=refresh,
-                  refresh_ttl_s=int(os.environ.get("ADK_CC_AUTH_REFRESH_TTL_S",
+                  refresh_ttl_s=as_int(os.environ.get("ADK_CC_AUTH_REFRESH_TTL_S",
                                                    str(_REFRESH_TTL_S))),
                   resets=resets,
-                  reset_ttl_s=int(os.environ.get("ADK_CC_AUTH_RESET_TTL_S",
+                  reset_ttl_s=as_int(os.environ.get("ADK_CC_AUTH_RESET_TTL_S",
                                                  str(_RESET_TTL_S))))
         svc._maybe_bootstrap_admin(global_tenant, admin_role)
         return svc
