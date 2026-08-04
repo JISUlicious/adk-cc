@@ -53,7 +53,11 @@ async def test_after_run_does_not_block_on_slow_title() -> None:
     t0 = loop.time()
     await plugin.after_run_callback(invocation_context=ictx)
     elapsed = loop.time() - t0
-    assert elapsed < 0.3, f"after_run blocked on the title call ({elapsed:.2f}s) — the SSE tail bug"
+    # Margin sized to the DEFECT, not to an ideal machine: the bug this
+    # guards is after_run awaiting the whole title call (1.0s below), so
+    # anything under ~half that still catches it, while a loaded box running
+    # the full sweep no longer flakes at 0.3s.
+    assert elapsed < 0.5, f"after_run blocked on the title call ({elapsed:.2f}s) — the SSE tail bug"
     assert svc.appended == [], "title should NOT be persisted synchronously for a slow call"
 
     # ...but it IS persisted a moment later, detached.
