@@ -138,6 +138,73 @@ def test_the_skill_name_and_file_path_are_not_rewritten() -> None:
     print("OK the_skill_name_and_file_path_are_not_rewritten")
 
 
+
+def check(name, ok, detail=""):
+    assert ok, f"{name}: {detail}"
+
+
+def test_a_loaded_skill_names_its_own_directory() -> None:
+    """The guarantee: the agent is TOLD where the skill lives.
+
+    Reported live — "agent often struggles with finding the script from
+    skill-runtime dir". Claude Code solves this by injecting the real base
+    directory into a loaded skill (SkillTool.ts:1076) and letting scripts run
+    in place; adk-cc could not, because ADK holds skill CONTENT in memory
+    (models.py: `scripts: dict[str, Script]`) and materialises it to a
+    digest-named cache the model cannot predict.
+    """
+    import adk_cc.tools.skills as sk
+
+    d = sk._local_skill_dir("greeter", None)
+    check("no directory is offered when nothing is registered", d is None, d)
+
+    sk._SKILL_DIRS["greeter"] = str(REPO)          # any real dir
+    try:
+        d = sk._local_skill_dir("greeter", None)
+        check("a registered skill's real directory is offered",
+              d == str(REPO), d)
+    finally:
+        sk._SKILL_DIRS.pop("greeter", None)
+
+
+def test_a_remote_workspace_is_never_handed_a_local_path() -> None:
+    """A path that is real on the SERVER and absent in the sandbox is worse
+    than no path: it looks valid and fails later, somewhere else. Container /
+    ssh / daytona execute on another filesystem, so the offer must be withheld
+    — the same hazard #109 was about."""
+    import adk_cc.tools.skills as sk
+
+    sk._SKILL_DIRS["greeter"] = str(REPO)
+    prev = os.environ.get("ADK_CC_SANDBOX_BACKEND")
+    try:
+        for backend in ("docker", "sandbox_service", "daytona", "e2b"):
+            os.environ["ADK_CC_SANDBOX_BACKEND"] = backend
+            check(f"no path is offered under the {backend} backend",
+                  sk._local_skill_dir("greeter", None) is None, backend)
+        for backend in ("noop", "host", ""):
+            os.environ["ADK_CC_SANDBOX_BACKEND"] = backend
+            check(f"a path IS offered under {backend or '<unset>'}",
+                  sk._local_skill_dir("greeter", None) == str(REPO), backend)
+    finally:
+        sk._SKILL_DIRS.pop("greeter", None)
+        if prev is None:
+            os.environ.pop("ADK_CC_SANDBOX_BACKEND", None)
+        else:
+            os.environ["ADK_CC_SANDBOX_BACKEND"] = prev
+
+
+def test_a_nonexistent_directory_is_not_offered() -> None:
+    """A stale index entry must not become a confidently wrong path."""
+    import adk_cc.tools.skills as sk
+
+    sk._SKILL_DIRS["ghost"] = "/nope/not/here"
+    try:
+        check("a directory that is gone is not offered",
+              sk._local_skill_dir("ghost", None) is None)
+    finally:
+        sk._SKILL_DIRS.pop("ghost", None)
+
+
 def main() -> None:
     test_an_existing_relative_file_becomes_absolute()
     test_a_nested_path_works_too()
@@ -146,6 +213,9 @@ def main() -> None:
     test_dict_options_and_positionals_are_handled()
     test_no_workspace_changes_nothing()
     test_the_skill_name_and_file_path_are_not_rewritten()
+    test_a_loaded_skill_names_its_own_directory()
+    test_a_remote_workspace_is_never_handed_a_local_path()
+    test_a_nonexistent_directory_is_not_offered()
     print("\nall skill-script path tests passed")
 
 

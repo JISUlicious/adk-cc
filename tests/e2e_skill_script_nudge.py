@@ -110,7 +110,7 @@ def main() -> int:  # noqa: PLR0915
          "--factory", "--host", "127.0.0.1", "--port", str(PORT)],
         cwd=REPO, env=env, stdout=open(log, "w"), stderr=subprocess.STDOUT)
 
-    used_tool = bash_first = never_ran = 0
+    used_tool = bash_first = never_ran = told = 0
     try:
         for _ in range(160):
             try:
@@ -145,6 +145,12 @@ def main() -> int:  # noqa: PLR0915
             events = requests.get(sess, timeout=30).json().get("events") or []
             names = _calls(events)
             blob = json.dumps(events)
+            # #113 part 1: load_skill must TELL the agent where the skill is,
+            # instead of leaving it to guess. Asserted against the real
+            # project dir, in the running desktop server.
+            told_dir = sd in blob and "base_dir" in blob
+            if told_dir:
+                told += 1
             got_output = MARKER in blob
             first_script_call = next(
                 (n for n in names if n in ("run_skill_script", "run_bash")), None)
@@ -155,15 +161,17 @@ def main() -> int:  # noqa: PLR0915
             if not got_output:
                 never_ran += 1
             print(f"  round {i+1}: first={first_script_call} "
-                  f"calls={names[:6]} marker={'yes' if got_output else 'NO'}")
+                  f"calls={names[:6]} marker={'yes' if got_output else 'NO'} "
+                  f"base_dir={'told' if told_dir else 'MISSING'}")
 
         print(f"\n  run_skill_script first : {used_tool}/{ROUNDS}")
         print(f"  run_bash first         : {bash_first}/{ROUNDS}")
         print(f"  never got the output   : {never_ran}/{ROUNDS}")
+        print(f"  told the skill's dir   : {told}/{ROUNDS}")
 
-        ok = used_tool > ROUNDS / 2 and never_ran == 0
-        print(f"\n  [{'PASS' if ok else 'FAIL'}] the nudge steers to the skill "
-              f"tool and the script always runs")
+        ok = used_tool > ROUNDS / 2 and never_ran == 0 and told == ROUNDS
+        print(f"\n  [{'PASS' if ok else 'FAIL'}] the script always runs AND "
+              f"every load_skill named the skill's real directory")
         if not ok:
             print(f"  server log: {log}")
         return 0 if ok else 1

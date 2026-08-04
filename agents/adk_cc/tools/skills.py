@@ -1130,6 +1130,49 @@ def _already_active(name: str, tool_context: ToolContext) -> bool:
     return False
 
 
+def _local_skill_dir(name: str, ctx: Any) -> Optional[str]:
+    """The skill's REAL directory, but only when bash could actually reach it.
+
+    Claude Code injects `Base directory for this skill: <dir>` into a loaded
+    skill and lets the agent run its scripts in place (SkillTool.ts). That
+    works because one filesystem holds both the skill and the shell. adk-cc
+    only sometimes has that: a container / ssh / daytona workspace executes
+    somewhere the skill folder does not exist, and a path that is real on the
+    server but absent in the sandbox is WORSE than no path — it looks valid
+    and fails later.
+
+    So: return the dir for a local workspace, None otherwise.
+    """
+    try:
+        from ..sandbox import get_workspace
+
+        ws = get_workspace(ctx)
+        if getattr(ws, "remote", False):
+            return None
+    except Exception:  # noqa: BLE001 — no workspace (tests, odd contexts)
+        pass
+    if not _executes_on_this_host():
+        return None
+    root = _ACTIVE_PROJECT_ROOT.get()
+    resolved = _skills_for_root(root) if root else None
+    # Per-skill and per-PROJECT: shadowing is already settled by discovery, so
+    # `greeter` resolves to the one directory this session was offered — the
+    # project's copy, not the built-in it shadows.
+    d = (resolved[1].get(name) if resolved else None) or _SKILL_DIRS.get(name)
+    return d if d and os.path.isdir(d) else None
+
+
+def _executes_on_this_host() -> bool:
+    """True when run_bash runs on the machine holding the skill files."""
+    backend = (os.environ.get("ADK_CC_SANDBOX_BACKEND") or "noop").strip().lower()
+    return backend in ("", "noop", "host", "local")
+
+
+# Filled by `_patch_skill_tools` so the load tool can name a skill's directory
+# without threading the index through ADK's constructors.
+_SKILL_DIRS: dict[str, str] = {}
+
+
 class _BoundedLoadSkillTool(LoadSkillTool):
     """`load_skill` that caps the injected SKILL.md instructions.
 
@@ -1177,9 +1220,29 @@ class _BoundedLoadSkillTool(LoadSkillTool):
                 )
                 result["instructions_truncated"] = True
                 result["total_instruction_chars"] = total
+            # ${SKILL_DIR} lets a skill reference its own files, the way
+            # Claude Code's ${CLAUDE_SKILL_DIR} does.
+            base = _local_skill_dir(name, tool_context)
+            if base:
+                # A skill may reference its own files, like Claude Code's
+                # ${CLAUDE_SKILL_DIR}.
+                instr = instr.replace("${SKILL_DIR}", base)
             result["instructions"] = _wrap_untrusted(
-                instr, f"{args.get('skill_name', '')}/SKILL.md"
-            )
+                instr, f"{args.get('skill_name', '')}/SKILL.md")
+            if base:
+                # Carried as FIELDS rather than prepended to `instructions`:
+                # that field is capped to stop a pathological SKILL.md dumping
+                # unbounded text, and folding a header into it would inflate
+                # the very thing being measured. The model reads tool results,
+                # so a labelled field is at least as visible as inline prose.
+                result["base_dir"] = base
+                result["how_to_run_scripts"] = (
+                    f"This skill's files are on this machine under {base} — "
+                    f"`scripts/…` means `{base}/scripts/…`. Run one with "
+                    f"run_skill_script(skill_name=\"{name}\", "
+                    f"file_path=\"scripts/…\"), which also supplies the "
+                    f"analysis interpreter and installs the skill's "
+                    f"dependencies.")
         return result
 
 
@@ -2301,6 +2364,9 @@ def _patch_skill_tools(
 ) -> None:
     """Swap ADK's skill tools for adk-cc's bounded/guarded variants in-place.
 
+    Also records the name->dir index globally so `load_skill` can tell the
+    model where a skill actually lives (see `_base_dir_header`).
+
     `SkillToolset._tools` is a regular list built in `__init__`. We replace:
       - LoadSkillResourceTool → _LenientLoadSkillResourceTool (bounded + disk
         fallback)
@@ -2311,6 +2377,9 @@ def _patch_skill_tools(
     """
     guards = _guards_on()
     _install_wider_script_launcher()
+    # So load_skill can name a skill's directory without threading the index
+    # through ADK's tool constructors.
+    _SKILL_DIRS.update(skill_dirs or {})
     for i, tool in enumerate(toolset._tools):
         if isinstance(tool, LoadSkillResourceTool) and not isinstance(
             tool, _LenientLoadSkillResourceTool
