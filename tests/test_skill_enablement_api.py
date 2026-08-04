@@ -110,6 +110,32 @@ def main() -> None:
     finally:
         os.environ.pop("ADK_CC_TRUST_PROJECT_SKILLS", None)
 
+    # ---- the catalog must SHOW project-directory skills -------------------
+    # Found 2026-08-04 in the UI: rescan reported 31 skills while the Settings
+    # list showed 24 — `catalog()` called `_resolve_skills_dirs()` with no
+    # project root, so a skill in the project's own .adk-cc/skills was ACTIVE
+    # for the agent yet unlistable and untoggleable.
+    from adk_cc.tools import skill_enablement as _E
+
+    os.environ["ADK_CC_TRUST_PROJECT_SKILLS"] = "1"
+    try:
+        blind = {r["name"] for r in _E.catalog(tenant_id="local")}
+        assert "late-skill" not in blind, "fixture: expected the blind spot"
+        seeing = {r["name"]: r for r in _E.catalog(tenant_id="local",
+                                                  project_root=str(proj))}
+        assert "late-skill" in seeing, sorted(seeing)[:8]
+        assert seeing["late-skill"]["source"] == "project", seeing["late-skill"]
+        print("OK the catalog lists the project's own skills when given a root")
+    finally:
+        os.environ.pop("ADK_CC_TRUST_PROJECT_SKILLS", None)
+
+    # An UNTRUSTED project's skills stay withheld from the catalog too — the
+    # gating lives in the resolver, so listing must not become a bypass.
+    withheld = {r["name"] for r in _E.catalog(tenant_id="local",
+                                             project_root=str(proj))}
+    assert "late-skill" not in withheld, "untrusted project skills must stay hidden"
+    print("OK trust gating still applies to the listing")
+
     # No body at all must not 500 — the button may fire with nothing to scope by.
     assert client.post("/desktop/settings/skills/reload").status_code == 200
     print("OK reload without a root still clears the cache")

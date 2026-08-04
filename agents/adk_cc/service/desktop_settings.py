@@ -321,6 +321,21 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
             from ..tools import skills as _skills
 
             uid = _scope_user(request)
+            # The project's OWN skills dir (…/.adk-cc/skills) is a different
+            # thing from the per-project slice of the desktop store above, and
+            # the catalog could not see it at all without the root.
+            proj_root = None
+            pid = request.query_params.get("project_id")
+            if pid:
+                try:
+                    from .desktop_routes import load_projects
+
+                    for it in load_projects():
+                        if it.get("id") == pid:
+                            proj_root = str(it.get("repo_path") or "") or None
+                            break
+                except Exception:  # noqa: BLE001
+                    proj_root = None
             return {
                 "skills": skill_enablement.catalog(
                     tenant_id=_TENANT,
@@ -329,6 +344,7 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
                         ([("project", _skill_base(uid))] if uid else [])
                         + [("installed", _skill_base(None))]
                     ),
+                    project_root=proj_root,
                 ),
                 # Project skills withheld pending a trust decision are served
                 # separately (see /skills/untrusted): the question is about the

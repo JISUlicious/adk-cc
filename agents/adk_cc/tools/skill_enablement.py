@@ -246,6 +246,7 @@ def catalog(
     tenant_id: Optional[str] = None,
     user_id: Optional[str] = None,
     scoped_dirs: Iterable[tuple[str, Path]] = (),
+    project_root: Optional[str] = None,
 ) -> list[dict]:
     """Every DISCOVERED skill with its source, enablement, and shadowing.
 
@@ -269,9 +270,18 @@ def catalog(
     org, user = disabled_for(tenant_id, user_id)
     rows: list[dict] = []
     seen: dict[str, dict] = {}
+    # `project_root` matters: without it `_resolve_skills_dirs` skips the
+    # PROJECT scope entirely, so a skill living in the project's own
+    # `.adk-cc/skills` was active for the agent yet absent from this list —
+    # unlistable and untoggleable (found 2026-08-04: catalog 24, agent 31).
+    # Trust gating rides along inside the resolver: an untrusted project's
+    # skills stay withheld here exactly as they are for the agent.
     sources: list[tuple[str, Path]] = [
         (label, Path(d)) for label, d in scoped_dirs
-    ] + [(_classify_source(d), d) for d in _resolve_skills_dirs()]
+    ] + [
+        (_classify_source(d), d)
+        for d in _resolve_skills_dirs(Path(project_root) if project_root else None)
+    ]
     for source, base in sources:
         if not base.is_dir():
             continue
