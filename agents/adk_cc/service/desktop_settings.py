@@ -218,12 +218,15 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
     async def reload_skills(request: Request):  # noqa: ANN202
         """Re-scan the skills directories now.
 
-        Skill BODIES are read from disk at load time, so edits to an existing
-        skill are always live; it is DISCOVERY (a skill added, renamed, or
-        removed) that is cached per project root. Investigated 2026-08-04:
-        the only thing that dropped that cache was the trust endpoint, so a
-        user who added a skill folder had no honest way to make it appear.
-        This is that way.
+        Discovery now invalidates itself: the per-root cache carries a
+        directory signature, so an added, renamed, or removed skill lands on
+        the next turn by itself (#107). This button therefore is not the only
+        way to refresh — it is the way to refresh NOW and, more usefully, to
+        SEE what the agent will actually be offered, which is what a user
+        editing skills is really asking.
+
+        It also still covers the cases a signature cannot see: a skill dir
+        that moved out from under a running session, and the trust state.
 
         Returns the freshly discovered skill names so the caller can show
         what the agent will actually see — the point is to make the result

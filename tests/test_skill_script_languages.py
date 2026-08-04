@@ -128,7 +128,56 @@ def _run(skill: str, file_path: str, args=None):
         tool_context=_Ctx()))
 
 
+# A script that READS STDIN. There is no interactive user behind a skill
+# script, so if the launcher hands the child its own stdin the read blocks on
+# a descriptor that never closes — and the child is killed by the outer exec
+# timeout having produced nothing, which surfaced as the maximally unhelpful
+# "no output from the skill-script launcher". Measured against the real
+# data-analyst skill: hung for the full 60s timeout, while the identical
+# command with </dev/null finished in 5s.
+_skill("stdin-skill", {
+    "reader.py": (
+        "import sys, json\n"
+        "data = sys.stdin.read()\n"      # must return '' immediately
+        "print(json.dumps({'stdin_bytes': len(data), 'ok': True}))\n"
+    ),
+})
+
+
+def test_a_script_that_reads_stdin_does_not_hang() -> None:
+    import time
+
+    # The test process' own stdin is usually already at EOF, so a naive
+    # version of this test passes even with the fix reverted (verified). To
+    # reproduce the real condition, fd 0 must be a pipe that STAYS OPEN — a
+    # writer the child will never hear from, exactly like the server's stdin.
+    r_fd, w_fd = os.pipe()
+    saved = os.dup(0)
+    os.dup2(r_fd, 0)
+    t = time.perf_counter()
+    try:
+        res = _run("stdin-skill", "scripts/reader.py")
+    finally:
+        os.dup2(saved, 0)
+        for fd in (saved, r_fd, w_fd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    took = time.perf_counter() - t
+    out = (res or {}).get("stdout") or ""
+    err = (res or {}).get("stderr") or ""
+    check("a script reading stdin returns instead of blocking on the launcher's",
+          "stdin_bytes" in out, f"took={took:.1f}s out={out[:120]!r} err={err[:200]!r}")
+    if "stdin_bytes" in out:
+        check("and it sees EOF, not somebody else's input",
+              json.loads(out.strip().splitlines()[-1])["stdin_bytes"] == 0, out)
+    check("it finished quickly rather than being killed by the timeout",
+          took < 30, f"{took:.1f}s")
+
+
 def main() -> int:
+    test_a_script_that_reads_stdin_does_not_hang()
     if not shutil.which("node"):
         print("SKIP: node not available."); return 0
 

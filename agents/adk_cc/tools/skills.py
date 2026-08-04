@@ -79,6 +79,8 @@ import json
 import logging
 import os
 import re
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -1844,7 +1846,7 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             "    else:",
             "        _ir = subprocess.run([_uv, 'pip', 'install', '--python',",
             "            sys.executable] + _deps, capture_output=True, text=True,",
-            "            timeout=600)",
+            "            timeout=600, stdin=subprocess.DEVNULL)",
             "        if _ir.returncode == 0:",
             "            open(_depmark, 'w').write('1')",
             "        else:",
@@ -1870,8 +1872,16 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             "        raise SystemExit(0)",
             "    _cmd = [_exe] + _interp[1:]",
             "try:",
+            # stdin=DEVNULL is load-bearing, not hygiene. There is no
+            # interactive user behind a skill script, so a script that reads
+            # stdin (pandas.read_csv('-'), input(), a `getpass` in a helper)
+            # blocks on an inherited descriptor that never closes. Measured:
+            # data-analyst's premodel_audit hung for the FULL exec timeout and
+            # returned nothing, surfacing as "no output from the skill-script
+            # launcher"; the identical command with </dev/null finished in 5s.
             "    _r = subprocess.run(_cmd + [_abs] + _argv, capture_output=True,",
-            f"        text=True, timeout={timeout!r}, cwd=os.getcwd())",
+            f"        text=True, timeout={timeout!r}, cwd=os.getcwd(),",
+            "        stdin=subprocess.DEVNULL)",
             "    _emit(stdout=_r.stdout, stderr=_r.stderr, returncode=_r.returncode)",
             "except subprocess.TimeoutExpired as _e:",
             "    _emit(stdout=(_e.stdout or ''),",
@@ -1935,10 +1945,84 @@ _ACTIVE_PROJECT_ROOT: "contextvars.ContextVar[Optional[str]]" = contextvars.Cont
     "adk_cc_active_project_root", default=None
 )
 
-# root → (skills, name→dir index). Built on first use per project and reused:
-# the built-ins are the bulk of it and re-reading them per request would be
+# root → cached discovery. Built on first use per project and reused: the
+# built-ins are the bulk of it and re-reading them per request would be
 # wasteful, but a project layer is small.
-_SKILLS_BY_ROOT: dict[str, tuple[list[Skill], dict[str, str]]] = {}
+#
+# Two things this has to get right, both of which it originally got wrong and
+# which together made "did my new skill show up?" non-deterministic:
+#
+#   1. The KEY is normalised. It used to be the raw root string, so one
+#      directory could occupy four entries — `/tmp/p`, `/private/tmp/p`,
+#      `/tmp/p/`, `/tmp/p//` — each freezing the skill set as of the first
+#      time that particular spelling appeared. Whether a new skill was
+#      visible depended on which spelling the turn happened to present.
+#      Normalisation is LEXICAL, never realpath: a remote workspace's path
+#      must not be resolved against this host (see WorkspaceRoot).
+#   2. It is INVALIDATED by a directory signature, so adding, removing, or
+#      editing a skill is picked up on the next turn without a restart.
+_SKILLS_BY_ROOT: dict[str, "_RootSkills"] = {}
+
+# How often a cached root re-stats its dirs. The signature costs one stat per
+# skill, so it is cheap, but `_skill_dir_for` runs per resource access and
+# there is no reason to pay it several times inside one turn.
+_SIG_RECHECK_S = 1.0
+
+
+@dataclass
+class _RootSkills:
+    """Discovery for one project root, plus what makes it go stale."""
+
+    skills: list[Skill]
+    index: dict[str, str]
+    signature: tuple
+    checked_at: float
+
+    def as_tuple(self) -> tuple[list[Skill], dict[str, str]]:
+        return (self.skills, self.index)
+
+
+def _normalise_root(root: str) -> str:
+    """Collapse the spellings of one directory into a single cache key.
+
+    Lexical only — `normpath` folds `//`, `.` and trailing slashes without
+    touching symlinks. Deliberately NOT `realpath`: for a remote workspace
+    that would resolve the path against the wrong machine, which is exactly
+    the hazard the grant code already refuses to take."""
+    try:
+        return os.path.normpath(root)
+    except Exception:  # noqa: BLE001
+        return root
+
+
+def _skills_signature(dirs: list[Path]) -> tuple:
+    """Cheap fingerprint of the skill dirs — enough to catch an added,
+    removed, or edited skill without re-reading a single skill body.
+
+    Each scanned dir contributes its own mtime (which moves when a skill
+    folder is added or removed) and, per skill, its SKILL.md mtime+size
+    (which moves when the frontmatter or body is edited). Bodies are read
+    lazily at load time, so a body edit already shows up without this; the
+    signature is what makes the CATALOGUE keep up."""
+    out: list[tuple] = []
+    for d in dirs:
+        try:
+            out.append((str(d), os.stat(d).st_mtime_ns))
+            # scandir, not iterdir: this runs on a per-resource-access path,
+            # and building a Path per entry costs several times the stat it
+            # exists to perform.
+            with os.scandir(d) as it:
+                children = sorted(e.path for e in it if e.is_dir())
+        except OSError:
+            out.append((str(d), -1))
+            continue
+        for child in children:
+            try:
+                st = os.stat(os.path.join(child, "SKILL.md"))
+            except OSError:
+                continue
+            out.append((os.path.basename(child), st.st_mtime_ns, st.st_size))
+    return tuple(out)
 
 
 def locate_skill_script(candidate: str) -> Optional[tuple[str, str]]:
@@ -2013,20 +2097,59 @@ def _skills_for_root(root: Optional[str]) -> Optional[tuple[list[Skill], dict[st
     process-wide set."""
     if not root or env_bool("ADK_CC_DISABLE_PROJECT_SKILLS"):
         return None
-    cached = _SKILLS_BY_ROOT.get(root)
-    if cached is not None:
-        return cached
+    key = _normalise_root(root)
+    now = time.monotonic()
+    cached = _SKILLS_BY_ROOT.get(key)
+    # Hot path first: this runs per resource access, and resolving the dir
+    # list walks from the project root up to $HOME — more work than the
+    # signature it would feed. Inside the window, answer from the entry alone.
+    if cached is not None and now - cached.checked_at < _SIG_RECHECK_S:
+        return cached.as_tuple()
     try:
-        pairs = discover_skills_with_sources(_resolve_skills_dirs(Path(root)))
+        dirs = _resolve_skills_dirs(Path(key))
     except Exception:  # noqa: BLE001 — a bad project dir must not break the turn
+        _log.debug("project skill dirs failed for %r", root, exc_info=True)
+        return cached.as_tuple() if cached else None
+
+    if not dirs and cached is not None:
+        # Nothing left to scan AT ALL — an unmounted share or a deleted
+        # project folder, not a user emptying their skills. Keep serving the
+        # last good set: a catalogue that silently goes blank mid-session is
+        # worse than one that is briefly out of date. (Deleting individual
+        # skills still takes effect: those dirs still exist to be scanned.)
+        _log.info("skills: no readable skill dirs for %s — keeping the last set", key)
+        return cached.as_tuple()
+
+    # Computed ONCE and reused as the new entry's signature: taking it again
+    # after the scan would be both wasted work and a window in which a write
+    # landing mid-scan gets stamped as already-seen.
+    signature = _skills_signature(dirs)
+    if cached is not None:
+        if signature == cached.signature:
+            cached.checked_at = now
+            return cached.as_tuple()
+        _log.info("skills: %s changed on disk — rediscovering", key)
+        # A skill that failed to load before may be fixed now; a diagnostic
+        # about a file that no longer exists is worse than none.
+        _UNLOADABLE.clear()
+        _DIAGNOSTICS.clear()
+
+    try:
+        pairs = discover_skills_with_sources(dirs)
+    except Exception:  # noqa: BLE001
         _log.debug("project skill discovery failed for %r", root, exc_info=True)
-        return None
+        return cached.as_tuple() if cached else None
     max_bytes = _file_max_bytes()
     for skill, _ in pairs:
         _prune_oversized_resources(skill, max_bytes)
-    resolved = ([s for s, _ in pairs], _build_skill_dir_index(pairs))
-    _SKILLS_BY_ROOT[root] = resolved
-    return resolved
+    entry = _RootSkills(
+        skills=[s for s, _ in pairs],
+        index=_build_skill_dir_index(pairs),
+        signature=signature,
+        checked_at=now,
+    )
+    _SKILLS_BY_ROOT[key] = entry
+    return entry.as_tuple()
 
 
 def clear_project_skill_cache() -> None:

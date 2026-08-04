@@ -177,6 +177,17 @@ class SandboxBackedCodeExecutor(BaseCodeExecutor):
         except Exception as e:  # noqa: BLE001 — surface as stderr
             return CodeExecutionResult(stdout="", stderr=f"{type(e).__name__}: {e}")
 
+        if getattr(res, "timed_out", False):
+            # A timeout that produced nothing used to arrive as empty
+            # stdout+stderr, which the skill launcher then reported as "no
+            # output from the skill-script launcher" — pointing the reader at
+            # the launcher instead of at the clock. Say what happened.
+            note = (f"[adk-cc] the script did not finish within "
+                    f"{self.timeout_seconds}s and was terminated.")
+            return CodeExecutionResult(
+                stdout=res.stdout,
+                stderr=(res.stderr + "\n" + note) if res.stderr else note,
+            )
         return CodeExecutionResult(
             stdout=res.stdout,
             stderr=res.stderr,
