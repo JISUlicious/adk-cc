@@ -1,148 +1,147 @@
-# Process management: every command visible, followable, and killable
+# Long-running processes: start, watch, keep, kill
 
-Status: PLAN (2026-08-04), task #108. Requirement: *all commands and scripts
-run inside adk-cc must be tracked in the UI — list them, see console output,
-and manage (terminate) them.*
+Status: PLAN v2 (2026-08-04), task #108. Scoped by the user's decisions:
+**(1)** agent work only, and only LONG-RUNNING things — an API server, a
+monitoring script — not every `ls`; **(2)** background processes are
+first-class: start a dev server, keep it alive across turns, watch its log;
+**(3)** start with local processes in desktop mode, investigate remote
+backends properly.
 
-## What exists today (investigated, not assumed)
+This replaces the v1 "track every exec" draft. Tracking every command was the
+wrong shape: the value is in the handful of processes that OUTLIVE a turn,
+and those need a different lifecycle than a `grep`.
 
-**One chokepoint, which is the good news.** Everything the agent runs reaches
-the OS through a `SandboxBackend`: `exec()` (buffered) or `exec_stream()`
-(chunked). Callers:
+## What exists today (investigated)
 
-| Caller | Path | Notes |
-|---|---|---|
-| `run_bash` | `backend.exec_stream()` | the only streaming caller today |
-| skill scripts (`run_skill_script`) | `_WiderScriptCodeExecutor` → `backend.exec` | wrapper script, deps install |
-| code execution / analysis | `code_executor` → `backend.exec` | content-addressed `scratch-<sha>.py` |
-| analysis-env provisioning | `analysis_env` → `backend.exec` | probe + `uv` installs |
-| checkpoints, file ops, ssh | direct `subprocess`/transport | infrastructure, NOT agent work |
+Every agent-run command reaches the OS through `SandboxBackend.exec` /
+`exec_stream`. Relevant facts, verified in the code:
 
-Backends: `noop` (desktop, local `create_subprocess_shell`), `local_container`,
-`sandbox_service` (SSE), `ssh`, `daytona`.
+- **Every local exec already gets its own process group** (`start_new_session
+  =True`), and a timeout kills the whole **group** (`_kill_group`) — added
+  because killing the shell alone orphaned background children.
+- **`timeout_s` is the only way a command ever dies.** There is no cancel.
+- **`run_bash` actively discourages background work today**: its instruction
+  tells the model that if it starts a background process it must redirect
+  that process's output. So the current answer to "run a dev server" is a
+  workaround, not a feature.
+- Output is capped (`_MAX_STREAM_BYTES`) while continuing to drain — a flood
+  can neither OOM the server nor deadlock the child.
+- `.adk-cc/` is excluded from checkpoints (#104), so process logs can live
+  there without polluting undo history.
 
-**Process hygiene already in place** (do not rebuild): every local exec gets
-`start_new_session=True` (own process group), and a timeout kills the whole
-**group** (`_kill_group`) precisely because killing the shell alone orphaned
-background children. Output is capped (`_MAX_STREAM_BYTES`) while continuing
-to drain, so a flood can neither OOM the server nor deadlock the child.
+### The lifecycle trap this feature creates
 
-**What is missing, exactly:**
-1. No registry — nothing knows what is running right now. A process exists
-   only as a local variable inside one `exec` call.
-2. No cancellation — `timeout_s` is the *only* way a command dies. A user
-   watching a runaway `npm install` has no button; aborting the turn cancels
-   the asyncio task, and the child's fate depends on the backend.
-3. Output is per-call and post-hoc — `run_bash` streams into the thread card,
-   but there is no place to follow a command already in flight, and nothing at
-   all for skill scripts / analysis execs (buffered `exec`).
-4. Nothing survives the turn — the thread is the only record, scattered across
-   cards.
-
-**Precedent to copy:** the sub-agents dock (`/api/subagents` +
-`SubagentsDock`, registry keyed by session, polled 1.5s hot / 6s idle) is the
-exact shape this needs, one level down.
+A backgrounded process is deliberately NOT in the turn's lifetime — which
+means it also escapes every cleanup we have. Worse, `start_new_session=True`
+puts it in its own process group, so it survives the backend dying too.
+#98 fixed exactly this class of bug for the app→backend relationship (the
+parent watchdog + group kill); this feature must not reintroduce it one
+level down. **Ownership and reaping are P0 concerns, not P4 polish.**
 
 ## Design
 
-### P0 — the registry (the load-bearing piece)
+### The tool surface
 
-`agents/adk_cc/sandbox/process_registry.py`: process-global, keyed by
-`app/user/session`, holding one record per exec:
+`run_bash(command, background=True, label="dev server")` — returns
+IMMEDIATELY with a process id and the first moments of output, instead of
+blocking to a timeout. Rationale for extending `run_bash` rather than adding
+a `start_process` tool: the model already reaches for `run_bash`, and a
+second tool competing for the same intent is how you get neither used well.
+The tool description flips from "redirect output yourself" to "use
+`background=True` for anything long-lived; it is tracked and you can read its
+log."
+
+Companion tools, deliberately few:
+- `list_processes()` — what is running in this session (also visible to the model, so it stops re-starting a server it already has).
+- `read_process_log(id, tail=…)` — how the agent checks "did the server come up".
+- `stop_process(id)`.
+
+### P0 — registry, logs, ownership (desktop/local)
+
+`agents/adk_cc/sandbox/process_registry.py`, keyed by session:
 
 ```
-id, session_key, kind (bash|skill|code|provision), label,
-command (redacted), cwd, backend, started_at, finished_at,
-status (running|done|failed|timed_out|killed), exit_code,
-pid/handle (backend-specific), ring buffer of recent output
+id, session_key, project_id, label, command (redacted), cwd, backend,
+pid, pgid, started_at, status (starting|running|exited|killed|failed),
+exit_code, log_path, ports (best-effort), can_terminate
 ```
 
-Registration happens in **one place** — a small wrapper around
-`backend.exec` / `exec_stream` in the base class, so every caller above is
-covered without touching five modules, and any future caller is covered by
-construction. `kind`/`label` come from a contextvar the tool layer sets
-(`run_bash` → the command's title; skills → skill name + script).
+- **Logs are FILES, not memory**: `.adk-cc/processes/<id>.log`, append-only,
+  size-capped with rotation. They outlive the turn, the session, and a
+  backend restart — which is the entire point. (Memory ring buffers die with
+  the process that owns them; that is fine for a 30s command and wrong here.)
+- **Registry persists** to `.adk-cc/processes/index.json` so a backend restart
+  can re-adopt or at least honestly report what it lost.
+- **Ownership/reaping (the trap above):**
+  - Every background process records its `pgid` at launch.
+  - The backend reaps its session's processes when the session is deleted
+    (#87's abort hook) and on graceful shutdown.
+  - **Orphan sweep at boot**: on startup, read the index, and for each
+    recorded pgid decide — still alive and ours (adopt), gone (mark exited),
+    or alive but re-parented/unknown (report, offer a kill). This is #98's
+    lesson applied one level down.
+  - Explicit policy, surfaced in the UI: a background process **survives
+    turns and sessions**, but **not** the app quitting. Anything else is a
+    footgun on a desktop app.
 
-Retention: keep finished records for N minutes / M entries (same bounded-LRU
-discipline as the summaries cache), so "what did that command print" survives
-past the turn without unbounded growth.
+### P1 — control
 
-Output: a ring buffer (default 256KB per process, tail-biased — the end is
-what matters for a failure) fed by the same drain loop that already exists.
-No new reading path, no new flood risk.
-
-### P1 — control: terminate
-
-`terminate(process_id, escalate=True)`: TERM the process **group**, 3s grace,
-then KILL — reusing `_kill_group`, which already exists and is already the
-tested behaviour for timeouts. Per backend:
-
-- **noop/local**: direct `killpg`.
-- **container**: `docker kill` the exec, or signal inside the container.
-- **ssh**: the transport already multiplexes; send a signal by remote pgid.
-- **sandbox_service / daytona**: needs a remote cancel endpoint — if the
-  backend cannot cancel, the API must say so (`can_terminate: false`) rather
-  than pretend. **No fake buttons.**
-
-Cancellation must mark the record `killed` and let the *tool* return a normal
-result ("terminated by user") so the model sees a legible outcome instead of
-a hang or an opaque error.
+`terminate(id)`: TERM the process **group** → 3s grace → KILL, reusing
+`_kill_group` (already the tested timeout path). The tool result reports a
+clean "terminated by user" so the model sees a legible outcome.
 
 ### P2 — API
 
 ```
-GET  /api/processes?session_id=…      list (running first, then recent)
-GET  /api/processes/{id}              detail + output tail
-GET  /api/processes/{id}/stream       SSE tail (live follow)
-POST /api/processes/{id}/terminate    TERM→KILL, returns the new status
+GET  /api/processes?session_id=…        list (running first, then recent)
+GET  /api/processes/{id}                detail
+GET  /api/processes/{id}/log?tail=N     log tail
+GET  /api/processes/{id}/stream         SSE follow (tail -f)
+POST /api/processes/{id}/terminate
 ```
-Auth/tenancy: same middleware as the rest; a process is visible to its own
-session's owner only.
 
 ### P3 — UI
 
-- **Process dock**, right panel footer, exactly where `SubagentsDock` lives
-  (and reusing its polling discipline): one row per running command — kind
-  icon, label, elapsed, a Stop button. Collapses when idle.
-- **Detail drawer**: full command, cwd, backend, status, and a live-following
-  console (reuse `BashTerminalCard`'s renderer rather than inventing a second
-  terminal look).
-- **Thread integration**: the existing bash card gains a Stop control while
-  its command is in flight — the natural place to reach for it.
-- Finished-recently section so a command that just failed is one click away.
+- **Process dock** in the right panel footer, modelled on `SubagentsDock`
+  (same polling discipline): one row per process — label, status, elapsed,
+  port if detected, Stop. Unlike the sub-agents dock it persists across
+  turns, because the processes do.
+- **Log drawer**: live-following console reusing `BashTerminalCard`'s
+  renderer rather than a second terminal look.
+- A detected port becomes a clickable `http://localhost:<port>` — the single
+  most useful thing for a dev server.
 
-### P4 — hardening
+### P4 — remote backends (investigated; here is the honest picture)
 
-- Kill-on-abort: aborting a turn terminates that turn's still-running
-  processes (today it cancels the task and hopes). Same lifecycle hook the
-  sub-agent cleanup uses.
-- Kill-on-session-delete (#87 already established the abort hook to piggyback).
-- Audit events for user-initiated terminations.
-- Redaction: commands can carry secrets — reuse the existing redaction used
-  for skill/MCP env before storing or displaying.
+The generalizable mechanism: **for any backend that can exec, terminate is
+just another exec** — `kill -TERM -<pgid>` — provided the pgid was captured
+at launch (wrap the command so it prints its own pgid on the first line).
+That is one mechanism, not five per-backend APIs.
+
+| Backend | Terminate | Notes from the code |
+|---|---|---|
+| **noop / local (desktop)** | ✅ direct `killpg` | P0 target; already the tested timeout path |
+| **local_container** | ✅ | already runs `timeout` INSIDE the container, so in-container signalling works; `docker kill` as backstop |
+| **ssh** | ✅ via pgid + a second channel | today's timeout is CLIENT-side only and the code documents that "the remote command may keep running" — a known v1 limitation this would actually fix |
+| **daytona** | ⚠️ via exec `kill` | no per-exec cancel in the API (only whole-sandbox DELETE, which is nuclear); the pgid trick should work through its exec endpoint — needs a live probe |
+| **sandbox_service** | ❌ for now | no cancel primitive exists service-side; needs an endpoint there. Report `can_terminate: false` rather than showing a button that lies |
+
+So: honest capability flags, one shared mechanism, and `sandbox_service` is
+the only genuine gap.
 
 ## Phasing
 
 | Phase | Deliverable | Verification |
 |---|---|---|
-| P0 | registry + base-class wrapper + ring buffer | unit: every exec path registers; bounded retention; redaction. Live: run bash/skill/analysis, see three records |
-| P1 | terminate (noop first), `can_terminate` per backend | live: `sleep 300` from the agent, Stop, verify child AND group gone (`ps`), tool returns a clean "terminated" |
-| P2 | endpoints + SSE tail | live: follow a long command's output through the API |
-| P3 | dock + detail drawer + Stop in the bash card | Playwright: start a long command, see the row, click Stop, watch it clear |
-| P4 | abort/delete kill-through, audit, redaction | live: abort a turn mid-command, confirm no orphan (`ps` before/after) |
+| P0 | registry + file logs + `background=True` + ownership/orphan sweep (local) | live: start a dev server, confirm it survives a turn AND a new session; kill the backend, confirm the boot sweep reports it |
+| P1 | terminate + `stop_process` + tool results | live: `python -m http.server`, Stop, verify group gone via `ps` |
+| P2 | endpoints + SSE follow | live: follow a monitoring script's log through the API |
+| P3 | dock + log drawer + clickable port | Playwright: start a server, see the row and port, click Stop |
+| P4 | container + ssh (pgid mechanism), daytona probe, honest flags | live on the SSH box from the remote-workspace work |
 
-## Open questions for you
+## Deliberately NOT in scope
 
-1. **Scope of "all commands":** agent-run commands only (bash, skills,
-   analysis) — or also adk-cc's own infrastructure execs (checkpoint `git`,
-   file ops)? My recommendation: agent work only. Infrastructure execs are
-   noise, and surfacing them invites terminating something load-bearing.
-2. **Background processes:** today `run_bash` discourages them (the
-   instruction tells the model to redirect output). Should this feature make
-   long-running background processes a first-class thing — start a dev
-   server, keep it alive across turns, watch its log in the dock? That is a
-   genuinely bigger feature (lifecycle beyond the turn, port management) and
-   I would do it as a follow-on, not P0.
-3. **Remote backends:** accept "list-only, no terminate" for backends that
-   cannot cancel (honest `can_terminate: false`), or block the feature until
-   every backend supports it? Recommendation: ship honest capability flags.
+- Restart/supervision (a crashed server stays dead; the agent can restart it).
+- Port allocation or conflict resolution beyond *detecting* a port.
+- Tracking short commands. If a foreground command's length becomes a
+  problem, #105's elapsed/tool indicator already covers the visibility half.
