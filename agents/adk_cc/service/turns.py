@@ -28,6 +28,7 @@ events do); ADK's own `/run_sse` is untouched as a fallback path.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -126,6 +127,14 @@ class Turn:
         self.finished_at: Optional[float] = None
         self.task: Optional[asyncio.Task] = None
         self.prune_orphan_of: Optional["Turn"] = None  # F2c, set by the broker
+        # In-flight tool (#105): measured live, turns run 15-95 min of
+        # legitimate work — browser automation, model generation — and the UI
+        # showed only "agent is working…", which is indistinguishable from a
+        # hang. The broker already sees every event, so naming the current
+        # tool and when it started costs nothing.
+        self.current_tool: Optional[str] = None
+        self.current_tool_at: Optional[float] = None
+        self._pending_calls: dict[str, str] = {}   # call id -> tool name
         self._cond = asyncio.Condition()
 
     # -- event flow -----------------------------------------------------
@@ -135,7 +144,39 @@ class Turn:
             self.events.append(payload)
             if model_authored:
                 self.model_events += 1
+            self._track_tool(payload)
             self._cond.notify_all()
+
+    def _track_tool(self, payload: str) -> None:
+        """Follow function calls/responses in the serialized event so the
+        snapshot can name what is running. Best-effort and never raises: a
+        progress label must not be able to break a turn."""
+        try:
+            if '"functionCall"' not in payload and '"functionResponse"' not in payload:
+                return
+            data = json.loads(payload)
+            parts = ((data.get("content") or {}).get("parts")) or []
+            for p in parts:
+                fc = p.get("functionCall") or {}
+                if fc.get("name"):
+                    self._pending_calls[str(fc.get("id") or "")] = str(fc["name"])
+                    self.current_tool = str(fc["name"])
+                    self.current_tool_at = time.time()
+                fr = p.get("functionResponse") or {}
+                if fr.get("name"):
+                    self._pending_calls.pop(str(fr.get("id") or ""), None)
+                    if not self._pending_calls:
+                        # Nothing outstanding: back to model generation, which
+                        # is the other half of a long turn.
+                        self.current_tool = None
+                        self.current_tool_at = None
+                    else:
+                        nxt = next(iter(self._pending_calls.values()))
+                        if nxt != self.current_tool:
+                            self.current_tool = nxt
+                            self.current_tool_at = time.time()
+        except Exception:  # noqa: BLE001 — a label is never worth an exception
+            pass
 
     async def finish(self, status: str, error: Optional[dict] = None) -> None:
         async with self._cond:
@@ -178,6 +219,11 @@ class Turn:
             "error": self.error,
         }
         if self.status == "running":
+            snap["elapsed_s"] = round(time.time() - self.started_at, 1)
+            if self.current_tool:
+                snap["current_tool"] = self.current_tool
+                snap["current_tool_elapsed_s"] = round(
+                    time.time() - (self.current_tool_at or self.started_at), 1)
             # A model call sleeping out a rate limit is otherwise a dead
             # "running" spinner; surface the countdown the model layer
             # published (see models/retry_status.py).

@@ -17,6 +17,7 @@ Run: `uv run python tests/test_turn_broker.py`
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
 
@@ -359,6 +360,48 @@ def test_error_event_recovered_by_later_text_still_completes() -> None:
     print("OK test_error_event_recovered_by_later_text_still_completes")
 
 
+def test_snapshot_names_the_running_tool() -> None:
+    """#105: a 15-95 minute turn of legitimate work (browser automation,
+    model generation) was indistinguishable from a hang — the UI said only
+    "agent is working…". The broker sees every event, so it can name what is
+    in flight and how long the turn has run."""
+    async def main():
+        turn = Turn(app_name="a", user_id="u", session_id="s", new_message=None)
+
+        call = json.dumps({"content": {"parts": [
+            {"functionCall": {"id": "c1", "name": "run_bash", "args": {}}}]}})
+        await turn.push(call, model_authored=True)
+        snap = turn.snapshot()
+        assert snap["current_tool"] == "run_bash", snap
+        assert snap["elapsed_s"] >= 0 and "current_tool_elapsed_s" in snap, snap
+
+        # A second call in flight keeps a tool named after the first returns.
+        await turn.push(json.dumps({"content": {"parts": [
+            {"functionCall": {"id": "c2", "name": "web_fetch", "args": {}}}]}}),
+            model_authored=True)
+        await turn.push(json.dumps({"content": {"parts": [
+            {"functionResponse": {"id": "c1", "name": "run_bash",
+                                  "response": {}}}]}}), model_authored=False)
+        assert turn.snapshot()["current_tool"] == "web_fetch", turn.snapshot()
+
+        # All responses in → back to model generation, no tool named.
+        await turn.push(json.dumps({"content": {"parts": [
+            {"functionResponse": {"id": "c2", "name": "web_fetch",
+                                  "response": {}}}]}}), model_authored=False)
+        assert "current_tool" not in turn.snapshot(), turn.snapshot()
+
+        # Malformed payloads must never break a turn — the label is cosmetic.
+        await turn.push("not json at all {functionCall", model_authored=True)
+        assert turn.snapshot()["status"] == "running"
+
+        # A finished turn carries no live progress fields.
+        await turn.finish("done")
+        assert "elapsed_s" not in turn.snapshot()
+
+    asyncio.run(main())
+    print("OK test_snapshot_names_the_running_tool")
+
+
 def test_extract_adk_web_server() -> None:
     from adk_cc.service.turns import extract_adk_web_server
 
@@ -383,6 +426,7 @@ def main() -> None:
     test_dangling_handback_autocontinue()
     test_error_event_ends_turn_no_autocontinue()
     test_error_event_recovered_by_later_text_still_completes()
+    test_snapshot_names_the_running_tool()
     test_extract_adk_web_server()
     print("\nall turn-broker tests passed")
 

@@ -31,6 +31,12 @@ export interface TurnSnapshot {
   model_events: number
   session_id: string
   error: TurnError | null
+  /** Wall-clock of the running turn, and the tool currently in flight —
+   * without these a 30-minute turn of real work (browser automation, model
+   * generation) is indistinguishable from a hang. */
+  elapsed_s?: number
+  current_tool?: string
+  current_tool_elapsed_s?: number
   /** Present while the model call is sleeping out a rate limit — the
    * otherwise-invisible backoff, surfaced as a countdown. */
   model_status?: {

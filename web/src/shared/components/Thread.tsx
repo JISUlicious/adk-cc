@@ -148,6 +148,7 @@ export function Thread({
   events,
   isStreaming,
   modelStatus,
+  progress,
   onSubmitFunctionResponse,
   appName,
   userId,
@@ -162,6 +163,12 @@ export function Thread({
     attempt: number
     of: number
     resume_in_s: number
+  } | null
+  /** How long the turn has been running, and what tool is in flight. */
+  progress?: {
+    elapsed_s?: number
+    current_tool?: string
+    current_tool_elapsed_s?: number
   } | null
   onSubmitFunctionResponse: (
     callId: string,
@@ -242,11 +249,35 @@ export function Thread({
             ? `model rate-limited — retrying in ~${Math.ceil(
                 modelStatus.resume_in_s)}s (attempt ${modelStatus.attempt}/${
                 modelStatus.of} on ${modelStatus.model})`
-            : "agent is working…"}
+            : workingLabel(progress)}
         </p>
       )}
     </div>
   )
+}
+
+/** "agent is working…" is a lie by omission on a 30-minute turn. Name the
+ *  tool and the clock so waiting is a decision, not a guess. */
+function workingLabel(p?: {
+  elapsed_s?: number
+  current_tool?: string
+  current_tool_elapsed_s?: number
+} | null): string {
+  if (!p || p.elapsed_s === undefined) return "agent is working…"
+  const total = fmtDuration(p.elapsed_s)
+  if (p.current_tool) {
+    const t = p.current_tool_elapsed_s
+    const inner = t !== undefined && t >= 5 ? ` ${fmtDuration(t)}` : ""
+    return `agent is working — ${p.current_tool}${inner} · ${total} total`
+  }
+  return `agent is working — thinking · ${total}`
+}
+
+function fmtDuration(s: number): string {
+  if (s < 60) return `${Math.round(s)}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ${Math.round(s % 60)}s`
+  return `${Math.floor(m / 60)}h ${m % 60}m`
 }
 
 function Row({

@@ -102,6 +102,13 @@ export function ChatPage({
   // countdown, not a dead spinner (#99).
   const [modelStatus, setModelStatus] =
     useState<TurnSnapshot["model_status"] | null>(null)
+  // Elapsed + in-flight tool (#105): measured live, a legitimate 30-minute
+  // turn looked exactly like a hang.
+  const [progress, setProgress] = useState<{
+    elapsed_s?: number
+    current_tool?: string
+    current_tool_elapsed_s?: number
+  } | null>(null)
   const [refreshTick, setRefreshTick] = useState(0)
   const [error, setError] = useState<string | null>(null)
   // Broker-classified terminal error of the last turn (rate-limited etc.) —
@@ -272,6 +279,7 @@ export function ChatPage({
   useEffect(() => {
     if (!isStreaming || !appName || !session) {
       setModelStatus(null)
+      setProgress(null)
       return
     }
     let cancelled = false
@@ -281,10 +289,18 @@ export function ChatPage({
         if (cancelled) return
         setModelStatus(
           t && t.status === "running" ? t.model_status ?? null : null)
+        setProgress(
+          t && t.status === "running"
+            ? {
+                elapsed_s: t.elapsed_s,
+                current_tool: t.current_tool,
+                current_tool_elapsed_s: t.current_tool_elapsed_s,
+              }
+            : null)
       })
     }
     tick()
-    const iv = setInterval(tick, 3000)
+    const iv = setInterval(tick, 2000)   // the clock should feel live
     return () => {
       cancelled = true
       clearInterval(iv)
@@ -688,6 +704,7 @@ export function ChatPage({
                 events={events}
                 isStreaming={isStreaming}
                 modelStatus={modelStatus}
+                progress={progress}
                 onSubmitFunctionResponse={handleSubmitFunctionResponse}
                 appName={appName ?? ""}
                 userId={userId}
