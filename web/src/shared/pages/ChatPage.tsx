@@ -44,6 +44,7 @@ import {
 } from "@/shared/api/turns"
 import { ModelChip } from "@/shared/components/ModelChip"
 import { AnalysisEnvChip } from "@/shared/components/AnalysisEnvChip"
+import { ProcessChip } from "@/shared/components/ProcessChip"
 import { ModelPicker } from "@/shared/components/ModelPicker"
 import { getStoredTheme, setStoredTheme, type ThemeMode } from "@/shared/lib/theme"
 
@@ -745,6 +746,13 @@ export function ChatPage({
               />
               {/* W1's analysis runtime, beside the model it runs alongside.
                   Renders nothing unless there is something to say. */}
+              {/* Background processes: the only ALWAYS-visible surface, so a
+                  forgotten dev server stops being invisible. Opens the right
+                  panel, where the dock and its logs live. */}
+              <ProcessChip
+                projectId={userId}
+                onClick={() => setRightPanelOpen(true)}
+              />
               {session && (
                 <AnalysisEnvChip
                   projectId={userId}

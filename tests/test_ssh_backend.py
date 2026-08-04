@@ -44,6 +44,9 @@ class FakeTransport:
         self.calls.append(("run", cmd, dict(env or {}), cwd, timeout_s))
         if self.fail_connect:
             raise SshConnectionError("ssh to 'dev@fake' failed: refused")
+        for needle, res in getattr(self, "scripted", []):
+            if needle in cmd:
+                return res
         return ExecResult(exit_code=0, stdout=f"ran:{cmd}", stderr="")
 
     async def run_stream(self, cmd, *, env=None, cwd=None, timeout_s=60.0):
@@ -295,6 +298,166 @@ async def test_factory_env_dispatch():
     print("OK factory_env_dispatch")
 
 
+# ---- remote background processes (#108) ------------------------------
+# The mechanism: setsid at launch so pgid == pid, then terminate is just
+# another exec (`kill -TERM -<pgid>`) over the same ControlMaster. These pin
+# the parts that make that safe — the pgid is actually captured, the kill
+# targets the GROUP (not the pid), and an unreachable host degrades to a
+# recorded failure instead of a lie about a running server.
+
+def _bg_registry(tag: str):
+    import tempfile
+    from pathlib import Path
+
+    from adk_cc.sandbox import process_registry as PR
+
+    PR._reset_for_test(Path(tempfile.mkdtemp(prefix=f"sshbg-{tag}-")))
+    return PR.get_registry()
+
+
+async def test_background_launch_captures_pgid_and_detaches():
+    reg = _bg_registry("launch")
+    b, t = _backend()
+    t.scripted = [("setsid", ExecResult(exit_code=0, stdout="4242\n", stderr=""))]
+    rec = await b.start_background(
+        "npm run dev", fs_write=_fsw(_ws()),
+        network=NetworkConfig(), cwd=_WS, label="dev",
+        session_key="s1", project_id="p1")
+    launch = next(c[1] for c in t.calls if c[0] == "run" and "setsid" in c[1])
+    assert "setsid" in launch, launch
+    assert "nohup" in launch and "< /dev/null" in launch, launch
+    assert "&" in launch and "echo $!" in launch, launch
+    assert rec["status"] == "running", rec
+    assert reg.get(rec["id"]).pid == 4242
+    # pgid == pid is the whole point: it is what makes the group kill reach
+    # anything the server forks.
+    assert reg.get(rec["id"]).pgid == 4242
+    assert reg.get(rec["id"]).can_terminate is True
+    print("OK background_launch_captures_pgid_and_detaches")
+
+
+async def test_background_launch_failure_is_recorded_not_claimed_running():
+    reg = _bg_registry("fail")
+    b, t = _backend()
+    t.scripted = [("setsid", ExecResult(exit_code=127, stdout="",
+                                        stderr="sh: npm: not found"))]
+    rec = await b.start_background(
+        "npm run dev", fs_write=_fsw(_ws()),
+        network=NetworkConfig(), cwd=_WS, session_key="s1", project_id="p1")
+    assert rec["status"] == "failed", rec
+    assert "not found" in reg.read_log(rec["id"]), reg.read_log(rec["id"])
+    print("OK background_launch_failure_is_recorded_not_claimed_running")
+
+
+async def test_background_launch_when_host_unreachable():
+    reg = _bg_registry("unreach")
+    b, t = _backend()
+    t.fail_connect = True
+    rec = await b.start_background(
+        "npm run dev", fs_write=_fsw(_ws()),
+        network=NetworkConfig(), cwd=_WS, session_key="s1", project_id="p1")
+    assert rec["status"] == "failed", rec
+    assert "transport error" in reg.read_log(rec["id"])
+    print("OK background_launch_when_host_unreachable")
+
+
+async def test_background_cwd_outside_workspace_never_reaches_the_host():
+    b, t = _backend()
+    try:
+        await b.start_background(
+            "rm -rf /", fs_write=_fsw(_ws()),
+            network=NetworkConfig(), cwd="/etc", session_key="s", project_id="p")
+        raise AssertionError("expected SandboxViolation")
+    except SandboxViolation:
+        pass
+    assert not t.calls, t.calls
+    print("OK background_cwd_outside_workspace_never_reaches_the_host")
+
+
+async def test_terminate_kills_the_remote_GROUP():
+    reg = _bg_registry("term")
+    b, t = _backend()
+    t.scripted = [("setsid", ExecResult(exit_code=0, stdout="777\n", stderr=""))]
+    rec = await b.start_background(
+        "python3 -m http.server 8000",
+        fs_write=_fsw(_ws()),
+        network=NetworkConfig(), cwd=_WS, session_key="s1", project_id="p1")
+    t.calls.clear()
+    ok = await b.terminate_background(rec["id"])
+    assert ok
+    kill = next(c[1] for c in t.calls if c[0] == "run" and "kill" in c[1])
+    # The MINUS is the bug this pins: `kill -TERM 777` leaves a forking
+    # server's children holding the port.
+    assert "kill -TERM -777" in kill, kill
+    assert "kill -KILL -777" in kill, kill
+    assert reg.get(rec["id"]).status == "killed"
+    print("OK terminate_kills_the_remote_GROUP")
+
+
+async def test_terminate_reports_failure_when_host_is_gone():
+    _bg_registry("termfail")
+    b, t = _backend()
+    t.scripted = [("setsid", ExecResult(exit_code=0, stdout="888\n", stderr=""))]
+    rec = await b.start_background(
+        "sleep 999", fs_write=_fsw(_ws()),
+        network=NetworkConfig(), cwd=_WS, session_key="s1", project_id="p1")
+    t.fail_connect = True
+    # A kill that never left the machine must NOT be reported as a stop —
+    # the UI would show "stopped" while the server keeps serving.
+    assert await b.terminate_background(rec["id"]) is False
+    print("OK terminate_reports_failure_when_host_is_gone")
+
+
+async def test_local_registry_refuses_to_signal_a_remote_pgid():
+    """A remote pgid is a number on ANOTHER machine; signalling it here would
+    hit an unrelated local process (or nothing). The registry must decline."""
+    reg = _bg_registry("localsig")
+    b, t = _backend()
+    t.scripted = [("setsid", ExecResult(exit_code=0, stdout="999\n", stderr=""))]
+    rec = await b.start_background(
+        "sleep 999", fs_write=_fsw(_ws()),
+        network=NetworkConfig(), cwd=_WS, session_key="s1", project_id="p1")
+    assert reg.terminate(rec["id"]) is False
+    assert reg.get(rec["id"]).status == "running"
+    print("OK local_registry_refuses_to_signal_a_remote_pgid")
+
+
+async def test_log_sync_pulls_the_remote_tail_and_sniffs_the_port():
+    reg = _bg_registry("logsync")
+    b, t = _backend()
+    t.scripted = [
+        ("setsid", ExecResult(exit_code=0, stdout="1234\n", stderr="")),
+        ("tail -c", ExecResult(exit_code=0,
+                               stdout="VITE ready\nLocal: http://localhost:5173/\n",
+                               stderr="")),
+        ("kill -0", ExecResult(exit_code=0, stdout="LIVE\n", stderr="")),
+    ]
+    rec = await b.start_background(
+        "npm run dev", fs_write=_fsw(_ws()),
+        network=NetworkConfig(), cwd=_WS, session_key="s1", project_id="p1")
+    assert "VITE ready" in reg.read_log(rec["id"])
+    assert reg.get(rec["id"]).port == 5173, reg.get(rec["id"]).port
+    # Pulled, not appended: a second sync must not double the log.
+    await b.sync_background_log(rec["id"])
+    assert reg.read_log(rec["id"]).count("VITE ready") == 1
+    print("OK log_sync_pulls_the_remote_tail_and_sniffs_the_port")
+
+
+async def test_log_sync_marks_a_process_that_died_remotely():
+    reg = _bg_registry("died")
+    b, t = _backend()
+    t.scripted = [
+        ("setsid", ExecResult(exit_code=0, stdout="1500\n", stderr="")),
+        ("tail -c", ExecResult(exit_code=0, stdout="crashed\n", stderr="")),
+        ("kill -0", ExecResult(exit_code=1, stdout="", stderr="")),
+    ]
+    rec = await b.start_background(
+        "npm run dev", fs_write=_fsw(_ws()),
+        network=NetworkConfig(), cwd=_WS, session_key="s1", project_id="p1")
+    assert reg.get(rec["id"]).status == "exited", reg.get(rec["id"]).status
+    print("OK log_sync_marks_a_process_that_died_remotely")
+
+
 def main():
     for t in (
         test_remote_workspace_skips_local_realpath,
@@ -309,6 +472,15 @@ def main():
         test_missing_file_raises_file_not_found,
         test_tools_resolve_is_lexical_for_remote_workspace,
         test_factory_env_dispatch,
+        test_background_launch_captures_pgid_and_detaches,
+        test_background_launch_failure_is_recorded_not_claimed_running,
+        test_background_launch_when_host_unreachable,
+        test_background_cwd_outside_workspace_never_reaches_the_host,
+        test_terminate_kills_the_remote_GROUP,
+        test_terminate_reports_failure_when_host_is_gone,
+        test_local_registry_refuses_to_signal_a_remote_pgid,
+        test_log_sync_pulls_the_remote_tail_and_sniffs_the_port,
+        test_log_sync_marks_a_process_that_died_remotely,
     ):
         asyncio.run(t())
     print("\nall ssh-backend unit tests passed")

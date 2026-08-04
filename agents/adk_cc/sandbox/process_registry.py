@@ -78,6 +78,9 @@ class ProcessRecord:
     # True once a sweep found it running but no longer owned by this backend
     # generation (adopted rather than spawned).
     adopted: bool = False
+    # REMOTE backends only: the log lives on the other machine and is pulled
+    # on demand (a second long-lived channel per process would be worse).
+    remote_log_path: str = ""
 
     def public(self) -> dict[str, Any]:
         d = asdict(self)
@@ -203,6 +206,23 @@ class ProcessRegistry:
                 self._save()
             return
 
+    def save(self) -> None:
+        """Persist the index (callers that mutate a record in place)."""
+        self._save()
+
+    def replace_log(self, pid_: str, data: bytes) -> None:
+        """Overwrite the local log with a remote tail. Remote logs are PULLED,
+        so appending would duplicate everything already fetched."""
+        rec = self._records.get(pid_)
+        if not rec:
+            return
+        try:
+            Path(rec.log_path).write_bytes(data)
+        except OSError as e:
+            _log.debug("log replace failed for %s: %s", pid_, e)
+        if rec.port is None:
+            self._sniff_port(rec, data)
+
     def read_log(self, pid_: str, *, tail_bytes: int = 64_000) -> str:
         rec = self._records.get(pid_)
         if not rec:
@@ -283,6 +303,13 @@ class ProcessRegistry:
             return False
         if rec.status not in ("running", "starting"):
             return True
+        if rec.backend != "noop":
+            # A remote pgid means nothing to THIS host — signalling it locally
+            # would either fail or, worse, hit an unrelated local process.
+            # The owning backend does it over its own channel.
+            _log.debug("terminate(%s): backend %r must handle this remotely",
+                       pid_, rec.backend)
+            return False
         _signal_group(rec.pgid, signal.SIGTERM)
         deadline = time.monotonic() + grace_s
         while time.monotonic() < deadline:

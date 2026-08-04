@@ -230,6 +230,35 @@ def test_listing_is_project_scoped_and_ordered() -> None:
     check("a running one cannot", not reg.forget(a.id))
 
 
+def test_no_backend_claims_background_it_cannot_do() -> None:
+    """The inheritance hazard: LocalContainerBackend extends NoopBackend, so
+    flipping `supports_background = True` on the parent silently gave every
+    container backend the HOST spawner — a background process escaping the
+    container entirely, which is the one thing that backend exists to prevent.
+
+    A backend may only advertise background support if it overrides the
+    spawner itself."""
+    from adk_cc.sandbox.backends.base import SandboxBackend
+    from adk_cc.sandbox.backends.local_container_backend import (
+        LocalContainerBackend, UnavailableSandboxBackend)
+    from adk_cc.sandbox.backends.ssh_backend import SshBackend
+
+    for cls in (LocalContainerBackend, UnavailableSandboxBackend):
+        check(f"{cls.__name__} does NOT claim background support",
+              cls.supports_background is False)
+        check(f"{cls.__name__} refuses to spawn even if called",
+              cls.start_background is not NoopBackend.start_background)
+    for cls in (NoopBackend, SshBackend):
+        check(f"{cls.__name__} advertises background AND implements it",
+              cls.supports_background
+              and cls.start_background is not SandboxBackend.start_background)
+    for cls in SandboxBackend.__subclasses__():
+        if cls.supports_background:
+            check(f"{cls.__name__} implements its own start_background",
+                  cls.start_background is not SandboxBackend.start_background,
+                  "advertises background but inherits the raising default")
+
+
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -246,6 +275,7 @@ def main() -> int:
     test_kills_the_whole_group_not_just_the_shell()
     test_boot_sweep_reconciles_the_index()
     test_listing_is_project_scoped_and_ordered()
+    test_no_backend_claims_background_it_cannot_do()
     shutil.rmtree(_TMP, ignore_errors=True)
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0

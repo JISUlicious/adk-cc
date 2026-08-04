@@ -209,6 +209,17 @@ class LocalContainerBackend(NoopBackend):
 
     # --- exec ------------------------------------------------------------
 
+    # Inherited from NoopBackend, which spawns on the HOST — exactly what a
+    # container backend exists to prevent. Backgrounding here has to run
+    # `setsid` INSIDE the container (and kill via a second `docker exec`);
+    # until that exists, say so honestly and the UI hides the control.
+    supports_background = False
+
+    async def start_background(self, cmd, **kw):  # noqa: ANN001, ANN003, ANN201
+        raise NotImplementedError(
+            "the container backend cannot run background processes yet — "
+            "run it in the foreground, or use a local/remote workspace")
+
     async def exec(
         self,
         cmd: str,
@@ -402,6 +413,13 @@ class UnavailableSandboxBackend(NoopBackend):
 
     def __init__(self, reason: str = "container sandbox required but no runtime is available") -> None:
         self._reason = reason
+
+    supports_background = False
+
+    async def start_background(self, cmd, **kw):  # noqa: ANN001, ANN003, ANN201
+        # A backend that refuses every foreground exec must not quietly
+        # inherit a spawner that runs on the host.
+        raise NotImplementedError(self._reason)
 
     async def exec(self, cmd, *, fs_write, network, timeout_s, cwd) -> ExecResult:  # noqa: ANN001
         return ExecResult(exit_code=-1, stdout="", stderr=self._reason)

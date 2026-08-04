@@ -321,6 +321,35 @@ def mount_desktop_routes(app) -> None:
             raise HTTPException(status_code=400, detail="project has no bound repo")
         return repo
 
+    def _remote_backend_for(rec):  # noqa: ANN001, ANN202
+        """A throwaway backend able to reach the host `rec` runs on, or None.
+
+        Remote work (terminate, log tail) has to travel over the SAME channel
+        that started it — a remote pgid is meaningless to this host, and
+        signalling it locally would hit an unrelated local process. Cheap to
+        build: the ssh transport is a shared per-host ControlMaster, so this
+        reuses the live connection rather than opening one.
+        """
+        if rec.backend != "ssh":
+            return None
+        try:
+            from ..sandbox.backends.ssh_backend import SshBackend
+            from ..sandbox.ssh_transport import get_transport
+            from .desktop_workspace import project_remote
+
+            remote = project_remote(rec.project_id)
+            if not remote:
+                return None
+            return SshBackend(
+                session_id=rec.session_key or "processes",
+                tenant_id="local",
+                transport=get_transport(str(remote["host"]),
+                                        port=remote.get("port") or None),
+                workspace_path=str(remote["path"]),
+            )
+        except Exception:  # noqa: BLE001 — an unreachable host is not a 500
+            return None
+
     # ---- long-running background processes (#108) --------------------
     # Scoped by PROJECT, not session: a dev server started in one session is
     # still what occupies the port in the next, and per-session scoping is how
@@ -347,8 +376,17 @@ def mount_desktop_routes(app) -> None:
         from ..sandbox.process_registry import get_registry
 
         reg = get_registry()
-        if reg.get(process_id) is None:
+        rec = reg.get(process_id)
+        if rec is None:
             raise HTTPException(status_code=404, detail="unknown process")
+        # Remote logs live on the other machine and are PULLED on demand —
+        # a second permanent channel per process would cost more than it saves.
+        be = _remote_backend_for(rec)
+        if be is not None:
+            try:
+                await be.sync_background_log(process_id)
+            except Exception:  # noqa: BLE001 — a stale tail beats a 500
+                pass
         return {"id": process_id, "log": reg.read_log(process_id,
                                                       tail_bytes=tail_bytes)}
 
@@ -364,7 +402,16 @@ def mount_desktop_routes(app) -> None:
             raise HTTPException(
                 status_code=409,
                 detail=f"the {rec.backend} backend cannot stop this process")
-        reg.terminate(process_id)
+        be = _remote_backend_for(rec)
+        if be is not None:
+            if not await be.terminate_background(process_id):
+                raise HTTPException(
+                    status_code=502,
+                    detail="could not reach the remote host to stop it")
+        elif not reg.terminate(process_id):
+            raise HTTPException(
+                status_code=409,
+                detail=f"the {rec.backend} backend cannot stop this process")
         after = reg.get(process_id)
         return after.public() if after else {"id": process_id, "status": "killed"}
 

@@ -103,6 +103,125 @@ class SshBackend(SandboxBackend):
 
     # --- exec -------------------------------------------------------------
 
+    # Remote background processes (#108). The mechanism generalises to any
+    # backend that can exec: capture the process GROUP id at launch, then
+    # terminate later with an ordinary `kill -TERM -<pgid>` over a second
+    # channel. That also fixes a documented v1 limitation — ssh timeouts are
+    # enforced CLIENT-side today ("the remote command may keep running"), so
+    # before this there was no way to stop remote work at all.
+    supports_background = True
+
+    async def start_background(
+        self,
+        cmd: str,
+        *,
+        fs_write: FsWriteConfig,
+        network: NetworkConfig,
+        cwd: str,
+        label: str = "",
+        session_key: str = "",
+        project_id: str = "",
+    ) -> dict:
+        import shlex as _sh
+
+        from ..process_registry import get_registry
+
+        if cwd and not fs_write.allows(cwd):
+            raise SandboxViolation(
+                f"ssh: cwd {cwd!r} is outside the workspace's allowed paths")
+
+        reg = get_registry()
+        rec = reg.create(session_key=session_key, project_id=project_id,
+                         label=label, command=cmd, cwd=cwd, backend="ssh",
+                         can_terminate=True)
+        # The log lives on the REMOTE (that is where the process writes), and
+        # is read back on demand — copying it continuously would put a second
+        # long-lived channel per process on the ControlMaster.
+        remote_log = f".adk-cc/processes/{rec.id}.log"
+        launch = (
+            f"mkdir -p .adk-cc/processes && "
+            f"setsid nohup sh -c {_sh.quote(cmd)} "
+            f"> {_sh.quote(remote_log)} 2>&1 < /dev/null & "
+            # setsid makes the child a group leader, so pgid == pid and the
+            # kill below reaches everything it forks.
+            f"echo $!"
+        )
+        try:
+            res = await self._t.run(launch, env=await self._runtime_env(),
+                                    cwd=cwd, timeout_s=30)
+        except SshConnectionError as e:
+            reg.mark_exited(rec.id, exit_code=None, status="failed")
+            reg.append_log(rec.id, f"ssh transport error: {e}\n".encode())
+            return (reg.get(rec.id) or rec).public()
+
+        pid = 0
+        for line in (res.stdout or "").splitlines():
+            if line.strip().isdigit():
+                pid = int(line.strip())
+        if not pid or res.exit_code != 0:
+            reg.mark_exited(rec.id, exit_code=res.exit_code, status="failed")
+            reg.append_log(
+                rec.id, (res.stderr or res.stdout or "failed to start").encode())
+            return (reg.get(rec.id) or rec).public()
+
+        reg.mark_started(rec.id, pid=pid, pgid=pid)
+        rec2 = reg.get(rec.id)
+        if rec2 is not None:
+            rec2.remote_log_path = remote_log
+            reg.save()
+        # Give it a moment, then pull the first output so the caller can
+        # already report "listening on :5173" or the reason it died.
+        import asyncio as _asyncio
+
+        await _asyncio.sleep(0.8)
+        await self.sync_background_log(rec.id)
+        return (reg.get(rec.id) or rec).public()
+
+    async def sync_background_log(self, process_id: str) -> None:
+        """Copy the remote log tail into the local record (read-on-demand)."""
+        from ..process_registry import get_registry
+
+        reg = get_registry()
+        rec = reg.get(process_id)
+        remote_log = getattr(rec, "remote_log_path", "") if rec else ""
+        if not rec or not remote_log:
+            return
+        import shlex as _sh
+
+        try:
+            res = await self._t.run(f"tail -c 200000 {_sh.quote(remote_log)}",
+                                    cwd=rec.cwd, timeout_s=20)
+        except SshConnectionError:
+            return
+        if res.exit_code == 0 and res.stdout:
+            reg.replace_log(process_id, res.stdout.encode("utf-8", "replace"))
+        # Liveness: the local pgid check is meaningless for a remote pid.
+        try:
+            alive = await self._t.run(f"kill -0 -{rec.pgid} 2>/dev/null && echo LIVE",
+                                      cwd=rec.cwd, timeout_s=15)
+            if "LIVE" not in (alive.stdout or "") and rec.status == "running":
+                reg.mark_exited(process_id, exit_code=None, status="exited")
+        except SshConnectionError:
+            pass
+
+    async def terminate_background(self, process_id: str) -> bool:
+        """`kill` the remote process GROUP — TERM, grace, then KILL."""
+        from ..process_registry import get_registry
+
+        reg = get_registry()
+        rec = reg.get(process_id)
+        if not rec or not rec.pgid:
+            return False
+        try:
+            await self._t.run(
+                f"kill -TERM -{rec.pgid} 2>/dev/null; sleep 3; "
+                f"kill -KILL -{rec.pgid} 2>/dev/null; true",
+                cwd=rec.cwd, timeout_s=30)
+        except SshConnectionError:
+            return False
+        reg.mark_exited(process_id, exit_code=None, status="killed")
+        return True
+
     async def exec(
         self,
         cmd: str,
