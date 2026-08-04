@@ -1714,15 +1714,34 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             f"_interp = {interp!r}",
             f"_files = {files!r}" if files is not None else "_files = None",
             "_ready = os.path.join(_cache, '.ready')",
+            # Readiness must mean "the SCRIPT is there", not just "a marker
+            # file is there". A tree can lose its contents while `.ready`
+            # survives — a checkpoint restore reverting `.adk-cc/**`, a manual
+            # clean, an interrupted write — and then the probe says warm and
+            # the run dies with "No such file or directory" on the script
+            # itself. Checking the actual target re-materialises instead.
+            "_target = os.path.join(_cache, _rel)",
             f"_deps = {list(deps or ())!r}",
             "_depnote = ''",
             "def _emit(**kw):",
             "    if _depnote: kw['stderr'] = _depnote + (kw.get('stderr') or '')",
             "    print(_json.dumps(dict(__shell_result__=True, **kw)))",
-            "if not os.path.isfile(_ready):",
+            "if not (os.path.isfile(_ready) and os.path.isfile(_target)):",
             "    if _files is None:",
             "        print(_json.dumps({'__needs_materialize__': True}))",
             "        raise SystemExit(0)",
+            "    if not _files:",
+            # An empty payload cannot produce a working skill, and the old
+            # code died on `open(_ready)` with a bare ENOENT that pointed at
+            # the runtime dir rather than the real problem.
+            "        _emit(returncode=1, stdout='', stderr="
+            "'skill has no files to materialise (nothing readable in the "
+            "skill directory) — reinstall or re-add the skill')",
+            "        raise SystemExit(0)",
+            # Create the digest dir EXPLICITLY: `makedirs(dirname(f))` below
+            # only ever creates it as a side effect of a file that happens to
+            # sit in a subdirectory, so a flat file set left it missing.
+            "    os.makedirs(_cache, exist_ok=True)",
             "    _parent = os.path.dirname(_cache)",
             # Older versions of the same skill are dead the moment this one
             # exists; leaving them would grow without bound in the project.

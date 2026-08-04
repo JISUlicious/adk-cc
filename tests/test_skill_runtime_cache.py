@@ -116,7 +116,63 @@ def _run(args):
         tool_context=_Ctx()))
 
 
+def test_runtime_dir_failures_are_survivable() -> None:
+    """Reported live alongside #109: running a skill script died with "no such
+    directory" for the skill-runtime dir. Three ways the wrapper could produce
+    that, all now handled:
+
+      1. a flat file set — `makedirs(dirname(f))` only ever created the digest
+         dir as a SIDE EFFECT of a file in a subdirectory;
+      2. a stale `.ready` with the tree gone (a checkpoint restore reverting
+         `.adk-cc/**`, a manual clean, an interrupted write) — the probe said
+         "warm" and the run then failed on the missing script;
+      3. an empty payload — died on `open(.ready)` with a bare ENOENT that
+         pointed at the runtime dir instead of the real problem.
+    """
+    import subprocess
+    import sys as _sys
+    import tempfile
+
+    from adk_cc.tools.skills import _WiderScriptCodeExecutor
+
+    ex = _WiderScriptCodeExecutor(base_executor=None, script_timeout=60)
+    cache = ".adk-cc/skill-runtime/demo/abc123"
+    files = {"scripts/run.py": "print('ran ok')\n", "SKILL.md": "x\n"}
+
+    def run(tmp: str, wrapper: str) -> str:
+        p = os.path.join(tmp, "w.py")
+        with open(p, "w") as fh:
+            fh.write(wrapper)
+        r = subprocess.run([_sys.executable, p], cwd=tmp,
+                           capture_output=True, text=True)
+        return (r.stdout or "") + (r.stderr or "")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cold = run(tmp, ex._wrapper(cache, "scripts/run.py", [], None, [], []))
+        assert "__needs_materialize__" in cold, cold[:200]
+        warm = run(tmp, ex._wrapper(cache, "scripts/run.py", [], files, [], []))
+        assert "ran ok" in warm, warm[:200]
+        assert os.path.isdir(os.path.join(tmp, cache))
+
+    # Stale marker, missing script -> re-materialise instead of ENOENT.
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, cache), exist_ok=True)
+        with open(os.path.join(tmp, cache, ".ready"), "w") as fh:
+            fh.write("1")
+        out = run(tmp, ex._wrapper(cache, "scripts/run.py", [], None, [], []))
+        assert "__needs_materialize__" in out, out[:200]
+
+    # Empty payload -> an explanation, not a path error.
+    with tempfile.TemporaryDirectory() as tmp:
+        out = run(tmp, ex._wrapper(cache, "scripts/run.py", [], {}, [], []))
+        assert "no files to materialise" in out, out[:200]
+        assert "No such file or directory" not in out, out[:200]
+
+    print("OK test_runtime_dir_failures_are_survivable")
+
+
 def main() -> int:
+    test_runtime_dir_failures_are_survivable()
     _write_skill()
     import adk_cc.sandbox.code_executor as ce
     from adk_cc.tools import skills as sk

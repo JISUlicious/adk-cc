@@ -246,13 +246,55 @@ def list_granted_roots(ctx: ToolContext) -> list[str]:
     return out
 
 
+def _canon_for_ctx(ctx: ToolContext, path: str) -> str:
+    """Canonicalize `path` for THIS session's workspace.
+
+    Local: realpath, so a granted `/tmp/x` matches the `/private/tmp/x` the
+    guard sees. REMOTE: verbatim — realpath'ing a remote path against this
+    host is exactly the hazard `WorkspaceRoot.__post_init__` already refuses
+    to commit. Measured on macOS with a remote Linux workspace:
+
+        /home/u/proj-worktree -> /System/Volumes/Data/home/u/proj-worktree
+        /tmp/build            -> /private/tmp/build
+
+    so the grant was stored under a path that does not exist on the remote,
+    never matched the next write, and the scope gate asked forever (#109 —
+    reported after `git worktree add` put the new tree outside the project).
+    """
+    if not path:
+        return path
+    try:
+        ws = get_workspace(ctx)
+        if getattr(ws, "remote", False):
+            return path
+    except Exception:  # noqa: BLE001 — no workspace (tests, odd contexts)
+        pass
+    return os.path.realpath(path)
+
+
+def _matches(ctx: ToolContext, stored: str, path: str) -> bool:
+    """True when a STORED root refers to `path`.
+
+    Also accepts the locally-canonicalized form so grants written by the
+    buggy version keep working — a user mid-session should not have to
+    re-grant, and stale state is exactly what makes a fix feel like it did
+    not land.
+    """
+    if stored == path:
+        return True
+    try:
+        return stored == os.path.realpath(path)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _append_root(ctx: ToolContext, key: str, path: str) -> None:
-    """Canonicalize `path` and append it to the state list at `key` if new."""
+    """Canonicalize `path` for this workspace and append it if new."""
     if not path:
         return
     existing = _read_roots(ctx, key)
-    canon = os.path.realpath(path)
-    if canon not in existing:
+    canon = _canon_for_ctx(ctx, path)
+    if not any(_matches(ctx, r, canon) for r in existing):
         existing.append(canon)
         ctx.state[key] = existing
 
@@ -267,8 +309,9 @@ def add_granted_root(ctx: ToolContext, path: str, *, persist: bool = False) -> N
 def remove_granted_root(ctx: ToolContext, path: str, *, persist: bool = False) -> None:
     """Revoke a previously granted directory from the given scope."""
     key = _USER_ROOTS_KEY if persist else _SESSION_ROOTS_KEY
-    canon = os.path.realpath(path) if path else path
-    ctx.state[key] = [r for r in _read_roots(ctx, key) if r != canon]
+    canon = _canon_for_ctx(ctx, path) if path else path
+    ctx.state[key] = [r for r in _read_roots(ctx, key)
+                      if not _matches(ctx, r, canon)]
 
 
 def grant_once(ctx: ToolContext, path: str) -> None:
@@ -283,10 +326,11 @@ def discard_grant_once(ctx: ToolContext, path: str) -> None:
     sibling tool call's completion can't drop another call's approved grant."""
     if not path:
         return
-    canon = os.path.realpath(path)
+    canon = _canon_for_ctx(ctx, path)
     cur = _read_roots(ctx, _GRANT_ONCE_KEY)
-    if canon in cur:
-        ctx.state[_GRANT_ONCE_KEY] = [r for r in cur if r != canon]
+    if any(_matches(ctx, r, canon) for r in cur):
+        ctx.state[_GRANT_ONCE_KEY] = [r for r in cur
+                                      if not _matches(ctx, r, canon)]
 
 
 def clear_grant_once(ctx: ToolContext) -> None:
