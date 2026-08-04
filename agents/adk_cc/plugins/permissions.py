@@ -132,9 +132,32 @@ def skill_script_preview(tool: Any, args: dict) -> str:
 # it through run_bash, in-scope and unflagged, and it wrote to $HOME. Matching
 # the invocation path lets both channels share ONE rule key (skill:file), so a
 # grant made on either covers the other.
+# Two shapes reach the shell, and BOTH are the same skill script:
+#   .adk-cc/skills/<name>/scripts/x.py                    (the source)
+#   .adk-cc/skill-runtime/<name>/<digest>/scripts/x.py    (materialised)
+# The runtime form is where a script actually lives when it runs, and it was
+# unmatched — so it fell through to the generic bash gate, whose rule key is
+# the command string INCLUDING the digest. Every skill edit changes the
+# digest, so an "allow always" stopped applying and the user was asked again
+# (reported live: "running skills scripts keep falling into user
+# confirmation, repeatedly"). Both shapes now yield the SAME
+# `<skill>:<scripts/...>` key, so one grant survives skill edits.
 _BASH_SKILL_SCRIPT_RE = re.compile(
     r"(?:^|[\s;&|(`'\"=])(?:\./)?(?:[\w./-]*/)?"
-    r"\.(?:adk-cc|agents)/skills/([\w.-]+)/(scripts/[\w./-]+)")
+    r"\.(?:adk-cc|agents)/(?:"
+    r"skills/([\w.-]+)/(scripts/[\w./-]+)"
+    r"|skill-runtime/([\w.-]+)/[\w.-]+/(scripts/[\w./-]+)"
+    r")")
+
+
+def _bash_skill_script(command: str):
+    """(skill_name, file_path) when `command` runs a skill script, else None."""
+    m = _BASH_SKILL_SCRIPT_RE.search(command or "")
+    if not m:
+        return None
+    name = m.group(1) or m.group(3)
+    rel = m.group(2) or m.group(4)
+    return (name, rel) if name and rel else None
 
 def _pending_deps(tool: Any, args: dict) -> list[str]:
     """The Python packages the launcher will install on this skill's first
@@ -284,13 +307,13 @@ class PermissionPlugin(BasePlugin):
         # Read-only commands (cat/grep of a script) stay free — the gate is
         # about EXECUTING third-party code, not reading it.
         if isinstance(tool, AdkCcTool) and tool.meta.name == "run_bash":
-            m = _BASH_SKILL_SCRIPT_RE.search(str(tool_args.get("command") or ""))
+            m = _bash_skill_script(str(tool_args.get("command") or ""))
             if m is not None:
                 from ..tools.bash.readonly import is_read_only_command
 
                 if not is_read_only_command(str(tool_args.get("command") or "")):
                     gate = await self._gate_skill_script(
-                        tool, {"skill_name": m.group(1), "file_path": m.group(2)},
+                        tool, {"skill_name": m[0], "file_path": m[1]},
                         tool_context, via_bash=True)
                     if gate is not None:
                         return gate

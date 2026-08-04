@@ -83,7 +83,33 @@ class _Ctx:
         self.requested.append({"hint": hint, "payload": payload})
 
 
+def test_bash_route_matches_the_materialised_runtime_path() -> None:
+    """Reported live: "running skills scripts keep falling into user
+    confirmation, repeatedly".
+
+    A skill script actually RUNS from `.adk-cc/skill-runtime/<name>/<digest>/
+    scripts/...`, but the bash route only recognised the SOURCE path
+    `.adk-cc/skills/<name>/scripts/...`. The runtime form fell through to the
+    generic bash gate, whose rule key is the command string — digest and all —
+    so every skill edit invalidated the grant and the user was asked again.
+    Both shapes must yield the SAME skill rule key."""
+    from adk_cc.plugins.permissions import _bash_skill_script
+
+    src = _bash_skill_script("bash .adk-cc/skills/pdf/scripts/x.sh")
+    assert src == ("pdf", "scripts/x.sh"), src
+
+    a = _bash_skill_script("python3 .adk-cc/skill-runtime/pdf/aaa111/scripts/x.py")
+    b = _bash_skill_script("python3 .adk-cc/skill-runtime/pdf/bbb222/scripts/x.py --f")
+    assert a == ("pdf", "scripts/x.py"), a
+    assert a == b, (a, b)          # the digest must NOT be part of the key
+
+    assert _bash_skill_script("echo hello") is None
+    assert _bash_skill_script("cat notes.md") is None
+    print("OK bash_route_matches_the_materialised_runtime_path")
+
+
 def main() -> int:
+    test_bash_route_matches_the_materialised_runtime_path()
     from adk_cc.permissions.modes import PermissionMode
     from adk_cc.permissions.settings import SettingsHierarchy
     from adk_cc.plugins.permissions import PermissionPlugin

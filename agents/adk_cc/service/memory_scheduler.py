@@ -171,9 +171,24 @@ def make_consolidation_lifespan():
                 "memory consolidation scheduler started (every %.0fs, first pass in %.0fs)",
                 interval, delay,
             )
+        # Background processes (#108) must die WITH the app. They are started
+        # with start_new_session=True — their own process group — so the
+        # app→backend group kill (#98) does NOT reach them: a dev server would
+        # outlive the app that started it and keep holding its port, which is
+        # exactly the orphan class #98 fixed one level up. Adopt-on-boot exists
+        # for the cases this cannot cover (SIGKILL of the backend), but a
+        # graceful shutdown must leave nothing behind.
         try:
             yield
         finally:
+            try:
+                from ..sandbox.process_registry import get_registry
+
+                n = get_registry().terminate_all()
+                if n:
+                    _log.info("stopped %d background process(es) on shutdown", n)
+            except Exception as e:  # noqa: BLE001 — shutdown must not raise
+                _log.warning("background process cleanup failed: %s", e)
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

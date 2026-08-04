@@ -37,6 +37,14 @@ interface BashResponse {
   stderr?: string
 }
 
+type BackgroundProcess = {
+  id: string
+  label: string
+  status: string
+  pid?: number | null
+  port?: number | null
+}
+
 export function BashTerminalCard({
   args,
   response,
@@ -57,6 +65,11 @@ export function BashTerminalCard({
   // Model-written call label (ToolTitlePlugin). Title becomes the header;
   // the raw command stays visible as a secondary chip + in the terminal block.
   const callTitle = toolCallTitle(args)
+  // A BACKGROUND start is not a finished command: it returns immediately
+  // with a process handle and the process keeps running. Rendering it with
+  // the normal exit-code chip would claim "exit 0, done" about a dev server
+  // that is still serving — and would give no way to reach it. (#108)
+  const bg = (r as { process?: BackgroundProcess } | null)?.process
   const exitCode = r?.exit_code
   const isTimeout = r?.status === "timeout"
   // A response that carries no exit code is abnormal, not a success: the turn
@@ -78,7 +91,8 @@ export function BashTerminalCard({
           ) : (
             <ChevronRight className="h-4 w-4 text-muted-foreground" />
           )}
-          <Terminal className="h-4 w-4 text-muted-foreground" />
+          <Terminal className={cn("h-4 w-4",
+            bg ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")} />
           {callTitle ? (
             <span className="text-xs truncate flex-1">
               {callTitle}{" "}
@@ -101,7 +115,26 @@ export function BashTerminalCard({
               timeout
             </span>
           )}
-          {!isPending && !isTimeout && (
+          {/* Background start: say it is RUNNING and where, not "exit 0". */}
+          {bg && (
+            <span className="flex shrink-0 items-center gap-1">
+              <span className="rounded-sm bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300">
+                running in background
+              </span>
+              {bg.port ? (
+                <a
+                  href={`http://localhost:${bg.port}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="text-[10px] text-primary hover:underline"
+                >
+                  :{bg.port}
+                </a>
+              ) : null}
+            </span>
+          )}
+          {!isPending && !isTimeout && !bg && (
             <span
               className={cn(
                 "rounded-sm px-1.5 py-0.5 text-[10px] font-medium",

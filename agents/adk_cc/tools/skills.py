@@ -1539,7 +1539,76 @@ def _skill_files(skill: Skill) -> dict[str, Any]:
                 files[f"assets/{n}"] = c
     except Exception:  # noqa: BLE001 — a skill with no resources is fine
         pass
+    # ADK's resource API exposes exactly three categories (scripts,
+    # references, assets), so ANY other directory a skill ships — `data/`
+    # most commonly — never reached the sandbox, and a script doing
+    # `open("data/x.csv")` failed with a missing file even though the file
+    # was right there in the skill folder. Materialise the whole skill
+    # directory: the layout is the skill author's choice, not ours.
+    files.update(_extra_skill_files(skill, files))
     return files
+
+
+# Never shipped into the workspace: VCS/venv/cache noise, and our own runtime
+# dir if a skill folder happens to contain one.
+_MATERIALIZE_IGNORE = {
+    ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".adk-cc", ".DS_Store",
+}
+
+
+def _extra_skill_files(skill: Skill, already: dict[str, Any]) -> dict[str, Any]:
+    """Files in the skill folder that ADK's three categories do not cover.
+
+    Bounded by the same per-file cap as resources so a skill shipping a large
+    corpus cannot blow up the payload; oversized files are skipped with a
+    warning rather than silently truncated (a half-written data file is worse
+    than an absent one — the script would read it and be wrong)."""
+    name = getattr(getattr(skill, "frontmatter", None), "name", "") or ""
+    if not name:
+        return {}
+    base = _skill_dir_for(name, {})
+    if not base:
+        # No session index (out-of-band call, or a skill outside the active
+        # project root): resolve from a fresh discovery, mirroring what the
+        # resource lookup does rather than silently shipping nothing.
+        try:
+            base = _build_skill_dir_index(
+                discover_skills_with_sources(_resolve_skills_dirs())).get(name)
+        except Exception:  # noqa: BLE001
+            base = None
+    if not base:
+        return {}
+    out: dict[str, Any] = {}
+    cap = _file_max_bytes()
+    try:
+        root = Path(base)
+        for f in root.rglob("*"):
+            if not f.is_file():
+                continue
+            rel_parts = f.relative_to(root).parts
+            if any(p in _MATERIALIZE_IGNORE for p in rel_parts):
+                continue
+            rel = "/".join(rel_parts)
+            if rel in already or rel == "SKILL.md":
+                continue          # already carried, or the manifest itself
+            try:
+                size = f.stat().st_size
+            except OSError:
+                continue
+            if cap and size > cap:
+                _log.warning(
+                    "skill %r: %s is %d bytes (over the %d cap) — not "
+                    "materialised; the script will not find it",
+                    name, rel, size, cap)
+                continue
+            try:
+                out[rel] = f.read_bytes()
+            except OSError:
+                continue
+    except Exception:  # noqa: BLE001 — a odd skill dir must not break the run
+        return out
+    return out
 
 
 def _files_digest(files: dict[str, Any]) -> str:
