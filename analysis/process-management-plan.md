@@ -100,16 +100,87 @@ GET  /api/processes/{id}/stream         SSE follow (tail -f)
 POST /api/processes/{id}/terminate
 ```
 
-### P3 — UI
+### P3 — UI (concrete)
 
-- **Process dock** in the right panel footer, modelled on `SubagentsDock`
-  (same polling discipline): one row per process — label, status, elapsed,
-  port if detected, Stop. Unlike the sub-agents dock it persists across
-  turns, because the processes do.
-- **Log drawer**: live-following console reusing `BashTerminalCard`'s
-  renderer rather than a second terminal look.
-- A detected port becomes a clickable `http://localhost:<port>` — the single
-  most useful thing for a dev server.
+Four surfaces. Each names the file it lands in and the slot it uses, so this
+is buildable without re-deciding layout.
+
+**1. `ProcessDock` — `web/src/shared/components/ProcessDock.tsx`**
+
+Right-panel footer, the slot `RightPanelShell` already exposes (`footer`),
+passed from `FileTreeSidePanel` (desktop) and `ArtifactsSidePanel` (web)
+exactly as `SubagentsDock` is today. The two docks STACK — sub-agents above
+processes — because they answer different questions ("is the agent still
+thinking" vs "what is running on my machine"). Same polling discipline
+(faster while something is starting, slow when steady), same
+`data-process-dock` hook for tests.
+
+```
+┌ Processes                                   2 running ┐
+│ ● dev server        :5173 ↗   4m 12s          ■ Stop  │
+│ ● watch tests                 1m 03s          ■ Stop  │
+│ ○ migration script            exited 0 · 2m ago    ✕  │
+└───────────────────────────────────────────────────────┘
+```
+
+- Row = status dot (running green / starting amber / exited grey / failed
+  red), label, detected port as a clickable `↗` opening
+  `http://localhost:<port>`, elapsed (or "exited N · Xm ago"), Stop.
+- Clicking a row opens the log drawer (below). Exited rows keep an ✕ to
+  dismiss from the list — the record stays on disk.
+- Collapsed to a one-line summary when nothing is running, so it costs no
+  vertical space in the common case: `Processes · none running`.
+- **Persists across turns and sessions**, unlike the sub-agents dock. It is
+  scoped to the PROJECT, not the session, since a dev server started in one
+  session is still the thing occupying :5173 in the next.
+
+**2. `ProcessLogDrawer` — `web/src/shared/components/ProcessLogDrawer.tsx`**
+
+Opens over the right panel (not a modal — the user needs the thread while
+reading a log). Header: label, command (monospace, truncated with full text
+on hover), cwd, backend, status chip, Stop. Body: live-following console
+reusing `BashTerminalCard`'s existing renderer — one terminal look in the
+product, not two — with:
+
+- follow-tail toggle (auto-scroll, disengages when the user scrolls up, the
+  behaviour every log viewer needs and few have),
+- a "jump to latest" affordance when disengaged,
+- copy-all, and a "reveal log file" action (desktop) since the file outlives
+  the UI.
+
+**3. Thread integration — `BashTerminalCard.tsx`**
+
+A `background=True` call renders as a card that says so instead of pretending
+to be a finished command: header shows `started · dev server` with a live
+status dot, a Stop button while running, and "open log" linking into the
+drawer. Today that card's contract is call+response; a backgrounded call has
+no terminal response, so this is a new state to render, NOT a repurposed one
+— getting it wrong would show a permanent "running" spinner for a process
+that died.
+
+**4. Composer chip — `Composer.tsx` footer**
+
+The composer already hosts small live chips (model, analysis env). One more:
+`⚙ 2 running` when this project has live processes, clicking it opens the
+dock. It is the only always-visible surface, and the point of the feature is
+that a forgotten dev server is never invisible again.
+
+**States that must be designed, not discovered**
+
+| State | UI |
+|---|---|
+| starting (no pid yet) | amber dot, "starting…", Stop disabled |
+| running, no port | green dot, elapsed only |
+| running, port detected | green dot + clickable port |
+| exited 0 | grey dot, "exited 0 · Xm ago", ✕ to dismiss |
+| exited non-zero / crashed | red dot, exit code, log drawer opens on the tail |
+| killed by user | grey, "stopped" — distinct from crashed, so the user is not asked to debug their own Stop |
+| backend can't terminate | Stop hidden (not disabled-with-tooltip; a dead control is worse than no control), row carries a "no remote stop" note |
+| orphan found at boot | listed under "found running from an earlier session", with Adopt / Stop |
+
+**Accessibility/scale notes:** rows are buttons with `aria-label` naming the
+process; the dock caps at ~6 visible rows and scrolls; long labels truncate
+with the full command in `title`.
 
 ### P4 — remote backends (investigated; here is the honest picture)
 
@@ -136,7 +207,7 @@ the only genuine gap.
 | P0 | registry + file logs + `background=True` + ownership/orphan sweep (local) | live: start a dev server, confirm it survives a turn AND a new session; kill the backend, confirm the boot sweep reports it |
 | P1 | terminate + `stop_process` + tool results | live: `python -m http.server`, Stop, verify group gone via `ps` |
 | P2 | endpoints + SSE follow | live: follow a monitoring script's log through the API |
-| P3 | dock + log drawer + clickable port | Playwright: start a server, see the row and port, click Stop |
+| P3 | ProcessDock + ProcessLogDrawer + bash-card background state + composer chip | Playwright: start a server, see the row and its port, open the log drawer and watch it follow, click Stop and see the row settle to "stopped"; a second session still shows the process |
 | P4 | container + ssh (pgid mechanism), daytona probe, honest flags | live on the SSH box from the remote-workspace work |
 
 ## Deliberately NOT in scope
