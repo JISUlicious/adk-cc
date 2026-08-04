@@ -1553,6 +1553,12 @@ def _skill_files(skill: Skill) -> dict[str, Any]:
 
 # Never shipped into the workspace: VCS/venv/cache noise, and our own runtime
 # dir if a skill folder happens to contain one.
+# Headroom between the script's own timeout and the exec that hosts it. The
+# wrapper materialises the whole skill (hundreds of KB) and starts an
+# interpreter before the script's first line runs, so the outer budget has to
+# cover more than the script itself.
+_OUTER_TIMEOUT_MARGIN_S = 30
+
 _MATERIALIZE_IGNORE = {
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
     ".mypy_cache", ".pytest_cache", ".ruff_cache", ".adk-cc", ".DS_Store",
@@ -1775,6 +1781,14 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
         if ext in ("sh", "bash"):
             interp = ["bash"]
         timeout = getattr(self, "_script_timeout", 300)
+        # Never let the inner timeout exceed the outer one: whichever fires
+        # first decides what the user sees, and only the inner can report the
+        # script's partial output. Applies when a caller supplies their own
+        # (tighter) executor — the one built here is already sized above.
+        outer = getattr(getattr(self, "_base_executor", None),
+                        "timeout_seconds", None)
+        if isinstance(outer, int) and outer > 0:
+            timeout = max(5, min(timeout, outer - _OUTER_TIMEOUT_MARGIN_S))
         return "\n".join([
             # Read by the sandbox executor to size the analysis environment.
             f"# adk-cc-skill-tiers: {' '.join(tiers)}",
@@ -1884,8 +1898,18 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             "        stdin=subprocess.DEVNULL)",
             "    _emit(stdout=_r.stdout, stderr=_r.stderr, returncode=_r.returncode)",
             "except subprocess.TimeoutExpired as _e:",
-            "    _emit(stdout=(_e.stdout or ''),",
-            f"          stderr='Timed out after {timeout}s', returncode=-1)",
+            # TimeoutExpired carries BYTES even under text=True (CPython
+            # decodes only on the success path), so emitting it raw raised
+            # "Object of type bytes is not JSON serializable" and the timeout
+            # report — the message AND the partial output it exists to
+            # preserve — was replaced by a traceback. Unreachable until the
+            # inner timeout could fire at all, so it shipped broken.
+            "    def _txt(_v):",
+            "        if isinstance(_v, bytes): return _v.decode('utf-8', 'replace')",
+            "        return _v or ''",
+            "    _emit(stdout=_txt(_e.stdout),",
+            f"          stderr=(_txt(_e.stderr) + 'Timed out after {timeout}s'),",
+            "          returncode=-1)",
         ])
 
 
@@ -2322,6 +2346,16 @@ def make_skill_toolset(
         from ..sandbox.code_executor import SandboxBackedCodeExecutor
 
         code_executor = SandboxBackedCodeExecutor()
+        # The wrapper runs the script under its OWN timeout (script_timeout)
+        # and must outlive it, or the outer kill always wins and the inner's
+        # report — which names the script and carries its partial stdout —
+        # can never be sent. The executor's 60s dataclass default was an
+        # accident here: `script_timeout=300` is this toolset's declared
+        # limit, so a 90s analysis script was being killed at 60s by
+        # machinery that never meant to have an opinion. This executor is
+        # built for skills alone (run_code has its own), so raising it
+        # changes nothing else.
+        code_executor.timeout_seconds = script_timeout + _OUTER_TIMEOUT_MARGIN_S
     toolset = _EnablementAwareSkillToolset(
         skills=[s for s, _ in pairs],
         code_executor=code_executor,

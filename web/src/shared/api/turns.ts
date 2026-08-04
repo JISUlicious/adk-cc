@@ -89,25 +89,44 @@ async function _startTurn(
   newMessage: unknown,
 ): Promise<TurnSnapshot> {
   // 409 = single-flight busy. The visible turn can END (final reply, or a
-  // confirmation card) while its server-side task briefly lives on for
-  // post-turn work (e.g. the out-of-band session-title call) — a user who
-  // answers a confirmation the moment the card appears lands in that window.
-  // Briefly retry instead of surfacing a spurious "busy" error.
-  for (let attempt = 0; ; attempt++) {
+  // confirmation card) while its server-side task lives on — post-turn work,
+  // or a tool call that is simply still going. A user who answers a
+  // confirmation the moment the card appears lands in that window.
+  //
+  // This used to give up after a fixed 20 x 500ms. Ten seconds is fine for a
+  // title call and far too short for a real tool: a skill script can hold the
+  // turn for minutes, and when the budget ran out the user's answer was not
+  // delayed, it was LOST — surfaced as a bare "409 conflict" with no way to
+  // resend. So: keep waiting as long as the server says a turn is genuinely
+  // running for this session, and only give up when it is not.
+  const deadline = Date.now() + _BUSY_MAX_WAIT_MS
+  for (let sawIdle = 0; ; ) {
     try {
       return await apiFetch<TurnSnapshot>(`/api/turns`, {
         method: "POST",
         body: JSON.stringify({ ...args, newMessage }),
       })
     } catch (e) {
-      if (e instanceof ApiError && e.status === 409 && attempt < 20) {
-        await new Promise((r) => setTimeout(r, 500))
-        continue
+      if (!(e instanceof ApiError && e.status === 409)) throw e
+      if (Date.now() > deadline) throw e
+      // Is something actually running, or is the 409 stale? Only the second
+      // case should ever give up — and only after a few tries, since the
+      // status and the reservation are read at slightly different moments.
+      const t = await latestTurn(args.appName, args.userId, args.sessionId)
+        .catch(() => null)
+      if (t && t.status === "running") {
+        sawIdle = 0
+      } else if (++sawIdle > 6) {
+        throw e
       }
-      throw e
+      await new Promise((r) => setTimeout(r, 500))
     }
   }
 }
+
+/** Upper bound on waiting out a busy session. Not a tool's runtime limit —
+ *  just a backstop so a wedged turn cannot hang the composer forever. */
+const _BUSY_MAX_WAIT_MS = 20 * 60 * 1000
 
 /** Tail a turn's SSE stream from `cursor`. Resolves when the stream ends. */
 async function _tailLoop(
@@ -173,11 +192,20 @@ async function _tailLoop(
   }
 }
 
+/** Ending a stream means one of two different things.
+ *
+ *  Stop  = the user wants the WORK to end → abort the server-side turn.
+ *  Detach = we are just looking away (switching sessions, unmounting) → drop
+ *  our tail and leave the turn running. Turns are durable precisely so this
+ *  is possible; conflating the two silently killed a running turn whenever
+ *  the user opened another session. */
+export type CancelStream = (opts?: { detachOnly?: boolean }) => void
+
 function _run(
   args: { appName: string; userId: string; sessionId: string },
   newMessage: unknown,
   cb: StreamCallbacks,
-): () => void {
+): CancelStream {
   const ctrl = new AbortController()
   let turnId: string | null = null
   void (async () => {
@@ -190,9 +218,8 @@ function _run(
       cb.onClose?.()
     }
   })()
-  return () => {
-    // FULL abort: stop the server-side turn, then drop the tail.
-    if (turnId) void abortTurnById(turnId).catch(() => {})
+  return (opts) => {
+    if (!opts?.detachOnly && turnId) void abortTurnById(turnId).catch(() => {})
     ctrl.abort()
   }
 }
@@ -231,11 +258,11 @@ export function streamExistingTurn(
   turnId: string,
   cursor: number,
   cb: StreamCallbacks,
-): () => void {
+): CancelStream {
   const ctrl = new AbortController()
   void _tailLoop(turnId, cursor, cb, ctrl.signal)
-  return () => {
-    void abortTurnById(turnId).catch(() => {})
+  return (opts) => {
+    if (!opts?.detachOnly) void abortTurnById(turnId).catch(() => {})
     ctrl.abort()
   }
 }

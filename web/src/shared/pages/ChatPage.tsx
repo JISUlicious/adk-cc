@@ -37,6 +37,7 @@ import {
   latestTurn,
   retryLastTurn,
   streamExistingTurn,
+  type CancelStream,
   streamTurnFunctionResponse,
   streamTurnRun,
   type TurnError,
@@ -148,7 +149,7 @@ export function ChatPage({
   const [railOpen, setRailOpen] = useState(false)
   // Right-side panel (artifacts on web / file tree on desktop) mobile drawer.
   const [rightPanelOpen, setRightPanelOpen] = useState(false)
-  const abortRef = useRef<(() => void) | null>(null)
+  const abortRef = useRef<CancelStream | null>(null)
   // Monotonic per-turn id. Because the "working" indicator now clears on the
   // in-band final-response event (not the socket close), the composer re-enables
   // while the previous stream may still be draining its silent post-turn tail —
@@ -249,6 +250,25 @@ export function ChatPage({
       setEvents([])
       return
     }
+    // Leaving a session must end our attachment to ITS turn, BEFORE the new
+    // one loads. Without this, switching to another session while one is
+    // running left `isStreaming` true — so a brand-new session opened
+    // mid-run showed "agent is working…" and refused input forever — and
+    // left the old stream attached, appending the OTHER session's events
+    // into this one's thread.
+    //
+    // Detaching is not aborting: the turn is durable server-side, so it
+    // keeps running and re-attaches below (or on the next visit) via
+    // latestTurn + streamExistingTurn. Only the client fetch is dropped.
+    streamGen.current++            // fence: ignore late callbacks from it
+    // detachOnly: looking away is not "stop". The turn is durable, so it
+    // keeps running and we re-attach on return; a full abort here killed the
+    // user's in-flight work every time they opened another session.
+    abortRef.current?.({ detachOnly: true })
+    abortRef.current = null
+    setIsStreaming(false)
+    setTurnError(null)
+
     let cancelled = false
     getSession(appName, userId, session.id)
       .then((s) => {

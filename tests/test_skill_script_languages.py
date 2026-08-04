@@ -176,8 +176,96 @@ def test_a_script_that_reads_stdin_does_not_hang() -> None:
           took < 30, f"{took:.1f}s")
 
 
+# A script that runs longer than its own timeout. It prints BEFORE sleeping,
+# so the partial output is a real thing the report can either preserve or lose.
+_skill("slow-skill", {
+    "slow.py": (
+        "import sys, time\n"
+        "print('started work'); sys.stdout.flush()\n"
+        "time.sleep(60)\n"
+        "print('never reached')\n"
+    ),
+})
+
+
+def _run_with(skill: str, file_path: str, script_timeout: int):
+    import adk_cc.sandbox as sandbox
+    import adk_cc.sandbox.code_executor as ce
+    from adk_cc.tools import skills as sk
+
+    sandbox.get_workspace = lambda ctx: _Ws()      # noqa: ARG005
+    ce.get_workspace = lambda ctx: _Ws()           # noqa: ARG005
+    sk.clear_project_skill_cache()
+    toolset = sk.make_skill_toolset(script_timeout=script_timeout)
+    tool = next(t for t in toolset._tools if t.name == "run_skill_script")
+    return toolset, asyncio.run(tool.run_async(
+        args={"skill_name": skill, "file_path": file_path},
+        tool_context=_Ctx()))
+
+
+def test_the_script_timeout_is_the_one_that_fires() -> None:
+    """The wrapper runs the script under `script_timeout`; the exec that hosts
+    the wrapper has its own. If the OUTER one is smaller it always wins, and
+    the inner report — the only one that names the script and keeps its
+    partial stdout — can never be sent. That was the shipped state: a 300s
+    script timeout inside a 60s exec, so anything over 60s died anonymously.
+    """
+    import time
+
+    t = time.perf_counter()
+    toolset, res = _run_with("slow-skill", "scripts/slow.py", script_timeout=5)
+    took = time.perf_counter() - t
+    # Checked at the REAL default, not the 5s used for the behavioural half:
+    # the shipped bug was a 300s script budget inside a 60s exec, and a test
+    # run at script_timeout=5 is satisfied by the broken 60s default too.
+    from adk_cc.tools import skills as _sk
+    _sk.clear_project_skill_cache()
+    real = _sk.make_skill_toolset(script_timeout=300)
+    outer = getattr(getattr(real, "_code_executor", None),
+                    "timeout_seconds", None)
+    check("the hosting exec outlives the script's declared 300s budget",
+          isinstance(outer, int) and outer > 300,
+          f"outer={outer} script_timeout=300")
+    check("the INNER timeout fires, at its own deadline",
+          5 <= took < 30, f"{took:.1f}s")
+
+    out = (res or {}).get("stdout") or ""
+    err = (res or {}).get("stderr") or ""
+    blob = f"{out}{err}{(res or {}).get('error') or ''}"
+    check("the report names the timeout rather than 'no output'",
+          "Timed out after 5s" in blob, blob[:220])
+    # The reason the inner one has to win: only it still holds what the
+    # script managed to print.
+    check("the script's partial output survives the timeout",
+          "started work" in blob, blob[:220])
+
+
+def test_a_caller_supplied_tight_executor_clamps_the_inner_timeout() -> None:
+    """Symmetric case: if someone hands us an executor with a SMALLER budget,
+    the inner timeout must shrink to fit rather than be unreachable again."""
+    from adk_cc.sandbox.code_executor import SandboxBackedCodeExecutor
+    from adk_cc.tools import skills as sk
+
+    tight = SandboxBackedCodeExecutor()
+    tight.timeout_seconds = 45
+    # `_wrapper` belongs to the wider executor, which is what actually
+    # generates the launcher; build it the way the toolset does.
+    wider = sk._WiderScriptCodeExecutor(tight, 300)
+    code = wider._wrapper("cache", "scripts/x.py", [], None, [])
+    # Parse the SCRIPT's timeout specifically — the wrapper also carries the
+    # dependency-install timeout, and grabbing the first `timeout=` finds
+    # that one instead (it did, and the test passed on a lie).
+    import re
+    inner = int(re.search(r"Timed out after (\d+)s", code).group(1))
+    check("the inner timeout shrinks below the caller's outer budget",
+          inner < 45, f"inner={inner} outer=45")
+    check("and it is not absurdly small", inner >= 5, inner)
+
+
 def main() -> int:
     test_a_script_that_reads_stdin_does_not_hang()
+    test_the_script_timeout_is_the_one_that_fires()
+    test_a_caller_supplied_tight_executor_clamps_the_inner_timeout()
     if not shutil.which("node"):
         print("SKIP: node not available."); return 0
 
