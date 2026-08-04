@@ -174,6 +174,70 @@ function nodeText(node: React.ReactNode): string {
  * year displayed as a stray mis-indented marker above the caveat paragraph.
  * No chat answer ever means an empty numbered list, so escape the delimiter
  * and let the line read as literal text. Fenced code blocks are left alone. */
+/** Bars that are not U+007C but are meant as one.
+ *
+ *  Models emit these constantly — a CJK IME/tokenizer produces the FULLWIDTH
+ *  form, and "draw me a table" sometimes yields box-drawing characters. GFM
+ *  only understands `|`, so a single stray one turns a whole table back into
+ *  a paragraph of text with pipes in it. */
+const BAR_VARIANTS = /[\uFF5C\uFFE8\u00A6\u2502\u2503\u2223\u23D0\u01C0]/g
+
+/** True for a GFM header-separator row (`|---|:--:|`), bars already ASCII. */
+function _isSeparatorRow(line: string): boolean {
+  return /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(line) && line.includes("-")
+}
+
+function _barCount(line: string): number {
+  return (line.match(/\|/g) || []).length +
+    (line.match(BAR_VARIANTS) || []).length
+}
+
+/**
+ * Rewrite look-alike bars to `|`, but ONLY inside something that is already
+ * shaped like a table.
+ *
+ * Scoped deliberately. A blanket replace would corrupt prose that legitimately
+ * contains `｜`, and would promote `tree`-style box-drawing output into a
+ * table. The guard is the separator row: a run of consecutive lines each
+ * holding 2+ bars, of which at least one is a `---|---` separator once
+ * normalised. Fenced code is skipped entirely — inside a fence the characters
+ * are the content.
+ */
+export function normalizeTableBars(body: string): string {
+  if (!BAR_VARIANTS.test(body)) return body      // fast path: nothing to do
+  BAR_VARIANTS.lastIndex = 0
+  const lines = body.split("\n")
+  const out = [...lines]
+  let inFence = false
+  let runStart = -1
+
+  const flush = (endExclusive: number) => {
+    if (runStart < 0) return
+    const run = lines.slice(runStart, endExclusive)
+    const normalised = run.map((l) => l.replace(BAR_VARIANTS, "|"))
+    if (run.length >= 2 && normalised.some(_isSeparatorRow)) {
+      for (let i = 0; i < run.length; i++) out[runStart + i] = normalised[i]
+    }
+    runStart = -1
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (/^\s*(```|~~~)/.test(line)) {
+      flush(i)
+      inFence = !inFence
+      continue
+    }
+    if (!inFence && _barCount(line) >= 2) {
+      if (runStart < 0) runStart = i
+    } else {
+      flush(i)
+    }
+  }
+  flush(lines.length)
+  return out.join("\n")
+}
+
 export function escapeBareOrdinals(body: string): string {
   let inFence = false
   return body
@@ -193,7 +257,7 @@ export function escapeBareOrdinals(body: string): string {
 export function Markdown({ children }: { children: string }) {
   return (
     <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
-      {escapeBareOrdinals(children)}
+      {escapeBareOrdinals(normalizeTableBars(children))}
     </ReactMarkdown>
   )
 }
@@ -256,7 +320,7 @@ export function WikiMarkdown({
       urlTransform={_urlTransform}
       components={components}
     >
-      {_linkifyWikilinks(children)}
+      {_linkifyWikilinks(normalizeTableBars(children))}
     </ReactMarkdown>
   )
 }

@@ -133,6 +133,65 @@ def test_the_locator_matches_by_tail_not_by_guess() -> None:
     print("OK the_locator_matches_by_tail_not_by_guess")
 
 
+
+def _c(name, ok, detail=""):
+    """This file reports with bare asserts + OK lines; keep that shape."""
+    assert ok, f"{name}: {detail}"
+
+
+def test_the_proactive_instruction_contradicts_adk_s_bash_line() -> None:
+    """ADK's stock skill instruction says scripts "can be run via bash" and
+    then, four lines later, to use `run_skill_script`. The model resolves that
+    in favour of bash — which cannot work, because skill files live outside
+    the workspace. Observed live: it retried from several guessed directories,
+    and since each guess was a DIFFERENT command string, "allow always" never
+    matched and it re-prompted every time.
+
+    The hint below explains this after the fact; this pins that the same
+    knowledge is also delivered BEFORE the first attempt."""
+    from adk_cc.tools.skills import _SKILL_SCRIPT_INSTRUCTION as I
+    from google.adk.tools.skill_toolset import (
+        _DEFAULT_SKILL_SYSTEM_INSTRUCTION as ADK_I)
+
+    _c("ADK's instruction really does say scripts run via bash "
+          "(if this fails, the override may be obsolete)",
+          "run via bash" in ADK_I, ADK_I[:200])
+    _c("ours names run_skill_script", "run_skill_script" in I)
+    _c("ours says skill files are not in the workspace",
+          "NOT in your workspace" in I)
+    _c("ours explicitly overrides the bash claim",
+          "overrides" in I and "bash" in I)
+    _c("ours explains the working directory, so args still resolve",
+          "working directory" in I)
+
+
+def test_the_instruction_is_actually_sent_with_the_catalogue() -> None:
+    """An instruction that never reaches a request is decoration."""
+    import adk_cc.tools.skills as sk
+
+    sent: list[str] = []
+
+    class _Req:
+        def append_instructions(self, items):  # noqa: ANN001
+            sent.extend(items)
+
+    class _TS(sk._EnablementAwareSkillToolset):
+        def _list_skills(self):  # noqa: ANN201
+            return []
+
+    ts = _TS.__new__(_TS)          # no ADK __init__: we only exercise the hook
+    import asyncio
+
+    try:
+        asyncio.run(ts.process_llm_request(tool_context=None, llm_request=_Req()))
+    except Exception:              # noqa: BLE001 — the tool_context is a stub
+        pass
+    _c("the script instruction rides along with the skill catalogue",
+          any("run_skill_script" in s and "NOT in your workspace" in s
+              for s in sent),
+          f"{len(sent)} instruction blocks sent")
+
+
 def main() -> None:
     test_the_verbatim_live_failure_is_explained()
     test_a_bare_script_name_also_resolves()
@@ -142,6 +201,8 @@ def main() -> None:
     test_a_succeeding_command_gets_nothing()
     test_an_absolute_path_is_not_hijacked()
     test_the_locator_matches_by_tail_not_by_guess()
+    test_the_proactive_instruction_contradicts_adk_s_bash_line()
+    test_the_instruction_is_actually_sent_with_the_catalogue()
     print("\nall skill-script hint tests passed")
 
 

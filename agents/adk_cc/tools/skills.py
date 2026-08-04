@@ -2186,6 +2186,32 @@ def clear_project_skill_cache() -> None:
     _UNTRUSTED.clear()
 
 
+# ADK's stock skill instruction says scripts "can be run via bash" — and then,
+# four lines later, to use `run_skill_script`. The model resolves that in
+# favour of bash, which cannot work: skill files live outside the workspace
+# and are materialised under a content-addressed cache, so `python
+# scripts/x.py` either fails or runs whatever stale copy a previous digest
+# left. Observed live: the model retried from several different guessed
+# directories, and because each guess produced a DIFFERENT command string,
+# "allow always" never matched and it re-prompted every time.
+#
+# The post-failure hint in tools/bash already explains this once it has gone
+# wrong (_skill_script_hint). This is the same knowledge, delivered before the
+# first attempt instead of after it.
+_SKILL_SCRIPT_INSTRUCTION = """
+IMPORTANT — running a skill's scripts (this overrides any statement above that
+skill scripts "can be run via bash"):
+
+- A skill's files are NOT in your workspace. No path and no `cd` reaches them,
+  so `run_bash python scripts/<name>.py` does not work — it fails, or worse,
+  runs a stale copy.
+- Run them with `run_skill_script(skill_name="<skill>", file_path="scripts/
+  <name>.py", args=[...])`. Use `load_skill_resource` first if you need to
+  read the script or its README.
+- It executes with YOUR workspace as the working directory, so file paths you
+  pass in `args` mean the same thing they do in `run_bash`.
+"""
+
 class _EnablementAwareSkillToolset(SkillToolset):
     """SkillToolset that also honours the deny-list in the SYSTEM INSTRUCTION.
 
@@ -2244,6 +2270,7 @@ class _EnablementAwareSkillToolset(SkillToolset):
         )
         llm_request.append_instructions([
             _DEFAULT_SKILL_SYSTEM_INSTRUCTION,
+            _SKILL_SCRIPT_INSTRUCTION,
             _skill_prompt.format_skills_as_xml(skills),
         ])
         # This is the only place that knows what was actually OFFERED on a

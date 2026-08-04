@@ -13,6 +13,7 @@ Run: ADK_CC_LIVE=1 .venv/bin/python tests/e2e_markdown_table_ui.py
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -95,6 +96,28 @@ def main() -> int:
                 break
         check("the turn produced an answer", st["status"] == "done", st.get("error"))
 
+        # Second turn, same session: a table drawn with FULLWIDTH bars.
+        # Reported live — the model sometimes emits U+FF5C instead of `|` and
+        # the table collapses into a paragraph. Asked for explicitly, because
+        # that is the only reliable way to get the character; if the model
+        # declines, the check is skipped rather than quietly passed.
+        FW = "\uFF5C"
+        t2 = requests.post(f"{BASE}/api/turns", timeout=60, json={
+            "appName": "adk_cc", "userId": pid, "sessionId": sid,
+            "newMessage": {"role": "user", "parts": [{"text":
+                "Output ONLY a markdown table with 3 rows and columns city "
+                f"and country. Use the fullwidth vertical bar '{FW}' (U+FF5C) "
+                "as the column separator on EVERY line, including the header "
+                "separator row. No prose, no code fence."}]}}).json()
+        for _ in range(90):
+            time.sleep(4)
+            st2 = requests.get(f"{BASE}/api/turns/{t2['turn_id']}",
+                               timeout=30).json()
+            if st2["status"] != "running":
+                break
+        emitted_fw = FW in json.dumps(
+            requests.get(base, timeout=30).json().get("events") or [])
+
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
             b = pw.chromium.launch(headless=True)
@@ -114,6 +137,18 @@ def main() -> int:
             check("the answer rendered as a real <table>", tbl.count() > 0)
             if not tbl.count():
                 b.close(); return 1
+
+            # The fullwidth table must ALSO have become a real table. Counted
+            # rather than re-navigated: both answers live in this session, so
+            # the repair working means two tables on the page.
+            if not emitted_fw:
+                print("  [skip] the model did not emit a fullwidth bar")
+            else:
+                n_tables = page.locator("table").count()
+                check("the fullwidth-bar table also rendered as a <table>",
+                      n_tables >= 2, f"{n_tables} table(s) in the thread")
+                check("no raw fullwidth bar survives in the rendered text",
+                      FW not in page.inner_text("body"))
 
             body_rows = page.locator("table tbody tr")
             n = body_rows.count()
