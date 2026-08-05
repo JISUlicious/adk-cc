@@ -61,6 +61,81 @@ def _is_dangling_handback(event: Any) -> bool:
     return False
 
 
+def _is_confirmation_answer(message: Any) -> bool:
+    """True when `message` consists ONLY of confirmation function responses.
+
+    Names, not ids: the confirmation plugin's sentinel and canonical names are
+    the protocol; anything else (ask_user_question answers, ordinary tool
+    responses) must keep ADK's default routing.
+    """
+    parts = getattr(message, "parts", None) or []
+    if not parts:
+        return False
+    saw = False
+    for p in parts:
+        fr = getattr(p, "function_response", None)
+        if fr is None:
+            return False
+        if fr.name not in ("adk_request_confirmation",
+                           "adk_cc_confirmation_form",
+                           "adk_cc_pending_confirmation"):
+            return False
+        saw = True
+    return saw
+
+
+def install_confirmation_resume_fix(runner: Any) -> None:
+    """Route confirmation answers into a NEW invocation on resumable apps.
+
+    ROOT CAUSE (reproduced 2026-08-05, A/B-proven with a one-flag toggle):
+    with `ResumabilityConfig(is_resumable=True)` — which durable runs require —
+    ADK's `_resolve_invocation_id` maps a function-response message back to the
+    invocation that emitted the matching call. For a confirmation answer that
+    is the GATED turn, which already ended (`end_of_agents` recorded: the gate
+    returns a dict, closing the call, and the turn completes while parked on
+    the user). `run_async` then hits
+
+        if invocation_context.end_of_agents.get(...): return
+
+    and yields ZERO events: the request-confirmation resume processor never
+    runs, the tools never re-execute, the model is never called. The broker
+    read the silence as an answered call needing a reply and injected
+    "Continue." — the model then saw only its needs_confirmation results and
+    concluded it was still waiting. EVERY confirmation resume in production
+    was broken; bash merely rarely exercised resume (allow_always accrues),
+    which is why it looked skills-specific.
+
+    A confirmation answer cannot meaningfully resume the old invocation — it
+    is finished. Forcing resolution to None sends it down
+    `_setup_context_for_new_invocation`, the exact path proven to resume
+    correctly (both tools re-run, model replies) in the non-resumable repro.
+
+    Wraps a private ADK method; the accompanying test pins the private-API
+    contract so an ADK upgrade that changes it fails loudly, not silently.
+    """
+    if getattr(runner, "_adk_cc_confirm_fix", False):
+        return
+    original = getattr(runner, "_resolve_invocation_id", None)
+    if original is None:
+        # A runner without the private hook (test fakes; a future ADK that
+        # renamed it). The regression test pins the contract against the real
+        # class, so a rename fails THERE loudly instead of erroring turns here.
+        _log.warning("confirmation-resume fix: runner %s has no "
+                     "_resolve_invocation_id — skipped", type(runner).__name__)
+        return
+
+    def _resolve(session, new_message, invocation_id):  # noqa: ANN001, ANN202
+        if _is_confirmation_answer(new_message):
+            return None            # new invocation → full flow → real resume
+        return original(session, new_message, invocation_id)
+
+    runner._resolve_invocation_id = _resolve
+    runner._adk_cc_confirm_fix = True
+    _log.info("confirmation-resume fix installed on runner %s",
+              type(runner).__name__)
+
+
+
 def _pending_long_running(event: Any) -> set[str]:
     """Ids this event PAUSES on — a long-running tool call awaiting the user."""
     return set(getattr(event, "long_running_tool_ids", None) or ())
@@ -445,6 +520,7 @@ class TurnBroker:
     async def _drive(self, turn: Turn) -> None:
         try:
             runner = await self._get_runner(turn.app_name)
+            install_confirmation_resume_fix(runner)
             await self._prune_orphan(turn)
             message = turn.new_message
             for round_ in range(1 + _MAX_CONTINUES):
