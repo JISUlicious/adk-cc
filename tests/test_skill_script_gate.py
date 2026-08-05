@@ -119,6 +119,11 @@ def test_a_pending_confirmation_forbids_working_around_it() -> None:
     a pause from a denial and forbid substitution outright. Amplified by
     #113 p1, which now tells the model the skill's real directory — making the
     bash route a viable plan rather than a guess.
+
+    Note what is NOT asserted: a prohibition on run_bash. Text in a tool
+    result cannot enforce one, and routing a bash call at a skill script
+    through the launcher is the intended behaviour (#113 part 3). The gate
+    must read as a pause; making the answer actually resume the call is #114.
     """
     import inspect
 
@@ -131,11 +136,9 @@ def test_a_pending_confirmation_forbids_working_around_it() -> None:
     src = inspect.getsource(P)
     for needle, why in (
         ("is_pause_not_denial", "the pause must name itself as a pause"),
-        ("Do NOT run this script another way", "substitution must be forbidden"),
-        ("run_bash", "the workaround the model actually chose"),
-        ("filesystem path", "the base_dir route, opened by #113 p1"),
-        ("reimplementing it", "silently rewriting the script is the third route"),
-        ("end your turn", "it must be told to stop, not to keep trying"),
+        ("this is not a refusal", "the denial reading must be contradicted"),
+        ("resumes it", "the model must know the answer revives THIS call"),
+        ("end your turn", "it must wait rather than invent a detour"),
     ):
         assert needle in src, f"{why}: {needle!r} missing"
     print("OK a_pending_confirmation_forbids_working_around_it")
