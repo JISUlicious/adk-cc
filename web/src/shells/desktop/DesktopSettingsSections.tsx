@@ -1,3 +1,4 @@
+import { BRAND } from "@/shared/brand"
 import { useCallback, useEffect, useRef, useState, type ReactNode, type ChangeEvent } from "react"
 import { ChevronRight, Trash2, Upload, Plus, RefreshCw } from "lucide-react"
 import { Button } from "@/shared/components/ui/button"
@@ -381,7 +382,7 @@ export function SkillsScope({ scope, projectId }: { scope: Scope; projectId?: st
       {/* Yours first: it is the shorter list and the only one you can change
           beyond a switch. */}
       {section("Installed here", "added by you — upload, replace or remove", mine)}
-      {section("Built in", "ship with adk-cc — switch off, but not removable", builtIn)}
+      {section("Built in", `ship with ${BRAND} — switch off, but not removable`, builtIn)}
       <div className="flex flex-wrap items-start gap-2 pt-1">
         <input ref={fileRef} type="file" accept=".zip" onChange={onFile} className="hidden" />
         <FolderPickerButton label="Add skill folder" placeholder="/absolute/path/to/skill-folder" busy={busy} onPick={addFromDir} />

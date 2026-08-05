@@ -1,3 +1,4 @@
+import { BRAND } from "@/shared/brand"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { Plus, X, Settings as SettingsIcon, ChevronRight, FolderPlus, Server, Trash2, Network } from "lucide-react"
@@ -263,7 +264,7 @@ export function ProjectRail({
         </button>
         <div className="flex items-center gap-2 px-4 py-3.5">
           <img src="/favicon.svg" alt="" className="h-6 w-6 shrink-0" />
-          <span className="text-base font-semibold tracking-tight">adk-cc</span>
+          <span className="text-base font-semibold tracking-tight">{BRAND}</span>
         </div>
         <div className="adk-rail-header flex items-center justify-between px-4 py-2">
           <span className="text-xs font-medium text-muted-foreground">Projects</span>

@@ -1,3 +1,4 @@
+import { BRAND } from "@/shared/brand"
 import { useEffect, useState } from "react"
 import { Plus, X, Settings as SettingsIcon } from "lucide-react"
 import {
@@ -167,7 +168,7 @@ export function SessionRail({
           picker only appears if a deployment registers more than one agent. */}
       <div className="flex items-center gap-2 px-4 py-3.5">
         <img src="/favicon.svg" alt="" className="h-6 w-6 shrink-0" />
-        <span className="text-base font-semibold tracking-tight">adk-cc</span>
+        <span className="text-base font-semibold tracking-tight">{BRAND}</span>
         {apps.length > 1 && (
           <select
             value={appName ?? ""}
