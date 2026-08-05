@@ -786,6 +786,11 @@ FIELDS: list[Var] = [
         "S3 endpoint for s3:// artifacts (falls back to AWS_ENDPOINT_URL).", default=None),
     Var("ADK_CC_UI_DIST", Tier.ADVANCED, "Deployment",
         "Built SPA dir to serve.", default=None, parse=as_path, default_display="<repo>/web/dist"),
+    Var("ADK_CC_BRAND", Tier.ADVANCED, "Deployment",
+        "Product name shown in the UI and used by the agent for itself. "
+        "The identifier form (env prefix, package, data dirs) does NOT "
+        "follow this — see analysis/branding-plan.md.",
+        default=".jus", parse=as_str),
     Var("ADK_CC_KNOWLEDGE_UI", Tier.ADVANCED, "Deployment",
         "Experimental knowledge-graph endpoints.", default=False, parse=as_bool),
     Var("ADK_CC_LOG_MODEL_IO", Tier.DEV, "Deployment",
