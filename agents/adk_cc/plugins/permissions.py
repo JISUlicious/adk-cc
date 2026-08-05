@@ -566,7 +566,28 @@ class PermissionPlugin(BasePlugin):
         )
         tool_context.request_confirmation(hint=reason, payload=prompt.model_dump())
         tool_context.actions.skip_summarization = True
-        return {"status": "needs_confirmation", "reason": reason}
+        # A PAUSE, not a refusal — and it has to say so. Reported live: the
+        # model read "needs_confirmation" as a denial and announced "the skill
+        # script needs confirmation to run. Let me run with bash", then ran the
+        # script through run_bash and straight past the gate. A permission gate
+        # the agent can talk its way around is not a gate.
+        #
+        # Same wording discipline as the missing-interpreter path: name the
+        # substitution and forbid it, rather than leaving a capable model to
+        # infer that a blocked route means "find another one".
+        return {
+            "status": "needs_confirmation",
+            "reason": reason,
+            "is_pause_not_denial": True,
+            "next_step": (
+                "STOP and wait. The user is being asked to approve this exact "
+                "run; their answer resumes it automatically and you will get "
+                "the script's output. Do NOT run this script another way — not "
+                "with run_bash, not by a filesystem path, not by "
+                "reimplementing it. Any such attempt bypasses a permission the "
+                "user has not given yet. Say you are waiting for approval and "
+                "end your turn."),
+        }
 
     async def after_tool_callback(
         self,

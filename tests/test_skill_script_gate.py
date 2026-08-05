@@ -51,6 +51,7 @@ _passed = _failed = 0
 
 def check(name, ok, detail=""):
     global _passed, _failed
+    test_a_pending_confirmation_forbids_working_around_it()
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail and not ok else ""))
     if ok:
         _passed += 1
@@ -106,6 +107,38 @@ def test_bash_route_matches_the_materialised_runtime_path() -> None:
     assert _bash_skill_script("echo hello") is None
     assert _bash_skill_script("cat notes.md") is None
     print("OK bash_route_matches_the_materialised_runtime_path")
+
+
+
+def test_a_pending_confirmation_forbids_working_around_it() -> None:
+    """Reported live (remote, cf432ef): the model read "needs_confirmation" as
+    a refusal, said "the skill script needs confirmation to run. Let me run
+    with bash", and ran the script straight past the gate.
+
+    The tool result is the ONLY thing the model sees, so it has to distinguish
+    a pause from a denial and forbid substitution outright. Amplified by
+    #113 p1, which now tells the model the skill's real directory — making the
+    bash route a viable plan rather than a guess.
+    """
+    import inspect
+
+    from adk_cc.plugins import permissions as P
+
+    # Asserted on the module source rather than a slice around the return:
+    # there is more than one `needs_confirmation` site, and index-arithmetic
+    # around them silently tested the wrong one. These strings are distinctive
+    # enough that their presence IS the contract.
+    src = inspect.getsource(P)
+    for needle, why in (
+        ("is_pause_not_denial", "the pause must name itself as a pause"),
+        ("Do NOT run this script another way", "substitution must be forbidden"),
+        ("run_bash", "the workaround the model actually chose"),
+        ("filesystem path", "the base_dir route, opened by #113 p1"),
+        ("reimplementing it", "silently rewriting the script is the third route"),
+        ("end your turn", "it must be told to stop, not to keep trying"),
+    ):
+        assert needle in src, f"{why}: {needle!r} missing"
+    print("OK a_pending_confirmation_forbids_working_around_it")
 
 
 def main() -> int:
