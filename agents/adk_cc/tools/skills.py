@@ -108,6 +108,7 @@ from google.adk.tools.skill_toolset import (
 )
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
+from ..branding import NOTE_PREFIX
 from ..config.schema import env_bool
 from . import skill_deps, skill_enablement, skill_trust, skill_usage
 
@@ -1204,7 +1205,7 @@ class _BoundedLoadSkillTool(LoadSkillTool):
                 "skill_name": name,
                 "already_loaded": True,
                 "instructions": (
-                    f"[adk-cc] '{name}' is already loaded in this conversation — "
+                    f"{NOTE_PREFIX} '{name}' is already loaded in this conversation — "
                     "its instructions are above and still apply. Nothing was "
                     "re-sent. Use load_skill_resource for a specific file."),
             }
@@ -1917,7 +1918,7 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             "if _deps and not os.path.isfile(_depmark):",
             "    _uv = shutil.which('uv')",
             "    if not _uv:",
-            "        _depnote = ('[adk-cc] could not install ' + ', '.join(_deps) +",
+            "        _depnote = (f'{NOTE_PREFIX} could not install ' + ', '.join(_deps) +",
             "                    ' (uv not available); the script may fail on "
             "imports.\\n')",
             "    else:",
@@ -1927,7 +1928,7 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             "        if _ir.returncode == 0:",
             "            open(_depmark, 'w').write('1')",
             "        else:",
-            "            _depnote = ('[adk-cc] installing ' + ', '.join(_deps) +",
+            "            _depnote = (f'{NOTE_PREFIX} installing ' + ', '.join(_deps) +",
             "                        ' failed: ' + (_ir.stderr or '')[-400:] +",
             "                        '\\n')",
             "_abs = os.path.abspath(os.path.join(_cache, _rel))",

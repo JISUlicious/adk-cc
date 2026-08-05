@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from google.adk.tools.tool_context import ToolContext
 
+from ...branding import NOTE_PREFIX
 from ...sandbox import get_backend, get_workspace
 from ...sandbox.config import ExecChunk, ExecResult, NetworkConfig
 from ..base import AdkCcTool, ToolMeta
@@ -71,7 +72,7 @@ def _skill_script_hint(command: str, stderr: str) -> Optional[str]:
             continue
         skill, rel = found
         return (
-            f"[adk-cc] `{token}` belongs to the `{skill}` skill, and a skill's "
+            f"{NOTE_PREFIX} `{token}` belongs to the `{skill}` skill, and a skill's "
             "files are NOT in your workspace — no filesystem path reaches them. "
             "Run it through the skill tool instead:\n"
             f'  run_skill_script(skill_name="{skill}", file_path="{rel}", '
@@ -348,7 +349,7 @@ class BashTool(AdkCcTool):
             # almost certainly the cause. Say so instead of leaving the model
             # to guess at `python: command not found`.
             stderr = (
-                "[adk-cc] the managed Python environment could not be "
+                f"{NOTE_PREFIX} the managed Python environment could not be "
                 f"prepared, so `python` may be missing or lack packages:\n"
                 f"{self._env_note}\n\n" + stderr
             )

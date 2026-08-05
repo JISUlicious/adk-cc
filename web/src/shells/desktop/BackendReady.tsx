@@ -1,3 +1,4 @@
+import { BRAND } from "@/shared/brand"
 import { useEffect, useState, type ReactNode } from "react"
 import { apiFetch } from "@/shared/api/client"
 import { getUser, getToken, setToken } from "@/shared/api/auth"
@@ -34,7 +35,7 @@ export function BackendReady({ children }: { children: ReactNode }) {
   if (!ready) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background">
-        <p className="text-sm text-muted-foreground">Starting adk-cc…</p>
+        <p className="text-sm text-muted-foreground">Starting {BRAND}…</p>
       </div>
     )
   }

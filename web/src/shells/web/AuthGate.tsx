@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react"
+import { BRAND } from "@/shared/brand"
 import { Button } from "@/shared/components/ui/button"
 import { Input } from "@/shared/components/ui/input"
 import {
@@ -260,10 +261,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
             <CardHeader>
               <CardTitle>
                 {mode === "signup"
-                  ? "Create your adk-cc account"
+                  ? `Create your ${BRAND} account`
                   : mode === "request"
-                    ? "Request access to adk-cc"
-                    : "Sign in to adk-cc"}
+                    ? `Request access to ${BRAND}`
+                    : `Sign in to ${BRAND}`}
               </CardTitle>
               <CardDescription>
                 {mode === "signup"
@@ -387,7 +388,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
         ) : (
           <>
             <CardHeader>
-              <CardTitle>Sign in to adk-cc</CardTitle>
+              <CardTitle>Sign in to {BRAND}</CardTitle>
               <CardDescription>
                 Paste a Bearer token. JWT (production) or static dev token both
                 work — same Authorization header on the wire.
@@ -465,5 +466,5 @@ function authErrMsg(err: unknown): string {
     if (err.status === 403) return "Sign-up is disabled. Contact your admin."
     return `Server returned ${err.status}.`
   }
-  return "Could not reach the server. Is the adk-cc server running?"
+  return `Could not reach the server. Is the ${BRAND} server running?`
 }

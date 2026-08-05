@@ -55,6 +55,7 @@ from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
 from google.genai import types
 
+from ..branding import WARN_LABEL
 from ..verification.signals import (
     _CLAIM_RE,
     _HEDGE_RE,
@@ -244,7 +245,7 @@ class VerifyNudgePlugin(BasePlugin):
                     pass
             _log.info("verify label: stale page claim about %s", stale)
             note = (
-                f"\n\n> ⚠ adk-cc: `{os.path.basename(stale[0])}` has changed "
+                f"\n\n> {WARN_LABEL} `{os.path.basename(stale[0])}` has changed "
                 "since it was last actually driven — the behaviour described "
                 "above is asserted, not verified. The web-smoke-check skill "
                 "can close that gap."

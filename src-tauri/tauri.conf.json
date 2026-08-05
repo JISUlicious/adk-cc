@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "adk-cc",
+  "productName": ".jus",
   "version": "0.1.0",
   "identifier": "com.adk-cc.desktop",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "adk-cc",
+        "title": ".jus",
         "width": 1200,
         "height": 820,
         "minWidth": 760,

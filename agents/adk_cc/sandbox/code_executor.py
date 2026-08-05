@@ -34,6 +34,7 @@ from google.adk.code_executors.code_execution_utils import (
     CodeExecutionResult,
 )
 
+from ..branding import NOTE_PREFIX
 from .config import NetworkConfig
 from .analysis_env import AnalysisEnvError, ensure_env, required_tiers
 from .backends.base import SandboxBackend
@@ -182,7 +183,7 @@ class SandboxBackedCodeExecutor(BaseCodeExecutor):
             # stdout+stderr, which the skill launcher then reported as "no
             # output from the skill-script launcher" — pointing the reader at
             # the launcher instead of at the clock. Say what happened.
-            note = (f"[adk-cc] the script did not finish within "
+            note = (f"{NOTE_PREFIX} the script did not finish within "
                     f"{self.timeout_seconds}s and was terminated.")
             return CodeExecutionResult(
                 stdout=res.stdout,
