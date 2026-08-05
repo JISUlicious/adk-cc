@@ -50,9 +50,17 @@ export function ConfirmationCard({
 }) {
   const [comment, setComment] = useState("")
   const [persist, setPersist] = useState(false)
+  // Per-card, not per-thread: THIS card locks once ITS answer is sent. The
+  // old global isStreaming disable froze every sibling card the moment one
+  // was answered — with two parallel confirmations the user literally could
+  // not answer the second (#114 report: "allowing one makes the other
+  // unclickable"), and the stranded card then poisoned the batch.
+  const [submitted, setSubmitted] = useState(false)
+  const locked = disabled || submitted
 
   function pick(id: string) {
-    if (disabled) return
+    if (locked) return
+    setSubmitted(true)
     onSubmit({
       chose_id: id,
       ...(payload.with_comment && comment ? { comment } : {}),
@@ -81,7 +89,7 @@ export function ConfirmationCard({
               onChange={(e) => setComment(e.target.value)}
               placeholder="Optional comment for the agent"
               rows={2}
-              disabled={disabled}
+              disabled={locked}
               className="w-full resize-none rounded-md border border-input bg-background px-2 py-1.5 text-xs"
             />
           </div>
@@ -92,7 +100,7 @@ export function ConfirmationCard({
               type="checkbox"
               checked={persist}
               onChange={(e) => setPersist(e.target.checked)}
-              disabled={disabled}
+              disabled={locked}
             />
             Persist across sessions
           </label>
@@ -114,7 +122,7 @@ export function ConfirmationCard({
                     : "outline"
               }
               size="sm"
-              disabled={disabled}
+              disabled={locked}
               onClick={() => pick(opt.id)}
               title={opt.description}
               className="h-7 px-2.5 text-xs"

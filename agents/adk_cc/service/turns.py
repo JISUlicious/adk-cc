@@ -141,13 +141,33 @@ def _pending_long_running(event: Any) -> set[str]:
     return set(getattr(event, "long_running_tool_ids", None) or ())
 
 
+# Confirmation-plugin names whose responses are NOT deliveries (#114 F1).
+# The sentinel is a stash ADK deliberately ignores; the form name is the
+# pre-rewrite shape ADK also ignores. Counting either as an "answer" is what
+# turned an undelivered answer into an auto-"Continue." — the broker judged
+# by id alone while ADK judges by name, and the disagreement produced a user
+# message the model could only misread. Kept as a LITERAL pair (not an
+# import) so the broker never imports plugin modules; the contract test pins
+# both sides against the plugin's constants.
+_UNDELIVERED_CONFIRMATION_NAMES = ("adk_cc_pending_confirmation",
+                                   "adk_cc_confirmation_form")
+
+
 def _answered_ids(event: Any) -> set[str]:
-    """Ids this event ANSWERS (function responses it carries)."""
+    """Ids this event ANSWERS (function responses it carries).
+
+    Name-aware: a response stashed or pre-rewrite under a confirmation-plugin
+    name has NOT been delivered to ADK, so the call it targets is still
+    parked — and per _answer_needs_reply's own rule, a parked run must not be
+    nudged. Without this, any future delivery bug becomes a misleading
+    "Continue." instead of a parked turn."""
     out: set[str] = set()
     content = getattr(event, "content", None)
     for p in getattr(content, "parts", None) or []:
         fr = getattr(p, "function_response", None)
         if fr is not None and getattr(fr, "id", None):
+            if getattr(fr, "name", "") in _UNDELIVERED_CONFIRMATION_NAMES:
+                continue
             out.add(fr.id)
     return out
 

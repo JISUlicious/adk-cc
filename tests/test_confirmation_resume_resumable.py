@@ -150,6 +150,53 @@ def main() -> int:
                   id="c1", name="adk_cc_confirmation_form",
                   response={"chose_id": "allow"}))])))
 
+    # ---- F1: undelivered answers must not trigger "Continue." -----------
+    from adk_cc.service import turns as TU
+
+    class _FR:
+        def __init__(self, id, name):
+            self.id, self.name = id, name
+
+    class _Part:
+        def __init__(self, fr):
+            self.function_response = fr
+
+    class _Content:
+        def __init__(self, parts):
+            self.parts = parts
+
+    class _Ev:
+        def __init__(self, frs):
+            self.content = _Content([_Part(f) for f in frs])
+
+    check("a stashed sentinel answer does NOT count as answered",
+          TU._answered_ids(_Ev([_FR("w1", "adk_cc_pending_confirmation")])) == set())
+    check("a pre-rewrite form answer does NOT count either",
+          TU._answered_ids(_Ev([_FR("w1", "adk_cc_confirmation_form")])) == set())
+    check("a CANONICAL answer still counts",
+          TU._answered_ids(_Ev([_FR("w1", "adk_request_confirmation")])) == {"w1"})
+    check("ordinary tool responses still count",
+          TU._answered_ids(_Ev([_FR("t1", "run_bash")])) == {"t1"})
+
+    # The broker keeps its literals; the plugin owns the names. Pin both so
+    # a rename on either side fails HERE instead of silently diverging.
+    from adk_cc.plugins import confirmation_form_ui as CF
+    check("broker literals match the plugin's actual names",
+          set(TU._UNDELIVERED_CONFIRMATION_NAMES)
+          == {CF.PENDING_CONFIRMATION_NAME,
+              CF.CONFIRMATION_FORM_FUNCTION_CALL_NAME},
+          (TU._UNDELIVERED_CONFIRMATION_NAMES,
+           CF.PENDING_CONFIRMATION_NAME, CF.CONFIRMATION_FORM_FUNCTION_CALL_NAME))
+
+    # ---- P1: the general gate's pause names itself too ------------------
+    import inspect
+
+    from adk_cc.plugins import permissions as P
+    src = inspect.getsource(P)
+    check("the GENERAL gate return carries the pause contract",
+          src.count("is_pause_not_denial") >= 2,
+          "only the skill gate has it")
+
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
 

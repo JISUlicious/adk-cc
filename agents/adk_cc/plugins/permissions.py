@@ -470,6 +470,17 @@ class PermissionPlugin(BasePlugin):
             return {
                 "status": "needs_confirmation",
                 "reason": decision.reason,
+                # Same pause contract as the skill gate (P1): without it the
+                # model read "needs_confirmation" as a refusal and invented a
+                # detour. One live incident showed it rewriting a gated
+                # `rm ~/…` into an in-workspace variant to slip past the ask.
+                "is_pause_not_denial": True,
+                "next_step": (
+                    "Wait — this is not a refusal. The user is being asked to "
+                    "approve this exact action, and their answer resumes it "
+                    "automatically. Do not restate the action another way to "
+                    "avoid the confirmation. Say you are waiting for approval "
+                    "and end your turn."),
                 "matched_rule": (
                     decision.matched_rule.model_dump()
                     if decision.matched_rule

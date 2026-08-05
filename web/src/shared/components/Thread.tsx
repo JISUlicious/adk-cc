@@ -187,13 +187,18 @@ export function Thread({
     flattenEvents(deduped, responsesByCallId),
   )
 
+  // Confirmation cards are NOT disabled by isStreaming: each card manages
+  // its own submitted lock (ConfirmationCard). A live stream must not freeze
+  // an unanswered sibling card — that is what made two parallel
+  // confirmations unanswerable (#114); submitting during a turn is safe, the
+  // client's 409 wait queues the answer.
   const renderRow = (row: ChatRow, key: string) => (
     <Row
       key={key}
       row={row}
       pendingCallIds={pendingCallIds}
       onSubmitFunctionResponse={onSubmitFunctionResponse}
-      submitDisabled={isStreaming}
+      submitDisabled={false}
       appName={appName}
       userId={userId}
       sessionId={sessionId}
