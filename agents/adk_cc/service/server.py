@@ -375,6 +375,40 @@ def _mount_ui(app, dist_dir: str) -> None:
     app.mount("/", StaticFiles(directory=str(dist), html=False), name="ui")
 
 
+def _install_stack_dumper() -> None:
+    """`kill -USR1 <pid>` dumps every thread's stack to stderr (the log).
+
+    Written for a class of report this codebase keeps producing and cannot
+    reason its way out of: "the whole server freezes". A stuck REQUEST cannot
+    do that — only a blocked event loop can, i.e. a synchronous call sitting
+    in an async path. Guessing which one has now been wrong twice (the skills
+    walk measured 6.8ms; ADK's confirmation resume was a different bug), so
+    the server should simply say where it is.
+
+    SIGUSR1, not SIGABRT/faulthandler-on-crash: the process must SURVIVE the
+    dump so the operator can take several seconds apart and compare, and so a
+    frozen production server can be diagnosed without being killed first.
+    all_threads=True is the point — the blocking frame is what we are after,
+    and it may not be on the main thread.
+    """
+    try:
+        import faulthandler
+        import logging as _lg
+        import signal
+
+        if hasattr(signal, "SIGUSR1"):
+            # chain=False is load-bearing: chaining re-raises to the PREVIOUS
+            # handler, and Python's default for SIGUSR1 is to TERMINATE. A
+            # dumper that kills the server it is diagnosing is worse than none
+            # — caught in test, one signal killed a healthy process.
+            faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
+            _lg.getLogger(__name__).info("stack dumper armed: kill -USR1 %d dumps all thread "
+                      "stacks to this log", os.getpid())
+    except Exception as e:  # noqa: BLE001 — diagnostics must never block boot
+        import logging as _lg
+        _lg.getLogger(__name__).debug("stack dumper unavailable: %s", e)
+
+
 def make_app():
     """Default factory consumed by `uvicorn ... --factory`.
 
@@ -459,6 +493,7 @@ def make_app():
     # the admin routes write to — that's what makes edits take effect live.
     # Must run before build_fastapi_app(). See _prepare_admin_env().
     _prepare_admin_env()
+    _install_stack_dumper()
 
     extractor = None
     identity = None
