@@ -293,7 +293,18 @@ class DaytonaBackend(SandboxBackend):
         self._http: Optional[httpx.AsyncClient] = client
         # threading.Lock (not asyncio.Lock) so concurrent first-calls
         # from different event loops don't each create a sandbox.
-        self._create_lock = threading.Lock()
+        # Creation is serialised with an asyncio.Lock PER EVENT LOOP, not a
+        # threading.Lock. The old threading.Lock was held across the create
+        # POST and the started-poll — i.e. across `await` — so a second
+        # concurrent tool call on the SAME loop blocked the loop thread in
+        # .acquire() and the first could never resume: the whole server froze
+        # until timeout. Reported live (two parallel load_skill calls; single
+        # loads were fine because they never contend) and confirmed by a
+        # SIGUSR1 dump parked on this exact line.
+        # The registry itself is guarded by a threading.Lock that is only ever
+        # held for a dict lookup — never across an await.
+        self._loop_locks: dict[Any, asyncio.Lock] = {}
+        self._loop_locks_guard = threading.Lock()
 
     # --- helpers --------------------------------------------------------
 
@@ -472,6 +483,24 @@ class DaytonaBackend(SandboxBackend):
 
     # --- lifecycle ------------------------------------------------------
 
+    def _create_lock_for_loop(self) -> "asyncio.Lock":
+        """The create lock for the RUNNING loop.
+
+        Per-loop because an asyncio.Lock is bound to the loop that awaits it;
+        the backend can outlive one loop (tests, cross-loop reuse — the very
+        case the old threading.Lock was defending). Two different loops each
+        get their own lock and could in principle both POST a create, which is
+        a wasted sandbox; a blocked event loop is a frozen product. Trading
+        the rare waste for the outage is the right way round.
+        """
+        loop = asyncio.get_running_loop()
+        with self._loop_locks_guard:          # dict access only; no await
+            lock = self._loop_locks.get(loop)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._loop_locks[loop] = lock
+            return lock
+
     async def ensure_workspace(self, ws: "WorkspaceRoot") -> None:
         """Create the Daytona sandbox and poll until state=started.
 
@@ -485,7 +514,7 @@ class DaytonaBackend(SandboxBackend):
         self._host_workspace = ws.abs_path.rstrip("/") if ws.abs_path else None
         if self._sandbox_id is not None:
             return
-        with self._create_lock:
+        async with self._create_lock_for_loop():
             if self._sandbox_id is not None:
                 return
             # Build the create body. Daytona rejects resource fields
