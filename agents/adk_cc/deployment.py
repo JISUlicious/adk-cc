@@ -123,10 +123,10 @@ def sandbox_network_enabled() -> bool:
 
 def sandbox_image() -> str:
     """The container image for the desktop sandbox. `ADK_CC_SANDBOX_IMAGE` env →
-    stored setting → python:3.12-slim."""
+    stored setting → python:3.13.11-slim."""
     return (os.environ.get("ADK_CC_SANDBOX_IMAGE")
             or read_sandbox_settings().get("image")
-            or "python:3.12-slim")
+            or "python:3.13.11-slim")
 
 
 def sandbox_require() -> bool:

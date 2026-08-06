@@ -60,7 +60,7 @@ runtime is present or the user leaves it off.
   `_to_container_path`, read-only rootfs, `network=none`, helper container for
   `mkdir`). **Wrong for local in-place** — don't reuse as-is; it also never injects
   `_runtime_env()` (a latent secrets gap).
-- `Dockerfile.sandbox` exists (python:3.12-slim + git/ripgrep/fd/build-essential +
+- `Dockerfile.sandbox` exists (python:3.13.11-slim + git/ripgrep/fd/build-essential +
   data stack + uid-1000 user); swappable via `ADK_CC_SANDBOX_IMAGE`.
 - `is_noop_backend()` gates the artifact tools off under `noop`; a real container
   backend flips them on (free side benefit).
@@ -165,7 +165,7 @@ runtime is present or the user leaves it off.
   override), alongside the existing `/desktop/settings/*`.
 
 ### Phase 4 — Image bootstrap
-- Default `ADK_CC_SANDBOX_IMAGE` to a small stock image (e.g. `python:3.12-slim`)
+- Default `ADK_CC_SANDBOX_IMAGE` to a small stock image (e.g. `python:3.13.11-slim`)
   for zero-setup first run; power users point at the richer bundled
   `Dockerfile.sandbox` (build) or a published `adk-cc-sandbox` (pull).
 - Settings shows image state (present / missing / pulling) with one-click

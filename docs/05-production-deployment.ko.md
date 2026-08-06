@@ -351,7 +351,7 @@ Tasks dir: `mv ~/.adk-cc/tasks/<tenant>/<session>/*.json <root>/<tenant>/<user>/
 
 ### 운영
 
-- ✗ **Agent 프로세스 Dockerfile.** `Dockerfile.sandbox`만 출하됨 (sandbox VM의 per-session container용). Agent pod 자체는 자체 Dockerfile 필요 — 단순함 (`FROM python:3.12-slim`, `uv pip install -e .`, uvicorn entrypoint)지만 직접 작성해야. 배포 repo의 K8s manifest와 함께 체크인.
+- ✗ **Agent 프로세스 Dockerfile.** `Dockerfile.sandbox`만 출하됨 (sandbox VM의 per-session container용). Agent pod 자체는 자체 Dockerfile 필요 — 단순함 (`FROM python:3.13.11-slim`, `uv pip install -e .`, uvicorn entrypoint)지만 직접 작성해야. 배포 repo의 K8s manifest와 함께 체크인.
 - ✗ **K8s manifest / Helm chart.** 제공되지 않음. 최소: Deployment, Service, ConfigMap (env), Secret (creds + JWT keys + Docker mTLS 인증서), PersistentVolumeClaim, NetworkPolicy (IdP egress + Postgres + sandbox VM Docker 포트만 허용).
 - ✗ **Graceful 종료.** `uvicorn`이 SIGTERM 처리, 하지만 ADK가 문서화된 세션 flush 후크가 없음. In-flight `run_bash` 호출은 pod 종료 시 사망. Stateless tool에는 수용 가능; long-running에는 먼저 로드 밸런서로 drain.
 - ✗ **백업 / 복원.** 다섯 상태 저장소; 각각의 절차 문서화:

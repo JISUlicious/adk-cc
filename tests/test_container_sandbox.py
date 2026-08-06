@@ -199,7 +199,7 @@ def test_sandbox_settings_persistence_and_precedence():
         # defaults with no file
         assert deployment.sandbox_mode() == "host"
         assert deployment.sandbox_network_enabled() is True
-        assert deployment.sandbox_image() == "python:3.12-slim"
+        assert deployment.sandbox_image() == "python:3.13.11-slim"
 
         # persisted values are read back
         deployment.write_sandbox_settings({"mode": "container", "network": False, "image": "custom:1"})

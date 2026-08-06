@@ -44,6 +44,33 @@ cd /opt/adk-cc
 docker build -t adk-cc-sandbox:latest -f Dockerfile.sandbox .
 ```
 
+The image carries Python 3.13.11 plus the analysis stack (pandas / numpy /
+scipy / scikit-learn / polars / duckdb), charting (matplotlib, seaborn, plotly
++ kaleido for static export), xgboost, the office-document readers/writers
+(xlsx, xls, docx, pptx, odf, hwp/hwpx), and the Nanum Korean fonts so Hangul
+renders in charts instead of tofu boxes.
+
+Verify a freshly built image actually exercises all of it:
+
+```bash
+python tests/e2e_sandbox_image_libs.py     # skips cleanly if Docker is absent
+```
+
+### Building behind a proxy
+
+On a restricted network, pass the proxy at build time. `APT_PROXY` writes
+`/etc/apt/apt.conf.d/proxy.conf` before the first `apt-get`, and the pip args
+cover PyPI, which the same network almost always blocks too:
+
+```bash
+docker build -t adk-cc-sandbox:latest -f Dockerfile.sandbox \
+  --build-arg APT_PROXY=http://proxy.corp:3128 \
+  --build-arg PIP_INDEX_URL=https://nexus.corp/repository/pypi/simple \
+  --build-arg PIP_TRUSTED_HOST=nexus.corp .
+```
+
+All three default to empty; an unrestricted build needs none of them.
+
 ## 2. Pick a connection mode
 
 ### Plain TCP (simpler — for trusted internal networks)

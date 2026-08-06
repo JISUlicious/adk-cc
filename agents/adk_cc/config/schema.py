@@ -296,7 +296,7 @@ FIELDS: list[Var] = [
         choices=("noop","container","docker","e2b","sandbox_service","daytona","ssh")),
     Var("ADK_CC_SANDBOX_IMAGE", Tier.ADVANCED, "Sandbox",
         "Container image override. Per-backend defaults when unset: docker = "
-        "adk-cc-sandbox:latest; container/desktop = python:3.12-slim.",
+        "adk-cc-sandbox:latest; container/desktop = python:3.13.11-slim.",
         default=None, default_display="per-backend (see help)"),
     Var("ADK_CC_SANDBOX_NETWORK", Tier.ADVANCED, "Sandbox",
         "container backend: 1 = network on (dev), 0 = none.",

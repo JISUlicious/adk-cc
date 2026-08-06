@@ -3,27 +3,137 @@
 # Built once on the sandbox host:
 #   docker build -t adk-cc-sandbox:latest -f Dockerfile.sandbox .
 #
+# Behind a proxy / restricted network:
+#   docker build -t adk-cc-sandbox:latest -f Dockerfile.sandbox \
+#     --build-arg APT_PROXY=http://proxy.corp:3128 \
+#     --build-arg PIP_INDEX_URL=https://nexus.corp/repository/pypi/simple \
+#     --build-arg PIP_TRUSTED_HOST=nexus.corp .
+#
 # Operators can swap a custom image via ADK_CC_SANDBOX_IMAGE.
 
-FROM python:3.12-slim
+FROM python:3.13.11-slim
 
+# --- optional egress config -------------------------------------------------
+# Written BEFORE the first apt-get: a proxy configured after it is useless,
+# because the update that needed it has already failed. Default empty, so an
+# unrestricted build never creates the file at all.
+ARG APT_PROXY=""
+RUN if [ -n "$APT_PROXY" ]; then \
+        printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' \
+            "$APT_PROXY" "$APT_PROXY" > /etc/apt/apt.conf.d/proxy.conf; \
+        echo "apt proxy configured: $APT_PROXY"; \
+    fi
+
+# A network that blocks apt almost always blocks PyPI too, and pip runs on the
+# very next layer — an apt-only proxy would stall this build one step later.
+# Unset = plain PyPI (pip treats the empty value as absent; verified).
+#
+# These are ENV rather than plain ARG on purpose: they persist into the running
+# container, so the lazy `pip install` a third-party skill performs at RUNTIME
+# reaches the same private index. A sandbox on a restricted network has no
+# route to PyPI either.
+ARG PIP_INDEX_URL=""
+ARG PIP_TRUSTED_HOST=""
+ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST}
+
+# --- system packages --------------------------------------------------------
 # Common shell + search tools the agent reaches for. ripgrep / fd are
 # fast alternatives the model often prefers; build-essential lets pip
 # compile any C extensions if a notebook installs something extra.
+#
+# libgomp1 only LOOKS optional: xgboost links OpenMP at import time, and on a
+# -slim base the import dies with a bare "libgomp.so.1: cannot open shared
+# object file" that reads like a broken package rather than a missing lib.
+#
+# Korean faces + fontconfig so Hangul renders in matplotlib/plotly output
+# instead of tofu boxes — the whole point of charting Korean data.
+# NOTE on the font list: Debian 13 (trixie) DROPPED fonts-nanum-coding, and a
+# missing font package fails the whole layer with a bare apt exit 100. Naver's
+# monospace face now ships as fonts-naver-d2coding, which is what replaces it
+# here. Re-check these names when the base image moves to a new Debian.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bash coreutils findutils grep sed gawk \
         git curl ripgrep fd-find \
         build-essential \
+        libgomp1 \
+        fontconfig \
+        fonts-nanum fonts-nanum-extra fonts-nanum-eco fonts-naver-d2coding \
+    && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
-# Data-analysis stack covering the typical 50K rows × ~1K columns
-# pandas / numpy / sklearn workloads, plus polars + duckdb for the
-# faster columnar paths.
+# --- python: analysis -------------------------------------------------------
+# Covers the typical 50K rows × ~1K columns pandas / numpy / sklearn
+# workloads, plus polars + duckdb for the faster columnar paths.
 RUN pip install --no-cache-dir \
         pandas numpy scipy scikit-learn \
         matplotlib seaborn \
         polars pyarrow duckdb \
         requests httpx
+
+# --- python: modelling + charting -------------------------------------------
+# xgboost-cpu, not xgboost: the default wheel drags in nvidia-nccl and friends
+# for GPU support — 244 MB of CUDA in a sandbox that has no GPU. Same
+# `import xgboost`, same API; manylinux wheels exist for x86_64 and aarch64.
+# Switch back to plain `xgboost` if these containers ever get a GPU.
+#
+# kaleido is pinned to the 0.x line deliberately. It is what makes
+# `fig.write_image()` work, which the bundled data-analyst skill documents and
+# which is the only way a headless agent can DELIVER a chart as a file. 0.2.1
+# bundles its own renderer (~85 MB, both arches); kaleido >= 1.0 instead
+# shells out to a real Chrome, and the lightest Debian option for that is
+# chromium-headless-shell at 800 MB — an unacceptable trade on an image this
+# size. The 0.x line is deprecated upstream, so when a future plotly finally
+# drops it, `tests/e2e_sandbox_image_libs.py` fails on the PNG check rather
+# than silently shipping an image that cannot export; at that point the choice
+# is to accept the browser or drop static export.
+RUN pip install --no-cache-dir \
+        xgboost-cpu \
+        plotly "kaleido==0.2.1"
+
+# --- python: office documents -----------------------------------------------
+# xlsx read/write (openpyxl both ways, xlsxwriter for rich formatting and
+# native charts), legacy .xls reads, odf, docx, pptx.
+RUN pip install --no-cache-dir \
+        openpyxl xlsxwriter xlrd odfpy \
+        python-docx python-pptx
+
+# HWP is the Korean office format and needs two paths, not one:
+#   pyhwp  — binary .hwp v5, an OLE container, read via olefile
+#   lxml   — .hwpx, which is just a zip of XML and needs no special reader
+# olefile + lxml are installed unconditionally so .hwpx and raw OLE parsing
+# work regardless. pyhwp is a much older package and is the one plausible
+# casualty of the 3.13 bump, so it gets its own layer and is allowed to fail
+# the build loudly-but-not-fatally rather than costing us every library above.
+RUN pip install --no-cache-dir olefile lxml
+RUN pip install --no-cache-dir pyhwp \
+    || echo "WARN: pyhwp did not install on this Python — binary .hwp reads \
+are unavailable; .hwpx still works via lxml"
+
+# Make the Korean faces a fallback rather than leaving every script to
+# configure fonts itself. DejaVu stays first for Latin text; NanumGothic
+# supplies the glyphs it lacks. unicode_minus off because the Unicode minus
+# sign is itself missing from the Nanum faces and renders as a box on axes.
+# The two replacements below are string-matched against upstream's shipped
+# matplotlibrc, so they fail closed: a future matplotlib that renames either
+# key would otherwise leave a silently unconfigured image that only shows up
+# as tofu boxes in a user's chart months later.
+RUN python - <<'PY'
+import pathlib, matplotlib
+p = pathlib.Path(matplotlib.matplotlib_fname())
+t = orig = p.read_text()
+t = t.replace("#font.sans-serif:",
+              "font.sans-serif: DejaVu Sans, NanumGothic, NanumBarunGothic, ")
+t = t.replace("#axes.unicode_minus: True", "axes.unicode_minus: False")
+if t == orig:
+    raise SystemExit(f"matplotlibrc keys not found in {p} — patch is stale")
+p.write_text(t)
+from matplotlib import font_manager
+names = {f.name for f in font_manager.fontManager.ttflist}
+if not any(n.startswith("Nanum") for n in names):
+    raise SystemExit("no Nanum face visible to matplotlib — font install failed")
+print("matplotlib Korean fallback configured:", p)
+PY
 
 # Unprivileged runtime user (matches the user= setting in the spawn
 # config so workspace writes get the right ownership).

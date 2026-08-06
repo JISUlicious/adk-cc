@@ -351,7 +351,7 @@ Mark each before serving real users. ✓ = covered by adk-cc; ⚠️ = partial /
 
 ### Operations
 
-- ✗ **Agent process Dockerfile.** Only `Dockerfile.sandbox` ships (for the per-session container, on the sandbox VM). The agent pod itself needs its own Dockerfile — straightforward (`FROM python:3.12-slim`, `uv pip install -e .`, entrypoint to uvicorn) but you have to write it. Check it in alongside the K8s manifests in your deployment repo.
+- ✗ **Agent process Dockerfile.** Only `Dockerfile.sandbox` ships (for the per-session container, on the sandbox VM). The agent pod itself needs its own Dockerfile — straightforward (`FROM python:3.13.11-slim`, `uv pip install -e .`, entrypoint to uvicorn) but you have to write it. Check it in alongside the K8s manifests in your deployment repo.
 - ✗ **K8s manifests / Helm chart.** Not provided. Minimum: Deployment, Service, ConfigMap (env), Secret (creds + JWT keys + Docker mTLS certs), PersistentVolumeClaim, NetworkPolicy (allow only IdP egress + Postgres + sandbox VM Docker port).
 - ✗ **Graceful shutdown.** `uvicorn` handles SIGTERM but ADK doesn't have a documented session-flush hook. In-flight `run_bash` calls die when the pod terminates. Acceptable for stateless tools; for long-running ones, drain via load balancer first.
 - ✗ **Backup / restore.** Five state stores; document procedures for each:

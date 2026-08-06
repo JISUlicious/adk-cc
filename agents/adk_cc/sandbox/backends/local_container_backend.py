@@ -32,7 +32,7 @@ from .noop_backend import NoopBackend
 if TYPE_CHECKING:
     from ..workspace import WorkspaceRoot
 
-_DEFAULT_IMAGE = "python:3.12-slim"
+_DEFAULT_IMAGE = "python:3.13.11-slim"
 
 # Last-active (monotonic) per container NAME, for the opt-in idle reaper. Module
 # state so it survives the per-turn rebuild of the backend object.

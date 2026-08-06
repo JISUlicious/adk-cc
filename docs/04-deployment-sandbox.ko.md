@@ -36,6 +36,33 @@ cd /opt/adk-cc
 docker build -t adk-cc-sandbox:latest -f Dockerfile.sandbox .
 ```
 
+이미지에는 Python 3.13.11과 함께 분석 스택(pandas / numpy / scipy /
+scikit-learn / polars / duckdb), 차트(matplotlib, seaborn, plotly + 정적
+내보내기용 kaleido), xgboost, 오피스 문서 읽기/쓰기(xlsx, xls, docx, pptx,
+odf, hwp/hwpx), 그리고 차트에서 한글이 두부(tofu) 대신 제대로 렌더링되도록
+나눔 글꼴이 포함됨.
+
+새로 빌드한 이미지가 실제로 전부 동작하는지 검증:
+
+```bash
+python tests/e2e_sandbox_image_libs.py     # Docker 없으면 자동 skip
+```
+
+### 프록시 환경에서 빌드
+
+제한된 네트워크에서는 빌드 시점에 프록시를 전달. `APT_PROXY`는 첫 `apt-get`
+전에 `/etc/apt/apt.conf.d/proxy.conf`를 작성하며, 같은 네트워크가 PyPI도
+막는 경우가 대부분이므로 pip 인자도 함께 제공:
+
+```bash
+docker build -t adk-cc-sandbox:latest -f Dockerfile.sandbox \
+  --build-arg APT_PROXY=http://proxy.corp:3128 \
+  --build-arg PIP_INDEX_URL=https://nexus.corp/repository/pypi/simple \
+  --build-arg PIP_TRUSTED_HOST=nexus.corp .
+```
+
+세 인자 모두 기본값이 비어 있으므로, 제한 없는 네트워크에서는 불필요.
+
 ## 2. 연결 모드 선택
 
 ### Plain TCP (더 단순 — 신뢰할 수 있는 내부 네트워크용)
