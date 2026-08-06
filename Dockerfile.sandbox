@@ -3,8 +3,13 @@
 # Built once on the sandbox host:
 #   docker build -t adk-cc-sandbox:latest -f Dockerfile.sandbox .
 #
-# Behind a proxy / restricted network:
+# Behind a proxy / restricted network. NO_PROXY is usually required, not
+# optional: anything reachable DIRECTLY (an internal Debian mirror, an internal
+# PyPI) must bypass the proxy or its fetches fail.
 #   docker build -t adk-cc-sandbox:latest -f Dockerfile.sandbox \
+#     --build-arg HTTP_PROXY=http://proxy.corp:3128 \
+#     --build-arg HTTPS_PROXY=http://proxy.corp:3128 \
+#     --build-arg NO_PROXY=localhost,127.0.0.1,.corp,mirror.corp.com \
 #     --build-arg APT_PROXY=http://proxy.corp:3128 \
 #     --build-arg PIP_INDEX_URL=https://nexus.corp/repository/pypi/simple \
 #     --build-arg PIP_TRUSTED_HOST=nexus.corp .
@@ -14,14 +19,41 @@
 FROM python:3.13.11-slim
 
 # --- optional egress config -------------------------------------------------
-# Written BEFORE the first apt-get: a proxy configured after it is useless,
-# because the update that needed it has already failed. Default empty, so an
-# unrestricted build never creates the file at all.
+# Standard proxy vars, set BEFORE anything fetches. Both cases on purpose:
+# some clients read only lowercase, some only uppercase.
+#
+# NO_PROXY is not decoration — on a restricted network it is usually what makes
+# the build work at all. Verified against this base image: with a proxy in
+# apt.conf and an unreachable proxy host, `apt-get update` fails every repo;
+# adding no_proxy for those repo hosts makes apt bypass the proxy and install
+# succeed. So env no_proxy OVERRIDES the apt.conf proxy per host, which is
+# exactly what an internal Debian mirror needs.
+#
+# Two things to know before setting these:
+#   - no_proxy does NOT support CIDR in apt, curl, or Python — it is suffix
+#     matching. "10.0.0.0/8" silently matches nothing; use ".corp" or hosts.
+#   - these persist into the image (see the ENV note below). If your proxy URL
+#     embeds credentials, do NOT bake it in — leave these empty and inject at
+#     runtime with ADK_CC_SANDBOX_ENV instead.
+#
+# HTTP_PROXY / HTTPS_PROXY / NO_PROXY are predefined build args in Docker, so
+# they are also picked up from the client environment automatically and kept
+# out of `docker history`.
+ARG HTTP_PROXY=""
+ARG HTTPS_PROXY=""
+ARG NO_PROXY=""
+ENV http_proxy=${HTTP_PROXY} https_proxy=${HTTPS_PROXY} no_proxy=${NO_PROXY} \
+    HTTP_PROXY=${HTTP_PROXY} HTTPS_PROXY=${HTTPS_PROXY} NO_PROXY=${NO_PROXY}
+
+# apt-specific proxy, for when apt must use a different one than everything
+# else (or when only apt is proxied). Written BEFORE the first apt-get: a proxy
+# configured after it is useless, because the update that needed it has already
+# failed. Default empty, so an unrestricted build never creates the file.
 ARG APT_PROXY=""
 RUN if [ -n "$APT_PROXY" ]; then \
         printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' \
             "$APT_PROXY" "$APT_PROXY" > /etc/apt/apt.conf.d/proxy.conf; \
-        echo "apt proxy configured: $APT_PROXY"; \
+        echo "apt proxy configured: $APT_PROXY (no_proxy=${NO_PROXY:-unset})"; \
     fi
 
 # A network that blocks apt almost always blocks PyPI too, and pip runs on the

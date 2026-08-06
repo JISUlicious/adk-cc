@@ -56,12 +56,56 @@ python tests/e2e_sandbox_image_libs.py     # Docker 없으면 자동 skip
 
 ```bash
 docker build -t adk-cc-sandbox:latest -f Dockerfile.sandbox \
+  --build-arg HTTP_PROXY=http://proxy.corp:3128 \
+  --build-arg HTTPS_PROXY=http://proxy.corp:3128 \
+  --build-arg NO_PROXY=localhost,127.0.0.1,.corp,mirror.corp.com \
   --build-arg APT_PROXY=http://proxy.corp:3128 \
   --build-arg PIP_INDEX_URL=https://nexus.corp/repository/pypi/simple \
   --build-arg PIP_TRUSTED_HOST=nexus.corp .
 ```
 
-세 인자 모두 기본값이 비어 있으므로, 제한 없는 네트워크에서는 불필요.
+모든 인자의 기본값이 비어 있으므로, 제한 없는 네트워크에서는 불필요.
+
+**`NO_PROXY`는 선택이 아니라 대개 필수.** 빌드가 *직접* 접근해야 하는 대상
+— 내부 Debian 미러, 내부 PyPI, 프록시가 라우팅할 수 없는 호스트 — 은 목록에
+없으면 실패. 이 이미지로 검증함: 프록시가 설정되어 있고 그 프록시 호스트에
+접근할 수 없을 때 `apt-get update`는 모든 저장소에서 실패하지만, 해당 저장소
+호스트를 `no_proxy`에 추가하면 apt가 프록시를 우회하여 성공. 환경변수
+`no_proxy`가 호스트 단위로 `apt.conf`의 프록시 설정을 덮어씀.
+
+주의할 점 두 가지:
+
+- **CIDR 미지원.** `no_proxy`는 apt, curl, Python 모두 접미사 매칭.
+  `NO_PROXY=10.0.0.0/8`은 아무것도 매칭하지 않고 조용히 무시됨 — `.corp`
+  또는 명시적 호스트명을 사용할 것. (Go는 CIDR을 지원하므로, 같은 값을 Go
+  도구로 시험해 본 경우 혼동하기 쉬움.)
+- **프록시 URL의 자격증명이 이미지에 구워짐.** 스킬의 지연 `pip install`이
+  인덱스에 접근할 수 있도록 이 변수들은 의도적으로 런타임 이미지까지
+  유지됨. 프록시 URL에 사용자명/비밀번호가 포함된다면 빌드 시에는 비워 두고
+  런타임에 주입할 것 (다음 절).
+
+`docker build`는 `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`를 클라이언트 환경에서
+자동으로 가져오며(predefined build args), `docker history`에는 남기지 않음.
+
+배선 검증 (죽은 프록시를 사용하므로 실제 프록시 불필요):
+
+```bash
+python tests/e2e_sandbox_build_proxy.py
+```
+
+### 런타임 프록시 설정
+
+컨테이너는 agent 호스트의 프록시 환경을 **상속하지 않음**. 이미지에 구워진
+값과 백엔드가 주입한 값만 받으므로, 스킬의 지연 의존성 설치가 프록시를
+통과해야 한다면 명시적으로 설정:
+
+```bash
+ADK_CC_SANDBOX_ENV=HTTPS_PROXY=http://proxy.corp:3128,NO_PROXY=localhost,127.0.0.1,.corp
+# 또는 호스트의 값을 이름으로 전달:
+ADK_CC_SANDBOX_ENV_PASSTHROUGH=HTTP_PROXY,HTTPS_PROXY,NO_PROXY
+```
+
+자격증명이 포함된 프록시 URL은 이미지 레이어에 남지 않도록 여기서 주입할 것.
 
 ## 2. 연결 모드 선택
 

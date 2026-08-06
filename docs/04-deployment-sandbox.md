@@ -64,12 +64,59 @@ cover PyPI, which the same network almost always blocks too:
 
 ```bash
 docker build -t adk-cc-sandbox:latest -f Dockerfile.sandbox \
+  --build-arg HTTP_PROXY=http://proxy.corp:3128 \
+  --build-arg HTTPS_PROXY=http://proxy.corp:3128 \
+  --build-arg NO_PROXY=localhost,127.0.0.1,.corp,mirror.corp.com \
   --build-arg APT_PROXY=http://proxy.corp:3128 \
   --build-arg PIP_INDEX_URL=https://nexus.corp/repository/pypi/simple \
   --build-arg PIP_TRUSTED_HOST=nexus.corp .
 ```
 
-All three default to empty; an unrestricted build needs none of them.
+All default to empty; an unrestricted build needs none of them.
+
+**`NO_PROXY` is usually required, not optional.** Anything the build must
+reach *directly* — an internal Debian mirror, an internal PyPI, a host the
+proxy cannot route — fails unless it is listed. Verified against this image:
+with a proxy configured and an unreachable proxy host, `apt-get update` fails
+every repository; adding `no_proxy` for those repo hosts makes apt bypass the
+proxy and succeed. Environment `no_proxy` overrides the `apt.conf` proxy on a
+per-host basis.
+
+Two traps:
+
+- **No CIDR support.** `no_proxy` is suffix matching in apt, curl and Python.
+  `NO_PROXY=10.0.0.0/8` silently matches nothing — use `.corp` or explicit
+  hostnames. (Go supports CIDR, which is why this surprises people who tested
+  the same value with a Go tool.)
+- **Credentials in a proxy URL get baked into the image.** These vars persist
+  into the runtime image on purpose, so a skill's lazy `pip install` can reach
+  the index. If your proxy URL embeds a username/password, leave them empty at
+  build time and inject at runtime instead (next section).
+
+`docker build` also picks `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` up from the
+client environment automatically — they are predefined build args — and keeps
+them out of `docker history`.
+
+Verify the wiring (uses a dead proxy, so it needs no real one):
+
+```bash
+python tests/e2e_sandbox_build_proxy.py
+```
+
+### Proxy settings at runtime
+
+The container does **not** inherit the agent host's proxy environment. It gets
+only what the image bakes in plus what the backend injects, so if a skill's
+lazy dependency install has to traverse the proxy, set it explicitly:
+
+```bash
+ADK_CC_SANDBOX_ENV=HTTPS_PROXY=http://proxy.corp:3128,NO_PROXY=localhost,127.0.0.1,.corp
+# or forward the host's own values by name:
+ADK_CC_SANDBOX_ENV_PASSTHROUGH=HTTP_PROXY,HTTPS_PROXY,NO_PROXY
+```
+
+This is also the right place for a proxy URL containing credentials, since it
+keeps them out of the image layers.
 
 ## 2. Pick a connection mode
 
