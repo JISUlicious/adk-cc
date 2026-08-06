@@ -299,7 +299,7 @@ FIELDS: list[Var] = [
         "adk-cc-sandbox:latest; container/desktop = python:3.13.11-slim.",
         default=None, default_display="per-backend (see help)"),
     Var("ADK_CC_SANDBOX_NETWORK", Tier.ADVANCED, "Sandbox",
-        "container backend: 1 = network on (dev), 0 = none.",
+        "Sandbox egress. container/desktop backend: default ON (1 = on, 0 = none). docker backend: default OFF — set 1 when the sandbox must reach a database, internal API or package index (without it pip/uv and all outbound calls fail).",
         default=True, parse=as_bool),
     Var("ADK_CC_SANDBOX_REQUIRE", Tier.ADVANCED, "Sandbox",
         "1 = fail closed: run_bash errors if the sandbox runtime is missing (no host fallback).",

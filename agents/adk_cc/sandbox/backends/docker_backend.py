@@ -36,6 +36,7 @@ Connection mode is picked by env vars:
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import logging
 import os
@@ -64,6 +65,38 @@ log = logging.getLogger(__name__)
 
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_USER = "1000:1000"
+
+# HOME must be writable, and the image's own /home/sandbox is NOT: the rootfs
+# is mounted read-only, so `uv` died with "failed to initialize cache at
+# /home/sandbox/.cache/uv: read-only file system" and every skill script with
+# it. LocalContainerBackend already had this lesson (_CONTAINER_HOME); this
+# backend never got it.
+#
+# It lives INSIDE the workspace bind mount rather than on the /tmp tmpfs,
+# which buys three things tmpfs cannot:
+#   - disk-backed, so a multi-hundred-MB wheel download is not charged against
+#     the container's memory limit,
+#   - persistent, so the uv/pip cache survives the session — which is what the
+#     old /root/.cache mount was reaching for, aimed at a HOME this container
+#     does not use (it runs as uid 1000, not root),
+#   - writable by `put_archive`, which refuses tmpfs destinations under a
+#     read-only rootfs even though a shell can write them.
+# `.adk-cc/` is already excluded from checkpoints, so the cache cannot leak
+# into undo history.
+CONTAINER_HOME = f"{CONTAINER_WORKSPACE}/.adk-cc/home"
+
+
+def _network_mode() -> str:
+    """Docker network for the sandbox. Default DENY, opt in via env.
+
+    Deliberately stricter than LocalContainerBackend, which defaults network
+    ON: that one is a developer's own machine, this one is a shared daemon
+    serving multiple tenants, so egress is opt-in rather than opt-out. Set
+    ADK_CC_SANDBOX_NETWORK=1 when the sandbox legitimately needs to reach a
+    database, an internal API, or a package index — without it `pip install`,
+    `uv`, and every outbound connection fail with no route.
+    """
+    return "bridge" if env_bool("ADK_CC_SANDBOX_NETWORK") else "none"
 
 
 def _build_client() -> docker.DockerClient:
@@ -219,27 +252,19 @@ class DockerBackend(SandboxBackend):
                 "mode": "rw",
             },
         }
-        # Per-user install cache (production layout only). Bind-mounts
-        # <user_home>/.cache to /root/.cache so uv/pip caches survive
-        # across the user's sessions. Skipped on dev (single-user, no
-        # benefit) and skippable in production via env if operators
-        # want truly stateless containers.
-        if (
-            self._is_per_user_layout
-            and not env_bool("ADK_CC_DISABLE_INSTALL_CACHE_MOUNT")
-        ):
-            cache_dir = os.path.join(self._workspace_abs_path, ".cache")
-            volumes[cache_dir] = {
-                "bind": "/root/.cache",
-                "mode": "rw",
-            }
+        # NOTE: there used to be a per-user install-cache mount here, binding
+        # <workspace>/.cache to /root/.cache. It never did anything: the
+        # container runs as uid 1000, whose HOME is not /root, so neither uv
+        # nor pip ever looked there. CONTAINER_HOME now lives inside the
+        # workspace mount, which delivers the same persistence for every
+        # layout without a second mount or a per-layout branch.
 
         return self._client.containers.run(
             image=image,
             detach=True,
             tty=True,
             name=self._container_name,
-            network_mode="none",
+            network_mode=_network_mode(),
             mem_limit=mem_limit,
             cpu_quota=cpu_quota,
             pids_limit=pids_limit,
@@ -347,14 +372,23 @@ class DockerBackend(SandboxBackend):
         # name-only `-e KEY` forwarding, but acceptable for the remote deployment
         # where the daemon host is trusted infrastructure, not the user's laptop.
         runtime_env = await self._runtime_env()
+        # HOME first, so an operator-supplied HOME in ADK_CC_SANDBOX_ENV still
+        # wins. Everything that caches — uv, pip, npm — derives its path from
+        # this, and the image's own HOME is on the read-only rootfs.
+        env = {"HOME": CONTAINER_HOME, **(runtime_env or {})}
 
         def _run() -> ExecResult:
             try:
+                # Create HOME per exec rather than once at container start: the
+                # backend can adopt a container from a previous boot, and a
+                # workspace can be re-created under it, so "once" is not a
+                # guarantee. mkdir -p is idempotent and costs a syscall.
                 rc, output = container.exec_run(
-                    cmd=["bash", "-lc", cmd],
+                    cmd=["bash", "-lc",
+                         f"mkdir -p {shlex.quote(env['HOME'])} 2>/dev/null; {cmd}"],
                     workdir=cwd_in_container,
                     user=CONTAINER_USER,
-                    environment=runtime_env or None,
+                    environment=env,
                     demux=True,
                 )
             except Exception as e:
@@ -424,9 +458,39 @@ class DockerBackend(SandboxBackend):
             container.exec_run(
                 cmd=["mkdir", "-p", target_dir], user=CONTAINER_USER
             )
-            ok = container.put_archive(path=target_dir, data=buf.getvalue())
-            if not ok:
-                raise IOError(f"put_archive returned False for {path_in_container}")
+            try:
+                ok = container.put_archive(path=target_dir, data=buf.getvalue())
+                if not ok:
+                    raise IOError(
+                        f"put_archive returned False for {path_in_container}")
+                return
+            except docker.errors.APIError as e:
+                # Docker's archive API refuses ANY destination when the rootfs
+                # is read-only — including /tmp, which is a tmpfs a shell in
+                # this same container writes happily. Measured: put_archive to
+                # /workspace succeeds, to /tmp returns 400 "container rootfs is
+                # marked read-only", while `echo > /tmp/f` works in both.
+                # Surfaced to users as a raw 400 from write_file.
+                #
+                # So fall back to the path that demonstrably works. Restricted
+                # to the read-only complaint on purpose: a genuine permission
+                # or quota error must still fail loudly rather than be retried
+                # into a confusing second error.
+                if "read-only" not in str(e).lower():
+                    raise
+                b64 = base64.b64encode(encoded).decode("ascii")
+                rc, out = container.exec_run(
+                    cmd=["bash", "-lc",
+                         f"printf %s {shlex.quote(b64)} | base64 -d > "
+                         f"{shlex.quote(path_in_container)}"],
+                    user=CONTAINER_USER,
+                )
+                if rc != 0:
+                    raise IOError(
+                        f"write to {path_in_container} failed after the "
+                        f"read-only rootfs fallback: "
+                        f"{(out or b'').decode('utf-8', 'replace')[:300]}"
+                    ) from e
 
         await asyncio.to_thread(_write)
 
