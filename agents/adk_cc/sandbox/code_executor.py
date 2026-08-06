@@ -20,6 +20,7 @@ sync method from inside its own running loop).
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import hashlib
 import re
@@ -36,9 +37,12 @@ from google.adk.code_executors.code_execution_utils import (
 
 from ..branding import NOTE_PREFIX
 from .config import NetworkConfig
-from .analysis_env import AnalysisEnvError, ensure_env, required_tiers
+from .analysis_env import (AnalysisEnvError, ensure_env, forget,
+                           required_tiers)
 from .backends.base import SandboxBackend
 from .workspace import WorkspaceRoot
+
+_log = logging.getLogger(__name__)
 
 
 # The skill-script launcher states the imports of the skill it is about to run,
@@ -154,9 +158,8 @@ class SandboxBackedCodeExecutor(BaseCodeExecutor):
             # supplies a uv-managed interpreter — and escalates package tiers
             # based on what this code actually imports, so a trivial script
             # doesn't pay for the modeling stack.
-            env = await ensure_env(
-                backend, ws, tiers=_tiers_for(code_execution_input.code)
-            )
+            tiers = _tiers_for(code_execution_input.code)
+            env = await ensure_env(backend, ws, tiers=tiers)
             cmd = f"{shlex.quote(env.python)} {shlex.quote(rel_tmpfile)}"
             # NOTE: a skill script used to be run by `runpy` inside a wrapper
             # process, which does NOT put the script's own directory on
@@ -171,6 +174,31 @@ class SandboxBackedCodeExecutor(BaseCodeExecutor):
                 timeout_s=self.timeout_seconds,
                 cwd=ws.abs_path,
             )
+            # 127 is the shell's "command not found", which for an interpreter
+            # PATH means the env is gone — `.adk-cc/analysis-env/bin/python: No
+            # such file or directory`, reported live after a sandbox image
+            # rebuild. `ensure_env` now detects that on disk, but its
+            # in-process cache short-circuits the probe entirely, so a sandbox
+            # REPLACED mid-session still hands back a dead interpreter.
+            #
+            # Retry from the observed failure rather than probing defensively
+            # on every run: the happy path stays one round trip, and this
+            # recovers regardless of WHY the interpreter vanished.
+            if (getattr(res, "exit_code", 0) == 127 and env.is_managed
+                    and not getattr(res, "timed_out", False)):
+                dropped = forget(ws.abs_path)
+                _log.warning(
+                    "analysis env interpreter missing (exit 127); dropped %d "
+                    "cached entr%s and rebuilding", dropped,
+                    "y" if dropped == 1 else "ies")
+                env = await ensure_env(backend, ws, tiers=tiers)
+                res = await backend.exec(
+                    f"{shlex.quote(env.python)} {shlex.quote(rel_tmpfile)}",
+                    fs_write=ws.fs_write_config(),
+                    network=NetworkConfig(),
+                    timeout_s=self.timeout_seconds,
+                    cwd=ws.abs_path,
+                )
         except AnalysisEnvError as e:
             # Actionable by construction — surface verbatim rather than as a
             # bare ModuleNotFoundError three steps later.

@@ -93,7 +93,9 @@ def test_provisions_and_escalates_tiers():
         assert env.python == ".adk-cc/analysis-env/bin/python", env.python
         assert env.is_managed and env.provisioned
         joined = " ".join(b.cmds)
-        assert "uv venv --python 3.12" in joined, joined
+        # Pin the pinned-interpreter part, not the whole flag string — the
+        # creation step also carries --clear (see the rebuild test).
+        assert "uv venv" in joined and "--python 3.12" in joined, joined
         assert "uv pip install" in joined and "pandas>=2.3" in joined
         # modeling packages must NOT be installed for a core-only request
         assert "xgboost" not in joined
@@ -252,16 +254,126 @@ def test_real_provisioning_and_pandas_import():
     print("OK real_provisioning_and_pandas_import")
 
 
+def test_marker_without_interpreter_rebuilds():
+    """LIVE BUG: `.adk-cc/analysis-env/bin/python: No such file or directory`.
+
+    Reported right after a sandbox image rebuild, which is the giveaway. The
+    probe gathers two INDEPENDENT bits — does the interpreter exist, and what
+    do the recorded tiers say — and the marker branch used to return the
+    interpreter path having consulted only the second. That is fine while both
+    agree and wrong the moment they don't:
+
+        .adk-cc/ lives in the mounted workspace, so the marker survives
+        anything. bin/python is a symlink into a uv-managed interpreter inside
+        the RUNTIME. Rebuild the image (or move the project between backends)
+        and every existing project has a marker whose interpreter is gone.
+
+    `test -x` follows symlinks, so venv_exists was already False and correct —
+    the fix is simply to stop ignoring it.
+
+    Two failure modes are covered, because fixing only the first leaves the
+    user just as stuck: the early return must not fire, AND the rebuild must
+    actually succeed. The marker lives INSIDE the env dir, so a marker on disk
+    guarantees the directory exists, and a plain `uv venv` refuses it with
+    "Use --clear to replace it".
+    """
+    _clean_env()
+    with tempfile.TemporaryDirectory() as tmp:
+        b = _FakeBackend()
+        asyncio.run(ensure_env(b, _ws(tmp), tiers={"core"}))
+        marker = next(v for k, v in b.writes.items() if k.endswith(".adk-cc-tiers"))
+
+        reset_cache()
+        # The exact on-disk state after an image rebuild: tiers recorded,
+        # interpreter gone.
+        b2 = _FakeBackend(marker=marker, venv_exists=False)
+        env = asyncio.run(ensure_env(b2, _ws(tmp), tiers={"core"}))
+        joined = " ".join(b2.cmds)
+
+        assert env.provisioned, "a marker with no interpreter must NOT be reused"
+        assert "uv venv" in joined, f"must rebuild the venv: {joined}"
+        assert "--clear" in joined, (
+            "the env dir still exists (the marker is inside it), so uv refuses "
+            f"to create without --clear: {joined}")
+        # Nothing survived the wipe: this is a rebuild, not an escalation, so
+        # the delta optimisation must NOT apply.
+        assert "pandas>=2.3" in joined, f"must reinstall, not delta: {joined}"
+        assert env.python.endswith("/bin/python"), env.python
+
+        # A rebuild must not silently downgrade a project's capability.
+        reset_cache()
+        b3 = _FakeBackend(marker=marker, venv_exists=False)
+        env3 = asyncio.run(ensure_env(b3, _ws(tmp), tiers={"modeling"}))
+        assert {"core", "modeling"} <= set(env3.tiers), (
+            f"recorded tiers must survive a rebuild: {env3.tiers}")
+        j3 = " ".join(b3.cmds)
+        assert "xgboost" in j3 and "pandas>=2.3" in j3, j3
+    print("OK marker_without_interpreter_rebuilds")
+
+
+def test_real_broken_env_self_heals():
+    """REAL: break a genuine venv the way an image rebuild does, then recover.
+
+    The unit test above proves the BRANCH is taken. It cannot prove that
+    `uv venv --clear` actually succeeds over a venv whose interpreter symlink
+    dangles — and that is the whole fix. So this provisions for real, points
+    the interpreter symlink at a path that no longer exists (what a rebuilt
+    sandbox image leaves behind: `.adk-cc/` persists in the mounted workspace,
+    the uv-managed interpreter inside the container does not), and requires
+    ensure_env to hand back an interpreter that RUNS.
+    """
+    if not shutil.which("uv"):
+        print("SKIP real_broken_env_self_heals (uv not installed)")
+        return
+    _clean_env()
+    from adk_cc.sandbox.backends.noop_backend import NoopBackend
+
+    tmp = tempfile.mkdtemp(prefix="adkcc-analysis-broken-")
+    try:
+        ws, backend = _ws(tmp), NoopBackend()
+        # base tier only — this is about the interpreter, not the packages.
+        env = asyncio.run(ensure_env(backend, ws, tiers=set()))
+        interp = os.path.join(tmp, env.python)
+        assert os.path.exists(interp), interp
+
+        env_bin = os.path.join(tmp, ".adk-cc/analysis-env/bin")
+        for name in os.listdir(env_bin):
+            if name.startswith("python"):
+                p = os.path.join(env_bin, name)
+                os.unlink(p)
+                os.symlink("/nonexistent/uv/python/gone/bin/python3", p)
+        marker = os.path.join(tmp, ".adk-cc/analysis-env/.adk-cc-tiers")
+        assert os.path.isfile(marker), "marker must survive — that IS the bug"
+        assert not os.path.exists(interp), "interpreter must be gone"
+
+        reset_cache()      # a fresh process, as after a restart
+        env2 = asyncio.run(ensure_env(backend, ws, tiers=set()))
+        interp2 = os.path.join(tmp, env2.python)
+        assert env2.provisioned, "must rebuild, not reuse the dead marker"
+        out = subprocess.run([interp2, "-c", "import sys; print(sys.version)"],
+                             capture_output=True, text=True, timeout=180)
+        assert out.returncode == 0, (
+            f"the recovered interpreter does not run: {out.stderr[-300:]}")
+        print(f"   broken env recovered; interpreter runs "
+              f"{out.stdout.split()[0]}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        _clean_env()
+    print("OK real_broken_env_self_heals")
+
+
 def main():
     test_required_tiers_from_imports()
     test_provisions_and_escalates_tiers()
     test_reuses_existing_env_without_reinstalling()
     test_escalation_does_not_recreate_the_venv()
+    test_marker_without_interpreter_rebuilds()
     test_missing_uv_is_actionable_not_silent_fallback()
     test_install_failure_surfaces_output()
     test_modes_off_and_explicit_path()
     test_forced_tiers_from_env()
     test_real_provisioning_and_pandas_import()
+    test_real_broken_env_self_heals()
     print("\nall analysis-env tests passed")
 
 

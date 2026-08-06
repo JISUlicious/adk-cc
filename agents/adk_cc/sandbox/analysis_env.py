@@ -166,6 +166,22 @@ def reset_cache() -> None:
     _verified.clear()
 
 
+def forget(workspace_abs_path: str) -> int:
+    """Drop the in-process verification for one workspace. Returns entries removed.
+
+    The cache is what lets a repeat execution skip the probe round trip, but it
+    also means a env verified once is trusted for the life of the process — and
+    a sandbox that is REPLACED mid-session (a recreated container, an expired
+    remote workspace) takes its interpreter with it while this process still
+    believes in it. Callers that actually watch an execution fail use this to
+    force the next `ensure_env` back onto the on-disk probe.
+    """
+    stale = [k for k in _verified if k[0] == workspace_abs_path]
+    for k in stale:
+        _verified.pop(k, None)
+    return len(stale)
+
+
 async def _exec(backend: SandboxBackend, ws: WorkspaceRoot, cmd: str, *, timeout_s: int):
     return await backend.exec(
         cmd,
@@ -220,16 +236,30 @@ async def ensure_env(
     venv_exists = any(ln.strip() == "__PY_OK__" for ln in lines)
     have_token = next((ln.strip() for ln in lines if ln.strip() != "__PY_OK__"), "")
     already: frozenset[str] = frozenset()
-    if have_token:
-        have_tiers = frozenset(
-            t for t in have_token.split("|")[0].split(",") if t
-        )
+    have_tiers = frozenset(
+        t for t in have_token.split("|")[0].split(",") if t
+    ) if have_token else frozenset()
+    # The marker alone is NOT proof of a usable env — the two bits the probe
+    # gathers are independent, and trusting the marker while ignoring
+    # `venv_exists` is what shipped `.adk-cc/analysis-env/bin/python: No such
+    # file or directory` to users. It happens whenever the workspace outlives
+    # the runtime that built the env: the marker is a plain file in the mounted
+    # workspace, while `bin/python` is a symlink to a uv-managed interpreter
+    # inside the container. Rebuild the sandbox image and EVERY existing
+    # project has a marker pointing at an interpreter that no longer exists.
+    if have_token and venv_exists:
         if want <= have_tiers and have_token.endswith(_tier_token(have_tiers).split("|")[-1]):
             env = AnalysisEnv(python=py_rel, tiers=have_tiers)
             _verified[key] = env
             return env
         # Existing env, missing a tier → install ONLY the delta below.
         already = have_tiers
+        want = want | have_tiers
+    elif have_tiers:
+        # Rebuilding: keep the tiers this project was recorded as needing, so a
+        # rebuild restores what was there rather than silently downgrading a
+        # "ready: core, modeling" project to core. `already` stays empty —
+        # nothing survives the wipe, so every package is reinstalled.
         want = want | have_tiers
 
     await _provision(backend, ws, py_rel, want, venv_exists=venv_exists,
@@ -316,8 +346,19 @@ async def _provision(
     if not venv_exists:
         # `uv venv` downloads the pinned interpreter itself when missing, so the
         # host's own python version is irrelevant.
+        #
+        # --clear is unconditional here, and safe BECAUSE of the guard: we only
+        # reach this branch when there is no working interpreter, so there is
+        # nothing to preserve. Without it, `uv venv` refuses to build into a
+        # directory that already exists ("Use --clear to replace it") — and
+        # that directory usually DOES exist, since the tier marker lives inside
+        # it. One flag covers every way an env can be present-but-unusable: a
+        # dangling interpreter symlink after the runtime changed, a half-built
+        # venv from an interrupted install, a partially restored checkpoint.
+        # Enumerating those cases instead would mean a new branch per variant.
         steps.append(
-            (f"uv venv --python {shlex.quote(pyver)} {shlex.quote(_ENV_REL)}",
+            (f"uv venv --clear --python {shlex.quote(pyver)} "
+             f"{shlex.quote(_ENV_REL)}",
              f"create a Python {pyver} virtualenv")
         )
     # Install only the DELTA. Re-passing already-installed tiers over-constrains
