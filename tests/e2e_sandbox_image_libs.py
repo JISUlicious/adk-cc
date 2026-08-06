@@ -183,9 +183,49 @@ def _():
     assert os.getuid() == 1000, f"uid={os.getuid()}"
     return "uid 1000"
 
+@check("uv is installed")
+def _():
+    # The gap this catches: the image shipped every analysis package while
+    # missing the tool that provisions the RUNTIME interpreter, so a library
+    # probe passed 15/15 and every skill script still died with "uv is not
+    # available in the execution environment". Presence is checked here;
+    # whether it can actually BUILD an env needs network, so that runs
+    # separately (see UV_PROBE).
+    import subprocess
+    v = subprocess.run(["uv", "--version"], capture_output=True, text=True)
+    assert v.returncode == 0, f"uv missing: {v.stderr[:200]}"
+    return v.stdout.strip()
+
 for name, ok, detail in results:
     print(f"{'OK  ' if ok else 'FAIL'}|{name}|{detail}")
 print("PYTHON|" + sys.version.split()[0])
+'''
+
+# Run WITH network, unlike the probe above: this reproduces what
+# `analysis_env._provision()` does inside the sandbox on the first skill run —
+# `uv venv --clear --python 3.12` (which DOWNLOADS an interpreter, since the
+# image ships 3.13) then `uv pip install`. Checking `uv --version` alone would
+# have missed a uv that cannot actually fetch anything, which on a restricted
+# network is the likely failure.
+UV_PROBE = r'''
+import os, subprocess, sys
+os.chdir("/tmp")
+steps = [
+    (["uv", "venv", "--clear", "--python", "3.12", "/tmp/probe-env"],
+     "uv venv --python 3.12 (downloads an interpreter)"),
+    (["uv", "pip", "install", "--quiet", "--python",
+      "/tmp/probe-env/bin/python", "packaging"], "uv pip install"),
+    (["/tmp/probe-env/bin/python", "-c",
+      "import sys, packaging; print(sys.version.split()[0], packaging.__version__)"],
+     "the provisioned interpreter runs with the installed package"),
+]
+for cmd, what in steps:
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    if p.returncode != 0:
+        print(f"FAIL|{what}|{(p.stderr or p.stdout).strip()[-300:]}")
+        sys.exit(0)
+    last = (p.stdout or "").strip()
+print(f"OK  |uv provisions an env exactly as analysis_env does|{last}")
 '''
 
 
@@ -201,6 +241,8 @@ def main() -> int:
               f"(docker build -t {IMAGE} -f Dockerfile.sandbox .)"); return 0
 
     print(f"probing {IMAGE}")
+    # --network none on purpose: every library check must work offline, which
+    # is a real property (kaleido 0.2.1 renders without fetching anything).
     proc = subprocess.run(
         ["docker", "run", "--rm", "-i", "--network", "none", IMAGE,
          "python", "-c", PROBE],
@@ -209,8 +251,18 @@ def main() -> int:
         print("FAIL: probe did not run\n" + (proc.stderr or "")[-2000:])
         return 1
 
+    # Provisioning genuinely needs egress, so it gets its own networked run
+    # rather than weakening the isolation above.
+    uv = subprocess.run(
+        ["docker", "run", "--rm", "-i", IMAGE, "python", "-c", UV_PROBE],
+        capture_output=True, text=True, timeout=1200)
+    uv_lines = [ln for ln in (uv.stdout or "").splitlines() if "|" in ln]
+    if not uv_lines:
+        uv_lines = [f"FAIL|uv provisioning probe did not run|"
+                    f"{(uv.stderr or '').strip()[-300:]}"]
+
     failed = optional_failed = 0
-    for line in proc.stdout.splitlines():
+    for line in proc.stdout.splitlines() + uv_lines:
         if line.startswith("PYTHON|"):
             print(f"  python: {line.split('|', 1)[1]}")
             continue

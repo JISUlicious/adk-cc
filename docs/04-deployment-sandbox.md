@@ -103,6 +103,39 @@ Verify the wiring (uses a dead proxy, so it needs no real one):
 python tests/e2e_sandbox_build_proxy.py
 ```
 
+### The analysis env provisions at runtime — inside the container
+
+Worth knowing before you lock the network down: the interpreter that runs skill
+scripts is **not** the one baked into the image. On the first analysis in a
+project, `analysis_env` runs `uv venv --python 3.12` and `uv pip install`
+*inside the sandbox*, writing to `.adk-cc/analysis-env/`. That means live
+egress from the container on first use, to two distinct places:
+
+| Needs to reach | For |
+|---|---|
+| the Python interpreter source | `uv venv --python 3.12` downloads a standalone build |
+| your PyPI (or mirror) | the package tiers (`core`, `modeling`, `stats`) |
+
+The image ships `uv` for this. If the interpreter download is blocked but you
+have an internal mirror, point uv at it:
+
+```bash
+ADK_CC_SANDBOX_ENV=UV_PYTHON_INSTALL_MIRROR=https://mirror.corp/python-build-standalone
+```
+
+**Fully offline alternative.** The image already contains Python 3.13.11 with
+pandas / numpy / scipy / scikit-learn / matplotlib / plotly / xgboost. Skip
+provisioning entirely and use it:
+
+```bash
+ADK_CC_ANALYSIS_ENV=/usr/local/bin/python
+```
+
+No downloads, instant first run. The tradeoff is that the tier system stops
+applying, so anything not already in the image is gone — `shap` from the
+`modeling` tier, and the whole `stats` tier (`statsmodels`, `ruptures`,
+`dowhy`). Add them to `Dockerfile.sandbox` if your workloads need them.
+
 ### Proxy settings at runtime
 
 The container does **not** inherit the agent host's proxy environment. It gets

@@ -93,6 +93,39 @@ docker build -t adk-cc-sandbox:latest -f Dockerfile.sandbox \
 python tests/e2e_sandbox_build_proxy.py
 ```
 
+### analysis env는 런타임에, 컨테이너 안에서 프로비저닝됨
+
+네트워크를 잠그기 전에 알아둘 것: 스킬 스크립트를 실행하는 인터프리터는
+이미지에 구워진 그것이 **아님**. 프로젝트에서 첫 분석을 수행할 때
+`analysis_env`가 **샌드박스 안에서** `uv venv --python 3.12`와
+`uv pip install`을 실행하여 `.adk-cc/analysis-env/`에 생성함. 즉 첫 사용
+시점에 컨테이너에서 실제 외부 통신이 발생하며, 대상은 두 곳:
+
+| 접근 대상 | 용도 |
+|---|---|
+| Python 인터프리터 배포처 | `uv venv --python 3.12`가 standalone 빌드를 다운로드 |
+| PyPI (또는 미러) | 패키지 티어 (`core`, `modeling`, `stats`) |
+
+이를 위해 이미지에 `uv`가 포함됨. 인터프리터 다운로드가 차단되어 있고 내부
+미러가 있다면 uv가 그쪽을 보도록 설정:
+
+```bash
+ADK_CC_SANDBOX_ENV=UV_PYTHON_INSTALL_MIRROR=https://mirror.corp/python-build-standalone
+```
+
+**완전 오프라인 대안.** 이미지에는 이미 Python 3.13.11과 pandas / numpy /
+scipy / scikit-learn / matplotlib / plotly / xgboost가 들어 있음. 프로비저닝을
+생략하고 그것을 사용:
+
+```bash
+ADK_CC_ANALYSIS_ENV=/usr/local/bin/python
+```
+
+다운로드 없음, 첫 실행 즉시 동작. 대신 티어 시스템이 적용되지 않으므로
+이미지에 없는 것은 사용할 수 없음 — `modeling` 티어의 `shap`, 그리고 `stats`
+티어 전체(`statsmodels`, `ruptures`, `dowhy`). 필요하면
+`Dockerfile.sandbox`에 추가할 것.
+
 ### 런타임 프록시 설정
 
 컨테이너는 agent 호스트의 프록시 환경을 **상속하지 않음**. 이미지에 구워진

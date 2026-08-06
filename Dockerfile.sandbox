@@ -94,6 +94,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
+# --- uv ---------------------------------------------------------------------
+# NOT optional, despite nothing in this image importing it: `analysis_env`
+# provisions the code-execution interpreter AT RUNTIME, inside this container,
+# and `_provision()` opens with `command -v uv` and raises
+# "uv is not available in the execution environment" when it is missing. Without
+# this line every skill script fails on the docker backend. Dockerfile.daytona-
+# snapshot has always installed it; this image was simply missing the same step.
+#
+# Installed from PyPI rather than the upstream `curl https://astral.sh/... | sh`
+# that the Daytona image uses, because pip goes through PIP_INDEX_URL and the
+# proxy configured above — on a restricted network an internal mirror is
+# reachable when astral.sh very likely is not.
+RUN pip install --no-cache-dir uv && uv --version
+
 # --- python: analysis -------------------------------------------------------
 # Covers the typical 50K rows × ~1K columns pandas / numpy / sklearn
 # workloads, plus polars + duckdb for the faster columnar paths.
