@@ -217,6 +217,7 @@ class DaytonaBackend(SandboxBackend):
         api_url: str,
         proxy_url: str,
         api_key: Optional[str] = None,
+        organization_id: Optional[str] = None,
         credentials: Optional["CredentialProvider"] = None,
         credential_key: str = "daytona_api_key",
         env_spec: Optional["SandboxEnvSpec"] = None,
@@ -243,6 +244,11 @@ class DaytonaBackend(SandboxBackend):
         # factory validates this; we accept either here for direct ctor
         # use (tests, embedding) without enforcing.
         self._static_token: Optional[str] = api_key
+        # Daytona routes an API key to ONE organisation by default; an account
+        # with several needs the target named per request. Optional: omitted
+        # entirely when unset, so single-org deployments send exactly what they
+        # sent before.
+        self._organization_id: Optional[str] = (organization_id or "").strip() or None
         self._credentials: Optional["CredentialProvider"] = credentials
         self._credential_key = credential_key
         # Env vars / secrets to bake into the sandbox at create time. None or
@@ -335,8 +341,11 @@ class DaytonaBackend(SandboxBackend):
             yield self._http
             return
         token = await self._resolve_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        if self._organization_id:
+            headers["X-Daytona-Organization-ID"] = self._organization_id
         async with httpx.AsyncClient(
-            headers={"Authorization": f"Bearer {token}"},
+            headers=headers,
             timeout=self._request_timeout_s,
             verify=self._verify,
         ) as client:
@@ -1107,6 +1116,7 @@ def make_daytona_backend_from_env(
         api_url=api_url,
         proxy_url=proxy_url,
         api_key=static_token,
+        organization_id=os.environ.get("ADK_CC_DAYTONA_ORG_ID") or None,
         credentials=credentials,
         credential_key=credential_key,
         env_spec=env_spec,

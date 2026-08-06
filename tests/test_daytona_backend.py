@@ -964,6 +964,50 @@ async def test_create_omits_env_when_no_spec():
     print("OK create_omits_env_when_no_spec")
 
 
+
+def check(name, ok, detail=""):
+    assert ok, f"{name}: {detail}"
+
+
+def test_organization_header_is_optional() -> None:
+    """Daytona scopes an API key to one org by default; an account with
+    several must name the target per request (X-Daytona-Organization-ID).
+
+    Optional on purpose: unset means the header is ABSENT, not empty — an
+    empty header is a different request than no header, and single-org
+    deployments must keep sending exactly what they sent before."""
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen[request.url.path] = dict(request.headers)
+        return httpx.Response(200, json={"id": "sb-1", "state": "started"})
+
+    from adk_cc.sandbox.backends.daytona_backend import DaytonaBackend
+
+    async def run(org):
+        be = DaytonaBackend(session_id="s", tenant_id="t",
+                            api_url="https://api.test", proxy_url="https://px.test",
+                            api_key="k", organization_id=org, client=None)
+        # exercise the real _client() (the ctor's client= short-circuits it)
+        # Read the client's default headers — no request needed, and no
+        # network: _client() builds a real AsyncClient.
+        async with be._client() as c:
+            return c.headers
+
+    import asyncio
+    h = asyncio.run(run("org-42"))
+    check("the org header is sent when configured",
+          h.get("x-daytona-organization-id") == "org-42", dict(h))
+    h = asyncio.run(run(None))
+    check("the header is ABSENT when unset (not empty)",
+          "x-daytona-organization-id" not in h, dict(h))
+    h = asyncio.run(run("   "))
+    check("whitespace-only is treated as unset",
+          "x-daytona-organization-id" not in h, dict(h))
+    check("Authorization is unaffected either way",
+          h.get("authorization") == "Bearer k", dict(h))
+
+
 def main():
     tests = [
         test_ensure_workspace_creates_and_polls,
@@ -993,6 +1037,7 @@ def main():
     ]
     for t in tests:
         asyncio.run(t())
+    test_organization_header_is_optional()
     print("\nall daytona-backend tests passed")
 
 

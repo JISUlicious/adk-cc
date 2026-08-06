@@ -317,6 +317,10 @@ FIELDS: list[Var] = [
     Var("ADK_CC_DAYTONA_API_KEY", Tier.REQUIRED, "Sandbox: Daytona",
         "Daytona API key (single-tenant) or use a credential provider.", default=None, secret=True,
         required_if=lambda c: c.get("ADK_CC_SANDBOX_BACKEND") == "daytona"),
+    Var("ADK_CC_DAYTONA_ORG_ID", Tier.ADVANCED, "Sandbox: Daytona",
+        "Organisation to scope Daytona calls to (X-Daytona-Organization-ID). "
+        "Only needed when the API key spans several organisations; omitted "
+        "from requests when unset.", default=None),
     Var("ADK_CC_DAYTONA_SNAPSHOT", Tier.COMMON, "Sandbox: Daytona",
         "Snapshot id/name to prewarm from (recommended).", default=None),
     # SSH remote workspace (only when SANDBOX_BACKEND=ssh via the env factory)
