@@ -22,6 +22,7 @@ Run: ADK_CC_SKIP_DOTENV=1 .venv/bin/python tests/test_skill_trust.py
 from __future__ import annotations
 
 import os
+import pathlib
 import sys
 import tempfile
 from pathlib import Path
@@ -59,6 +60,55 @@ def _project() -> Path:
     return proj
 
 
+
+def test_a_workspace_NESTED_under_a_trusted_repo_gets_its_skills() -> None:
+    """The desktop/web split reported live (#116).
+
+    Desktop runs noop, so the workspace IS the repo — trusted, skills load.
+    Web runs daytona, so TenancyPlugin puts the workspace at
+    <repo>/.temp/<tenant>/<user> — a path nobody ever trusts. Trust used to be
+    tested ONCE against that workspace root, so a trusted repo's own skills
+    were withheld and the log blamed the scratch dir for skills living in the
+    repo. Same session, two answers.
+
+    Trust belongs to the folder the skills LIVE IN.
+    """
+    import tempfile
+
+    import adk_cc.tools.skills as sk
+    from adk_cc.tools import skill_trust
+
+    repo = pathlib.Path(tempfile.mkdtemp(prefix="nested-repo-"))
+    (repo / ".adk-cc" / "skills" / "design").mkdir(parents=True)
+    (repo / ".adk-cc" / "skills" / "design" / "SKILL.md").write_text(
+        "---\nname: design\ndescription: d\n---\nbody\n")
+    nested = repo / ".temp" / "local" / "alice"          # the web workspace
+    nested.mkdir(parents=True)
+
+    def dirs_for(root):
+        sk.clear_project_skill_cache()
+        return [str(d) for d in sk._resolve_skills_dirs(pathlib.Path(root))]
+
+    skill_trust.set_trusted(str(repo), False)
+    check("untrusted repo: nested workspace gets nothing",
+          not any(str(repo.resolve()) in d and ".adk-cc/skills" in d
+                  for d in dirs_for(nested)))
+    check("…and the user is told about the REPO, not the scratch dir",
+          "design" in sk.withheld_for(nested))
+
+    skill_trust.set_trusted(str(repo), True)
+    try:
+        check("trusting the REPO is enough — the nested workspace loads it",
+              any(".adk-cc/skills" in d and str(repo.resolve()) in d
+                  for d in dirs_for(nested)), dirs_for(nested)[:4])
+        check("the repo's own workspace still loads it (desktop parity)",
+              any(".adk-cc/skills" in d and str(repo.resolve()) in d
+                  for d in dirs_for(repo)))
+        check("nothing is withheld once trusted", sk.withheld_for(nested) == [])
+    finally:
+        skill_trust.set_trusted(str(repo), False)
+
+
 def main() -> int:
     from adk_cc.tools import skill_trust, skills as sk
 
@@ -76,7 +126,11 @@ def main() -> int:
           "repo-skill" not in found and "other-agent-skill" not in found,
           sorted(found)[:6])
     withheld = sk.untrusted_project_skills()
-    names = withheld.get(str(proj)) or []
+    # Keyed by the CANONICAL path, matching skill_trust's own `_key()` (which
+    # resolves): the two must agree or a folder could read as untrusted under
+    # one spelling and trusted under another — the /var vs /private/var split
+    # that #107 hit. `proj` here is the unresolved tmpdir.
+    names = withheld.get(str(pathlib.Path(proj).resolve())) or []
     check("but the user is told exactly what was withheld",
           sorted(names) == ["other-agent-skill", "repo-skill"], withheld)
     check("including skills another agent left in the repo",
@@ -124,6 +178,8 @@ def main() -> int:
     check("trust is per folder, not global",
           not sk.skill_trust.is_trusted(other) if hasattr(sk, "skill_trust")
           else not skill_trust.is_trusted(other))
+
+    test_a_workspace_NESTED_under_a_trusted_repo_gets_its_skills()
 
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0

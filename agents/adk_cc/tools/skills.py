@@ -190,26 +190,40 @@ def _resolve_skills_dirs(project_root: Optional[Path] = None) -> list[Path]:
     # a clone can otherwise inject instructions into the agent's context; both
     # the implementer guide and Anthropic's docs call this out. What gets
     # skipped is recorded below so it can be offered rather than lost.
-    if (project_root is not None
-            and not env_bool("ADK_CC_DISABLE_PROJECT_SKILLS")
-            and not skill_trust.is_trusted(project_root)):
-        _note_untrusted(project_root)
-    elif project_root is not None and not env_bool("ADK_CC_DISABLE_PROJECT_SKILLS"):
+    if project_root is not None and not env_bool("ADK_CC_DISABLE_PROJECT_SKILLS"):
         try:
             cursor = Path(project_root).resolve()
         except OSError:
             cursor = None
         if cursor is not None:
             home = Path.home()
+            untrusted: list[Path] = []
             while True:
-                _add(cursor / _PROJECT_SKILLS_SUBDIR)
-                # …and the cross-client location at the same level, AFTER ours,
-                # so a skill that exists in both is adk-cc's.
-                if not env_bool("ADK_CC_DISABLE_INTEROP_SKILLS"):
-                    _add(cursor / _INTEROP_SKILLS_SUBDIR)
+                # Trust belongs to the folder the skills LIVE IN, not to
+                # wherever the walk started. Testing it ONCE against the
+                # workspace root withheld a trusted repo's own skills whenever
+                # the workspace sat BELOW that repo: desktop's workspace IS the
+                # repo (trusted -> loads), while web/daytona's is
+                # <repo>/.temp/<tenant>/<user> (never trusted -> the walk never
+                # ran, and the log blamed a scratch dir for skills that live in
+                # the repo). Reported live; desktop and web disagreed on the
+                # same session.
+                if skill_trust.is_trusted(cursor):
+                    _add(cursor / _PROJECT_SKILLS_SUBDIR)
+                    # …and the cross-client location at the same level, AFTER
+                    # ours, so a skill that exists in both is adk-cc's.
+                    if not env_bool("ADK_CC_DISABLE_INTEROP_SKILLS"):
+                        _add(cursor / _INTEROP_SKILLS_SUBDIR)
+                elif _has_project_skills(cursor):
+                    untrusted.append(cursor)
                 if cursor == home or cursor == cursor.parent:
                     break
                 cursor = cursor.parent
+            # Default-deny is unchanged: an untrusted folder contributes
+            # nothing. What changes is WHO gets named — the folder holding the
+            # skills, so "trust this" can point at the repo the user knows.
+            for d in untrusted:
+                _note_untrusted(d)
 
     # 3. GLOBAL — the install's own skills, wherever it runs and stores data.
     try:
@@ -252,21 +266,7 @@ def _note_untrusted(project_root: Path) -> None:
     skill which silently is not there is the hardest failure to diagnose. The
     user should be offered the choice, not left wondering.
     """
-    found: list[str] = []
-    try:
-        cursor = Path(project_root).resolve()
-        home = Path.home()
-        while True:
-            for sub in (_PROJECT_SKILLS_SUBDIR, _INTEROP_SKILLS_SUBDIR):
-                d = cursor / sub
-                if _is_dir_silently(d):
-                    found += [f"{p.name}" for p in sorted(d.iterdir())
-                              if (p / "SKILL.md").is_file()]
-            if cursor == home or cursor == cursor.parent:
-                break
-            cursor = cursor.parent
-    except OSError:
-        pass
+    found = _project_skill_names(project_root)
     _UNTRUSTED[str(Path(project_root))] = found
     if found:
         _log.info("skills: %d project skill(s) in %s withheld until the folder "
@@ -287,10 +287,47 @@ def withheld_for(project_root: Optional[Path | str]) -> list[str]:
     appeared. A question with an answer that does not depend on what happened
     to run earlier is the right shape here.
     """
-    if project_root is None or skill_trust.is_trusted(project_root):
+    if project_root is None:
         return []
-    _note_untrusted(Path(project_root))
-    return list(_UNTRUSTED.get(str(Path(project_root))) or [])
+    # F2: answer for the whole ANCESTRY, not just this folder. A workspace
+    # nested under the repo (web/daytona: <repo>/.temp/<tenant>/<user>) ships
+    # no skills of its own — the ones being withheld live further up, and
+    # naming the scratch dir sent the user to trust a folder they had never
+    # seen while the repo stayed untrusted.
+    out: list[str] = []
+    try:
+        cursor = Path(project_root).resolve()
+    except OSError:
+        return []
+    home = Path.home()
+    while True:
+        if not skill_trust.is_trusted(cursor):
+            names = _project_skill_names(cursor)
+            if names:
+                _note_untrusted(cursor)
+                out += names
+        if cursor == home or cursor == cursor.parent:
+            break
+        cursor = cursor.parent
+    return out
+
+
+def _project_skill_names(folder) -> list[str]:  # noqa: ANN001
+    """Skill names directly under `folder`'s skills dirs — no walk-up."""
+    out: list[str] = []
+    for sub in (_PROJECT_SKILLS_SUBDIR, _INTEROP_SKILLS_SUBDIR):
+        d = Path(folder) / sub
+        if _is_dir_silently(d):
+            try:
+                out += [q.name for q in sorted(d.iterdir())
+                        if (q / "SKILL.md").is_file()]
+            except OSError:
+                pass
+    return out
+
+
+def _has_project_skills(folder) -> bool:  # noqa: ANN001
+    return bool(_project_skill_names(folder))
 
 
 def _is_dir_silently(p: Path) -> bool:
