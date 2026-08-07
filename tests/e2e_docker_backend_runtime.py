@@ -123,6 +123,39 @@ async def _run(net: bool) -> None:
             check("network=0 still denies egress (default stays closed)",
                   not reached, "container had egress with the knob off")
 
+        # 5b. Why `export HTTPS_PROXY=...` in run_bash does not stick, and what
+        #     does. Reported live: "it fails even after setting HTTP_PROXY and
+        #     HTTPS_PROXY using export via run_bash". Every exec is its own
+        #     `bash -lc`, so an export dies with the process that made it — and
+        #     the skill-script executor is a DIFFERENT exec that never saw it.
+        #     ADK_CC_SANDBOX_ENV is injected per-exec, so it survives.
+        await be.exec("export PROXY_PROBE=exported-value", fs_write=fsw,
+                      network=NetworkConfig(), timeout_s=60, cwd=ws_dir)
+        r = await be.exec('echo "probe=[${PROXY_PROBE:-unset}]"', fs_write=fsw,
+                          network=NetworkConfig(), timeout_s=60, cwd=ws_dir)
+        check("export in one run_bash does NOT reach the next exec",
+              "probe=[unset]" in r.stdout, r.stdout.strip()[:120])
+
+        from adk_cc.sandbox.sandbox_env import SandboxEnvSpec
+        be.configure_runtime_env(
+            credentials=None, tenant_id="local", user_id=None,
+            env_spec=SandboxEnvSpec(static={"HTTPS_PROXY": "http://proxy.probe:3128"}),
+            declared_keys=frozenset())
+        be.invalidate_runtime_env()
+        r = await be.exec('echo "proxy=[${HTTPS_PROXY:-unset}]"', fs_write=fsw,
+                          network=NetworkConfig(), timeout_s=60, cwd=ws_dir)
+        check("ADK_CC_SANDBOX_ENV DOES reach every exec",
+              "proxy=[http://proxy.probe:3128]" in r.stdout, r.stdout.strip()[:160])
+        # And it must not have clobbered the HOME fix.
+        r = await be.exec('echo "$HOME"', fs_write=fsw, network=NetworkConfig(),
+                          timeout_s=60, cwd=ws_dir)
+        check("injected env does not displace HOME", CONTAINER_HOME in r.stdout,
+              r.stdout.strip()[:120])
+        be.configure_runtime_env(credentials=None, tenant_id="local",
+                                 user_id=None, env_spec=SandboxEnvSpec(),
+                                 declared_keys=frozenset())
+        be.invalidate_runtime_env()
+
         # 6. With egress, the full provisioning chain must complete — this is
         #    what the analysis env actually does on first use.
         if net:
