@@ -31,10 +31,23 @@ if [ -e /sys/class/net/eth0 ]; then
 else
   say "network attached" "NO — this container is network=none"
 fi
-say "HTTPS_PROXY" "${HTTPS_PROXY:-<unset>}"
-say "NO_PROXY" "${NO_PROXY:-<unset>}"
 say "nameserver" "$(awk '/^nameserver/{print $2}' /etc/resolv.conf | tr '\n' ' ')"
-say "HOME writable" "$(touch "$HOME/.probe" 2>/dev/null && echo "yes ($HOME)" || echo "NO ($HOME)")"
+# CAREFUL, these two are measured in the wrong context on purpose-of-caution:
+# adk-cc injects HOME and the ADK_CC_SANDBOX_ENV vars PER EXEC, through the
+# backend. A plain `docker exec` (which is what this script does) never sees
+# them, so "<unset>" here does NOT mean the server is not injecting them —
+# only that they are not baked into the image or the container config.
+say "HTTPS_PROXY (image/cfg)" "${HTTPS_PROXY:-<unset> — see note below}"
+say "NO_PROXY (image/cfg)" "${NO_PROXY:-<unset> — see note below}"
+# The image's default HOME is on the read-only rootfs and is EXPECTED to fail;
+# what matters is the dir adk-cc actually points HOME at.
+say "image HOME writable" "$(touch "$HOME/.probe" 2>/dev/null && echo "yes ($HOME)" || echo "no ($HOME) — expected, see note")"
+adk_home=/workspace/.adk-cc/home
+if mkdir -p "$adk_home" 2>/dev/null && touch "$adk_home/.probe" 2>/dev/null; then
+  say "adk-cc HOME writable" "yes ($adk_home)"
+else
+  say "adk-cc HOME writable" "NO ($adk_home) — this one is a real problem"
+fi
 
 if getent hosts pypi.org >/dev/null 2>&1; then
   say "DNS pypi.org" "OK -> $(getent hosts pypi.org | head -1 | awk '{print $1}')"
@@ -117,8 +130,17 @@ Reading it:
                              Read the "TCP proxy" line instead.
   DNS OK but TCP FAIL        Egress is filtered. Use the proxy, or an internal
                              index via PIP_INDEX_URL / UV_INDEX_URL.
-  HOME writable = NO         Stale container from before the HOME fix. Restart
-                             the server (it recreates) or `docker rm -f` it.
+  image HOME not writable    EXPECTED. The rootfs is read-only by design;
+                             adk-cc points HOME at /workspace/.adk-cc/home
+                             instead. Only "adk-cc HOME writable: NO" matters.
   control OK, sandbox not    The difference is config, not the network.
                              Compare NetworkMode and the proxy lines above.
+
+IMPORTANT about the proxy and HOME lines: this script uses a plain
+`docker exec`, which does NOT see what adk-cc injects per exec (HOME and
+everything in ADK_CC_SANDBOX_ENV). "<unset>" above therefore means "not baked
+into the image or container config" — NOT "the server is not injecting it".
+To check what a real tool call sees, ask the agent to run:
+
+    run_bash: env | grep -E 'HOME|PROXY'
 EOF
