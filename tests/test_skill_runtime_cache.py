@@ -219,8 +219,15 @@ def main() -> int:
     check("the warm run carries none of them",
           SENT and not any(BULK in c for c in SENT),
           f"warm payload {_big(SENT)} bytes")
+    # Bounded RELATIVE to the cold call, not by a magic byte count. The point
+    # is that a warm call does not carry the skill — an absolute cap re-breaks
+    # every time the launcher legitimately grows (it did: the read-only-rootfs
+    # dependency fallback added ~500 bytes and tipped a 4096 bound to 4411,
+    # while the payload was still 34x smaller than cold). The absolute ceiling
+    # stays, generously, purely to catch unbounded bloat.
     check("so a warm call is a constant, tiny exchange",
-          SENT and _big(SENT) < 4096, f"{_big(SENT)} bytes vs cold {_big(cold)}")
+          SENT and _big(SENT) < _big(cold) / 10 and _big(SENT) < 16384,
+          f"{_big(SENT)} bytes vs cold {_big(cold)}")
 
     # Nothing is remembered in-process: the probe has to find the ready marker
     # on disk, which is what makes this survive a restart.

@@ -1600,12 +1600,29 @@ def _explain_missing_package(res: dict, skill: Skill) -> dict:
         siblings = set()
     if missing in siblings:
         return res
+    # When the install ALREADY failed because the interpreter is read-only,
+    # "run uv pip install and re-run" is advice that cannot work, and the model
+    # dutifully retries it. Measured live: psycopg2 into
+    # /usr/local/lib/python3.13/site-packages on a container rootfs. Say what
+    # is actually true instead.
+    read_only = "Read-only file system" in err
+    if read_only:
+        remedy = (
+            f"the interpreter it runs under is on a READ-ONLY filesystem, so "
+            f"`uv pip install {missing}` there cannot work — do not retry it. "
+            f"Report the step as NOT RUN and say the environment needs "
+            f"'{missing}': the operator must unset ADK_CC_ANALYSIS_ENV so a "
+            f"writable virtualenv is provisioned in the workspace, or add the "
+            f"package to the sandbox image.")
+    else:
+        remedy = (
+            f"install it there (uv pip install {missing}) and re-run, or "
+            f"report the step as NOT RUN.")
     return _with_compatibility({**res, "stderr": err.rstrip() + (
         f"\n\n[adk-cc] this script needs the '{missing}' package, which is not "
-        f"installed in the environment skill scripts run in. Install it there "
-        f"(uv pip install {missing}) and re-run, or report the step as NOT RUN "
-        f"— do not re-implement the script's job inline and present it as the "
-        f"script's result.")}, skill)
+        f"installed in the environment skill scripts run in — {remedy} Do not "
+        f"re-implement the script's job inline and present it as the script's "
+        f"result.")}, skill)
 
 
 def _with_compatibility(res: dict, skill: Skill) -> dict:
@@ -1962,12 +1979,41 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             "        _ir = subprocess.run([_uv, 'pip', 'install', '--python',",
             "            sys.executable] + _deps, capture_output=True, text=True,",
             "            timeout=600, stdin=subprocess.DEVNULL)",
+            # A container sandbox mounts its rootfs read-only, so installing
+            # INTO the interpreter fails whenever that interpreter lives on it
+            # — which is exactly the supported offline setup
+            # (ADK_CC_ANALYSIS_ENV=/usr/local/bin/python). Measured live:
+            # "failed to create directory /usr/local/lib/python3.13/
+            # site-packages/psycopg2-...dist-info: Read-only file system".
+            #
+            # Retry into a writable directory beside the materialised skill and
+            # put it on sys.path instead of giving up. Nothing needs to mutate
+            # the interpreter — a per-skill target is enough, and it keeps one
+            # skill's pins out of every other skill's environment.
+            "        if _ir.returncode != 0 and 'Read-only file system' in "
+            "(_ir.stderr or ''):",
+            "            _dtgt = os.path.join(_cache, '.deps')",
+            "            os.makedirs(_dtgt, exist_ok=True)",
+            "            _ir = subprocess.run([_uv, 'pip', 'install', '--target',",
+            "                _dtgt, '--python', sys.executable] + _deps,",
+            "                capture_output=True, text=True, timeout=600,",
+            "                stdin=subprocess.DEVNULL)",
+            "            if _ir.returncode == 0:",
+            "                _pp = os.environ.get('PYTHONPATH') or ''",
+            "                os.environ['PYTHONPATH'] = (",
+            "                    _dtgt + (os.pathsep + _pp if _pp else ''))",
             "        if _ir.returncode == 0:",
             "            open(_depmark, 'w').write('1')",
             "        else:",
+            "            _ro = 'Read-only file system' in (_ir.stderr or '')",
             "            _depnote = (f'{NOTE_PREFIX} installing ' + ', '.join(_deps) +",
             "                        ' failed: ' + (_ir.stderr or '')[-400:] +",
-            "                        '\\n')",
+            "                        ('\\nThe interpreter at ' + sys.executable +",
+            "                         ' is on a read-only filesystem, so `uv pip "
+            "install` into it CANNOT work — do not retry it. Ask the operator to "
+            "unset ADK_CC_ANALYSIS_ENV so a writable virtualenv is provisioned in "
+            "the workspace, or to add this package to the sandbox image.'",
+            "                         if _ro else '') + '\\n')",
             "_abs = os.path.abspath(os.path.join(_cache, _rel))",
             "if not os.path.isfile(_abs):",
             "    _emit(stdout='', stderr='materialised skill is missing ' + _rel,",
