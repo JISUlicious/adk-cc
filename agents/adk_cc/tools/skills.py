@@ -1911,6 +1911,14 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             # Read by the sandbox executor to size the analysis environment.
             f"# adk-cc-skill-tiers: {' '.join(tiers)}",
             "import os, sys, json as _json, shutil, subprocess",
+            # This runs as its OWN process, so every name the generated code
+            # uses has to exist in the generated code. The dep-install notes
+            # below say f'{NOTE_PREFIX} ...' inside PLAIN strings — literal
+            # text here, evaluated over there — so without this line they
+            # raise NameError and the launcher dies with a traceback instead
+            # of reporting why the install failed. Interpolated (f-string) on
+            # purpose: the value has to be baked in, not looked up.
+            f"NOTE_PREFIX = {NOTE_PREFIX!r}",
             f"_cache = {cache!r}",
             f"_rel = {file_path!r}",
             f"_argv = {argv!r}",
