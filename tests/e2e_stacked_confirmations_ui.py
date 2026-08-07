@@ -182,16 +182,37 @@ def main() -> int:  # noqa: PLR0915
             if clickable:
                 card_of(second).get_by_role("button", name="Allow once").click()
 
-            # 5. Both scripts must really have run, and the model must reply.
+            # 5. "Did it run" is a question about the SESSION, not the DOM:
+            #    finished tool rows collapse into a ToolCallGroup, and
+            #    inner_text does not return collapsed content — so reading the
+            #    page here reports "never ran" for output that is simply
+            #    folded away. Ask the server.
+            def _session_blob():
+                try:
+                    rows = requests.get(
+                        f"{BASE}/apps/adk_cc/users/{pid}/sessions",
+                        timeout=30).json()
+                    if not rows:
+                        return ""
+                    sid = rows[-1]["id"]
+                    return requests.get(
+                        f"{BASE}/apps/adk_cc/users/{pid}/sessions/{sid}",
+                        timeout=30).text
+                except Exception:
+                    return ""
+
             deadline = time.time() + 300
-            body = ""
+            blob = ""
             while time.time() < deadline:
                 page.wait_for_timeout(3000)
-                body = page.inner_text("body")
-                if MARK_A in body and MARK_B in body:
+                blob = _session_blob()
+                if MARK_A in blob and MARK_B in blob:
                     break
-            check("the FIRST script actually ran", MARK_A in body, body[-400:])
-            check("the SECOND script actually ran", MARK_B in body, body[-400:])
+            body = page.inner_text("body")
+            check("the FIRST script actually ran", MARK_A in blob,
+                  "marker absent from the session events")
+            check("the SECOND script actually ran", MARK_B in blob,
+                  "marker absent from the session events")
             check("no card is left awaiting an answer",
                   not any(allow_state(s)[1] for s in ("alpha", "beta")),
                   "a confirmation card is still clickable after both answers")

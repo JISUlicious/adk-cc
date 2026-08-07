@@ -206,12 +206,27 @@ export function Thread({
     />
   )
 
+  // Key a row by IDENTITY, never by list position. Two parallel tool calls
+  // live in one event, so `eventId:kind` is identical for both and only the
+  // index told them apart — and the index MOVES: answering the first inserts
+  // a response row, every later row shifts by one, and the same key now names
+  // a different row. React then reuses the mounted component, so the
+  // ConfirmationCard's own `submitted` lock lands on the card the user has
+  // NOT answered: present, greyed out, unanswerable. That is the reported
+  // "allowing one makes the other unclickable", and it survived the #114 fix
+  // because that one addressed `submitDisabled` — the other way a card can
+  // lock. `callId` is unique per call and stable for the row's whole life.
+  const rowKey = (r: ChatRow, i: number) =>
+    r.kind === "tool_pair"
+      ? `pair:${r.callId}`
+      : `${r.eventId}:${r.kind}:${i}`
+
   // Accumulate runs of >2 consecutive tool rows into one collapsible
   // ToolCallGroup; everything else renders inline.
   const body: ReactNode[] = []
   for (let i = 0; i < rows.length; ) {
     if (!isGroupableToolRow(rows[i], pendingCallIds)) {
-      body.push(renderRow(rows[i], `${rows[i].eventId}:${rows[i].kind}:${i}`))
+      body.push(renderRow(rows[i], rowKey(rows[i], i)))
       i++
       continue
     }
@@ -229,13 +244,11 @@ export function Thread({
           summary={summarizeTools(run)}
           defaultOpen={hasPending && isStreaming}
         >
-          {run.map((r, k) => renderRow(r, `${r.eventId}:${r.kind}:${i + k}`))}
+          {run.map((r, k) => renderRow(r, rowKey(r, i + k)))}
         </ToolCallGroup>,
       )
     } else {
-      run.forEach((r, k) =>
-        body.push(renderRow(r, `${r.eventId}:${r.kind}:${i + k}`)),
-      )
+      run.forEach((r, k) => body.push(renderRow(r, rowKey(r, i + k))))
     }
     i = j
   }
