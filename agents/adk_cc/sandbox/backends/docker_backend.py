@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import logging
 import os
@@ -226,11 +227,43 @@ class DockerBackend(SandboxBackend):
                         await asyncio.to_thread(c.remove, v=True)
                         c = None
                 if c is not None:
-                    self._container = c
-                    return c
+                    # Adopting by NAME alone silently pins the config the
+                    # container was born with. Turning on
+                    # ADK_CC_SANDBOX_NETWORK then appears to do nothing,
+                    # because network_mode is fixed at creation and the old
+                    # container just gets reused — the operator changes a
+                    # setting, restarts, and sees the identical failure.
+                    # LocalContainerBackend already compares a signature for
+                    # exactly this; this backend adopted blindly.
+                    want = self._config_signature()
+                    got = (c.labels or {}).get("adk-cc-config")
+                    if got == want:
+                        self._container = c
+                        return c
+                    log.info(
+                        "sandbox config changed (%s -> %s); recreating %s",
+                        got or "unlabelled", want, self._container_name)
+                    try:
+                        await asyncio.to_thread(c.remove, force=True, v=True)
+                    except Exception:  # noqa: BLE001 — recreate regardless
+                        pass
 
             self._container = await asyncio.to_thread(self._spawn_container)
             return self._container
+
+    def _config_signature(self) -> str:
+        """Everything fixed at CREATION time, so a change forces a recreate.
+
+        Deliberately only creation-time settings: env and secrets are injected
+        per exec and must NOT churn containers, while image / network / mount
+        cannot be changed on a live container at all.
+        """
+        parts = (
+            os.environ.get("ADK_CC_SANDBOX_IMAGE", "adk-cc-sandbox:latest"),
+            _network_mode(),
+            self._workspace_abs_path or "",
+        )
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
     def _spawn_container(self) -> Any:
         if self._workspace_abs_path is None:
@@ -278,6 +311,8 @@ class DockerBackend(SandboxBackend):
             labels={
                 "adk-cc-session": self._session_id,
                 "adk-cc-tenant": self._tenant_id,
+                # Read back on adoption; a mismatch forces a recreate.
+                "adk-cc-config": self._config_signature(),
             },
             command=["sleep", "infinity"],
         )

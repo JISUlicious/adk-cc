@@ -174,6 +174,58 @@ async def _run(net: bool) -> None:
         shutil.rmtree(ws_dir, ignore_errors=True)
 
 
+async def _config_change_recreates() -> None:
+    """Flipping ADK_CC_SANDBOX_NETWORK must actually reach the container.
+
+    The backend adopts a still-running container by NAME so an agent restart
+    keeps the session. But network_mode is fixed at creation, so adopting
+    blindly pinned whatever config the container was born with: an operator
+    sets ADK_CC_SANDBOX_NETWORK=1, restarts, and gets the identical "no route"
+    failure because the OLD container came back. Silent, and indistinguishable
+    from the fix not working.
+    """
+    from adk_cc.sandbox.backends.docker_backend import DockerBackend
+    from adk_cc.sandbox.config import NetworkConfig
+    from adk_cc.sandbox.workspace import WorkspaceRoot
+
+    print("\n--- config change forces a recreate ---")
+    ws_dir = tempfile.mkdtemp(prefix="dockbe-cfg-")
+    ws = WorkspaceRoot(tenant_id="local", session_id="cfg", abs_path=ws_dir)
+    ws_dir = ws.abs_path
+    fsw = ws.fs_write_config()
+    probe = ("python -c \"import socket;socket.setdefaulttimeout(8);"
+             "socket.create_connection(('pypi.org',443));print('NET_OK')\" 2>&1 | tail -1")
+    try:
+        os.environ["ADK_CC_SANDBOX_NETWORK"] = "0"
+        be = DockerBackend(session_id="cfg", tenant_id="local",
+                           workspace_abs_path=ws_dir)
+        await be.ensure_workspace(ws)
+        r = await be.exec(probe, fs_write=fsw, network=NetworkConfig(),
+                          timeout_s=120, cwd=ws_dir)
+        check("starts with no egress", "NET_OK" not in r.stdout, r.stdout[:120])
+        # Deliberately NOT be.close(): close() stops AND removes the container,
+        # so calling it here would leave nothing to adopt and this test would
+        # pass no matter what (it did). An agent restart leaves the container
+        # RUNNING — that is the case the adoption path exists for.
+        del be
+
+        # A fresh backend object, as after an agent restart — the container
+        # from the previous run is still there to be adopted.
+        os.environ["ADK_CC_SANDBOX_NETWORK"] = "1"
+        be2 = DockerBackend(session_id="cfg", tenant_id="local",
+                            workspace_abs_path=ws_dir)
+        await be2.ensure_workspace(ws)
+        r = await be2.exec(probe, fs_write=fsw, network=NetworkConfig(),
+                           timeout_s=120, cwd=ws_dir)
+        check("flipping the knob takes effect after a restart",
+              "NET_OK" in r.stdout,
+              "the stale container was adopted with its old network config")
+        await be2.close()
+    finally:
+        subprocess.run(["docker", "rm", "-f", "adk-cc-cfg"], capture_output=True)
+        shutil.rmtree(ws_dir, ignore_errors=True)
+
+
 def main() -> int:
     if not shutil.which("docker"):
         print("SKIP: docker not installed."); return 0
@@ -185,6 +237,7 @@ def main() -> int:
 
     for net in (False, True):
         asyncio.run(_run(net))
+    asyncio.run(_config_change_recreates())
 
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
