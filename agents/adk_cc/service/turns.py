@@ -152,6 +152,36 @@ def _pending_long_running(event: Any) -> set[str]:
 _UNDELIVERED_CONFIRMATION_NAMES = ("adk_cc_pending_confirmation",
                                    "adk_cc_confirmation_form")
 
+# Function CALLS that put a card in front of the user — the only long-running
+# calls a click can complete. Deliberately excludes the gated tool call itself
+# (answered by its needs-confirmation result) and ask_user_question (answered
+# some other way): treating those as part of a confirmation batch would park
+# it on something no click can ever resolve.
+_CONFIRMATION_CALL_NAMES = ("adk_cc_confirmation_form",
+                            "adk_request_confirmation")
+
+
+def _user_answered_ids(event: Any) -> set[str]:
+    """Ids the USER has answered, whatever name the answer carries.
+
+    Deliberately the opposite policy to `_answered_ids`, and the pair is the
+    whole point. `_answered_ids` asks "did ADK receive this?" and so must skip
+    the confirmation plugin's own names, which are stashes ADK ignores. This
+    asks "has the person clicked?", for which the stash counts — the click
+    happened regardless of what the delivery layer did with it.
+
+    Conflating the two is what broke stacked confirmations: the broker judged
+    a batch by the delivery question, concluded nothing had been answered, and
+    still started a fresh invocation.
+    """
+    out: set[str] = set()
+    content = getattr(event, "content", None)
+    for p in getattr(content, "parts", None) or []:
+        fr = getattr(p, "function_response", None)
+        if fr is not None and getattr(fr, "id", None):
+            out.add(fr.id)
+    return out
+
 
 def _answered_ids(event: Any) -> set[str]:
     """Ids this event ANSWERS (function responses it carries).
@@ -537,12 +567,100 @@ class TurnBroker:
         except Exception as e:  # noqa: BLE001 — prune is best-effort
             _log.warning("turn %s: orphan prune failed: %s", turn.id, e)
 
+    async def _append_answer_only(self, turn: Turn) -> None:
+        """Record a parked confirmation answer WITHOUT running the model.
+
+        The click has to survive even though nothing runs: it is what makes
+        the batch complete later, and what lets the UI mark this card
+        answered. Dropping it would leave the user clicking a card that never
+        resolves.
+        """
+        try:
+            from google.adk.events.event import Event
+
+            session = await self.session_service.get_session(
+                app_name=turn.app_name, user_id=turn.user_id,
+                session_id=turn.session_id)
+            if session is None:
+                return
+            await self.session_service.append_event(
+                session=session,
+                event=Event(author="user", content=turn.new_message,
+                            invocation_id=f"park_{turn.id}"))
+        except Exception as e:  # noqa: BLE001 — never fail the turn on this
+            _log.warning("turn %s: could not record the parked confirmation "
+                         "answer: %s", turn.id, e)
+
+    async def _outstanding_confirmations(self, turn: Turn) -> set[str]:
+        """Confirmation calls the user has NOT clicked yet, this answer included.
+
+        A model can raise several gated calls in one round (two
+        `run_skill_script`s, measured live). Each becomes its own card, and the
+        user answers them one at a time — but a model turn is only legal when
+        EVERY outstanding function call has a response. Resuming after the
+        first click therefore hands the model two calls and one answer; it has
+        no valid move, emits an event with no parts, and the turn ends. The
+        second card's invocation is then over, so the UI greys it out and the
+        run is stuck with no way forward.
+
+        So: answer-by-answer, count what is still unclicked, and let the caller
+        park until the batch is whole.
+        """
+        try:
+            session = await self.session_service.get_session(
+                app_name=turn.app_name, user_id=turn.user_id,
+                session_id=turn.session_id)
+        except Exception:  # noqa: BLE001 — a probe must never fail a turn
+            _log.debug("could not read session for the confirmation batch",
+                       exc_info=True)
+            return set()
+        if session is None:
+            return set()
+        # ONLY confirmation cards, not every long-running call. The gated tool
+        # call is itself long-running and is answered by its needs-confirmation
+        # result, not by a click; `ask_user_question` and friends are answered
+        # by other means entirely. Counting those would park a batch that can
+        # never complete — a permanent stall, strictly worse than the bug being
+        # fixed. So a card is a long-running call whose NAME is one the
+        # confirmation plugin raises.
+        pending: set[str] = set()
+        for event in getattr(session, "events", None) or []:
+            lr = _pending_long_running(event)
+            content = getattr(event, "content", None)
+            for p in getattr(content, "parts", None) or []:
+                fc = getattr(p, "function_call", None)
+                if (fc is not None and getattr(fc, "id", None) in lr
+                        and getattr(fc, "name", "") in _CONFIRMATION_CALL_NAMES):
+                    pending.add(fc.id)
+            pending -= _user_answered_ids(event)
+        # The incoming answer is not in the session yet.
+        return pending - _user_answered_ids(
+            type("_M", (), {"content": turn.new_message})())
+
     async def _drive(self, turn: Turn) -> None:
         try:
             runner = await self._get_runner(turn.app_name)
             install_confirmation_resume_fix(runner)
             await self._prune_orphan(turn)
             message = turn.new_message
+
+            # Park a PARTIAL batch instead of running the model on it. Ending
+            # the turn (rather than holding it open) is what keeps the
+            # remaining cards live: their invocation stays current, the UI
+            # leaves them clickable, and the last click starts one clean turn
+            # carrying the complete answer set. Holding the turn open instead
+            # would re-open the single-flight window that produced spurious
+            # 409s.
+            if _is_confirmation_answer(message):
+                outstanding = await self._outstanding_confirmations(turn)
+                if outstanding:
+                    _log.info(
+                        "turn %s: confirmation answer parked — %d of the "
+                        "batch still unanswered (%s)", turn.id,
+                        len(outstanding), ", ".join(sorted(outstanding)))
+                    await self._append_answer_only(turn)
+                    await turn.finish("done")
+                    return
             for round_ in range(1 + _MAX_CONTINUES):
                 # F3 detection: the round needs a continuation when a handback
                 # marker appears with NO model text after it. Covers both
