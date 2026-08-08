@@ -145,3 +145,93 @@ Two recurring shapes explain nearly every finding:
 
 Nothing here is fixed. §2.5 and §2.6 were fixed this session and are recorded
 for the pattern, not as open items.
+
+---
+
+# Part 2: critical review of the above + fix/refactor plan (2026-08-08)
+
+Every §2 claim was re-verified against code before planning. Two corrections,
+one new finding, one honest unresolved.
+
+## Verification results
+
+- **§2.1 VERIFIED.** `resolve()` (_fs.py:71) passes absolutes straight to
+  `p.resolve()`; `container_cwd` exists on the ABC + 3 backends; no inverse
+  mapping exists anywhere in the tree.
+- **§2.2 VERIFIED, severity revised DOWN, plus one real bug found.**
+  `WorkspaceRoot` uses `os.path.realpath`; `skill_trust._key` uses
+  `Path.expanduser().resolve()`. These mostly agree — the audit overstated the
+  drift. The genuine defect is `_key`'s `except OSError: return str(root)`:
+  an unresolvable path is keyed RAW, which can never match a resolved key, so
+  trust for such a root silently never persists.
+- **§2.3 VERIFIED as written.** Bonus: `data_dir()`'s docstring records that a
+  cwd-relative root once shipped and "silently orphaned data" — this failure
+  class has prior art in this repo.
+- **§2.4 was PARTLY WRONG — the truth is worse.** Corrected picture:
+  - Desktop: DSN forced to `adkccfiles://desktop_data_dir()` — the session
+    store follows `ADK_CC_DESKTOP_DATA`, not `data_dir()`. Two roots, per the
+    audit, but now precisely located (`server.py:_resolve_session_dsn`).
+  - **NEW FINDING:** web mode uses `ADK_CC_SESSION_DSN` as-is, and when unset
+    the DSN is `None` → ADK's default → **`InMemorySessionService`**
+    (service_registry.py:225). A web deployment without an explicit DSN gets
+    EPHEMERAL sessions — all history vanishes on restart, silently. Bigger
+    operational landmine than anything in the original audit.
+  - **NEW FINDING (sibling drift again):** `desktop_settings.py:695` and
+    `desktop_routes.py:518` construct `FileSessionService(desktop_data_dir())`
+    DIRECTLY, bypassing the DSN mechanism. Today the values coincide; any
+    future DSN divergence means those two read a different store than the
+    runner writes.
+- **UNRESOLVED:** during web-shell testing, `GET /users/local/sessions` on a
+  supposedly in-memory server returned 25 persistent wiki-era sessions. They
+  are in none of the stores above (searched `~/.adk-cc-desktop`, `~/.adk-cc`,
+  repo sqlite, no stale listener). Either some resolution layer is untraced
+  (ADK's registry also loads `<agents_dir>/services.py` — none exists here;
+  ruled out) or the probe hit a different process than assumed. MUST be
+  explained before changing session-store defaults: log the session_service
+  class at boot and re-probe.
+- §3.1/§3.2/§3.4 re-verified, stand as written. §2.5/§2.6 were fixed this
+  session; no re-verification needed.
+
+## The plan
+
+### P1 — normalize container paths at the tool boundary (small; do first)
+`resolve()` gains one lexical rewrite BEFORE expanduser/realpath: when
+`backend.container_cwd(ws.abs_path) != ws.abs_path` and the input is that
+root or under it (component-boundary match, `root + "/"`), swap the prefix
+for `ws.abs_path`. Identity backends (noop, ssh) are no-ops by construction.
+No permission change: results land under `ws.abs_path` and the existing
+allow-list + protected floor judge them unchanged.
+Acceptance: live e2e on DockerBackend — same file readable under both
+spellings; `/workspaces-evil` prefix NOT matched; outside-workspace still
+denied; DEBUG log when a rewrite fires so production confirms itself.
+Fixes the remote `read denied by fs_read: /workspace/...` report.
+
+### P2 — one source of truth for server roots (medium; resolve the mystery first)
+1. Instrument: one boot banner naming every resolved root (data_dir, session
+   store + service class, workspace root and WHY — env vs cwd fallback).
+   This alone would have caught both test-isolation incidents this week and
+   the web in-memory landmine.
+2. Explain the 25-session observation using that banner. No default changes
+   until it is explained.
+3. `deployment.session_store_root()` as the single derivation; used by
+   `_resolve_session_dsn` AND both direct `FileSessionService(...)`
+   constructions — removes the drift in §2.4.
+4. Decide web-mode default: recommend `adkccfiles://data_dir()` when
+   `ADK_CC_SESSION_DSN` is unset in single-tenant web (durable by default),
+   and a config-check ERROR (schema self-validation already has the pattern)
+   for multi-tenant web without an explicit DSN.
+
+### P3 — one canonicalisation helper (small)
+`adk_cc/paths.py: canonical(p)` — expanduser + realpath, documented; used by
+`WorkspaceRoot`, `skill_trust._key`, and any future path-keyed map. Fix
+`_key`'s OSError fallback to lexical `normpath(abspath(...))` rather than the
+raw string. Guard test: `canonical("/tmp/x") == canonical("/private/tmp/x")`
+on macOS.
+
+### P4 — leave alone, but say so in code
+`/tmp` in the allow-list, the CWD fallback of `default_workspace()`, and the
+remote lexical-resolve branch are DECISIONS with rationale. Add one comment
+each linking here, so the next audit doesn't re-litigate them.
+
+Order: P1 → P2.1/P2.2 (instrument + explain) → P2.3/P2.4 → P3. P1 and P3 are
+independent and can land in either order. Nothing here migrates existing data.
