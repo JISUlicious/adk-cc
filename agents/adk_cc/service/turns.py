@@ -567,31 +567,33 @@ class TurnBroker:
         except Exception as e:  # noqa: BLE001 — prune is best-effort
             _log.warning("turn %s: orphan prune failed: %s", turn.id, e)
 
-    async def _append_answer_only(self, turn: Turn) -> None:
-        """Record a parked confirmation answer WITHOUT running the model.
+    def _park_buffer(self, turn: Turn) -> list:
+        """Answers clicked so far in this session's confirmation batch.
 
-        The click has to survive even though nothing runs: it is what makes
-        the batch complete later, and what lets the UI mark this card
-        answered. Dropping it would leave the user clicking a card that never
-        resolves.
+        BUFFERED, not written to the session. The first version appended each
+        parked answer as an event, and that is precisely what kept the batch
+        broken: the answer carries the confirmation plugin's stash name, which
+        ADK deliberately IGNORES, so replaying history left the first call
+        still unanswered and the model still had no legal move. Clicking both
+        cards then stalled exactly like clicking one.
+
+        Held in memory instead and merged into the final message, so ADK
+        receives every response in one delivery — the same shape that already
+        works for a single confirmation, which is the evidence this is the
+        deliverable form.
         """
-        try:
-            from google.adk.events.event import Event
+        if not hasattr(self, "_parked_answers"):
+            self._parked_answers: dict[tuple, list] = {}
+        key = (turn.app_name, turn.user_id, turn.session_id)
+        return self._parked_answers.setdefault(key, [])
 
-            session = await self.session_service.get_session(
-                app_name=turn.app_name, user_id=turn.user_id,
-                session_id=turn.session_id)
-            if session is None:
-                return
-            await self.session_service.append_event(
-                session=session,
-                event=Event(author="user", content=turn.new_message,
-                            invocation_id=f"park_{turn.id}"))
-        except Exception as e:  # noqa: BLE001 — never fail the turn on this
-            _log.warning("turn %s: could not record the parked confirmation "
-                         "answer: %s", turn.id, e)
+    def _clear_park_buffer(self, turn: Turn) -> None:
+        getattr(self, "_parked_answers", {}).pop(
+            (turn.app_name, turn.user_id, turn.session_id), None)
 
-    async def _outstanding_confirmations(self, turn: Turn) -> set[str]:
+    async def _outstanding_confirmations(
+        self, turn: Turn, buffered: Optional[list] = None,
+    ) -> set[str]:
         """Confirmation calls the user has NOT clicked yet, this answer included.
 
         A model can raise several gated calls in one round (two
@@ -633,9 +635,15 @@ class TurnBroker:
                         and getattr(fc, "name", "") in _CONFIRMATION_CALL_NAMES):
                     pending.add(fc.id)
             pending -= _user_answered_ids(event)
-        # The incoming answer is not in the session yet.
-        return pending - _user_answered_ids(
+        # Neither the buffered answers nor the incoming one are in the session
+        # — the buffer exists precisely so they are NOT written there.
+        answered = _user_answered_ids(
             type("_M", (), {"content": turn.new_message})())
+        if buffered:
+            answered |= _user_answered_ids(
+                type("_M", (), {"content": type("_C", (), {
+                    "parts": list(buffered)})()})())
+        return pending - answered
 
     async def _drive(self, turn: Turn) -> None:
         try:
@@ -652,15 +660,45 @@ class TurnBroker:
             # would re-open the single-flight window that produced spurious
             # 409s.
             if _is_confirmation_answer(message):
-                outstanding = await self._outstanding_confirmations(turn)
+                buf = self._park_buffer(turn)
+                outstanding = await self._outstanding_confirmations(turn, buf)
+                new_parts = list(
+                    getattr(message, "parts", None) or [])
                 if outstanding:
+                    # Keyed by id: the answered card no longer greys out (its
+                    # answer is not in the session, so the server still reports
+                    # the call pending), which means it CAN be clicked again.
+                    # A duplicate functionResponse for one call is not a legal
+                    # message, so keep the last answer per id rather than
+                    # appending blindly.
+                    seen = {getattr(getattr(p, "function_response", None),
+                                    "id", None) for p in buf}
+                    for p in new_parts:
+                        pid = getattr(getattr(p, "function_response", None),
+                                      "id", None)
+                        if pid in seen:
+                            buf[:] = [q for q in buf
+                                      if getattr(getattr(q, "function_response",
+                                                         None), "id", None) != pid]
+                        buf.append(p)
                     _log.info(
                         "turn %s: confirmation answer parked — %d of the "
                         "batch still unanswered (%s)", turn.id,
                         len(outstanding), ", ".join(sorted(outstanding)))
-                    await self._append_answer_only(turn)
                     await turn.finish("done")
                     return
+                if buf:
+                    # Batch complete: deliver EVERY answer in one message. A
+                    # model turn is legal only when all outstanding calls have
+                    # responses, so they have to arrive together — sending
+                    # only the last one is what left the earlier calls
+                    # dangling and stopped the run.
+                    message = type(message)(role="user",
+                                            parts=buf + new_parts)
+                    _log.info("turn %s: confirmation batch complete — "
+                              "delivering %d answers together",
+                              turn.id, len(buf) + len(new_parts))
+                    self._clear_park_buffer(turn)
             for round_ in range(1 + _MAX_CONTINUES):
                 # F3 detection: the round needs a continuation when a handback
                 # marker appears with NO model text after it. Covers both

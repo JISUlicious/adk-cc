@@ -155,23 +155,26 @@ def main() -> int:  # noqa: PLR0915
     check("the last answer completes the batch", outstanding2 == set(),
           f"outstanding={sorted(outstanding2)}")
 
-    # 4. A parked answer must still be RECORDED, or the batch can never
-    #    complete and the card never resolves in the UI.
-    asyncio.run(broker._append_answer_only(turn))
-    check("the parked answer is persisted to the session",
-          len(svc.appended) == 1
-          and _user_answered_ids(svc.appended[0]) == {"fa"},
-          f"appended={svc.appended}")
-    check("and it is attributed to the user",
-          getattr(svc.appended[0], "author", None) == "user")
+    # 4. A parked answer is BUFFERED, never written to the session. Writing
+    #    it is what kept the batch broken: it carries the plugin's stash name,
+    #    which ADK ignores, so replaying history left the first call
+    #    unanswered and clicking BOTH cards stalled exactly like clicking one.
+    buf = broker._park_buffer(turn)
+    buf.extend(answer.parts)
+    check("the parked answer is NOT written to the session",
+          svc.appended == [], f"appended={svc.appended}")
+    check("it is held in the buffer instead",
+          _user_answered_ids(type("_M", (), {"content": _C(buf)})()) == {"fa"})
 
-    # 5. Having recorded it, the SAME broker now sees the batch as one short —
-    #    i.e. the recorded click is what lets the final answer complete it.
+    # 5. The buffer is what completes the batch on the final click.
     turn3 = Turn.__new__(Turn)
     turn3.id, turn3.app_name, turn3.user_id, turn3.session_id = "t3", "adk_cc", "u", "s"
     turn3.new_message = _C([_P(fr=_Resp("fb", "adk_cc_pending_confirmation"))])
-    check("after recording, the final answer completes the batch",
-          asyncio.run(broker._outstanding_confirmations(turn3)) == set())
+    check("buffered + incoming completes the batch",
+          asyncio.run(broker._outstanding_confirmations(turn3, buf)) == set())
+    check("and WITHOUT the buffer it would not",
+          asyncio.run(broker._outstanding_confirmations(turn3)) == {"fa"},
+          "the buffer must be what closes the batch")
 
     # 6. The ordinary single-confirmation path must be untouched: one card,
     #    one answer, nothing outstanding, so it runs immediately.
