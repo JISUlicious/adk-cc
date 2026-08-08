@@ -192,46 +192,79 @@ one new finding, one honest unresolved.
 - §3.1/§3.2/§3.4 re-verified, stand as written. §2.5/§2.6 were fixed this
   session; no re-verification needed.
 
-## The plan
+## The plan (revised: simple + robust across desktop / web / sandboxes)
 
-### P1 — normalize container paths at the tool boundary (small; do first)
-`resolve()` gains one lexical rewrite BEFORE expanduser/realpath: when
-`backend.container_cwd(ws.abs_path) != ws.abs_path` and the input is that
-root or under it (component-boundary match, `root + "/"`), swap the prefix
-for `ws.abs_path`. Identity backends (noop, ssh) are no-ops by construction.
-No permission change: results land under `ws.abs_path` and the existing
-allow-list + protected floor judge them unchanged.
-Acceptance: live e2e on DockerBackend — same file readable under both
-spellings; `/workspaces-evil` prefix NOT matched; outside-workspace still
-denied; DEBUG log when a rewrite fires so production confirms itself.
-Fixes the remote `read denied by fs_read: /workspace/...` report.
+Previous draft fixed symptoms in place. This revision reduces the SYSTEM to
+two objects and one translation, so the per-mode differences become data, not
+scattered branches. Guiding constraint (standing feedback): the desktop dev
+path stays simple — fork by code path, no new knobs, no migrations.
 
-### P2 — one source of truth for server roots (medium; resolve the mystery first)
-1. Instrument: one boot banner naming every resolved root (data_dir, session
-   store + service class, workspace root and WHY — env vs cwd fallback).
-   This alone would have caught both test-isolation incidents this week and
-   the web in-memory landmine.
-2. Explain the 25-session observation using that banner. No default changes
-   until it is explained.
-3. `deployment.session_store_root()` as the single derivation; used by
-   `_resolve_session_dsn` AND both direct `FileSessionService(...)`
-   constructions — removes the drift in §2.4.
-4. Decide web-mode default: recommend `adkccfiles://data_dir()` when
-   `ADK_CC_SESSION_DSN` is unset in single-tenant web (durable by default),
-   and a config-check ERROR (schema self-validation already has the pattern)
-   for multi-tenant web without an explicit DSN.
+### The shape
 
-### P3 — one canonicalisation helper (small)
-`adk_cc/paths.py: canonical(p)` — expanduser + realpath, documented; used by
-`WorkspaceRoot`, `skill_trust._key`, and any future path-keyed map. Fix
-`_key`'s OSError fallback to lexical `normpath(abspath(...))` rather than the
-raw string. Guard test: `canonical("/tmp/x") == canonical("/private/tmp/x")`
-on macOS.
+**Two path objects, and nothing else holds a root:**
 
-### P4 — leave alone, but say so in code
-`/tmp` in the allow-list, the CWD fallback of `default_workspace()`, and the
-remote lexical-resolve branch are DECISIONS with rationale. Add one comment
-each linking here, so the next audit doesn't re-litigate them.
+1. `ServerPaths` — frozen at boot, resolved ONCE from mode+env, then logged
+   as a one-line banner. Everything per-deployment: data root, session store,
+   identity, admin, credential store. Downstream code stops reading
+   `os.environ` for paths entirely.
+2. `WorkspaceRoot` (exists) — everything per-project/tenant. Unchanged
+   externally; gains nothing new to configure.
 
-Order: P1 → P2.1/P2.2 (instrument + explain) → P2.3/P2.4 → P3. P1 and P3 are
-independent and can land in either order. Nothing here migrates existing data.
+**One translation, owned by the component that already knows it:** the
+backend. The ABC grows the complete pair `to_runtime(p)` / `to_host(p)`,
+default = identity. Docker/sandbox_service/daytona override both (each
+already implements half as `_to_container_path`/`container_cwd`). `resolve()`
+calls `ws_backend.to_host(p)` before anything else — ONE crossing point
+covers read_file/write_file/edit_file/grep/glob alike.
+
+Why this is robust per mode, by construction rather than by testing:
+
+| mode | server data | sessions | path translation |
+|---|---|---|---|
+| desktop | `~/.adk-cc-desktop` (alias kept) | files under data root | identity (noop) or local-container map |
+| web single-tenant | `data_dir()` | **files under data root** (new default) | backend map |
+| web multi-tenant | `data_dir()` | explicit `ADK_CC_SESSION_DSN` **required** | backend map |
+| sandboxes | n/a | n/a | each backend owns its own pair; identity for noop/ssh means host-exec modes cannot regress |
+
+### The rule collapse (what makes it SIMPLE)
+
+- **One data root rule for every mode**: `ADK_CC_DATA_DIR` wins everywhere;
+  `ADK_CC_DESKTOP_DATA` stays as a desktop-mode alias (compat, no migration);
+  setting the alias in web mode WARNS instead of silently landing in
+  `~/.adk-cc` (§2.3's observed failure).
+- **Sessions follow the data root by default in ALL modes.** Kills the web
+  in-memory landmine (§2.4) with a better default instead of a new knob.
+  Multi-tenant is the one place a DSN is genuinely required → config-check
+  ERROR (the schema self-validation pattern already exists).
+- **The two direct `FileSessionService(...)` constructions are deleted** —
+  they read `ServerPaths.sessions`. Sibling drift removed by removing the
+  sibling.
+- `canonical()` lives in one module and is applied only at the EDGES where a
+  path enters the system (WorkspaceRoot construction, trust keys, env-var
+  roots) — never mid-pipeline. Remote stays lexical, as it already is, now
+  documented as the rule rather than an exception. Fixes `_key`'s raw-string
+  OSError fallback as a side effect.
+
+### Fail loud, in two places only
+
+1. Boot banner: every resolved root + the session service CLASS. Would have
+   caught both of this week's test-isolation incidents and the in-memory
+   landmine; also the instrument that settles the unresolved 25-session
+   observation (which still gates the session-default change).
+2. Config check: multi-tenant web without DSN = error; desktop alias set in
+   web mode = warning. No other new validation.
+
+### Order
+
+1. **P1 — backend pair + `resolve()` crossing** (small, self-contained, fixes
+   the live remote `read denied by fs_read: /workspace/...`). Acceptance:
+   live e2e on DockerBackend, same file under both spellings, prefix-boundary
+   negative case, outside-workspace still denied; identity backends
+   byte-identical behavior.
+2. **P2 — banner first, then `ServerPaths`** (the banner explains the
+   25-session mystery BEFORE the session default changes).
+3. **P3 — `canonical()` at the edges** — folds into P2's construction sites.
+
+Net effect on code volume: negative outside tests (two constructions deleted,
+env reads consolidated). No new env vars, no migrations, desktop behavior
+unchanged.
