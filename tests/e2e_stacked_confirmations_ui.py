@@ -63,8 +63,30 @@ def _skill(proj: str, name: str, marker: str) -> None:
     (d / "report.py").write_text(f'print("{marker}")\n')
 
 
+def _discover_uid() -> str:
+    """Web shell: the UI signs itself in, so the user id is not known up front.
+
+    Read it back from the session files the server just wrote rather than
+    guessing at the no-auth identity, which is an implementation detail.
+    """
+    import requests as _rq
+    for uid in ("local", "user", "default"):
+        try:
+            if _rq.get(f"{BASE}/apps/adk_cc/users/{uid}/sessions",
+                       timeout=10).json():
+                return uid
+        except Exception:
+            continue
+    return ""
+
+
 def main() -> int:  # noqa: PLR0915
-    dist = REPO / "web" / "dist-desktop"
+    # WEB=1 exercises the OTHER shell. Both render the same ChatPage -> Thread,
+    # so the fix should apply identically — but "should" is not evidence, and
+    # the shells genuinely differ (auth gate, no project rail, no
+    # /desktop/settings/* routes at all).
+    web_shell = os.environ.get("WEB") == "1"
+    dist = REPO / "web" / ("dist" if web_shell else "dist-desktop")
     if not dist.is_dir():
         print("SKIP: desktop UI not built."); return 0
     if os.environ.get("ADK_CC_LIVE") != "1":
@@ -75,6 +97,7 @@ def main() -> int:  # noqa: PLR0915
         print("SKIP: playwright not installed."); return 0
 
     data = tempfile.mkdtemp(prefix="stackconf-data-")
+    os.environ["_ADKCC_TEST_DATA"] = data
     proj = tempfile.mkdtemp(prefix="stackconf-proj-")
     subprocess.run(["git", "init", "-q"], cwd=proj, check=False)
     _skill(proj, "alpha", MARK_A)
@@ -85,10 +108,20 @@ def main() -> int:  # noqa: PLR0915
         "ADK_CC_MODEL_REGISTRY_FILE": os.path.expanduser(
             "~/.adk-cc-desktop/admin-data/model-endpoints.json"),
         "ADK_CC_AGENTS_DIR": str(REPO / "agents"),
-        "ADK_CC_ALLOW_NO_AUTH": "1", "ADK_CC_DESKTOP": "1",
+        "ADK_CC_ALLOW_NO_AUTH": "1",
+        # ADK_CC_DATA_DIR, not just the desktop alias: deployment.data_dir()
+        # only honours ADK_CC_DESKTOP_DATA in DESKTOP mode and otherwise falls
+        # back to ~/.adk-cc — so the web run wrote a session into the
+        # operator's REAL store and read back 25 unrelated sessions.
+        "ADK_CC_DATA_DIR": data,
         "ADK_CC_DESKTOP_DATA": data, "ADK_CC_TENANCY_MODE": "single",
+        # The desktop trust endpoint does not exist in web mode; this is the
+        # supported way to trust project skills without it.
+        "ADK_CC_TRUST_PROJECT_SKILLS": "1",
+        "ADK_CC_WORKSPACE_ROOT": proj,
         "ADK_CC_GLOBAL_TENANT_ID": "local", "ADK_CC_SERVE_UI": "1",
         "ADK_CC_UI_DIST": str(dist), "ADK_CC_SANDBOX_BACKEND": "noop",
+        **({} if web_shell else {"ADK_CC_DESKTOP": "1"}),
         "ADK_CC_NOOP_ACK_HOST_EXEC": "1",
         "ADK_CC_SKILL_SCRIPTS_ACK_HOST_EXEC": "1",
         "ADK_CC_DEFAULT_MODEL": MODEL,
@@ -106,19 +139,27 @@ def main() -> int:  # noqa: PLR0915
                     break
             except Exception:
                 time.sleep(0.25)
-        pid = requests.post(BASE + "/desktop/projects", json={"path": proj},
-                            timeout=15).json()["project"]["id"]
-        # Project skills stay withheld until the folder is trusted.
-        requests.post(f"{BASE}/desktop/settings/skills/trust",
-                      json={"root": proj, "trusted": True}, timeout=15)
+        if web_shell:
+            pid = None          # discovered from the session list after the UI runs
+        else:
+            pid = requests.post(BASE + "/desktop/projects", json={"path": proj},
+                                timeout=15).json()["project"]["id"]
+            requests.post(f"{BASE}/desktop/settings/skills/trust",
+                          json={"root": proj, "trusted": True}, timeout=15)
 
         with sync_playwright() as pw:
             b = pw.chromium.launch(headless=True)
             page = b.new_page(viewport={"width": 1440, "height": 1000})
             page.goto(BASE + "/", wait_until="networkidle")
             page.wait_for_timeout(1500)
-            page.locator(".adk-project-row").first.click(timeout=20000)
-            page.wait_for_timeout(2500)
+            if web_shell:
+                # The web shell opens with no session and a DISABLED composer
+                # ("Pick or create a session to start chatting") — the desktop
+                # shell gets one implicitly when a project is picked.
+                page.get_by_role("button", name="New").first.click(timeout=20000)
+            else:
+                page.locator(".adk-project-row").first.click(timeout=20000)
+            page.wait_for_timeout(3000)
 
             composer = page.locator("textarea").first
             composer.click()
@@ -189,14 +230,17 @@ def main() -> int:  # noqa: PLR0915
             #    folded away. Ask the server.
             def _session_blob():
                 try:
+                    uid = pid or _discover_uid()
+                    if not uid:
+                        return ""
                     rows = requests.get(
-                        f"{BASE}/apps/adk_cc/users/{pid}/sessions",
+                        f"{BASE}/apps/adk_cc/users/{uid}/sessions",
                         timeout=30).json()
                     if not rows:
                         return ""
                     sid = rows[-1]["id"]
                     return requests.get(
-                        f"{BASE}/apps/adk_cc/users/{pid}/sessions/{sid}",
+                        f"{BASE}/apps/adk_cc/users/{uid}/sessions/{sid}",
                         timeout=30).text
                 except Exception:
                     return ""
@@ -225,11 +269,17 @@ def main() -> int:  # noqa: PLR0915
               "confirmation answer parked" in server_log,
               "expected the park log line; the gate may not have fired")
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        if os.environ.get("KEEP_SERVER") == "1":
+            print(f"\n  server left RUNNING for inspection: {BASE}")
+            print(f"  project:    {proj}")
+            print(f"  server log: {log}")
+            print(f"  stop it with: kill {proc.pid}")
+        else:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
     print(f"\n{_passed} passed, {_failed} failed")
     if _failed:
