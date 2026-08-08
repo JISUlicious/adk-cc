@@ -256,6 +256,31 @@ class SandboxBackend(ABC):
         """
         return host_abs_path
 
+    def to_host_path(self, path: str, host_workspace: str) -> str:
+        """Translate a RUNTIME-absolute path back to its host spelling.
+
+        The other half of `container_cwd`, and derived from it rather than
+        overridden per backend, so the pair cannot drift: the workspace hint
+        deliberately teaches the model runtime paths ("/workspace/…"), and the
+        model then hands them to agent-side file tools, which validate HOST
+        allow-lists — `read denied by fs_read: /workspace/...` in production.
+        Backends where the two spaces coincide (Noop, Ssh) return
+        `host_workspace` from `container_cwd`, which makes this an identity by
+        construction — host-exec modes cannot regress.
+
+        Purely lexical, component-boundary safe ("/workspace-evil" does not
+        match), and never consults the local filesystem — the same reason the
+        remote resolve() branch is lexical.
+        """
+        root = self.container_cwd(host_workspace).rstrip("/")
+        if not root or root == host_workspace.rstrip("/"):
+            return path
+        if path == root:
+            return host_workspace
+        if path.startswith(root + "/"):
+            return host_workspace.rstrip("/") + path[len(root):]
+        return path
+
     async def close(self) -> None:
         """Tear down per-session state (e.g. stop and remove a container).
 

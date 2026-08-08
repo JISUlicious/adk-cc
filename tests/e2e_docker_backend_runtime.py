@@ -109,6 +109,25 @@ async def _run(net: bool) -> None:
         got = await be.read_text(os.path.join(ws_dir, "in_ws.txt"), fs_read=fsr)
         check("write_text still works for the workspace", "ws-ok" in got, repr(got))
 
+        # 4b. P1 crossing: the SAME file, addressed by the runtime spelling
+        #     the model actually sees ("/workspace/…"), through resolve() —
+        #     the production failure was `read denied by fs_read: /workspace/…`.
+        from adk_cc.tools._fs import resolve as _resolve
+
+        class _Ctx:
+            def __init__(self, backend, wsr):
+                self.state = {"temp:sandbox_backend": backend,
+                              "temp:sandbox_workspace": wsr}
+
+        mapped = _resolve("/workspace/in_ws.txt", _Ctx(be, ws))
+        ok_read = ""
+        try:
+            ok_read = await be.read_text(str(mapped), fs_read=fsr)
+        except Exception as e:  # noqa: BLE001
+            ok_read = f"EXC {type(e).__name__}: {e}"
+        check("the runtime spelling reads the same file (P1)",
+              "ws-ok" in ok_read, str(ok_read)[:160])
+
         # 5. Egress must follow the knob in BOTH directions — a fix that just
         #    turns the network on unconditionally would pass a one-sided test.
         r = await be.exec(

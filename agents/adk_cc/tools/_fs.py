@@ -9,12 +9,15 @@ ultimately decide whether the resolved path is allowed).
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
 from google.adk.tools.tool_context import ToolContext
 
 from ..sandbox import get_workspace
+
+_log = logging.getLogger(__name__)
 
 
 def display_path(p: str | Path, ctx: ToolContext | None = None) -> str:
@@ -62,6 +65,24 @@ def resolve(path: str, ctx: ToolContext | None = None) -> Path:
             ws = get_workspace(ctx)
         except Exception:
             ws = None
+    # The ONE crossing between path spaces (see analysis/path-and-workspace-
+    # audit.md). The workspace hint deliberately teaches the model the
+    # RUNTIME's paths ("/workspace/…" under Docker), and the model hands them
+    # back to agent-side tools that validate HOST allow-lists — so a file
+    # inside the workspace was denied under its runtime spelling. Rewrite the
+    # prefix BEFORE any expanduser/realpath (a runtime path must never be
+    # realpath'd against the host filesystem). Identity for host-exec
+    # backends by construction — to_host_path derives from container_cwd.
+    if ws is not None and ctx is not None:
+        try:
+            from ..sandbox import get_backend
+
+            mapped = get_backend(ctx).to_host_path(path, ws.abs_path)
+            if mapped != path:
+                _log.debug("resolve: runtime path %s -> host %s", path, mapped)
+                path = mapped
+        except Exception:  # noqa: BLE001 — no backend (tests, odd contexts)
+            pass
     if ws is not None and getattr(ws, "remote", False):
         import posixpath
 
