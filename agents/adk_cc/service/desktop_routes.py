@@ -515,7 +515,7 @@ def mount_desktop_routes(app) -> None:
                 from .. import deployment
                 from .file_session_service import FileSessionService
 
-                fss = FileSessionService(deployment.desktop_data_dir())
+                fss = FileSessionService(deployment.session_store_root())
                 result["events_kept"] = await fss.truncate_before_invocation(
                     user_id=project_id, session_id=session_id, invocation_id=inv
                 )

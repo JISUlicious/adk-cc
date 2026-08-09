@@ -60,10 +60,12 @@ def _read() -> dict:
 
 
 def _key(root: Path | str) -> str:
-    try:
-        return str(Path(root).expanduser().resolve())
-    except OSError:
-        return str(root)
+    # One canonicalisation (P3): the old OSError fallback keyed the RAW
+    # string, which can never match a resolved key — trust for such a root
+    # silently never persisted.
+    from ..paths import canonical
+
+    return canonical(root)
 
 
 def is_trusted(root: Optional[Path | str]) -> bool:

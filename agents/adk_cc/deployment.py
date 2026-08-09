@@ -36,6 +36,18 @@ def desktop_data_dir() -> Path:
     return p
 
 
+def session_store_root() -> Path:
+    """WHERE session history lives — the ONE derivation (P2, path audit).
+
+    Desktop: the desktop data dir (unchanged). Web: data_dir(), so history is
+    durable by default — without this, a web deployment with no explicit
+    ADK_CC_SESSION_DSN silently got ADK's InMemorySessionService and every
+    session vanished on restart. An explicit DSN still overrides entirely
+    (the caller checks it first).
+    """
+    return desktop_data_dir() if is_desktop() else data_dir()
+
+
 def data_dir() -> Path:
     """Server-side data ROOT — identity, admin/tenant registry, credential
     store, audit log, central task store, and codex token all default UNDER

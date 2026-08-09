@@ -573,11 +573,30 @@ def make_app():
     # build_fastapi_app mounts the admin panel (when enabled) before the UI.
     return build_fastapi_app(
         agents_dir=agents_dir,
-        session_service_uri=_resolve_session_dsn(),
+        session_service_uri=_log_resolved_roots(_resolve_session_dsn()),
         auth_extractor=extractor,
         identity=identity,
         ui_dist_dir=ui_dist_dir,
     )
+
+
+def _log_resolved_roots(session_uri: Optional[str]) -> Optional[str]:
+    """Boot banner (P2): every resolved root, once, where drift is visible.
+
+    Both of this week's test-isolation incidents and the web in-memory
+    landmine would have been one glance at this line.
+    """
+    import logging as _logging
+
+    from .. import deployment
+
+    _logging.getLogger(__name__).info(
+        "resolved roots: desktop=%s data=%s session_store=%s session_uri=%s "
+        "workspace_root=%s",
+        deployment.is_desktop(), deployment.data_dir(),
+        deployment.session_store_root(), session_uri,
+        os.environ.get("ADK_CC_WORKSPACE_ROOT") or "(cwd fallback)")
+    return session_uri
 
 
 def _resolve_session_dsn() -> Optional[str]:
@@ -589,8 +608,13 @@ def _resolve_session_dsn() -> Optional[str]:
     from .. import deployment
 
     if deployment.is_desktop():
-        return f"adkccfiles://{deployment.desktop_data_dir()}"
-    return os.environ.get("ADK_CC_SESSION_DSN")
+        return f"adkccfiles://{deployment.session_store_root()}"
+    dsn = os.environ.get("ADK_CC_SESSION_DSN")
+    if dsn:
+        return dsn
+    # Durable by default (P2): the old None fall-through handed ADK its
+    # InMemorySessionService — web history silently vanished on restart.
+    return f"adkccfiles://{deployment.session_store_root()}"
 
 
 # --- Admin panel wiring ---------------------------------------------------

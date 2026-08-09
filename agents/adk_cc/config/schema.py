@@ -976,6 +976,18 @@ RULES: list[Rule] = [
          "disabled (localhost/private IPs are fetchable).",
          lambda r, s: _truthy(r, s, "ADK_CC_WEB_FETCH_ALLOW_PRIVATE")),
     Rule("warn",
+         "multi-tenant web without an explicit ADK_CC_SESSION_DSN — sessions "
+         "land in the local file store, which does not scale past one "
+         "process. Set a real DSN (postgres/sqlite).",
+         lambda r, s: (r.get("ADK_CC_TENANCY_MODE") or "").strip() == "multi"
+                      and not r.get("ADK_CC_DESKTOP")
+                      and not r.get("ADK_CC_SESSION_DSN")),
+    Rule("warn",
+         "ADK_CC_DESKTOP_DATA is set in a non-desktop deployment — it is "
+         "IGNORED there; use ADK_CC_DATA_DIR.",
+         lambda r, s: bool(r.get("ADK_CC_DESKTOP_DATA"))
+                      and not r.get("ADK_CC_DESKTOP")),
+    Rule("warn",
          "ADK_CC_ALLOW_NO_AUTH is enabled in a non-desktop deployment — the "
          "server runs with NO auth.",
          lambda r, s: _truthy(r, s, "ADK_CC_ALLOW_NO_AUTH")

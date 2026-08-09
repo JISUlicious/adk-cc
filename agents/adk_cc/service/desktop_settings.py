@@ -692,7 +692,7 @@ def mount_desktop_settings_routes(app) -> None:  # noqa: ANN001
         from .. import deployment
         from .file_session_service import FileSessionService
 
-        return FileSessionService(deployment.desktop_data_dir())
+        return FileSessionService(deployment.session_store_root())
 
     def _require_project(request: Request) -> str:
         uid = _scope_user(request)
