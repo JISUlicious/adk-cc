@@ -329,6 +329,16 @@ class ConfirmationFormUiPlugin(BasePlugin):
         }
         union_ids = set(relevant_incoming) | set(relevant_pending)
 
+        import logging as _lg
+
+        _lg.getLogger(__name__).info(
+            "confirmation batch: outstanding=%s resolved=%s unresolved=%s "
+            "incoming=%s stashed=%s -> %s",
+            sorted(outstanding), sorted(_resolved_wrap_ids(events)),
+            sorted(unresolved), sorted(relevant_incoming),
+            sorted(relevant_pending),
+            "STASH" if (not unresolved
+                        or not unresolved.issubset(union_ids)) else "BUNDLE")
         if not unresolved or not unresolved.issubset(union_ids):
             # Either no outstanding wraps to bundle yet (defensive), or
             # not all wraps have responses yet. Persist every reshaped
@@ -492,13 +502,27 @@ def _session_events(invocation_context) -> list:
     Returns an empty list when the context, session, or events are
     missing — keeps the plugin testable with a fake context and tolerant
     of unusual session shapes."""
+    import logging as _lg
+
     if invocation_context is None:
+        _lg.getLogger(__name__).warning(
+            "confirmation batch: NO invocation context — deferring blind. "
+            "If a batch is parked forever, this line is suspect #0 "
+            "(analysis/confirmation-batching-research.md).")
         return []
     session = getattr(invocation_context, "session", None)
     if session is None:
+        _lg.getLogger(__name__).warning(
+            "confirmation batch: context has NO session — deferring blind "
+            "(suspect #0, see the research note).")
         return []
     events = getattr(session, "events", None)
     if not events:
+        _lg.getLogger(__name__).warning(
+            "confirmation batch: session %s has NO events — the batch "
+            "predicate will see an empty set and STASH instead of bundling "
+            "(suspect #0/#1: invocation-scoped snapshot?).",
+            getattr(session, "id", "?"))
         return []
     return list(events)
 

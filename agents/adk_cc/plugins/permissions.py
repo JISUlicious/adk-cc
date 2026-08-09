@@ -637,9 +637,18 @@ class PermissionPlugin(BasePlugin):
         if not raw:
             return None
         try:
-            from ..sandbox import get_workspace
+            from ..sandbox import get_backend, get_workspace
 
             ws = get_workspace(tool_context)
+            # The same crossing resolve() makes (P1, path audit): the model is
+            # deliberately taught RUNTIME paths ("/workspace/…"), and judging
+            # the raw spelling here asked the user to grant scope for a file
+            # already INSIDE the project — live: "read_file targets a path
+            # outside the project scope" for /workspace/notes.txt.
+            try:
+                raw = get_backend(tool_context).to_host_path(raw, ws.abs_path)
+            except Exception:  # noqa: BLE001 — no backend (tests)
+                pass
             return _resolve_against_workspace(raw, ws.abs_path)
         except Exception:
             return None
