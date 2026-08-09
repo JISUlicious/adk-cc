@@ -802,7 +802,7 @@ FIELDS: list[Var] = [
     Var("ADK_CC_LOG_MODEL_IO_MAX_BYTES", Tier.DEV, "Deployment",
         "Truncation cap for LOG_MODEL_IO.", default=50000, parse=as_int),
     Var("ADK_CC_TOOL_TITLES", Tier.ADVANCED, "Behavior",
-        "Generate tool/session titles (costs extra model tokens).", default=False, parse=as_bool),
+        "Model-labelled TOOL calls in the UI (session titles are always on).", default=False, parse=as_bool),
     Var("ADK_CC_TASK_REMINDER", Tier.ADVANCED, "Behavior",
         "Periodic task-list nudge (set 0 to disable).", default=True, parse=as_bool),
     Var("ADK_CC_VERIFY", Tier.ADVANCED, "Behavior",

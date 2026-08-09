@@ -1467,14 +1467,21 @@ if _compaction_config is not None:
 # an optional `title` arg to every tool declaration and strips it before
 # execution; the recorded functionCall event keeps it for the UI. Appended
 # last so injection runs after PlanModeReminderPlugin's tool filtering.
-# Same flag also enables SESSION titles for the rail — an out-of-band LLM
-# call after the first turn (SessionTitlePlugin), not a tool the agent must
-# remember to call.
 if env_bool("ADK_CC_TOOL_TITLES"):
-    from .plugins import SessionTitlePlugin, ToolTitlePlugin
+    from .plugins import ToolTitlePlugin
 
     _app_kwargs["plugins"].append(ToolTitlePlugin())
-    _app_kwargs["plugins"].append(SessionTitlePlugin())
+
+# SESSION titles are ALWAYS on — every chat product names its sessions, and
+# chaining this to the ADVANCED tool-label opt-in above meant no deployment
+# that didn't happen to export ADK_CC_TOOL_TITLES ever titled a session:
+# reported live as "most sessions are just 'New Chat', on remote none get a
+# title", with ZERO session_title: log lines because the plugin was never
+# registered at all. One tiny out-of-band call per young session; every
+# failure path logs and never breaks a run (see the plugin's docstring).
+from .plugins import SessionTitlePlugin
+
+_app_kwargs["plugins"].append(SessionTitlePlugin())
 
 # The wiki (ADK_CC_WIKI=1) is EXPLICIT — accessed via the wiki_search /
 # wiki_read / wiki_add tools (wired onto the coordinator above). It has NO
