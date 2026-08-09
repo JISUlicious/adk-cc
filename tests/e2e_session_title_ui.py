@@ -75,6 +75,16 @@ def main() -> int:  # noqa: PLR0915
                 pass
 
     env = dict(os.environ)
+    # STRIP the tool-titles flag: titling used to be chained to it, and this
+    # very test once passed only because the dev shell leaked it in. The
+    # feature must work with NO flag — that is the fix under test (5c0eb99).
+    env.pop("ADK_CC_TOOL_TITLES", None)
+    # …and the repo .env ALSO sets it (line 674) — the server runs with
+    # cwd=REPO and loads it, which is how an A/B against the pre-fix code
+    # passed on both sides. Registration must be provable with NO flag from
+    # ANY source.
+    env["ADK_CC_SKIP_DOTENV"] = "1"
+    env["ADK_CC_SKIP_CONFIG_CHECK"] = "1"
     env.update({
         "ADK_CC_MODEL_REGISTRY_FILE": os.path.expanduser(
             "~/.adk-cc-desktop/admin-data/model-endpoints.json"),
