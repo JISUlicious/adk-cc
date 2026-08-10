@@ -155,7 +155,7 @@ class DockerBackend(SandboxBackend):
         # must never run on the request loop. See _get_client.
         self._client = client
         self._container: Any = None  # docker.models.containers.Container
-        self._lock = asyncio.Lock()
+        self._lock = threading.Lock()  # see _ensure_container
         self._client_lock = threading.Lock()
 
     # --- helpers ---------------------------------------------------------
@@ -199,7 +199,20 @@ class DockerBackend(SandboxBackend):
         return self._client
 
     async def _ensure_container(self) -> Any:
-        async with self._lock:
+        # CROSS-LOOP mutual exclusion (client-diagnosed deadlock, 17min+
+        # "agent is working"): each skill-script execution runs in its own
+        # thread with its OWN event loop (code_executor), and an asyncio.Lock
+        # waiter's wake-up future belongs to the loop that created it — a
+        # release from loop A never wakes loop B, so the second parallel
+        # script hung forever. The MIRROR of the Daytona #116 freeze: that
+        # was a threading.Lock blocking a loop; switching this to a plain
+        # threading.Lock (the reported remedy) would re-create it, because
+        # this critical section AWAITS. So: threading.Lock acquired OFF-loop
+        # via to_thread — waiters park in worker threads, never on a loop,
+        # and release is legal from any thread for a plain Lock.
+        await asyncio.to_thread(self._lock.acquire)
+        try:
+          if True:
             # Build the client off-loop on first use (the /version handshake).
             await asyncio.to_thread(self._get_client)
             if self._container is not None:
@@ -250,6 +263,8 @@ class DockerBackend(SandboxBackend):
 
             self._container = await asyncio.to_thread(self._spawn_container)
             return self._container
+        finally:
+            self._lock.release()
 
     def _config_signature(self) -> str:
         """Everything fixed at CREATION time, so a change forces a recreate.

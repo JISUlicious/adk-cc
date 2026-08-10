@@ -17,6 +17,7 @@ and removed on `close()`.
 from __future__ import annotations
 
 import asyncio
+import threading
 import os
 
 from ...config.schema import as_int
@@ -79,7 +80,7 @@ class LocalContainerBackend(NoopBackend):
         # in use. When ensure_workspace changes the mount set mid-session, the sig
         # changes and _ensure_container recreates the container (see #5).
         self._active_sig: Optional[str] = None
-        self._lock = asyncio.Lock()
+        self._lock = threading.Lock()  # see _ensure_container
 
     # --- config helpers --------------------------------------------------
 
@@ -202,12 +203,27 @@ class LocalContainerBackend(NoopBackend):
         _LAST_ACTIVE[self._name] = time.monotonic()  # touch: this session is active
         if self._started and self._active_sig == desired:
             return
-        async with self._lock:
+        # CROSS-LOOP mutual exclusion (client-diagnosed deadlock, 17min+
+        # "agent is working"): each skill-script execution runs in its own
+        # thread with its OWN event loop (code_executor), and an asyncio.Lock
+        # waiter's wake-up future belongs to the loop that created it — a
+        # release from loop A never wakes loop B, so the second parallel
+        # script hung forever. The MIRROR of the Daytona #116 freeze: that
+        # was a threading.Lock blocking a loop; switching this to a plain
+        # threading.Lock (the reported remedy) would re-create it, because
+        # this critical section AWAITS. So: threading.Lock acquired OFF-loop
+        # via to_thread — waiters park in worker threads, never on a loop,
+        # and release is legal from any thread for a plain Lock.
+        await asyncio.to_thread(self._lock.acquire)
+        try:
+          if True:
             if self._started and self._active_sig == desired:
                 return
             await asyncio.to_thread(self._ensure_container_sync)
             # Opportunistically reap OTHER sessions' idle containers (opt-in).
             await asyncio.to_thread(_maybe_reap_idle, self._runtime)
+        finally:
+            self._lock.release()
 
     # --- exec ------------------------------------------------------------
 
