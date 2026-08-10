@@ -26,12 +26,15 @@ export function ArtifactChip({
   sessionId,
   filename,
   version,
+  superseded,
 }: {
   appName: string
   userId: string
   sessionId: string
   filename: string
   version: number
+  /** Older version of a re-saved file: mini chip, no auto-preview (#123). */
+  superseded?: boolean
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -55,12 +58,18 @@ export function ArtifactChip({
         type="button"
         onClick={handleDownload}
         disabled={busy}
-        className="w-full flex items-center gap-2 rounded-md border border-primary/40 bg-brand-tint px-3 py-2 text-sm hover:bg-brand-tint-strong transition-colors disabled:opacity-50"
+        className={
+          "w-full flex items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors disabled:opacity-50 " +
+          (superseded
+            ? "border-border bg-transparent hover:bg-accent"
+            : "border-primary/40 bg-brand-tint hover:bg-brand-tint-strong")
+        }
       >
         <FileDown className="h-4 w-4 text-primary shrink-0" />
         <span className="font-mono text-xs truncate">{filename}</span>
         <span className="text-[10px] text-muted-foreground shrink-0">
           v{version}
+          {superseded ? " · superseded" : ""}
         </span>
         {busy ? (
           <RefreshCw className="h-3.5 w-3.5 text-muted-foreground ml-auto shrink-0 animate-spin" />
@@ -73,7 +82,7 @@ export function ArtifactChip({
           </span>
         )}
       </button>
-      {isHtml && (
+      {isHtml && !superseded && (
         // Fill the chip's max-w-[80%] box so the preview renders at the same
         // width as a chat bubble. Needed because this column is `items-start`
         // (children don't stretch); without an explicit width the preview's

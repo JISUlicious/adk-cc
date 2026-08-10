@@ -184,8 +184,11 @@ export function Thread({
   const deduped = dedupePartials(events)
   const pendingCallIds = collectPendingCallIds(deduped)
   const responsesByCallId = collectResponses(deduped)
-  const rows = mergeAdjacentThoughts(
-    flattenEvents(deduped, responsesByCallId),
+  const rows = pinPendingConfirmations(
+    foldSupersededArtifacts(
+      mergeAdjacentThoughts(flattenEvents(deduped, responsesByCallId)),
+    ),
+    pendingCallIds,
   )
 
   // Confirmation cards are NOT disabled by isStreaming: each card manages
@@ -339,6 +342,7 @@ function Row({
           sessionId={sessionId}
           filename={row.filename}
           version={row.version}
+          superseded={row.superseded}
         />
       )
     case "run":
@@ -616,6 +620,9 @@ type ChatRow =
       version: number
       /** Which invocation produced it — the key the run fold groups on. */
       invocationId?: string
+      /** An older version of a filename that reappears later in the thread —
+       * renders as a mini chip with NO auto-preview (#123). */
+      superseded?: boolean
     }
   | {
       // 3+ outputs from ONE invocation. Below that they stay as individual
@@ -939,6 +946,45 @@ function flattenEvents(
  * The collapsed card takes the position of the FIRST output, so the run appears
  * where the work started rather than jumping to the end of the turn.
  */
+/** Only the LATEST version of a filename keeps the full chip + preview; every
+ * earlier save of the same file demotes to a superseded mini chip. Verified
+ * live: one turn that rewrote report.html four times rendered four full
+ * iframes down the thread (#123). Event order is untouched — the newest row
+ * already sits where the last save happened. */
+function foldSupersededArtifacts(rows: ChatRow[]): ChatRow[] {
+  const last = new Map<string, number>()
+  rows.forEach((r, i) => {
+    if (r.kind === "artifact") last.set(r.filename, i)
+  })
+  if (!last.size) return rows
+  return rows.map((r, i) =>
+    r.kind === "artifact" && last.get(r.filename) !== i
+      ? { ...r, superseded: true }
+      : r,
+  )
+}
+
+/** A pending confirmation (or ask_user_question) is an INPUT REQUEST, not a
+ * record: it renders at the bottom of the thread next to the composer, no
+ * matter where its wrap event landed. ADK emits the wrap BEFORE the same
+ * turn's tool responses, so faithful event order showed the card above the
+ * artifact preview it should follow (#123). Once answered, the row falls out
+ * of pendingCallIds and returns to its historical position. */
+function pinPendingConfirmations(
+  rows: ChatRow[], pending: Set<string>,
+): ChatRow[] {
+  const pinned: ChatRow[] = []
+  const rest = rows.filter((r) => {
+    const isAsk =
+      r.kind === "tool_pair" &&
+      pending.has(r.callId) &&
+      (CONFIRMATION_NAMES.has(r.name) || r.name === ASK_QUESTION_NAME)
+    if (isAsk) pinned.push(r)
+    return !isAsk
+  })
+  return pinned.length ? [...rest, ...pinned] : rows
+}
+
 function foldRuns(rows: ChatRow[]): ChatRow[] {
   const byInvocation = new Map<string, number[]>()
   rows.forEach((r, i) => {
