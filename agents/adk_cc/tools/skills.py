@@ -2201,6 +2201,35 @@ def _skills_signature(dirs: list[Path]) -> tuple:
             except OSError:
                 continue
             out.append((os.path.basename(child), st.st_mtime_ns, st.st_size))
+            # EVERY file, not just SKILL.md. The original signature trusted
+            # its own docstring's claim that bodies are read lazily — false
+            # for scripts/references/assets: ADK's loader read_text()s them
+            # ONCE into SkillResources dicts, and get_script() serves that RAM
+            # copy forever. So editing scripts/foo.py moved nothing in the
+            # signature, the cached Skill objects kept their old content, the
+            # materialisation digest never changed, and the OLD script ran —
+            # reported live from web mode ("cached skills material has no way
+            # to be renewed"), and the reason desktop needed its explicit
+            # reload as a workaround. Cost: a few dozen stats per skill on a
+            # 1s-TTL recheck path.
+            for sub in ("scripts", "references", "assets"):
+                subdir = os.path.join(child, sub)
+                entries: list[tuple] = []
+                # RECURSIVE — ADK's loader keys resources by relative path, so
+                # nested files (scripts/lib/util.py) are loaded too and must
+                # move the signature like any other.
+                for root_, _dirs, files_ in os.walk(subdir):
+                    for fn in files_:
+                        fp = os.path.join(root_, fn)
+                        try:
+                            st_f = os.stat(fp)
+                        except OSError:
+                            continue
+                        entries.append((os.path.relpath(fp, subdir),
+                                        st_f.st_mtime_ns, st_f.st_size))
+                if entries:
+                    out.append((os.path.basename(child), sub,
+                                tuple(sorted(entries))))
     return tuple(out)
 
 
