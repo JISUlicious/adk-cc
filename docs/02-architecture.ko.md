@@ -387,7 +387,7 @@ ADK의 tool-dispatch flow(`google/adk/flows/llm_flows/functions.py:489-504`)는 
 
 두 계층이 LLM context window 채워짐을 막습니다.
 
-**1차 방어 — ADK의 `EventsCompactionConfig`**(`google/adk/apps/compaction.py`). adk-cc의 `agent.py`는 env(`ADK_CC_COMPACTION_TOKEN_THRESHOLD` + `ADK_CC_COMPACTION_EVENT_RETENTION` for token-threshold mode; `ADK_CC_COMPACTION_INTERVAL` + `ADK_CC_COMPACTION_OVERLAP` for sliding-window)에서 구성하고 `App(events_compaction_config=...)`에 전달. ADK runner가 invocation 후 compaction을 트리거; `LlmEventSummarizer`가 LLM 호출을 처리, function-call/response 페어링을 보존하고 pending call의 compaction을 피하는 안전 split 로직.
+**1차 방어 — ADK의 `EventsCompactionConfig`**(`google/adk/apps/compaction.py`). adk-cc의 `agent.py`는 env(`ADK_CC_COMPACTION_TOKEN_THRESHOLD` + `ADK_CC_COMPACTION_EVENT_RETENTION` for token-threshold mode; `ADK_CC_COMPACTION_INTERVAL` + `ADK_CC_COMPACTION_OVERLAP` for sliding-window)에서 구성하고 `App(events_compaction_config=...)`에 전달. ADK runner가 invocation 후 compaction을 트리거; `LlmEventSummarizer`가 LLM 호출을 처리, function-call/response 페어링을 보존하고 pending call의 compaction을 피하는 안전 split 로직. 여기에 adk-cc 패치 하나: ADK는 *모든* function_response를 응답으로 간주하지만, confirmation으로 gate된 call은 사용자를 기다리는 동안 interim `needs_confirmation` response로 닫혀 있음 — 그대로면 ADK가 parked call의 이벤트를 compact해 버리고, 승인 후의 실제 response가 고아가 됨("No function call event found…"). `context/compaction_pin.py`(config와 함께 설치)가 pending-call 계산을 name/payload 인식으로 바꿔 parked confirmation이 compaction에서 살아남게 함.
 
 전용 compaction 모델은 `ADK_CC_COMPACTION_MODEL` (+ 완전히 별도 provider용 선택적 `_API_BASE`/`_API_KEY`)을 통해 지원됨. Unset 시 ADK가 에이전트의 main 모델로 auto-default.
 
