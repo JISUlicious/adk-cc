@@ -128,6 +128,35 @@ async def _run(net: bool) -> None:
         check("the runtime spelling reads the same file (P1)",
               "ws-ok" in ok_read, str(ok_read)[:160])
 
+        # 4c. Upload delivery (#121): binary-exact through the REAL daemon —
+        #     deliver_upload → put_archive → sha256 verified INSIDE the
+        #     container via the runtime path.
+        import hashlib as _hl
+
+        from adk_cc.service.uploads import deliver_upload
+
+        blob = bytes(range(256)) * 512  # 128 KiB, not valid utf-8
+        want = _hl.sha256(blob).hexdigest()
+        row = await deliver_upload(ws, be, "upload.bin", blob)
+        r = await be.exec("sha256sum /workspace/uploads/upload.bin",
+                          fs_write=fsw, network=NetworkConfig(),
+                          timeout_s=60, cwd=ws_dir)
+        check("upload lands binary-exact in the container (#121)",
+              want in (r.stdout or ""),
+              f"want {want[:12]}… got {(r.stdout or r.stderr)[:160]}")
+        check("upload row reports uploads/<name>",
+              row.get("rel_path") == "uploads/upload.bin", row)
+
+        # 4d. The read-only-rootfs fallback must be binary-safe too: /tmp
+        #     rejects put_archive, so this exercises the chunked base64 path.
+        await be.write_bytes("/tmp/upload-fallback.bin", blob, fs_write=fsw)
+        r = await be.exec("sha256sum /tmp/upload-fallback.bin",
+                          fs_write=fsw, network=NetworkConfig(),
+                          timeout_s=60, cwd=ws_dir)
+        check("read-only fallback is binary-exact (chunked b64)",
+              want in (r.stdout or ""),
+              f"want {want[:12]}… got {(r.stdout or r.stderr)[:160]}")
+
         # 5. Egress must follow the knob in BOTH directions — a fix that just
         #    turns the network on unconditionally would pass a one-sided test.
         r = await be.exec(

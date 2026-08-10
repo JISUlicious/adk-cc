@@ -14,6 +14,7 @@ same bearer/no-auth policy as every other route applies.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any
 
@@ -63,9 +64,38 @@ def mount_turn_routes(app: Any, broker: Any) -> None:
         if not raw:
             raise HTTPException(status_code=400, detail="newMessage required")
         try:
-            return types.Content.model_validate(raw)
+            content = types.Content.model_validate(raw)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"bad newMessage: {e}")
+        _reject_oversized_blobs(content)
+        return content
+
+    def _reject_oversized_blobs(content: Any) -> None:
+        """Inline blobs ride into session events verbatim: every JSONL
+        rewrite re-serializes the base64, the context guard and microcompact
+        are blind to it, and the chatgpt-codex backend silently drops the
+        part. Cap it hard and point at the upload path instead
+        (analysis/file-upload-plan.md hardening rider)."""
+        try:
+            cap_mb = float(os.environ.get("ADK_CC_TURN_INLINE_MAX_MB", "1"))
+        except ValueError:
+            cap_mb = 1.0
+        cap = int(cap_mb * 1024 * 1024)
+        total = 0
+        for part in getattr(content, "parts", None) or []:
+            blob = getattr(part, "inline_data", None)
+            if blob is not None and getattr(blob, "data", None):
+                total += len(blob.data)
+        if total > cap:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"inline file data ({total / 1024 / 1024:.1f}MB) exceeds "
+                    f"{cap_mb:g}MB — upload the file instead (it lands at "
+                    "uploads/<name> in the workspace) and reference it by "
+                    "path in the message"
+                ),
+            )
 
     def _ids(body: dict) -> tuple[str, str, str]:
         try:

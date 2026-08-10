@@ -387,3 +387,29 @@ Keeping every byte buffers the whole flood in the SERVER
         p = Path(abs_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
+
+    async def read_bytes(self, path: str, *, fs_read: FsReadConfig) -> bytes:
+        abs_path = os.path.abspath(path)
+        if not fs_read.allows(abs_path):
+            raise SandboxViolation(f"read denied by fs_read: {abs_path}")
+        p = Path(abs_path)
+        if not p.exists():
+            raise FileNotFoundError(abs_path)
+        if not p.is_file():
+            raise IsADirectoryError(abs_path)
+        return p.read_bytes()
+
+    async def write_bytes(
+        self, path: str, content: bytes, *, fs_write: FsWriteConfig
+    ) -> None:
+        """Binary-safe host write. Atomic (`.part` + os.replace) — uploads
+        land here and a half-written file must never be visible to a turn
+        that starts mid-transfer."""
+        abs_path = os.path.abspath(path)
+        if not fs_write.allows(abs_path):
+            raise SandboxViolation(f"write denied by fs_write: {abs_path}")
+        p = Path(abs_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".part")
+        tmp.write_bytes(content)
+        os.replace(tmp, p)

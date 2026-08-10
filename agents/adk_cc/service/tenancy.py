@@ -79,6 +79,51 @@ class TenantContext:
         )
 
 
+def resolve_default_tenant(
+    user_id: str, *, default_root: Optional[str] = None
+) -> TenantContext:
+    """Default (non-desktop) tenant resolution, shared by the TenancyPlugin
+    and server-side routes that must land files in the SAME workspace the
+    agent uses (uploads). One function on purpose: deriving the layout in
+    two places is how path bugs are born.
+
+    Order of precedence:
+      1. If the auth middleware set an auth context for this request
+         (JWT or BearerToken extractor), use the tenant_id from there.
+      2. Otherwise (dev `adk web .`, unit tests, no-auth runs), fall
+         back to the legacy "local" tenant.
+    """
+    root = (
+        default_root
+        or os.environ.get("ADK_CC_WORKSPACE_ROOT")
+        or os.getcwd()
+    )
+    # Lazy import to keep `service/auth.py` an optional dep — it pulls in
+    # fastapi/starlette which aren't required for the `adk web .` dev path.
+    try:
+        from .auth import get_auth_context
+        auth = get_auth_context()
+    except Exception:  # noqa: BLE001 — never block tenant resolution
+        auth = None
+
+    if auth is not None:
+        auth_user_id, auth_tenant_id = auth
+        return TenantContext(
+            tenant_id=auth_tenant_id,
+            # Trust the explicit user_id passed in; fall back to the
+            # auth-provided one. Both should match in practice (ADK's
+            # session uses auth-provided user_id) but passing user_id is
+            # the public API of the resolver.
+            user_id=user_id or auth_user_id or "local",
+            workspace_root_path=root,
+        )
+    return TenantContext(
+        tenant_id="local",
+        user_id=user_id or "local",
+        workspace_root_path=root,
+    )
+
+
 # `temp:` prefix — ADK's session service skips temp-keyed state in
 # state-delta extraction. TenantContext is a dataclass, not JSON-
 # serializable; persisting risks json.dumps failures and stale-session
@@ -133,48 +178,14 @@ class TenancyPlugin(BasePlugin):
         )
 
     def _default_resolver(self, user_id: str) -> TenantContext:
-        """Default tenant resolution.
-
-        Order of precedence:
-          1. If the auth middleware set an auth context for this
-             request (JWT or BearerToken extractor), use the
-             tenant_id from there. This bridges the JWT's tenant
-             claim into the plugin layer without requiring operators
-             to supply a custom resolver.
-          2. Otherwise (dev `adk web .`, unit tests, no-auth runs),
-             fall back to the legacy "local" tenant. Single-tenant
-             behavior is preserved when there's no auth context.
+        """Default tenant resolution — see `resolve_default_tenant`.
 
         Operators who need a different mapping (e.g. user_id → tenant
         via a database lookup, or a tenant-per-feature-flag scheme)
         still supply a custom `tenant_resolver` that overrides this
         method entirely.
         """
-        # Lazy import to keep `service/auth.py` an optional dep — it
-        # pulls in fastapi/starlette which aren't required for the
-        # `adk web .` dev path.
-        try:
-            from .auth import get_auth_context
-            auth = get_auth_context()
-        except Exception:  # noqa: BLE001 — never block tenant resolution
-            auth = None
-
-        if auth is not None:
-            auth_user_id, auth_tenant_id = auth
-            return TenantContext(
-                tenant_id=auth_tenant_id,
-                # Trust the explicit user_id passed in; fall back to
-                # the auth-provided one. Both should match in practice
-                # (ADK's session uses auth-provided user_id) but
-                # passing user_id is the public API of the resolver.
-                user_id=user_id or auth_user_id or "local",
-                workspace_root_path=self._default_root,
-            )
-        return TenantContext(
-            tenant_id="local",
-            user_id=user_id or "local",
-            workspace_root_path=self._default_root,
-        )
+        return resolve_default_tenant(user_id, default_root=self._default_root)
 
     def _seed_state(self, state, *, user_id: str, session) -> None:
         """Resolve the tenant and seed workspace + backend into state.

@@ -422,6 +422,51 @@ def mount_desktop_files_routes(app) -> None:  # noqa: ANN001
 
 # --- datasets (W5 ingestion) ------------------------------------------------
 
+def mount_desktop_upload_routes(app) -> None:  # noqa: ANN001
+    """`PUT /desktop/uploads/{name}` — general file upload into the bound
+    project's workspace (ADK_CC_DESKTOP=1 only; no-op otherwise).
+
+    Unlike the dataset routes this does NOT refuse remote/containerized
+    workspaces: delivery goes through the SAME (resolver, backend) pair the
+    TenancyPlugin gives the agent, so an SSH project's file lands on the
+    remote host and a container backend's inside the sandbox
+    (analysis/file-upload-plan.md)."""
+    from .desktop_routes import desktop_enabled
+
+    if not desktop_enabled():
+        return
+
+    from .uploads import UploadError, deliver_upload, read_capped_body
+
+    @app.put("/desktop/uploads/{name}", include_in_schema=False)
+    async def upload_file(name: str, request: Request):  # noqa: ANN202
+        from .desktop_routes import load_projects
+        from .desktop_workspace import (
+            desktop_backend_factory,
+            desktop_tenant_resolver,
+        )
+
+        q = request.query_params
+        project_id = _safe(q.get("project_id") or "", "project_id")
+        session_id = _safe(q.get("session_id") or "", "session_id")
+        if not any(p.get("id") == project_id for p in load_projects()):
+            raise HTTPException(status_code=404,
+                                detail=f"unknown project: {project_id}")
+
+        ctx = desktop_tenant_resolver(project_id)
+        ws = ctx.workspace(session_id)
+        backend = desktop_backend_factory(ctx, session_id)
+
+        blob = await read_capped_body(request)
+        overwrite = (q.get("overwrite") or "").lower() in ("1", "true")
+        try:
+            row = await deliver_upload(ws, backend, name, blob,
+                                       overwrite=overwrite)
+        except UploadError as e:
+            raise HTTPException(status_code=e.status, detail=str(e))
+        return {"status": "ok", "upload": row}
+
+
 def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
     """Mount /desktop/datasets/* when ADK_CC_DESKTOP=1; otherwise a no-op.
 

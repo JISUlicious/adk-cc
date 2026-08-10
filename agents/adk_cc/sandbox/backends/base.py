@@ -228,9 +228,15 @@ class SandboxBackend(ABC):
         Used by `fetch_from_artifact` to materialize a user-uploaded
         file into the agent's sandbox without lossy re-encoding.
         """
-        await self.write_text(
-            path, content.decode("utf-8"), fs_write=fs_write
-        )
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise RuntimeError(
+                f"backend {getattr(self, 'name', type(self).__name__)!r} has "
+                "no binary write path (write_bytes falls back to utf-8 text); "
+                f"cannot write binary content to {path}"
+            ) from e
+        await self.write_text(path, text, fs_write=fs_write)
 
     async def ensure_workspace(self, ws: "WorkspaceRoot") -> None:
         """Create the workspace dir if it doesn't exist.

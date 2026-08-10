@@ -484,13 +484,20 @@ class DockerBackend(SandboxBackend):
     async def write_text(
         self, path: str, content: str, *, fs_write: FsWriteConfig
     ) -> None:
+        await self.write_bytes(path, content.encode("utf-8"), fs_write=fs_write)
+
+    async def write_bytes(
+        self, path: str, content: bytes, *, fs_write: FsWriteConfig
+    ) -> None:
+        """Binary-safe write through the daemon (uploads land here — the
+        workspace lives on the daemon host, so plain host writes are not an
+        option)."""
         if not fs_write.allows(path):
             raise SandboxViolation(f"write denied by fs_write: {path}")
         container = await self._ensure_container()
         path_in_container = self._to_container_path(path)
         target_dir = str(PurePosixPath(path_in_container).parent)
         target_name = PurePosixPath(path_in_container).name
-        encoded = content.encode("utf-8")
 
         # Build a tar stream containing one file with the target name,
         # then put_archive into the parent dir. put_archive extracts
@@ -498,9 +505,9 @@ class DockerBackend(SandboxBackend):
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as tar:
             info = tarfile.TarInfo(name=target_name)
-            info.size = len(encoded)
+            info.size = len(content)
             info.mode = 0o644
-            tar.addfile(info, io.BytesIO(encoded))
+            tar.addfile(info, io.BytesIO(content))
         buf.seek(0)
 
         def _write() -> None:
@@ -528,19 +535,37 @@ class DockerBackend(SandboxBackend):
                 # into a confusing second error.
                 if "read-only" not in str(e).lower():
                     raise
-                b64 = base64.b64encode(encoded).decode("ascii")
+                # Chunked: a single argv element is capped (Linux
+                # MAX_ARG_STRLEN = 128 KiB), so large payloads must be
+                # appended in slices. 96 KiB slices of base64 are a multiple
+                # of 4 chars, so each decodes independently.
+                b64 = base64.b64encode(content).decode("ascii")
+                quoted_path = shlex.quote(path_in_container)
                 rc, out = container.exec_run(
-                    cmd=["bash", "-lc",
-                         f"printf %s {shlex.quote(b64)} | base64 -d > "
-                         f"{shlex.quote(path_in_container)}"],
+                    cmd=["bash", "-lc", f": > {quoted_path}"],
                     user=CONTAINER_USER,
                 )
                 if rc != 0:
                     raise IOError(
-                        f"write to {path_in_container} failed after the "
+                        f"truncate of {path_in_container} failed in the "
                         f"read-only rootfs fallback: "
                         f"{(out or b'').decode('utf-8', 'replace')[:300]}"
                     ) from e
+                step = 96 * 1024
+                for i in range(0, len(b64) or 1, step):
+                    chunk = b64[i:i + step]
+                    rc, out = container.exec_run(
+                        cmd=["bash", "-lc",
+                             f"printf %s {shlex.quote(chunk)} | base64 -d >> "
+                             f"{quoted_path}"],
+                        user=CONTAINER_USER,
+                    )
+                    if rc != 0:
+                        raise IOError(
+                            f"write to {path_in_container} failed after the "
+                            f"read-only rootfs fallback: "
+                            f"{(out or b'').decode('utf-8', 'replace')[:300]}"
+                        ) from e
 
         await asyncio.to_thread(_write)
 

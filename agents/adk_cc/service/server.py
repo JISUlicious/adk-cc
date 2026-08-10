@@ -287,9 +287,19 @@ def build_fastapi_app(
     # Desktop read-only file tree + file viewer over the session's in-place
     # workspace (the project root; for the right-side file panel). Scoped +
     # path-guarded; no-auth.
-    from .desktop_files import mount_desktop_dataset_routes, mount_desktop_files_routes
+    from .desktop_files import (
+        mount_desktop_dataset_routes,
+        mount_desktop_files_routes,
+        mount_desktop_upload_routes,
+    )
     mount_desktop_files_routes(fastapi_app)
     mount_desktop_dataset_routes(fastapi_app)
+    mount_desktop_upload_routes(fastapi_app)
+    # General file upload for web deployments (`PUT /api/uploads/{name}`,
+    # auth-gated by the middleware). Desktop uses /desktop/uploads above;
+    # the mount itself no-ops in the mode it doesn't serve.
+    from .uploads import mount_upload_routes
+    mount_upload_routes(fastapi_app)
 
     # Admin panel routes (default-OFF). Mounted BEFORE the UI StaticFiles
     # mount — the SPA is mounted at `/` (a catch-all) and would otherwise

@@ -624,11 +624,18 @@ class SandboxServiceBackend(SandboxBackend):
     async def write_text(
         self, path: str, content: str, *, fs_write: FsWriteConfig
     ) -> None:
+        await self.write_bytes(path, content.encode("utf-8"), fs_write=fs_write)
+
+    async def write_bytes(
+        self, path: str, content: bytes, *, fs_write: FsWriteConfig
+    ) -> None:
+        """Binary-safe: the REST file_write carries raw octet-stream bytes;
+        only the text wrapper above imposes utf-8."""
         sid = await self._ensure_session()
         rel = self._to_container_path(path)
         if not rel:
             raise SandboxViolation(
-                f"sandbox_service: write_text refuses to write to the "
+                f"sandbox_service: write refuses to write to the "
                 f"workspace root itself ({path!r})"
             )
         url = f"/v1/sessions/{sid}/files/{quote(rel, safe='/')}"
@@ -636,7 +643,7 @@ class SandboxServiceBackend(SandboxBackend):
             try:
                 resp = await client.post(
                     url,
-                    content=content.encode("utf-8"),
+                    content=content,
                     headers={
                         "Content-Type": "application/octet-stream",
                         "Idempotency-Key": self._idem_key(),
@@ -644,12 +651,12 @@ class SandboxServiceBackend(SandboxBackend):
                 )
             except httpx.HTTPError as e:
                 raise RuntimeError(
-                    f"sandbox_service: write_text transport error for "
+                    f"sandbox_service: write transport error for "
                     f"{path!r}: {e}"
                 ) from e
             if resp.status_code >= 400:
                 raise RuntimeError(
-                    f"sandbox_service: write_text returned {resp.status_code} "
+                    f"sandbox_service: write returned {resp.status_code} "
                     f"for {path!r}: {resp.text}"
                 )
 
