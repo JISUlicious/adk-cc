@@ -184,11 +184,8 @@ export function Thread({
   const deduped = dedupePartials(events)
   const pendingCallIds = collectPendingCallIds(deduped)
   const responsesByCallId = collectResponses(deduped)
-  const rows = pinPendingConfirmations(
-    foldSupersededArtifacts(
-      mergeAdjacentThoughts(flattenEvents(deduped, responsesByCallId)),
-    ),
-    pendingCallIds,
+  const rows = foldSupersededArtifacts(
+    mergeAdjacentThoughts(flattenEvents(deduped, responsesByCallId)),
   )
 
   // Confirmation cards are NOT disabled by isStreaming: each card manages
@@ -962,27 +959,6 @@ function foldSupersededArtifacts(rows: ChatRow[]): ChatRow[] {
       ? { ...r, superseded: true }
       : r,
   )
-}
-
-/** A pending confirmation (or ask_user_question) is an INPUT REQUEST, not a
- * record: it renders at the bottom of the thread next to the composer, no
- * matter where its wrap event landed. ADK emits the wrap BEFORE the same
- * turn's tool responses, so faithful event order showed the card above the
- * artifact preview it should follow (#123). Once answered, the row falls out
- * of pendingCallIds and returns to its historical position. */
-function pinPendingConfirmations(
-  rows: ChatRow[], pending: Set<string>,
-): ChatRow[] {
-  const pinned: ChatRow[] = []
-  const rest = rows.filter((r) => {
-    const isAsk =
-      r.kind === "tool_pair" &&
-      pending.has(r.callId) &&
-      (CONFIRMATION_NAMES.has(r.name) || r.name === ASK_QUESTION_NAME)
-    if (isAsk) pinned.push(r)
-    return !isAsk
-  })
-  return pinned.length ? [...rest, ...pinned] : rows
 }
 
 function foldRuns(rows: ChatRow[]): ChatRow[] {

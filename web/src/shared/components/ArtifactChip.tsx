@@ -38,7 +38,13 @@ export function ArtifactChip({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Superseded versions collapse by default; CLICK toggles their preview
+  // open/closed (download moves to the trailing icon). The latest version
+  // keeps the auto-preview and click-to-download as before.
+  const [expanded, setExpanded] = useState(false)
   const isHtml = isHtmlArtifact(filename)
+  const toggleable = Boolean(superseded && isHtml)
+  const showPreview = isHtml && (!superseded || expanded)
 
   async function handleDownload() {
     setBusy(true)
@@ -56,7 +62,7 @@ export function ArtifactChip({
     <div className={cn(THREAD_ROW_WIDTH, "flex flex-col items-start gap-2")}>
       <button
         type="button"
-        onClick={handleDownload}
+        onClick={() => (toggleable ? setExpanded((x) => !x) : void handleDownload())}
         disabled={busy}
         className={
           "w-full flex items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors disabled:opacity-50 " +
@@ -74,7 +80,18 @@ export function ArtifactChip({
         {busy ? (
           <RefreshCw className="h-3.5 w-3.5 text-muted-foreground ml-auto shrink-0 animate-spin" />
         ) : (
-          <Download className="h-3.5 w-3.5 text-muted-foreground ml-auto shrink-0" />
+          <span
+            role="button"
+            title="Download"
+            className="ml-auto shrink-0 rounded p-0.5 hover:bg-accent"
+            onClick={(e) => {
+              if (!toggleable) return // whole chip already downloads
+              e.stopPropagation()
+              void handleDownload()
+            }}
+          >
+            <Download className="h-3.5 w-3.5 text-muted-foreground" />
+          </span>
         )}
         {error && (
           <span className="text-[10px] text-destructive ml-2 shrink-0">
@@ -82,7 +99,7 @@ export function ArtifactChip({
           </span>
         )}
       </button>
-      {isHtml && !superseded && (
+      {showPreview && (
         // Fill the chip's max-w-[80%] box so the preview renders at the same
         // width as a chat bubble. Needed because this column is `items-start`
         // (children don't stretch); without an explicit width the preview's
