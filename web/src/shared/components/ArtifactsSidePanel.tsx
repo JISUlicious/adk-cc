@@ -10,6 +10,8 @@ import {
 import { HtmlArtifactPreview } from "./HtmlArtifactPreview"
 import { RightPanelShell, type RightPanelProps } from "./RightPanelShell"
 import { UploadsList, WebFileViewer } from "./WorkspaceFilesPanel"
+import { fetchArtifact } from "@/shared/api/artifacts"
+import { isImage, isPdf } from "@/shared/lib/filetypes"
 import { SubagentsDock } from "@/shared/components/SubagentsDock"
 import { CodeView } from "@/shared/components/CodeView"
 import { Markdown } from "@/shared/lib/markdown"
@@ -174,6 +176,11 @@ function ArtifactViewer({
   const { filename, version } = selection
   const html = isHtmlArtifact(filename)
   const md = isMarkdown(filename)
+  // Agent-produced charts/reports are images/PDFs: render them, don't
+  // dead-end at "use download". Artifact routes are auth-gated, so the
+  // bytes are fetched with the Bearer and shown via a blob object URL.
+  const media = isImage(filename) ? "image" : isPdf(filename) ? "pdf" : null
+  const [mediaUrl, setMediaUrl] = useState<string | null>(null)
   const [text, setText] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(!html)
@@ -189,6 +196,22 @@ function ArtifactViewer({
     let cancelled = false
     setLoading(true)
     setError(null)
+    if (media) {
+      let url: string | null = null
+      fetchArtifact(appName, userId, sessionId, filename, version ?? undefined)
+        .then((r) => {
+          if (cancelled) return
+          url = URL.createObjectURL(
+            new Blob([r.bytes as BlobPart], { type: r.mime }))
+          setMediaUrl(url)
+        })
+        .catch((e) => !cancelled && setError((e as Error).message))
+        .finally(() => !cancelled && setLoading(false))
+      return () => {
+        cancelled = true
+        if (url) URL.revokeObjectURL(url)
+      }
+    }
     fetchArtifactText(appName, userId, sessionId, filename, version ?? undefined)
       .then((r) => {
         if (cancelled) return
@@ -265,7 +288,15 @@ function ArtifactViewer({
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        {html ? (
+        {media === "image" && mediaUrl ? (
+          <div className="flex items-start justify-center p-2">
+            <img src={mediaUrl} alt={filename} className="max-w-full rounded"
+                 data-artifact-viewer="image" />
+          </div>
+        ) : media === "pdf" && mediaUrl ? (
+          <iframe src={mediaUrl} title={filename} className="h-full w-full"
+                  data-artifact-viewer="pdf" />
+        ) : html ? (
           <HtmlArtifactPreview
             appName={appName}
             userId={userId}
