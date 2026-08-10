@@ -1,4 +1,5 @@
-import { Trash2 } from "lucide-react"
+import { useState } from "react"
+import { Hash, Trash2 } from "lucide-react"
 import { type Session } from "@/shared/api/sessions"
 import { cn } from "@/shared/lib/utils"
 
@@ -22,8 +23,32 @@ export function SessionList({
   onDelete: (s: Session) => void
   emptyHint?: React.ReactNode
 }) {
+  // Reveal-session-ids toggle (minimal, per user request): one localStorage
+  // flag, no settings plumbing. Lives HERE because this list is the one
+  // shared surface both shells render sessions through.
+  const [showIds, setShowIds] = useState(
+    () => localStorage.getItem("adk.showSessionIds") === "1",
+  )
+  const toggleIds = () => {
+    const v = !showIds
+    setShowIds(v)
+    localStorage.setItem("adk.showSessionIds", v ? "1" : "0")
+  }
   return (
     <>
+      <div className="flex justify-end px-2 pt-1">
+        <button
+          type="button"
+          onClick={toggleIds}
+          title={showIds ? "Hide session ids" : "Show session ids"}
+          className={cn(
+            "adk-toggle-session-ids rounded p-1 hover:bg-accent",
+            showIds ? "text-primary" : "text-muted-foreground/60",
+          )}
+        >
+          <Hash className="h-3 w-3" />
+        </button>
+      </div>
       {loading && (
         <p className="px-4 py-3 text-xs text-muted-foreground">Loading…</p>
       )}
@@ -46,6 +71,15 @@ export function SessionList({
             <div className="flex-1 min-w-0">
               <div className="adk-session-title truncate text-xs">{sessionTitle(s) ?? "New Chat"}</div>
               <div className="adk-session-meta truncate text-[10px] text-muted-foreground">{fmtWhen(s.lastUpdateTime)}</div>
+              {showIds && (
+                <div
+                  className="adk-session-id truncate font-mono text-[10px] text-muted-foreground/80 select-all"
+                  title={s.id}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {s.id}
+                </div>
+              )}
             </div>
             <button
               type="button"
