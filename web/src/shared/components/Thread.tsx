@@ -387,6 +387,7 @@ function Row({
           return (
             <ConfirmationCard
               payload={payload}
+              originalCall={extractOriginalCall(args)}
               disabled={submitDisabled}
               onSubmit={(resp) =>
                 onSubmitFunctionResponse(callId, name, resp)
@@ -496,6 +497,20 @@ function mergeAdjacentThoughts(rows: ChatRow[]): ChatRow[] {
     merged.push(row)
   }
   return merged
+}
+
+/** The gated call itself ({name, args}) so the card can SHOW what it is
+ * being asked to approve — the wrap always carries it as
+ * originalFunctionCall, and dropping it left the user approving blind. */
+function extractOriginalCall(
+  args: unknown,
+): { name?: string; args?: unknown } | null {
+  if (!args || typeof args !== "object") return null
+  const a = args as Record<string, unknown>
+  const oc = (a.originalFunctionCall ?? a.original_function_call) as
+    | { name?: string; args?: unknown }
+    | undefined
+  return oc && typeof oc === "object" ? oc : null
 }
 
 function extractConfirmPayload(args: unknown): ConfirmPayload | null {

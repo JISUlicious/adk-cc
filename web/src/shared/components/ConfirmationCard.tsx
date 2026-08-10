@@ -39,8 +39,11 @@ export function ConfirmationCard({
   payload,
   onSubmit,
   disabled,
+  originalCall,
 }: {
   payload: ConfirmPayload
+  /** The gated tool call itself, for the details expander. */
+  originalCall?: { name?: string; args?: unknown } | null
   onSubmit: (response: {
     chose_id: string
     comment?: string
@@ -77,6 +80,16 @@ export function ConfirmationCard({
           <ShieldAlert className="h-4 w-4 text-primary mt-0.5 shrink-0" />
           <div className="min-w-0 flex-1">
             <div className="font-medium">{payload.title}</div>
+            {originalCall && (
+              <details className="adk-confirm-details mt-1">
+                <summary className="cursor-pointer select-none text-[11px] text-muted-foreground hover:text-foreground">
+                  {originalCall.name ?? "tool call"} — details
+                </summary>
+                <pre className="mt-1 max-h-60 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/60 p-2 font-mono text-[11px]">
+                  {formatCallArgs(originalCall.args)}
+                </pre>
+              </details>
+            )}
             <div className="text-xs text-muted-foreground whitespace-pre-wrap mt-1">
               {payload.detail}
             </div>
@@ -134,4 +147,21 @@ export function ConfirmationCard({
       </div>
     </div>
   )
+}
+
+/** The command/code the user is approving, shown as itself — a run_bash
+ * command or write_file content reads far better raw than JSON-escaped. Any
+ * other shape falls back to pretty JSON. */
+function formatCallArgs(args: unknown): string {
+  if (!args || typeof args !== "object") return String(args ?? "")
+  const a = args as Record<string, unknown>
+  for (const k of ["command", "code", "content"]) {
+    const v = a[k]
+    if (typeof v === "string" && Object.keys(a).length === 1) return v
+  }
+  try {
+    return JSON.stringify(args, null, 2)
+  } catch {
+    return String(args)
+  }
 }
