@@ -9,6 +9,7 @@ import {
   File as FileIcon,
   Folder,
   FolderOpen,
+  Download,
   History,
   RefreshCw,
   RotateCcw,
@@ -17,6 +18,7 @@ import {
 import {
   getFileStatus,
   listDir,
+  rawFileUrl,
   readFile,
   type DirEntry,
   type FileContent,
@@ -46,7 +48,15 @@ import {
 } from "@/shared/api/desktop-settings"
 import { CodeView } from "@/shared/components/CodeView"
 import { Markdown } from "@/shared/lib/markdown"
-import { isHtml, isMarkdown, langFromPath } from "@/shared/lib/filetypes"
+import {
+  isAudio,
+  isHtml,
+  isImage,
+  isMarkdown,
+  isPdf,
+  isVideo,
+  langFromPath,
+} from "@/shared/lib/filetypes"
 import { cn } from "@/shared/lib/utils"
 
 /**
@@ -755,6 +765,14 @@ function FileViewer({
           <ArrowLeft className="h-4 w-4" />
         </button>
         <span className="min-w-0 flex-1 truncate text-xs font-medium">{name}</span>
+        <a
+          href={rawFileUrl(projectId, sessionId, path, true)}
+          download={name}
+          className="rounded-md p-1 text-muted-foreground hover:bg-accent"
+          title="Download"
+        >
+          <Download className="h-3.5 w-3.5" />
+        </a>
         {renderable && !loading && !content?.binary && (
           <button
             type="button"
@@ -802,9 +820,49 @@ function FileViewer({
           <div className="p-4 text-center text-xs text-muted-foreground">Loading…</div>
         ) : error ? (
           <div className="p-3 text-xs text-destructive">{error}</div>
+        ) : isImage(name, content?.mime) ? (
+          // Type-first, not binary-first: an SVG is text but views as an
+          // image; a PNG over the 1 MiB JSON cap still renders here because
+          // the <img> pulls from the raw route (25 MB), not from `content`.
+          <div className="flex items-start justify-center p-2">
+            <img
+              src={rawFileUrl(projectId, sessionId, path)}
+              alt={name}
+              className="max-w-full rounded"
+              data-file-viewer="image"
+            />
+          </div>
+        ) : isPdf(name, content?.mime) ? (
+          <iframe
+            src={rawFileUrl(projectId, sessionId, path)}
+            title={name}
+            className="h-full w-full"
+            data-file-viewer="pdf"
+          />
+        ) : isVideo(name, content?.mime) ? (
+          <video
+            src={rawFileUrl(projectId, sessionId, path)}
+            controls
+            className="max-w-full p-2"
+            data-file-viewer="video"
+          />
+        ) : isAudio(name, content?.mime) ? (
+          <audio
+            src={rawFileUrl(projectId, sessionId, path)}
+            controls
+            className="w-full p-3"
+            data-file-viewer="audio"
+          />
         ) : content?.binary ? (
           <div className="p-4 text-center text-xs text-muted-foreground">
-            Binary file ({content.size.toLocaleString()} bytes) — not shown.
+            <div>Binary file ({content.size.toLocaleString()} bytes) — no viewer for this type.</div>
+            <a
+              href={rawFileUrl(projectId, sessionId, path, true)}
+              download={name}
+              className="mt-2 inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] hover:bg-accent"
+            >
+              <Download className="h-3.5 w-3.5" /> Download
+            </a>
           </div>
         ) : isHtml(name, content?.mime) && !showSource ? (
           <div className="p-2">

@@ -26,6 +26,7 @@ from fastapi import HTTPException, Request
 _log = logging.getLogger(__name__)
 
 _MAX_READ = 1024 * 1024  # 1 MiB — cap file reads so the panel can't pull a huge blob
+_MAX_RAW = 25 * 1024 * 1024  # raw-bytes route (image/PDF viewers, downloads)
 _MAX_ENTRIES = 2000       # per-directory entry cap (keeps huge dirs responsive)
 _STATUS_TIMEOUT = 10      # wall-clock cap for the `git status` behind change markers
 
@@ -418,6 +419,61 @@ def mount_desktop_files_routes(app) -> None:  # noqa: ANN001
             "text": text,
             "binary": binary,
         }
+
+    # Raw bytes with a real Content-Type — what the panel's image/PDF/media
+    # viewers and the Download button consume (the JSON read route above can
+    # only say "binary — not shown"). Same guards as /read; desktop is
+    # no-auth loopback, so a plain <img src>/<iframe src> URL works.
+    @app.get("/desktop/files/raw", include_in_schema=False)
+    async def files_raw(request: Request):  # noqa: ANN202
+        from urllib.parse import quote as _urlquote
+
+        from fastapi.responses import FileResponse, Response
+
+        q = request.query_params
+        project_id = q.get("project_id") or ""
+        session_id = q.get("session_id") or ""
+        rel = q.get("path") or ""
+        if not project_id or not session_id or not rel:
+            raise HTTPException(status_code=400,
+                                detail="project_id, session_id, path required")
+        as_download = (q.get("download") or "") in ("1", "true")
+        name = rel.rsplit("/", 1)[-1]
+        mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        disposition = (
+            f"{'attachment' if as_download else 'inline'}; "
+            f"filename*=UTF-8''{_urlquote(name)}"
+        )
+
+        rc = _remote_ctx_checked(project_id, session_id)
+        if rc:
+            from ..sandbox.ssh_transport import SshConnectionError
+
+            target = _remote_target(rc[1], rel)
+            try:
+                raw = await rc[0].read_file(target, max_bytes=_MAX_RAW + 1)
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail="not a file")
+            except SshConnectionError as e:
+                raise HTTPException(status_code=502, detail=str(e))
+            if len(raw) > _MAX_RAW:
+                raise HTTPException(status_code=413,
+                                    detail=f"file exceeds the "
+                                           f"{_MAX_RAW // (1024 * 1024)}MB view limit")
+            return Response(raw, media_type=mime,
+                            headers={"Content-Disposition": disposition})
+
+        target = _resolve_within(project_id, session_id, rel)
+        if target is None:
+            raise HTTPException(status_code=404, detail="workspace not initialized")
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail="not a file")
+        if target.stat().st_size > _MAX_RAW:
+            raise HTTPException(status_code=413,
+                                detail=f"file exceeds the "
+                                       f"{_MAX_RAW // (1024 * 1024)}MB view limit")
+        return FileResponse(target, media_type=mime,
+                            headers={"Content-Disposition": disposition})
 
 
 # --- datasets (W5 ingestion) ------------------------------------------------

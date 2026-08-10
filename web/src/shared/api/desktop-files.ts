@@ -80,3 +80,15 @@ export function readFile(
 ): Promise<FileContent> {
   return apiFetch<FileContent>(`/desktop/files/read?${qs(projectId, sessionId, path)}`)
 }
+
+/** URL for the raw-bytes route (real Content-Type; 25 MB cap) — used as
+ * <img>/<iframe>/<video> src by the viewers and, with `download`, by the
+ * Download button. A plain URL works because desktop is no-auth loopback. */
+export function rawFileUrl(
+  projectId: string,
+  sessionId: string,
+  path: string,
+  download = false,
+): string {
+  return `/desktop/files/raw?${qs(projectId, sessionId, path)}${download ? "&download=1" : ""}`
+}

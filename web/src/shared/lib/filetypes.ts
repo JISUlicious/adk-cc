@@ -16,6 +16,29 @@ export function isHtml(name: string, mime?: string): boolean {
   return /\.x?html?$/i.test(name)
 }
 
+/** Browser-renderable images (SVG included — an <img src> never runs its
+ * scripts, so it is safe to show inline). */
+export function isImage(name: string, mime?: string): boolean {
+  if (mime && /^image\//i.test(mime)) return true
+  return /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i.test(name)
+}
+
+/** PDFs — rendered by the browser's native viewer in an iframe. */
+export function isPdf(name: string, mime?: string): boolean {
+  if (mime && /^application\/pdf/i.test(mime)) return true
+  return /\.pdf$/i.test(name)
+}
+
+export function isVideo(name: string, mime?: string): boolean {
+  if (mime && /^video\//i.test(mime)) return true
+  return /\.(mp4|webm|mov|m4v)$/i.test(name)
+}
+
+export function isAudio(name: string, mime?: string): boolean {
+  if (mime && /^audio\//i.test(mime)) return true
+  return /\.(mp3|wav|ogg|m4a|flac)$/i.test(name)
+}
+
 /** Map a filename/path to a highlight.js language name (see `lib/hljs.ts` for
  * the registered set), or "" to let the highlighter auto-detect. Extension-based;
  * a few whole-name specials (Dockerfile, Makefile) are handled first. */
