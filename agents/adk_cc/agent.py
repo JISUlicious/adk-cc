@@ -1254,6 +1254,14 @@ def _make_compaction_config():
             "ADK EventsCompactionConfig unavailable; skipping compaction wiring."
         )
         return None
+    # ADK's compactor treats ANY function_response as an answer; our gate's
+    # interim needs_confirmation dict and stashed clicks then let it fold a
+    # PARKED call's event, and the post-approval response orphans ("No
+    # function call event found..."). Pin those calls whenever compaction
+    # is wired (#119).
+    from .context.compaction_pin import install_compaction_pin
+
+    install_compaction_pin()
     return EventsCompactionConfig(
         token_threshold=int(threshold) if threshold else None,
         event_retention_size=int(retention) if retention else None,
