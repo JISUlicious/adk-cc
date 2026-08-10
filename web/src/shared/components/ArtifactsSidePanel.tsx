@@ -9,6 +9,7 @@ import {
 } from "@/shared/api/artifacts"
 import { HtmlArtifactPreview } from "./HtmlArtifactPreview"
 import { RightPanelShell, type RightPanelProps } from "./RightPanelShell"
+import { UploadsList, WebFileViewer } from "./WorkspaceFilesPanel"
 import { SubagentsDock } from "@/shared/components/SubagentsDock"
 import { CodeView } from "@/shared/components/CodeView"
 import { Markdown } from "@/shared/lib/markdown"
@@ -40,12 +41,14 @@ export function ArtifactsSidePanel({
   open,
   onClose,
   refreshKey,
-  headerExtra,
-}: RightPanelProps & { headerExtra?: React.ReactNode }) {
+}: RightPanelProps) {
   const [rows, setRows] = useState<Row[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<Selection | null>(null)
+  // Workspace-file viewer (uploads): a flat section below the artifact
+  // list, NOT a separate tree — see WorkspaceFilesPanel.tsx for why.
+  const [fileSel, setFileSel] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -71,9 +74,10 @@ export function ArtifactsSidePanel({
     }
   }, [appName, userId, sessionId])
 
-  // Clear the viewer only when switching sessions (not on every turn refresh).
+  // Clear the viewers only when switching sessions (not on every turn refresh).
   useEffect(() => {
     setSelected(null)
+    setFileSel(null)
   }, [sessionId])
 
   // Load on mount, on session change, and after each turn (refreshKey) so a
@@ -98,10 +102,18 @@ export function ArtifactsSidePanel({
       title="Artifacts"
       open={open}
       onClose={onClose}
-      headerRight={<>{headerExtra}{refresh}</>}
+      headerRight={refresh}
       footer={<SubagentsDock appName={appName} userId={userId} sessionId={sessionId} />}
     >
-      {selected ? (
+      {fileSel ? (
+        <WebFileViewer
+          userId={userId}
+          sessionId={sessionId}
+          path={fileSel}
+          refreshKey={refreshKey}
+          onBack={() => setFileSel(null)}
+        />
+      ) : selected ? (
         <ArtifactViewer
           appName={appName}
           userId={userId}
@@ -134,6 +146,12 @@ export function ArtifactsSidePanel({
               </li>
             ))}
           </ul>
+          <UploadsList
+            userId={userId}
+            sessionId={sessionId}
+            refreshKey={refreshKey}
+            onOpen={setFileSel}
+          />
         </div>
       )}
     </RightPanelShell>

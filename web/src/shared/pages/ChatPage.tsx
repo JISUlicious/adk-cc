@@ -19,7 +19,7 @@ import { SessionRail, type RailProps } from "@/shared/components/SessionRail"
 import { Thread } from "@/shared/components/Thread"
 import { Composer } from "@/shared/components/Composer"
 import { TaskStrip } from "@/shared/components/TaskStrip"
-import { WebRightPanel } from "@/shared/components/WorkspaceFilesPanel"
+import { ArtifactsSidePanel } from "@/shared/components/ArtifactsSidePanel"
 import { type RightPanelProps } from "@/shared/components/RightPanelShell"
 import { ContextGauge } from "@/shared/components/ContextGauge"
 import { sessionTitle } from "@/shared/sessions/SessionList"
@@ -79,7 +79,7 @@ export type SettingsModalProps = {
 export function ChatPage({
   Rail = SessionRail,
   Settings = SettingsModal,
-  RightPanel = WebRightPanel,
+  RightPanel = ArtifactsSidePanel,
 }: {
   Rail?: ComponentType<RailProps>
   Settings?: ComponentType<SettingsModalProps>
