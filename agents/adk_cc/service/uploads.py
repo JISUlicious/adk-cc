@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import shlex
 from typing import Any
 
@@ -31,11 +30,6 @@ from fastapi import HTTPException, Request
 _log = logging.getLogger(__name__)
 
 UPLOADS_DIR = "uploads"
-
-# Datasets' name rule, minus the extension allow-list: single component,
-# no separators, no leading dot, printable-safe charset.
-_SAFE_NAME = re.compile(r"^[A-Za-z0-9가-힣][A-Za-z0-9가-힣._\- ]{0,120}$")
-
 
 class UploadError(Exception):
     """Delivery failure with an HTTP-shaped status for the routes."""
@@ -54,18 +48,28 @@ def upload_max_bytes() -> int:
 
 
 def check_upload_name(name: str) -> str:
-    """Validate an upload filename. Returns the bare name (never a path)."""
+    """Validate an upload filename. Returns the bare name (never a path).
+
+    STRUCTURAL guards only, no charset allow-list: real files are called
+    "report (1).csv" and "売上データ.xlsx", and every consumer of the name
+    quotes or encodes it (shlex for exec probes, tar member names, URL
+    encoding for the daytona/sandbox_service proxies). What stays banned:
+    path separators, leading dot (workspace dotfiles) and dash (argv-flag
+    lookalike, defense in depth), control characters, absurd length.
+    """
     name = (name or "").strip()
     if not name:
         raise UploadError(400, "a filename is required")
-    if "/" in name or "\\" in name or name.startswith("."):
-        raise UploadError(400, f"unsafe filename: {name!r}")
-    if not _SAFE_NAME.match(name):
+    if "/" in name or "\\" in name:
+        raise UploadError(400, f"unsafe filename: {name!r} — no path separators")
+    if name.startswith(".") or name.startswith("-"):
         raise UploadError(
-            400,
-            f"unsafe filename: {name!r} — letters, digits, dot, dash, "
-            "underscore and space only",
-        )
+            400, f"unsafe filename: {name!r} — must not start with '.' or '-'")
+    if any(ord(c) < 32 or ord(c) == 0x7F for c in name):
+        raise UploadError(
+            400, f"unsafe filename: {name!r} — control characters not allowed")
+    if len(name) > 150:
+        raise UploadError(400, f"filename too long ({len(name)} chars, max 150)")
     return name
 
 

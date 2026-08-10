@@ -68,14 +68,20 @@ def main() -> int:
     from adk_cc.service import uploads as U
 
     # ---- name validation -------------------------------------------------
-    ok_names = ["data.csv", "My Report 2.xlsx", "a-b_c.d.tar.gz", "x"]
+    # Real-world names must pass: browser-download suffixes, spaces,
+    # non-Latin scripts, accents, plus/ampersand. The guards are structural
+    # (separators, leading dot/dash, control chars, length), not a charset.
+    ok_names = ["data.csv", "My Report 2.xlsx", "a-b_c.d.tar.gz", "x",
+                "report (1).csv", "데이터 분석.xlsx", "売上データ.csv",
+                "résumé.pdf", "data+v2.json", "P&L 2026.hwp", "회의록.docx"]
     for n in ok_names:
         try:
             check(f"name ok: {n!r}", U.check_upload_name(n) == n)
         except Exception as e:  # noqa: BLE001
             check(f"name ok: {n!r}", False, repr(e))
     bad_names = ["", "  ", "../x", "a/b", "a\\b", ".env", ".hidden",
-                 "/etc/passwd", "a\x00b", "-" * 200]
+                 "/etc/passwd", "a\x00b", "a\tb", "a\nb", "-flag.csv",
+                 "x" * 200]
     for n in bad_names:
         try:
             U.check_upload_name(n)
@@ -111,6 +117,13 @@ def main() -> int:
             check("empty body rejected", False)
         except U.UploadError as e:
             check("empty body rejected", e.status == 400, e.status)
+
+        # images are just data: a real PNG header + payload survives intact
+        png = (b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 64)
+        asyncio.run(U.deliver_upload(ws, be, "chart.png", png))
+        got = (Path(td) / "uploads" / "chart.png").read_bytes()
+        check("image upload is byte-exact (PNG magic intact)",
+              got == png and got[:8] == b"\x89PNG\r\n\x1a\n")
 
     # size cap
     os.environ["ADK_CC_UPLOAD_MAX_MB"] = "0.0001"  # ~104 bytes
