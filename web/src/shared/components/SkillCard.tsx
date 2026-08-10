@@ -48,10 +48,27 @@ export function SkillCard({
           </span>
         </button>
         {open && (
-          <div className="border-t border-border px-3 py-2">
-            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-[11px] text-muted-foreground">
-              {stringify(response ?? args)}
-            </pre>
+          <div className="border-t border-border px-3 py-2 space-y-2">
+            {/* Both halves, always: reading a result without being able to
+                see the exact call it answers was a standing complaint. */}
+            <div>
+              <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+                call · {name}
+              </div>
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-[11px] text-muted-foreground">
+                {stringify(args)}
+              </pre>
+            </div>
+            {response != null && (
+              <div>
+                <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+                  response
+                </div>
+                <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-[11px] text-muted-foreground">
+                  {stringify(response)}
+                </pre>
+              </div>
+            )}
           </div>
         )}
       </div>

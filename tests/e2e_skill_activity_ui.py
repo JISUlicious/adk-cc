@@ -181,6 +181,22 @@ def main() -> int:
                   any(s in text for s in set(loaded)), text[:160])
             check("and says what it cost or what it did",
                   ("tokens" in text or "ok" in text or "loaded" in text), text[:160])
+            # Unfolded, the card must show BOTH halves — the call and the
+            # response. It used to render `response ?? args`, so once a
+            # result landed the call it answered became unreadable.
+            if card.count() > 0:
+                card.first.click()
+                page.wait_for_timeout(600)
+                # lower(): the section labels are CSS-uppercased and
+                # inner_text() reports the rendered casing.
+                body = " ".join(
+                    card.first.locator("xpath=..").inner_text().split()).lower()
+                check("unfolded: the call section is present",
+                      "call ·" in body, body[:200])
+                check("unfolded: the call args are readable",
+                      '"skill_name"' in body, body[:200])
+                check("unfolded: the response section is present too",
+                      "response {" in body, body[:200])
             # The thread scrolls internally, so a full-page shot lands on the
             # final answer; put the row on screen before capturing it.
             if card.count() > 0:
