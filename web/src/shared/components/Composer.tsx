@@ -8,6 +8,7 @@ import {
   formatBytes,
   uploadWithAutoRename,
 } from "@/shared/api/uploads"
+import { ApiError } from "@/shared/api/client"
 import {
   SlashCommandMenu,
   filterSlash,
@@ -87,11 +88,15 @@ export function Composer({
   // on.
   const [staged, setStaged] = useState<StagedFile[]>([])
   const [uploading, setUploading] = useState(false)
+  // Visible failure line under the chips. A tooltip-only error reads as
+  // "pressed Enter and nothing happened" — reported live with a PDF.
+  const [uploadError, setUploadError] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   function stageFiles(files: FileList | File[] | null) {
     if (!files || disabled) return
+    setUploadError(null)
     const add = Array.from(files).map((file) => ({
       id: ++_stagedId, file, status: "staged" as const,
     }))
@@ -130,23 +135,37 @@ export function Composer({
     // Upload sequentially, THEN send one message carrying the attachment
     // lines. Any failure keeps the message unsent and marks the chip —
     // never tell the model about a file that did not land.
-    if (!sessionId || !userId) return
+    if (!sessionId || !userId) {
+      setUploadError("no active session — pick or create one first")
+      return
+    }
     setUploading(true)
+    setUploadError(null)
     setStaged((s) => s.map((f) => ({ ...f, status: "uploading" as const })))
     const lines: string[] = []
-    try {
-      for (const f of staged) {
+    for (const f of staged) {
+      try {
         const up = await uploadWithAutoRename({
           file: f.file, name: f.file.name,
           userId, sessionId,
         })
         lines.push(attachmentLine(up))
+      } catch (e) {
+        // Prefer the server's own explanation (413 cap, 400 name, 404
+        // route/project) over a generic status line.
+        const detail =
+          e instanceof ApiError && e.body && typeof e.body === "object"
+            && "detail" in (e.body as Record<string, unknown>)
+            ? String((e.body as Record<string, unknown>).detail)
+            : e instanceof Error ? e.message : String(e)
+        setStaged((s) => s.map((x) =>
+          x.id === f.id
+            ? { ...x, status: "error" as const, error: detail }
+            : { ...x, status: "staged" as const }))
+        setUploadError(`upload failed: ${f.file.name} — ${detail}`)
+        setUploading(false)
+        return
       }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setStaged((s) => s.map((f) => ({ ...f, status: "error" as const, error: msg })))
-      setUploading(false)
-      return
     }
     setUploading(false)
     setStaged([])
@@ -303,6 +322,14 @@ export function Composer({
                   )}
                 </span>
               ))}
+            </div>
+          )}
+          {uploadError && (
+            <div
+              data-upload-error
+              className="px-1 pb-0.5 text-[11px] text-destructive"
+            >
+              {uploadError}
             </div>
           )}
           <div className={cn("flex items-end gap-2 rounded-md",
