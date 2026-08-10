@@ -58,7 +58,8 @@ def main() -> int:
     proj = tempfile.mkdtemp(prefix="uplui-proj-")
     subprocess.run(["git", "init", "-q", proj], capture_output=True)
 
-    csv_path = os.path.join(data, "secret.csv")
+    FNAME = "매출 보고서 (1).csv"  # Hangul + space + parens: the widened name rule, end to end
+    csv_path = os.path.join(data, FNAME)
     csv_body = f"key,value\nmagic_word,{MAGIC}\n"
     with open(csv_path, "w") as fh:
         fh.write(csv_body)
@@ -115,7 +116,7 @@ def main() -> int:
             # Stage the file through the hidden input, assert the chip.
             page.set_input_files("input[type=file]", csv_path)
             page.wait_for_timeout(400)
-            chip = page.locator('[data-upload-chip="secret.csv"]')
+            chip = page.locator(f'[data-upload-chip="{FNAME}"]')
             check("staged chip appears", chip.count() > 0)
 
             box = page.locator("textarea.adk-composer-input")
@@ -125,14 +126,14 @@ def main() -> int:
             page.get_by_title("Send (Enter)").click()
 
             # The upload happens before the send; the file must land fast.
-            dest = os.path.join(proj, "uploads", "secret.csv")
+            dest = os.path.join(proj, "uploads", FNAME)
             landed = False
             for _ in range(40):
                 if os.path.isfile(dest):
                     landed = True
                     break
                 page.wait_for_timeout(500)
-            check("file lands at uploads/secret.csv in the project", landed)
+            check(f"file lands at uploads/{FNAME} in the project", landed)
             if landed:
                 check("bytes exact (sha256)",
                       hashlib.sha256(open(dest, "rb").read()).hexdigest()
@@ -166,7 +167,7 @@ def main() -> int:
                           for e in evs if (e.get("author") or "") == "user"
                           for p in ((e.get("content") or {}).get("parts") or [])]
             check("message carries the attachment line",
-                  any("[attached file: uploads/secret.csv" in t
+                  any(f"[attached file: uploads/{FNAME}" in t
                       for t in user_texts),
                   [t[:80] for t in user_texts][:4])
 
