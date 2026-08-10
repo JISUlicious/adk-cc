@@ -1,14 +1,29 @@
 import { useRef, useState, useMemo, type KeyboardEvent, type ReactNode } from "react"
-import { Send, Square, ClipboardList } from "lucide-react"
+import { Send, Square, ClipboardList, Paperclip, X, Loader } from "lucide-react"
 import { Button } from "./ui/button"
 import { SandboxBadge } from "./SandboxBadge"
 import { cn } from "@/shared/lib/utils"
+import {
+  attachmentLine,
+  formatBytes,
+  uploadWithAutoRename,
+} from "@/shared/api/uploads"
 import {
   SlashCommandMenu,
   filterSlash,
   type SlashCommand,
   type SlashAction,
 } from "./SlashCommandMenu"
+
+/** A file staged in the composer, before/while/after its upload. */
+interface StagedFile {
+  id: number
+  file: File
+  status: "staged" | "uploading" | "error"
+  error?: string
+}
+
+let _stagedId = 0
 
 /**
  * Multi-line message composer. Enter sends; Shift+Enter newlines.
@@ -65,6 +80,23 @@ export function Composer({
   const [value, setValue] = useState("")
   const [slashCursor, setSlashCursor] = useState(0)
   const ref = useRef<HTMLTextAreaElement>(null)
+  // Attachments (#121): staged locally, uploaded on SEND (not on pick — the
+  // user can still remove one), then announced to the model as plain-text
+  // lines appended to the message. A failed upload blocks the send: a
+  // message naming a file that is not there is a half-truth the model acts
+  // on.
+  const [staged, setStaged] = useState<StagedFile[]>([])
+  const [uploading, setUploading] = useState(false)
+  const [dragOver, setDragOver] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  function stageFiles(files: FileList | File[] | null) {
+    if (!files || disabled) return
+    const add = Array.from(files).map((file) => ({
+      id: ++_stagedId, file, status: "staged" as const,
+    }))
+    if (add.length) setStaged((s) => [...s, ...add])
+  }
 
   // Slash UX is only active when the FIRST char is `/` and there's no
   // newline — i.e. the user is typing a command, not a message that
@@ -82,8 +114,43 @@ export function Composer({
 
   function submit() {
     const trimmed = value.trim()
-    if (!trimmed || disabled || isStreaming) return
-    onSend(trimmed)
+    if (disabled || isStreaming || uploading) return
+    if (!trimmed && staged.length === 0) return
+    if (staged.length === 0) {
+      onSend(trimmed)
+      setValue("")
+      setSlashCursor(0)
+      ref.current?.focus()
+      return
+    }
+    void submitWithAttachments(trimmed)
+  }
+
+  async function submitWithAttachments(text: string) {
+    // Upload sequentially, THEN send one message carrying the attachment
+    // lines. Any failure keeps the message unsent and marks the chip —
+    // never tell the model about a file that did not land.
+    if (!sessionId || !userId) return
+    setUploading(true)
+    setStaged((s) => s.map((f) => ({ ...f, status: "uploading" as const })))
+    const lines: string[] = []
+    try {
+      for (const f of staged) {
+        const up = await uploadWithAutoRename({
+          file: f.file, name: f.file.name,
+          userId, sessionId,
+        })
+        lines.push(attachmentLine(up))
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setStaged((s) => s.map((f) => ({ ...f, status: "error" as const, error: msg })))
+      setUploading(false)
+      return
+    }
+    setUploading(false)
+    setStaged([])
+    onSend([text, ...lines].filter(Boolean).join("\n"))
     setValue("")
     setSlashCursor(0)
     ref.current?.focus()
@@ -140,7 +207,21 @@ export function Composer({
   const isPlan = mode === "plan"
 
   return (
-    <div className="adk-composer px-4 pt-0.5 pb-2 faded-top-edge">
+    <div
+      className="adk-composer px-4 pt-0.5 pb-2 faded-top-edge"
+      onDragOver={(e) => {
+        if (disabled || !e.dataTransfer.types.includes("Files")) return
+        e.preventDefault()
+        setDragOver(true)
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => {
+        if (!e.dataTransfer.files.length) return
+        e.preventDefault()
+        setDragOver(false)
+        stageFiles(e.dataTransfer.files)
+      }}
+    >
       <div className="max-w-3xl mx-auto relative">
         {slashOpen && (
           <div className="absolute bottom-full left-0 right-0 mb-2">
@@ -188,7 +269,64 @@ export function Composer({
               {footer && <div className="adk-gauge-slot">{footer}</div>}
             </div>
           </div>
-          <div className="flex items-end gap-2">
+          {/* Staged attachments (#121): chips above the input row. */}
+          {staged.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 px-1 pb-0.5">
+              {staged.map((f) => (
+                <span
+                  key={f.id}
+                  data-upload-chip={f.file.name}
+                  title={f.error || f.file.name}
+                  className={cn(
+                    "flex items-center gap-1 rounded-sm border px-1.5 py-0.5 text-[11px]",
+                    f.status === "error"
+                      ? "border-destructive/40 bg-destructive/10 text-destructive"
+                      : "border-border bg-muted text-muted-foreground",
+                  )}
+                >
+                  {f.status === "uploading" && (
+                    <Loader className="h-3 w-3 animate-spin" />
+                  )}
+                  <Paperclip className="h-3 w-3" />
+                  <span className="max-w-48 truncate">{f.file.name}</span>
+                  <span className="opacity-70">{formatBytes(f.file.size)}</span>
+                  {f.status !== "uploading" && (
+                    <button
+                      type="button"
+                      className="ml-0.5 hover:text-foreground"
+                      title="Remove"
+                      onClick={() =>
+                        setStaged((s) => s.filter((x) => x.id !== f.id))}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
+          <div className={cn("flex items-end gap-2 rounded-md",
+                             dragOver && "ring-2 ring-primary/60")}>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            stageFiles(e.target.files)
+            e.target.value = ""
+          }}
+        />
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={disabled || uploading}
+          title="Attach a file — it lands at uploads/<name> in the workspace"
+        >
+          <Paperclip className="h-4 w-4" />
+        </Button>
         <textarea
           ref={ref}
           value={value}
@@ -197,6 +335,13 @@ export function Composer({
             setSlashCursor(0)
           }}
           onKeyDown={handleKey}
+          onPaste={(e) => {
+            const files = Array.from(e.clipboardData?.files ?? [])
+            if (files.length) {
+              e.preventDefault()
+              stageFiles(files)
+            }
+          }}
           placeholder={
             disabled
               ? "Pick or create a session to start chatting"
@@ -223,10 +368,13 @@ export function Composer({
             type="button"
             size="icon"
             onClick={submit}
-            disabled={disabled || !value.trim()}
-            title="Send (Enter)"
+            disabled={disabled || uploading
+              || (!value.trim() && staged.length === 0)}
+            title={uploading ? "Uploading attachments…" : "Send (Enter)"}
           >
-            <Send className="h-4 w-4" />
+            {uploading
+              ? <Loader className="h-4 w-4 animate-spin" />
+              : <Send className="h-4 w-4" />}
           </Button>
         )}
           </div>
