@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react"
 import { useNavigate } from "react-router-dom"
-import { Menu, PanelRight } from "lucide-react"
+import { Hash, Menu, PanelRight } from "lucide-react"
 import { Button } from "@/shared/components/ui/button"
 import { clearToken, getUser, getToken, decodeJwtPayload, markSignedOut } from "@/shared/api/auth"
 import { revokeSession } from "@/shared/api/identity"
@@ -149,6 +149,9 @@ export function ChatPage({
   const [railOpen, setRailOpen] = useState(false)
   // Right-side panel (artifacts on web / file tree on desktop) mobile drawer.
   const [rightPanelOpen, setRightPanelOpen] = useState(false)
+  const [showSessionId, setShowSessionId] = useState(
+    () => localStorage.getItem("adk.showSessionIds") === "1",
+  )
   const abortRef = useRef<CancelStream | null>(null)
   // Monotonic per-turn id. Because the "working" indicator now clears on the
   // in-band final-response event (not the socket close), the composer re-enables
@@ -677,6 +680,33 @@ export function ChatPage({
             {session && (
               <span className="adk-chat-title text-base font-semibold tracking-tight truncate">
                 {sessionTitle(session) ?? "New Chat"}
+              </span>
+            )}
+            {/* Session-id reveal (minimal): a # in the title header — this is
+                the session it names, unlike a whole-list toggle in the rail. */}
+            {session && (
+              <button
+                type="button"
+                onClick={() => {
+                  const v = !showSessionId
+                  setShowSessionId(v)
+                  localStorage.setItem("adk.showSessionIds", v ? "1" : "0")
+                }}
+                title={showSessionId ? "Hide session id" : "Show session id"}
+                className={
+                  "adk-toggle-session-ids shrink-0 rounded p-1 hover:bg-accent " +
+                  (showSessionId ? "text-primary" : "text-muted-foreground/50")
+                }
+              >
+                <Hash className="h-3 w-3" />
+              </button>
+            )}
+            {session && showSessionId && (
+              <span
+                className="adk-session-id truncate font-mono text-[10px] text-muted-foreground select-all"
+                title={session.id}
+              >
+                {session.id}
               </span>
             )}
           </div>
