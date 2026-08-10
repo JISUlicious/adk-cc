@@ -312,6 +312,132 @@ def _shq(s: str) -> str:
     return shlex.quote(s)
 
 
+# --- local serving cores (shared by the desktop and web mounts) -------------
+
+def _dir_listing(target: Path, rel: str) -> dict:
+    entries: list[dict] = []
+    truncated = False
+    # Dirs first, then files, each case-insensitively sorted.
+    for child in sorted(
+        target.iterdir(), key=lambda c: (not c.is_dir(), c.name.lower())
+    ):
+        if child.name == ".git":
+            continue  # the repo's .git dir is noise in the file panel
+        is_dir = child.is_dir()
+        try:
+            size = None if is_dir else child.stat().st_size
+        except OSError:
+            size = None
+        entries.append(
+            {"name": child.name, "type": "dir" if is_dir else "file", "size": size}
+        )
+        if len(entries) >= _MAX_ENTRIES:
+            truncated = True
+            break
+    return {"root_exists": True, "path": rel, "entries": entries,
+            "truncated": truncated}
+
+
+def _read_payload(target: Path, rel: str) -> dict:
+    size = target.stat().st_size
+    raw = target.read_bytes()[:_MAX_READ]
+    truncated = size > _MAX_READ
+    mime, _ = mimetypes.guess_type(target.name)
+    try:
+        text: Optional[str] = raw.decode("utf-8")
+        binary = False
+    except UnicodeDecodeError:
+        text = None
+        binary = True
+    return {
+        "path": rel,
+        "mime": mime or "application/octet-stream",
+        "size": size,
+        "truncated": truncated,
+        "text": text,
+        "binary": binary,
+    }
+
+
+def _raw_response(target: Path, name: str, as_download: bool):  # noqa: ANN201
+    from urllib.parse import quote as _urlquote
+
+    from fastapi.responses import FileResponse
+
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="not a file")
+    if target.stat().st_size > _MAX_RAW:
+        raise HTTPException(status_code=413,
+                            detail=f"file exceeds the "
+                                   f"{_MAX_RAW // (1024 * 1024)}MB view limit")
+    mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    disposition = (
+        f"{'attachment' if as_download else 'inline'}; "
+        f"filename*=UTF-8''{_urlquote(name)}"
+    )
+    return FileResponse(target, media_type=mime,
+                        headers={"Content-Disposition": disposition})
+
+
+def mount_web_file_routes(app) -> None:  # noqa: ANN001
+    """`/api/files/{tree,read,raw}` for WEB deployments (no-op on desktop).
+
+    The web shell's Files panel + viewers. Workspace resolved through the
+    SAME tenant path the agent (and /api/uploads) uses — auth principal
+    wins; in no-auth dev the ids ride as query params. Local-fs only: web
+    workspaces live under ADK_CC_WORKSPACE_ROOT on the server host (docker
+    bind-mounts the same dir), which is exactly what the tenancy layer
+    `os.makedirs`'s. Same guards and caps as the desktop routes.
+    """
+    from .. import deployment
+
+    if deployment.is_desktop():
+        return
+
+    def _web_root_and_target(request: Request) -> tuple[Path, Path, str]:
+        from .tenancy import resolve_default_tenant
+
+        q = request.query_params
+        session_id = q.get("session_id") or ""
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id required")
+        auth = getattr(request.state, "adk_cc_auth", None)
+        user_id = (getattr(auth, "user_id", None) if auth is not None
+                   else q.get("user_id")) or "local"
+        try:
+            ws = resolve_default_tenant(user_id).workspace(session_id)
+        except ValueError as e:  # unsafe ids
+            raise HTTPException(status_code=400, detail=str(e))
+        root = Path(ws.abs_path).resolve()
+        rel = q.get("path") or ""
+        target = (root / rel).resolve() if rel else root
+        if target != root and root not in target.parents:
+            raise HTTPException(status_code=403, detail="path escapes workspace")
+        return root, target, rel
+
+    @app.get("/api/files/tree", include_in_schema=False)
+    async def web_files_tree(request: Request):  # noqa: ANN202
+        _, target, rel = _web_root_and_target(request)
+        if not target.is_dir():
+            raise HTTPException(status_code=400, detail="not a directory")
+        return _dir_listing(target, rel)
+
+    @app.get("/api/files/read", include_in_schema=False)
+    async def web_files_read(request: Request):  # noqa: ANN202
+        _, target, rel = _web_root_and_target(request)
+        if not rel or not target.is_file():
+            raise HTTPException(status_code=404, detail="not a file")
+        return _read_payload(target, rel)
+
+    @app.get("/api/files/raw", include_in_schema=False)
+    async def web_files_raw(request: Request):  # noqa: ANN202
+        _, target, rel = _web_root_and_target(request)
+        if not rel:
+            raise HTTPException(status_code=404, detail="not a file")
+        as_download = (request.query_params.get("download") or "") in ("1", "true")
+        return _raw_response(target, rel.rsplit("/", 1)[-1], as_download)
+
+
 def mount_desktop_files_routes(app) -> None:  # noqa: ANN001
     """Mount /desktop/files/* when ADK_CC_DESKTOP=1; otherwise a no-op."""
     from .desktop_routes import desktop_enabled
@@ -338,27 +464,7 @@ def mount_desktop_files_routes(app) -> None:  # noqa: ANN001
             return {"root_exists": False, "path": rel, "entries": [], "truncated": False}
         if not target.is_dir():
             raise HTTPException(status_code=400, detail="not a directory")
-
-        entries: list[dict] = []
-        truncated = False
-        # Dirs first, then files, each case-insensitively sorted.
-        for child in sorted(
-            target.iterdir(), key=lambda c: (not c.is_dir(), c.name.lower())
-        ):
-            if child.name == ".git":
-                continue  # the repo's .git dir is noise in the file panel
-            is_dir = child.is_dir()
-            try:
-                size = None if is_dir else child.stat().st_size
-            except OSError:
-                size = None
-            entries.append(
-                {"name": child.name, "type": "dir" if is_dir else "file", "size": size}
-            )
-            if len(entries) >= _MAX_ENTRIES:
-                truncated = True
-                break
-        return {"root_exists": True, "path": rel, "entries": entries, "truncated": truncated}
+        return _dir_listing(target, rel)
 
     @app.get("/desktop/files/status", include_in_schema=False)
     async def files_status(request: Request):  # noqa: ANN202
@@ -400,25 +506,7 @@ def mount_desktop_files_routes(app) -> None:  # noqa: ANN001
             raise HTTPException(status_code=404, detail="workspace not initialized")
         if not target.is_file():
             raise HTTPException(status_code=404, detail="not a file")
-
-        size = target.stat().st_size
-        raw = target.read_bytes()[:_MAX_READ]
-        truncated = size > _MAX_READ
-        mime, _ = mimetypes.guess_type(target.name)
-        try:
-            text: Optional[str] = raw.decode("utf-8")
-            binary = False
-        except UnicodeDecodeError:
-            text = None
-            binary = True
-        return {
-            "path": rel,
-            "mime": mime or "application/octet-stream",
-            "size": size,
-            "truncated": truncated,
-            "text": text,
-            "binary": binary,
-        }
+        return _read_payload(target, rel)
 
     # Raw bytes with a real Content-Type — what the panel's image/PDF/media
     # viewers and the Download button consume (the JSON read route above can
@@ -466,14 +554,7 @@ def mount_desktop_files_routes(app) -> None:  # noqa: ANN001
         target = _resolve_within(project_id, session_id, rel)
         if target is None:
             raise HTTPException(status_code=404, detail="workspace not initialized")
-        if not target.is_file():
-            raise HTTPException(status_code=404, detail="not a file")
-        if target.stat().st_size > _MAX_RAW:
-            raise HTTPException(status_code=413,
-                                detail=f"file exceeds the "
-                                       f"{_MAX_RAW // (1024 * 1024)}MB view limit")
-        return FileResponse(target, media_type=mime,
-                            headers={"Content-Disposition": disposition})
+        return _raw_response(target, name, as_download)
 
 
 # --- datasets (W5 ingestion) ------------------------------------------------

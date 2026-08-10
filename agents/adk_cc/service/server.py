@@ -291,10 +291,14 @@ def build_fastapi_app(
         mount_desktop_dataset_routes,
         mount_desktop_files_routes,
         mount_desktop_upload_routes,
+        mount_web_file_routes,
     )
     mount_desktop_files_routes(fastapi_app)
     mount_desktop_dataset_routes(fastapi_app)
     mount_desktop_upload_routes(fastapi_app)
+    # Web shell's Files panel (tree/read/raw over the tenant workspace);
+    # no-op on desktop, which mounts /desktop/files/* above instead.
+    mount_web_file_routes(fastapi_app)
     # General file upload for web deployments (`PUT /api/uploads/{name}`,
     # auth-gated by the middleware). Desktop uses /desktop/uploads above;
     # the mount itself no-ops in the mode it doesn't serve.

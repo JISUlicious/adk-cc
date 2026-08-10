@@ -40,7 +40,8 @@ export function ArtifactsSidePanel({
   open,
   onClose,
   refreshKey,
-}: RightPanelProps) {
+  headerExtra,
+}: RightPanelProps & { headerExtra?: React.ReactNode }) {
   const [rows, setRows] = useState<Row[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -97,7 +98,7 @@ export function ArtifactsSidePanel({
       title="Artifacts"
       open={open}
       onClose={onClose}
-      headerRight={refresh}
+      headerRight={<>{headerExtra}{refresh}</>}
       footer={<SubagentsDock appName={appName} userId={userId} sessionId={sessionId} />}
     >
       {selected ? (

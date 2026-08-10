@@ -1,4 +1,5 @@
 import { apiFetch } from "./client"
+import { IS_DESKTOP } from "@/shared/lib/platform"
 
 /**
  * Read-only view of a session's in-place workspace (the project root), for the
@@ -40,9 +41,15 @@ export interface WorkspaceStatus {
   statuses: Record<string, FileStatus>
 }
 
-function qs(projectId: string, sessionId: string, path: string): string {
+// One client for both shells: desktop hits /desktop/files/* keyed by
+// project_id; web hits /api/files/* keyed by user_id (the auth principal
+// wins server-side). The first arg is the scope id — project id on
+// desktop, user id on web (ChatPage's userId is both, by construction).
+const BASE = IS_DESKTOP ? "/desktop/files" : "/api/files"
+
+function qs(scopeId: string, sessionId: string, path: string): string {
   return new URLSearchParams({
-    project_id: projectId,
+    ...(IS_DESKTOP ? { project_id: scopeId } : { user_id: scopeId }),
     session_id: sessionId,
     path,
   }).toString()
@@ -55,7 +62,7 @@ export function listDir(
   sessionId: string,
   path = "",
 ): Promise<DirListing> {
-  return apiFetch<DirListing>(`/desktop/files/tree?${qs(projectId, sessionId, path)}`)
+  return apiFetch<DirListing>(`${BASE}/tree?${qs(projectId, sessionId, path)}`)
 }
 
 /** Whole-workspace git working-tree status → change markers on the file tree.
@@ -66,6 +73,11 @@ export function getFileStatus(
   projectId: string,
   sessionId: string,
 ): Promise<WorkspaceStatus> {
+  if (!IS_DESKTOP) {
+    // No status route in web mode (tenant workspaces are rarely git repos);
+    // an empty map just means no change markers.
+    return Promise.resolve({ is_repo: false, statuses: {} })
+  }
   return apiFetch<WorkspaceStatus>(
     `/desktop/files/status?${qs(projectId, sessionId, "")}`,
   )
@@ -78,7 +90,7 @@ export function readFile(
   sessionId: string,
   path: string,
 ): Promise<FileContent> {
-  return apiFetch<FileContent>(`/desktop/files/read?${qs(projectId, sessionId, path)}`)
+  return apiFetch<FileContent>(`${BASE}/read?${qs(projectId, sessionId, path)}`)
 }
 
 /** URL for the raw-bytes route (real Content-Type; 25 MB cap) — used as
@@ -90,5 +102,5 @@ export function rawFileUrl(
   path: string,
   download = false,
 ): string {
-  return `/desktop/files/raw?${qs(projectId, sessionId, path)}${download ? "&download=1" : ""}`
+  return `${BASE}/raw?${qs(projectId, sessionId, path)}${download ? "&download=1" : ""}`
 }
