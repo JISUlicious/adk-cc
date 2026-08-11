@@ -68,7 +68,12 @@ class ExitPlanModeTool(AdkCcTool):
         # `previous != "plan"` guard trips, the tool returns noop, and
         # state["permission_mode"] is NEVER written. The next turn the
         # plugins fall back to env-default="plan" again → stuck loop.
-        self._default_mode = (default_mode or "default").lower()
+        # Lowercased for comparisons; CANONICAL for anything written back
+        # into state — PermissionMode values are camelCase
+        # ("bypassPermissions"), and a lowercased value stored as the mode
+        # (or the F4 marker) is invalid on read.
+        self._default_mode_canonical = default_mode or "default"
+        self._default_mode = self._default_mode_canonical.lower()
 
     def _approval_hint(self, args: ExitPlanModeArgs) -> str:
         return f"Approve plan and exit plan mode?\n\n{args.plan_summary}"
@@ -131,14 +136,18 @@ class ExitPlanModeTool(AdkCcTool):
         # F4 (dogfooding): restore the mode the session was in BEFORE
         # enter_plan_mode (recorded there), not a hardcoded "default".
         # Guards: never restore INTO plan mode (a stale/corrupt marker would
-        # trap the session), and fall back to "default" when no marker exists
-        # (plan mode entered via the UI toggle, which doesn't record one).
+        # trap the session). With no marker (plan entered via an older UI
+        # flip), fall back to the ENV-DERIVED default — a web deployment
+        # whose sessions run bypassPermissions by default must come back as
+        # bypass, not "default" (client report 2026-08-10: exiting plan
+        # stranded a bypass session in ask-everything).
         try:
             restored = ctx.state.get("plan_previous_mode")
         except Exception:
             restored = None
         if not restored or restored == "plan":
-            restored = "default"
+            restored = (self._default_mode_canonical
+                        if self._default_mode != "plan" else "default")
         try:
             ctx.state["permission_mode"] = restored
             ctx.state["plan_previous_mode"] = None  # consumed — one cycle only

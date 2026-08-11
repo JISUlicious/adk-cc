@@ -68,7 +68,12 @@ class EnterPlanModeTool(AdkCcTool):
         # would see "ok, switched to plan" when it was already there
         # by env default — confusing but not catastrophic. Symmetric to
         # the exit tool fix.
-        self._default_mode = (default_mode or "default").lower()
+        # Lowercased for comparisons; CANONICAL for anything written back
+        # into state — PermissionMode values are camelCase
+        # ("bypassPermissions"), and a lowercased value stored as the mode
+        # (or the F4 marker) is invalid on read.
+        self._default_mode_canonical = default_mode or "default"
+        self._default_mode = self._default_mode_canonical.lower()
 
     async def _execute(
         self, args: EnterPlanModeArgs, ctx: ToolContext
@@ -78,7 +83,7 @@ class EnterPlanModeTool(AdkCcTool):
         except Exception:
             previous = None
         if not previous:
-            previous = self._default_mode
+            previous = self._default_mode_canonical
         if previous == "plan":
             return {
                 "status": "noop",

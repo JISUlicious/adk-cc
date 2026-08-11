@@ -590,10 +590,25 @@ export function ChatPage({
         // next tool call. Values match adk_cc/permissions/modes.py:
         // PLAN="plan", DEFAULT="default".
         if (!appName || !session) return
-        const next = action === "plan" ? "plan" : "default"
-        patchSessionState(appName, userId, session.id, {
-          permission_mode: next,
-        })
+        // Entering plan RECORDS the current mode; exiting RESTORES it (or
+        // unsets, letting the env-derived default apply) — a bypass session
+        // must come back as bypass, never hardcoded "default" (#122 item 1).
+        const stateDelta: Record<string, unknown> =
+          action === "plan"
+            ? {
+                permission_mode: "plan",
+                plan_previous_mode:
+                  permissionMode && permissionMode !== "plan"
+                    ? permissionMode
+                    : null,
+              }
+            : {
+                permission_mode:
+                  (session.state as Record<string, unknown> | undefined)
+                    ?.plan_previous_mode ?? null,
+                plan_previous_mode: null,
+              }
+        patchSessionState(appName, userId, session.id, stateDelta)
           .then((s) => {
             setSession(s)
             setEvents(s.events)
