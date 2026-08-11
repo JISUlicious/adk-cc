@@ -124,13 +124,18 @@ def resolve_default_tenant(
 
     if auth is not None:
         auth_user_id, auth_tenant_id = auth
+        # #126: the PRINCIPAL scopes storage (workspace, uploads, memory,
+        # wiki), never the client-supplied id — preferring the passed id let
+        # an authenticated user open a session under someone else's user_id
+        # and read/write their memory and workspace. A mismatch is logged,
+        # not fatal: request-time enforcement lives in turn_routes.
+        if user_id and auth_user_id and user_id != auth_user_id:
+            _log.warning(
+                "tenant resolution: passed user_id %r != principal %r — "
+                "scoping by the principal", user_id, auth_user_id)
         return TenantContext(
             tenant_id=auth_tenant_id,
-            # Trust the explicit user_id passed in; fall back to the
-            # auth-provided one. Both should match in practice (ADK's
-            # session uses auth-provided user_id) but passing user_id is
-            # the public API of the resolver.
-            user_id=user_id or auth_user_id or "local",
+            user_id=auth_user_id or user_id or "local",
             workspace_root_path=root,
         )
     return TenantContext(

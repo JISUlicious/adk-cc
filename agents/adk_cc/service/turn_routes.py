@@ -109,6 +109,16 @@ def mount_turn_routes(app: Any, broker: Any) -> None:
     async def start_turn(request: Request):
         body = await request.json()
         app_name, user_id, session_id = _ids(body)
+        # #126: request-time OWNERSHIP, independent of ADK_CC_AUTHZ (which
+        # covers /apps/* but explicitly not /api/turns). Resolver-level
+        # principal preference alone is not airtight: resumed/auto-continued
+        # turns run outside any request context.
+        auth = getattr(request.state, "adk_cc_auth", None)
+        if (auth is not None and getattr(auth, "user_id", None)
+                and user_id != auth.user_id):
+            raise HTTPException(
+                status_code=403,
+                detail="userId does not match the authenticated principal")
         # 404 on unknown session — same contract as ADK's own run routes.
         session = await broker.session_service.get_session(
             app_name=app_name, user_id=user_id, session_id=session_id)

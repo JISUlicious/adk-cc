@@ -177,6 +177,19 @@ def build_fastapi_app(
     mount_knowledge_routes(fastapi_app)
 
     if auth_extractor is not None:
+        # #126: memory/wiki scope on user identity; without the authz layer,
+        # the ADK /apps/* paths accept any user_id an authenticated client
+        # names. /api/turns enforces ownership itself; recommend closing the
+        # rest.
+        import logging as _l
+
+        if (os.environ.get("ADK_CC_AUTHZ", "").lower() not in ("1", "true")
+                and (os.environ.get("ADK_CC_MEMORY") == "1"
+                     or os.environ.get("ADK_CC_WIKI") == "1")):
+            _l.getLogger(__name__).warning(
+                "memory/wiki are ON with auth but ADK_CC_AUTHZ is OFF — "
+                "set ADK_CC_AUTHZ=1 so /apps/* paths also enforce "
+                "user ownership (#126)")
         from .auth import make_auth_middleware
 
         # When the SPA bundle is mounted, exempt its public paths from
