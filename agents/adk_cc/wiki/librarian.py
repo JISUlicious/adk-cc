@@ -353,13 +353,31 @@ class Librarian:
         touched = False
 
         for (doc, claim), verdict in zip(items, verdicts):
+            override = self.store.human_override(claim.claim_hash)
             res = conflict.resolve(
                 verdict, claim,
                 support_count=support_count,
                 corroboration_n=n,
-                human_override=self.store.human_override(claim.claim_hash),
+                human_override=override,
                 domain_value=domain_value,
             )
+            # #129: a HUMAN-edited page is never auto-replaced. Any
+            # resolution that would rewrite its content (supersede/overturn)
+            # is held for adjudication instead — the owner's correction
+            # survives every librarian run until a human accepts the change
+            # (the sticky accept then routes through resolve() normally).
+            if (
+                res.action in (conflict.SUPERSEDE, conflict.OVERTURN)
+                and domain_page is not None
+                and domain_page.frontmatter.get("human_edited")
+                and override is None
+            ):
+                res = Resolution(
+                    conflict.QUARANTINE, claim,
+                    reason=("page is human-edited — supersession needs "
+                            "human adjudication"),
+                )
+                report.bump("human_edit_protected")
             report.bump(res.action)
             if res.action in conflict.HELD_ACTIONS:
                 self._hold(res, verdict, report)

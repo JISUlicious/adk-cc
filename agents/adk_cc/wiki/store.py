@@ -313,6 +313,43 @@ class WikiStore:
     def is_quarantined(self, claim_hash: str) -> bool:
         return self._store.kv_get(f"quarantine/{_safe_id(claim_hash, 'hash')}") is not None
 
+    def adjudicate(
+        self, claim_hash: str, *, action: str, note: str = "", by: str = "human"
+    ) -> dict[str, Any]:
+        """#129: record a human decision for a queued claim. Writes the
+        STICKY resolution (which resolve() honors on every later librarian
+        run) and closes the quarantine record. Returns the updated record.
+
+        `by` names the ACTOR for the audit trail; the sticky itself is
+        always written with by="human" — human_override() keys on that
+        literal, and an actor name there would silently disable the
+        override (found by the route test)."""
+        if action not in ("accept", "reject"):
+            raise ValueError(f"action must be accept|reject, got {action!r}")
+        self.set_sticky(claim_hash, action=action, by="human",
+                        note=(f"[{by}] {note}".strip() if by != "human" else note))
+        h = _safe_id(claim_hash, "hash")
+        raw = self._store.kv_get(f"quarantine/{h}")
+        rec: dict[str, Any] = {}
+        if raw is not None:
+            try:
+                data = json.loads(raw)
+                rec = data if isinstance(data, dict) else {}
+            except json.JSONDecodeError:
+                rec = {}
+        rec.update({
+            "claim_hash": claim_hash,
+            "status": "accepted" if action == "accept" else "rejected",
+            "adjudicated_ts": _now_iso(),
+            "adjudicated_by": by,
+            "note": note,
+        })
+        self._store.kv_put(f"quarantine/{h}", json.dumps(rec))
+        self.append_changelog(
+            {"op": "adjudicate", "claim_hash": claim_hash, "action": action,
+             "by": by, "note": note})
+        return rec
+
     # ----- per-tenant settings (admin-tunable) -----
     def read_settings(self) -> dict[str, Any]:
         raw = self._store.kv_get("settings")

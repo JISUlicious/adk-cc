@@ -288,6 +288,120 @@ def mount_tenant_admin(
             store.set_setting("corroboration_n", n)
             return {"status": "ok", "corroboration_n": store.corroboration_n}
 
+        # --- Wiki document management (#129) --------------------------
+        # The domain wiki previously had NO human management surface: the
+        # librarian was the only writer. These routes let an admin/owner
+        # edit or delete pages and adjudicate the review queue. LOAD-
+        # BEARING: an edited page is stamped `human_edited`, and the
+        # librarian holds any would-be supersession of such a page for
+        # human adjudication — a manual correction survives every run.
+        def _auth_user(request) -> str:
+            auth = getattr(request.state, "adk_cc_auth", None)
+            uid = getattr(auth, "user_id", None)
+            if uid:
+                return str(uid)
+            try:
+                return str(auth[0]) if auth else "admin"
+            except Exception:  # noqa: BLE001
+                return "admin"
+
+        @router.get("/wiki-pages")
+        async def list_wiki_pages(tenant_id: str, request: Request):
+            await _maybe_await(authorize(request, tenant_id))
+            store = WikiStore.for_tenant(tenant_id)
+            pages = []
+            for slug in store.list_domain_pages():
+                p = store.read_domain_page(slug)
+                if p is None:
+                    continue
+                pages.append({
+                    "slug": slug,
+                    "title": p.frontmatter.get("title") or slug,
+                    "contested": p.contested,
+                    "human_edited": p.frontmatter.get("human_edited") or None,
+                })
+            return {"pages": pages}
+
+        @router.get("/wiki-pages/{slug}")
+        async def get_wiki_page(tenant_id: str, slug: str, request: Request):
+            await _maybe_await(authorize(request, tenant_id))
+            store = WikiStore.for_tenant(tenant_id)
+            p = store.read_domain_page(_ensure_safe_id(slug, "slug"))
+            if p is None:
+                raise HTTPException(status_code=404, detail="page not found")
+            return {"slug": slug, "frontmatter": p.frontmatter, "body": p.body}
+
+        @router.put("/wiki-pages/{slug}")
+        async def put_wiki_page(tenant_id: str, slug: str, request: Request):
+            await _maybe_await(authorize(request, tenant_id))
+            slug = _ensure_safe_id(slug, "slug")
+            body = await request.json()
+            text = body.get("body")
+            if not isinstance(text, str) or not text.strip():
+                raise HTTPException(status_code=400,
+                                    detail="'body' (non-empty string) required")
+            from ..wiki.page import Page
+            from datetime import datetime, timezone
+
+            store = WikiStore.for_tenant(tenant_id).ensure()
+            existing = store.read_domain_page(slug)
+            fm = dict(existing.frontmatter) if existing else {"title": slug}
+            patch = body.get("frontmatter")
+            if isinstance(patch, dict):
+                for k, v in patch.items():
+                    if v is None:
+                        fm.pop(k, None)
+                    else:
+                        fm[k] = v
+            editor = _auth_user(request)
+            fm["human_edited"] = datetime.now(timezone.utc).isoformat()
+            fm["edited_by"] = editor
+            store.write_domain_page(Page(slug=slug, frontmatter=fm, body=text))
+            store.append_changelog(
+                {"op": "human_edit", "slug": slug, "by": editor})
+            return {"status": "ok", "slug": slug,
+                    "human_edited": fm["human_edited"]}
+
+        @router.delete("/wiki-pages/{slug}")
+        async def delete_wiki_page(tenant_id: str, slug: str, request: Request):
+            await _maybe_await(authorize(request, tenant_id))
+            slug = _ensure_safe_id(slug, "slug")
+            store = WikiStore.for_tenant(tenant_id)
+            gone = store.delete_domain_page(slug)
+            if gone is None:
+                raise HTTPException(status_code=404, detail="page not found")
+            store.append_changelog(
+                {"op": "human_delete", "slug": slug, "by": _auth_user(request)})
+            return {"status": "deleted", "slug": slug}
+
+        @router.get("/wiki-review")
+        async def list_wiki_review(tenant_id: str, request: Request,
+                                   pending_only: bool = True):
+            await _maybe_await(authorize(request, tenant_id))
+            store = WikiStore.for_tenant(tenant_id)
+            contested = []
+            for slug in store.list_domain_pages():
+                p = store.read_domain_page(slug)
+                if p is not None and p.contested:
+                    contested.append(slug)
+            return {"queue": store.list_quarantine(pending_only=pending_only),
+                    "contested_pages": contested}
+
+        @router.post("/wiki-review/{claim_hash}")
+        async def adjudicate_claim(tenant_id: str, claim_hash: str,
+                                   request: Request):
+            await _maybe_await(authorize(request, tenant_id))
+            body = await request.json()
+            action = str(body.get("action") or "")
+            if action not in ("accept", "reject"):
+                raise HTTPException(status_code=400,
+                                    detail="'action' must be accept|reject")
+            store = WikiStore.for_tenant(tenant_id).ensure()
+            rec = store.adjudicate(
+                claim_hash, action=action,
+                note=str(body.get("note") or ""), by=_auth_user(request))
+            return {"status": "ok", "record": rec}
+
     app.include_router(router)
 
 
