@@ -82,3 +82,30 @@ recall next turn → consolidator → semantic file → visible on the
 
 If any step fails, report: which step, the exact status code / log line,
 and whether `ADK_CC_AUTHZ` was set — those three identify the layer.
+
+## 6. Triage: wiki_add ran but NO inbox nodes on the web wiki tab
+
+Inbox nodes are read straight from the store at request time — if they are
+missing, the CAPTURE and the DISPLAY resolved different (tenant, user)
+scopes. Check in this order, ON the remote box:
+
+```bash
+# 1. Where did the notes actually land?
+find $ADK_CC_WIKI_ROOT -name '*.md' | sed "s|$ADK_CC_WIKI_ROOT/||" | head
+#    → local/users/<CAPTURE-UID>/inbox/…  ← note the uid segment
+```
+
+2. Compare `<CAPTURE-UID>` with the uid the graph reads: the web graph
+   route uses the AUTH PRINCIPAL's user_id and ignores `?user=`. If the
+   two differ, that is the pre-`79cada2` identity bug: capture followed
+   the client-supplied session user_id while display follows the
+   principal. **Fix: pull ≥ `79cada2` and restart** — capture then scopes
+   by the principal too, and new notes appear. (Old notes stay under the
+   old uid; move the files or re-add.)
+3. If the uid matches and nodes are still missing: open the wiki_add TOOL
+   CARD in the thread (it expands) — a `status: "skipped",
+   reason: "personal_info"` result means the PII guard refused the
+   capture and nothing was stored; `status: "error"` names the cause.
+4. Only if 1–3 check out: confirm the server was restarted after the pull
+   (stale process = stale routes) and that `ADK_CC_WIKI_ROOT` in the
+   service env matches the path you inspected in step 1.
