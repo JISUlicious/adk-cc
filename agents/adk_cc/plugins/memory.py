@@ -152,22 +152,50 @@ def _capture_timeout() -> float:
     except ValueError:
         return _DEFAULT_CAPTURE_TIMEOUT_S
 
+# The capture scope must MATCH the store scope, or recall contaminates
+# (#126 review): on DESKTOP memory is per-PROJECT, so project stack/config/
+# decisions belong; on WEB it is per-USER across unrelated sessions, so
+# only cross-session durable facts qualify and session-scoped work details
+# (current files, in-progress task state, this conversation's artifacts)
+# must be excluded — they would be recalled into every future session.
+_CAPTURE_SCOPE_PROJECT = (
+    "Record ONLY durable facts about the USER and THIS PROJECT — the user's "
+    "identity and preferences, and the project's stack / config / decisions "
+    "/ outcomes. Good examples: \"user's name is X\", \"project deploys to "
+    "Fly.io\", \"team chose Postgres\", \"user prefers dark mode\"."
+)
+_CAPTURE_SCOPE_USER = (
+    "Record ONLY durable facts about the USER that will still be true and "
+    "useful in their FUTURE, UNRELATED conversations — identity, role, "
+    "standing preferences, long-lived constraints. Good examples: \"user's "
+    "name is X\", \"user prefers answers in Korean\", \"user works with "
+    "pandas 2.x only\".\n"
+    "Do NOT record anything scoped to THIS session's work: current file "
+    "names/paths, the task being worked on, choices made for this "
+    "conversation's artifacts — those die with the session."
+)
 _CAPTURE_PROMPT = (
-    "You maintain long-term memory for an AI assistant. Record ONLY durable "
-    "facts about the USER and THEIR work — their identity and preferences, and "
-    "their project's stack / config / decisions / outcomes. Good examples: "
-    "\"user's name is X\", \"project deploys to Fly.io\", \"team chose "
-    "Postgres\", \"user prefers dark mode\".\n"
+    "You maintain long-term memory for an AI assistant. {scope}\n"
     "Do NOT record: (a) general or domain knowledge, or facts about the SUBJECT "
     "MATTER being discussed — e.g. \"L2 caches are 256KB\", \"TAGE is a branch "
     "predictor\", \"DDR5 has 8 channels\" — those belong in documents, not user "
-    "memory; (b) the user's questions, greetings, or one-off task steps. If a "
-    "statement would be equally true for any user, it is NOT a user fact.\n\n"
+    "memory; (b) the user's questions, greetings, or one-off task steps. Two "
+    "tests: if a statement would be equally true for any user, it is NOT a "
+    "user fact; if it will not matter in the user's next, unrelated "
+    "conversation, it is NOT durable.\n\n"
     "Output one fact per line, EXACTLY:\n"
     "TOPIC: <2-5 word topic> | <one concise sentence>\n"
     "Only if there is genuinely nothing worth remembering, output: NONE\n\n"
     "TURN:\n{turn}"
 )
+
+
+def _capture_prompt(turn: str) -> str:
+    from .. import deployment
+
+    scope = (_CAPTURE_SCOPE_PROJECT if deployment.is_desktop()
+             else _CAPTURE_SCOPE_USER)
+    return _CAPTURE_PROMPT.format(scope=scope, turn=turn)
 
 
 def _recall_budget() -> int:
@@ -353,7 +381,7 @@ class MemoryPlugin(BasePlugin):
             contents=[
                 types.Content(
                     role="user",
-                    parts=[types.Part(text=_CAPTURE_PROMPT.format(turn=transcript))],
+                    parts=[types.Part(text=_capture_prompt(transcript))],
                 )
             ],
             config=types.GenerateContentConfig(),
