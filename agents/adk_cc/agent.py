@@ -308,6 +308,8 @@ _read_process_log = ReadProcessLogTool()
 _stop_process = StopProcessTool()
 _web_fetch = WebFetchTool()
 _ask_user = AskUserQuestionTool()
+from .tools.session_notes import UpdateSessionNotesTool
+_session_notes = UpdateSessionNotesTool()
 _task_create = TaskCreateTool()
 _task_get = TaskGetTool()
 _task_list = TaskListTool()
@@ -522,6 +524,7 @@ _coordinator_tools: list = [
     _stop_process,
     _web_fetch,
     _ask_user,
+    _session_notes,
     _task_create,
     _task_get,
     _task_list,
@@ -1507,6 +1510,13 @@ if env_bool("ADK_CC_MEMORY"):
     from .plugins import MemoryPlugin
 
     _app_kwargs["plugins"].append(MemoryPlugin())
+
+# Session notes (#127): always on — the tool writes only its own session's
+# state and the plugin injects nothing until notes exist. Registered after
+# MemoryPlugin so the notes block lands AFTER memory recall.
+from .plugins.session_notes import NotesPlugin
+
+_app_kwargs["plugins"].append(NotesPlugin())
 
 # Durable runs P3 (analysis/durable-runs-design.md): ADK-native resumability.
 # A confirmation answered inside a specialist RESUMES the original invocation

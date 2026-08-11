@@ -292,6 +292,10 @@ FIELDS: list[Var] = [
         "Max total inline_data (MB) accepted in one /api/turns message — "
         "blobs persist into every session JSONL rewrite and bypass the "
         "context defenses; upload files instead.", default="1"),
+    Var("ADK_CC_SESSION_NOTES_BUDGET", Tier.ADVANCED, "Memory & Wiki",
+        "Token budget for the per-session notes block (update_session_notes "
+        "tool + every-turn injection). Oldest lines trim past it.",
+        default="2000"),
     Var("ADK_CC_SANDBOX_RELAXED", Tier.COMMON, "Permissions",
         "=0 disables #122: by default, sessions whose backend is a real "
         "isolation boundary (docker/daytona/sandbox_service; web mode only) "
