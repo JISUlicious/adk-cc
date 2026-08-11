@@ -23,8 +23,10 @@ STATE_KEY = "session_notes"
 
 def notes_budget_chars() -> int:
     """~4 chars/token over ADK_CC_SESSION_NOTES_BUDGET (default 2000 tokens)."""
+    from ..config.schema import as_int
+
     try:
-        tokens = int(os.environ.get("ADK_CC_SESSION_NOTES_BUDGET", "2000"))
+        tokens = as_int(os.environ.get("ADK_CC_SESSION_NOTES_BUDGET", "2000"))
     except ValueError:
         tokens = 2000
     return max(200, tokens) * 4
