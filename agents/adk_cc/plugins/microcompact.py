@@ -8,7 +8,7 @@ coding agent, big tool outputs dominate the context. This plugin runs
 rebuilds `llm_request.contents` from session events each call, so stored
 history and transcripts keep the full content.
 
-TWO shapes are rewritten — the incident lived in the gap between them:
+THREE shapes are rewritten — the incidents lived in the gaps between them:
 
   - `function_response` parts of allowlisted tools (same-agent history).
     This shape was handled from day one, and it is WHY the transferred
@@ -20,6 +20,12 @@ TWO shapes are rewritten — the incident lived in the gap between them:
     bytes microcompact was stubbing inside Explore's own requests re-entered
     the coordinator's request in this costume — ~833KB ≈ 289k tokens against
     a measured ~272k window — and the type-based filter missed them.
+  - `function_call` ARGS of completed calls (#128 P1). A `write_file` body
+    or a big MCP payload rides in the call, not the result — invisible to
+    both shapes above, and re-sent on every subsequent request of the turn.
+    Only calls whose id has a matching `function_response` in the same
+    request are touched: a call still pending (executing, or parked behind
+    a user confirmation) keeps its args byte-for-byte.
 
 Rewrites prefer a cached LLM summary (`context/result_summaries` — findings
 survive) and fall back to a mechanical stub (window survives). Idempotent:
@@ -60,6 +66,10 @@ _COMPACTABLE = frozenset({
 })
 
 _STUB_NOTE = "[old tool result cleared to save context — full content in session history]"
+_ELIDED_ARG_PREFIX = "[adk-cc elided call argument: "
+_ELIDED_ARG_NOTE = ("chars — the call already completed; full content is in "
+                    "session history and its effect (e.g. the written file) "
+                    "persists] ")
 _SUMMARY_NOTE = "[condensed from {n} chars — full content in session history; re-run the tool if more is needed]"
 _DEFAULT_KEEP_RECENT = 4
 _DEFAULT_MIN_TOKENS = 800
@@ -117,6 +127,16 @@ async def rewrite_request(
     use); otherwise rewrite everything eligible (the always-on pass).
     Returns {"rewritten": n, "freed": tokens, "summarized": n}.
     """
+    # A function_call is rewriteable ONLY once answered — a call still
+    # pending (mid-execution, or parked behind a user confirmation) must
+    # keep its args byte-for-byte or the eventual execution replays garbage.
+    answered_ids = set()
+    for content in llm_request.contents or []:
+        for part in content.parts or []:
+            fr = getattr(part, "function_response", None)
+            if fr is not None and getattr(fr, "id", None):
+                answered_ids.add(fr.id)
+
     targets = []  # (part, kind, size_tokens)
     for content in llm_request.contents or []:
         for part in content.parts or []:
@@ -125,6 +145,13 @@ async def rewrite_request(
                 if (fr.name or "") not in _COMPACTABLE or _is_stub(fr.response):
                     continue
                 targets.append((part, "response", _est_tokens(fr.response)))
+                continue
+            fc = getattr(part, "function_call", None)
+            if fc is not None:
+                if getattr(fc, "id", None) in answered_ids:
+                    fat = _fat_arg_tokens(fc, min_tokens)
+                    if fat:
+                        targets.append((part, "call", fat))
                 continue
             text = getattr(part, "text", None)
             if (text and len(text) >= min_tokens * 4
@@ -142,6 +169,22 @@ async def rewrite_request(
             continue
         if budget_tokens is not None and freed >= budget_tokens:
             break
+        if kind == "call":
+            fc = part.function_call
+            new_args = dict(fc.args or {})
+            freed_chars = 0
+            for k, v in list(new_args.items()):
+                if (isinstance(v, str) and len(v) >= min_tokens * 4
+                        and not v.startswith(_ELIDED_ARG_PREFIX)):
+                    replaced = (_ELIDED_ARG_PREFIX + str(len(v))
+                                + _ELIDED_ARG_NOTE + v[:160] + "…")
+                    freed_chars += max(0, len(v) - len(replaced))
+                    new_args[k] = replaced
+            if freed_chars:
+                fc.args = new_args
+                freed += freed_chars // 4
+                rewritten += 1
+            continue
         if kind == "response":
             fr = part.function_response
             raw = _payload_text(fr.response)
@@ -193,6 +236,18 @@ async def rewrite_request(
         except Exception:  # noqa: BLE001
             pass
     return {"rewritten": rewritten, "freed": freed, "summarized": summarized}
+
+
+def _fat_arg_tokens(fc, min_tokens: int) -> int:
+    """Reclaimable tokens in a call's top-level string args (0 = skip).
+    Per-arg threshold, not aggregate: many medium args stay readable;
+    one huge write_file body is the target."""
+    total = 0
+    for v in (fc.args or {}).values():
+        if (isinstance(v, str) and len(v) >= min_tokens * 4
+                and not v.startswith(_ELIDED_ARG_PREFIX)):
+            total += len(v) // 4
+    return total
 
 
 def _payload_text(response) -> str:

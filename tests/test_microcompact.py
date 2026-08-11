@@ -330,6 +330,77 @@ def test_keep_recent_counts_across_both_shapes():
     assert "evicted" not in parts[3].text, "newest kept regardless of shape"
 
 
+def _fat_call(name="write_file", cid="w-1", body_chars=8000):
+    return types.Part(function_call=types.FunctionCall(
+        id=cid, name=name,
+        args={"path": "/tmp/out.html", "content": "<html>" + "b" * body_chars}))
+
+
+def test_completed_call_args_elided():
+    parts = [_fat_call(cid="w-1"),
+             _resp_part("write_file", {"status": "ok"}),
+             types.Part(text="later chatter")]
+    parts[1].function_response.id = "w-1"
+    req = _req(parts)
+    stats = asyncio.run(rewrite_request(req, keep_recent=0, min_tokens=100,
+                                        allow_summaries=False))
+    args = parts[0].function_call.args
+    assert args["content"].startswith("[adk-cc elided call argument:"), args["content"][:60]
+    assert args["path"] == "/tmp/out.html", "small sibling arg untouched"
+    assert stats["rewritten"] >= 1 and stats["freed"] > 1500, stats
+
+
+def test_pending_call_args_never_touched():
+    # No matching function_response id → parked/pending. Even the guard's
+    # desperation pass (keep_recent=0, min_tokens tiny) must not touch it.
+    parts = [_fat_call(cid="pending-1")]
+    req = _req(parts)
+    stats = asyncio.run(rewrite_request(req, keep_recent=0, min_tokens=16,
+                                        allow_summaries=False))
+    assert "b" * 100 in parts[0].function_call.args["content"]
+    assert stats["rewritten"] == 0, stats
+
+
+def test_call_args_idempotent():
+    parts = [_fat_call(cid="w-1"), _resp_part("write_file", {"status": "ok"})]
+    parts[1].function_response.id = "w-1"
+    req = _req(parts)
+    asyncio.run(rewrite_request(req, keep_recent=0, min_tokens=100,
+                                allow_summaries=False))
+    once = parts[0].function_call.args["content"]
+    stats2 = asyncio.run(rewrite_request(req, keep_recent=0, min_tokens=100,
+                                         allow_summaries=False))
+    assert parts[0].function_call.args["content"] == once
+    assert stats2["rewritten"] == 0, stats2
+
+
+def test_call_args_small_below_threshold_kept():
+    parts = [_fat_call(cid="w-1", body_chars=300),
+             _resp_part("write_file", {"status": "ok"})]
+    parts[1].function_response.id = "w-1"
+    req = _req(parts)
+    stats = asyncio.run(rewrite_request(req, keep_recent=0, min_tokens=100,
+                                        allow_summaries=False))
+    assert "b" * 100 in parts[0].function_call.args["content"]
+    assert stats["rewritten"] == 0, stats
+
+
+def test_keep_recent_shields_newest_call_shape():
+    parts = []
+    for i in range(3):
+        parts.append(_fat_call(cid=f"w-{i}"))
+        rp = _resp_part("plan", {"status": "ok"})  # non-compactable response
+        rp.function_response.id = f"w-{i}"
+        parts.append(rp)
+    req = _req(parts)
+    asyncio.run(rewrite_request(req, keep_recent=1, min_tokens=100,
+                                allow_summaries=False))
+    assert parts[0].function_call.args["content"].startswith("[adk-cc elided")
+    assert parts[2].function_call.args["content"].startswith("[adk-cc elided")
+    assert "b" * 100 in parts[4].function_call.args["content"], \
+        "newest call kept under keep_recent=1"
+
+
 def _run_all() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
