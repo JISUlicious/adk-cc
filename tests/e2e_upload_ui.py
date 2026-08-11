@@ -156,7 +156,7 @@ def main() -> int:  # noqa: PLR0915
             def _dest():
                 if web_shell:
                     hits = glob.glob(os.path.join(
-                        wsroot, "*", "*", "uploads", FNAME))
+                        wsroot, "*", "*", ".sessions", "*", "uploads", FNAME))
                     return hits[0] if hits else None
                 d = os.path.join(proj, "uploads", FNAME)
                 return d if os.path.isfile(d) else None

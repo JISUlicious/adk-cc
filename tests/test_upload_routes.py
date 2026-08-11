@@ -151,11 +151,24 @@ def web_scenario() -> None:
         u = f"{base}/api/uploads/f.bin?session_id=s1&user_id=u1"
         r = requests.put(u, data=b"tiny-binary\xff\xfe", timeout=30)
         check("web: upload accepted", r.status_code == 200, (r.status_code, r.text[:200]))
-        dest = Path(wsroot) / "local" / "u1" / "uploads" / "f.bin"
-        check("web: file lands in the tenant/user workspace", dest.is_file(),
+        dest = Path(wsroot) / "local" / "u1" / ".sessions" / "s1" / "uploads" / "f.bin"
+        check("web: file lands in the per-SESSION workspace (#124)", dest.is_file(),
               str(dest))
         check("web: bytes exact",
               dest.is_file() and dest.read_bytes() == b"tiny-binary\xff\xfe")
+
+        # ISOLATION (#124): the same name in ANOTHER session must not 409 —
+        # different session, different workspace. And s1's file is invisible
+        # from s2's workspace dir.
+        r_iso = requests.put(f"{base}/api/uploads/f.bin?session_id=s2&user_id=u1",
+                             data=b"other", timeout=15)
+        check("web: same name in another session is a fresh upload (#124)",
+              r_iso.status_code == 200, (r_iso.status_code, r_iso.text[:150]))
+        s2dir = Path(wsroot) / "local" / "u1" / ".sessions" / "s2" / "uploads"
+        check("web: sessions are mutually invisible (#124)",
+              sorted(x.name for x in s2dir.iterdir()) == ["f.bin"]
+              and (Path(wsroot) / "local" / "u1" / ".sessions" / "s1" /
+                   "uploads" / "f.bin").read_bytes() == b"tiny-binary\xff\xfe")
 
         rcap = requests.put(u.replace("f.bin", "big.bin"), data=b"x" * 4096,
                             timeout=15)

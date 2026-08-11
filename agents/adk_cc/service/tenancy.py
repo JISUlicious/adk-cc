@@ -71,10 +71,26 @@ class TenantContext:
         os.makedirs(user_home, exist_ok=True)
         os.makedirs(scratch, exist_ok=True)
 
+        # PER-SESSION workspace (#124, decided 2026-08-11): abs_path is the
+        # session dir, NOT the user home. Two same-user sessions used to
+        # bind-mount ONE host dir into two containers (zero write
+        # coordination), and `rm -rf /workspace` nuked the user's entire
+        # accumulated home — untenable once #122 relaxes sandbox
+        # confirmations. The home stays as the parent (per-user quota/reap
+        # unit) but is deliberately NOT in allow_paths: read-only transition
+        # access would need a permission tier that doesn't exist, and write
+        # access would undo the blast-radius win.
+        #
+        # Accepted costs (owner-approved): analysis env provisions cold per
+        # session (mitigation candidate: shared read-only uv cache mount);
+        # uploads are per-session (consistent — the attachment line already
+        # names this-session paths); sessions created under the OLD layout
+        # keep their files in the user home and cannot see them here
+        # (release-note, dev-stage deployment).
         return WorkspaceRoot(
             tenant_id=self.tenant_id,
             session_id=session_id,
-            abs_path=user_home,
+            abs_path=scratch,
             session_scratch_path=scratch,
         )
 
