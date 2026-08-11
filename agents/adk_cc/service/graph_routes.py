@@ -96,6 +96,21 @@ def mount_knowledge_routes(app) -> None:
             n["notes"] += 1
         return {"nodes": nodes, "links": links}
 
+    @app.get("/api/knowledge/wiki/inbox/{slug}", include_in_schema=False)
+    def _wiki_inbox(slug: str, request: Request):  # noqa: ANN202
+        """The CALLER'S unmerged inbox notes for one slug — content, not a
+        stub. Principal-scoped like every route here; there is no way to
+        read another user's inbox."""
+        tenant_id, user_id = _principal(request)
+        wiki = WikiStore.for_tenant(tenant_id).ensure()
+        want = slugify(slug)
+        notes = [{"doc_id": d.doc_id, "text": d.page.body,
+                  "frontmatter": d.page.frontmatter}
+                 for d in wiki.list_inbox(user_id) if d.slug == want]
+        if not notes:
+            return {"status": "not_found", "slug": slug}
+        return {"status": "ok", "slug": want, "notes": notes}
+
     @app.get("/api/knowledge/wiki/page/{slug}", include_in_schema=False)
     def _wiki_page(slug: str, request: Request):  # noqa: ANN202
         tenant_id, _ = _principal(request)

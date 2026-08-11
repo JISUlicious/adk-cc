@@ -57,6 +57,13 @@ export const fetchWikiGraph = (user?: string) =>
   apiFetch<Graph>(`/api/knowledge/wiki/graph${_u(user)}`)
 export const fetchWikiPage = (slug: string, user?: string) =>
   apiFetch<WikiPage>(`/api/knowledge/wiki/page/${encodeURIComponent(slug)}${_u(user)}`)
+export interface WikiInboxNotes {
+  status: string
+  slug: string
+  notes: { doc_id: string; text: string; frontmatter: Record<string, unknown> }[]
+}
+export const fetchWikiInbox = (slug: string, user?: string) =>
+  apiFetch<WikiInboxNotes>(`/api/knowledge/wiki/inbox/${encodeURIComponent(slug)}${_u(user)}`)
 export const fetchMemoryGraph = (user?: string) =>
   apiFetch<Graph>(`/api/knowledge/memory/graph${_u(user)}`)
 export const fetchMemoryItem = (id: string, user?: string) =>

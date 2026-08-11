@@ -6,6 +6,7 @@ import { Button } from "@/shared/components/ui/button"
 import { WikiMarkdown } from "@/shared/lib/markdown"
 import {
   fetchWikiGraph,
+  fetchWikiInbox,
   fetchWikiPage,
   fetchMemoryGraph,
   fetchMemoryItem,
@@ -84,7 +85,19 @@ export function KnowledgePage() {
     (node: GraphNode) => {
       if (tab === "wiki") {
         if (node.kind === "inbox") {
-          setDetail({ status: "ok", title: node.label, body: "(inbox note — not yet merged into the shared wiki)" })
+          // Show the actual note content(s), not a stub — "what is in my
+          // inbox?" is the question this panel answers before the librarian
+          // has run.
+          fetchWikiInbox(node.id.replace(/^inbox:/, ""), user)
+            .then((r) =>
+              setDetail({
+                status: "ok",
+                title: `${node.label} — inbox (not yet merged)`,
+                body: r.notes
+                  .map((n) => n.text)
+                  .join("\n\n---\n\n"),
+              }))
+            .catch((e) => setError(String(e)))
           return
         }
         fetchWikiPage(node.id, user).then(setDetail).catch((e) => setError(String(e)))
