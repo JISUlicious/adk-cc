@@ -292,6 +292,11 @@ FIELDS: list[Var] = [
         "Max total inline_data (MB) accepted in one /api/turns message — "
         "blobs persist into every session JSONL rewrite and bypass the "
         "context defenses; upload files instead.", default="1"),
+    Var("ADK_CC_CONTEXT_PRESSURE_PCT", Tier.ADVANCED, "Context",
+        "Percent of the effective window where the guard rewrites the "
+        "request AGGRESSIVELY before the reject line (85 default; 0 "
+        "disables). #128: WARN only logged and REJECT killed the call — a "
+        "mid-turn 128K->219K growth sailed between them.", default="85"),
     Var("ADK_CC_SESSION_NOTES_AUTOCAPTURE", Tier.ADVANCED, "Memory & Wiki",
         "=1 (web only): the memory capture pass routes session-scoped facts "
         "into session notes instead of dropping them. Default off — "

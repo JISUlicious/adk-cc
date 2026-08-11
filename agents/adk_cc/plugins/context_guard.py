@@ -180,6 +180,12 @@ class ContextGuardPlugin(BasePlugin):
         # inline `# comment` on this var in .env stopped the agent from
         # importing at all.
         self._max: Optional[int] = env_int("ADK_CC_MAX_CONTEXT_TOKENS")
+        # #128 P0: per-session estimate correction (learned from
+        # usage_metadata) + the pressure line where aggressive request
+        # rewriting kicks in before REJECT is ever near.
+        self._cal: dict = {}
+        self._last_estimate: dict = {}
+        self._pressure: Optional[int] = None
 
         if self._max is None:
             self._warn = None
@@ -212,6 +218,14 @@ class ContextGuardPlugin(BasePlugin):
         )
         for c in corrections:
             _log.warning("ContextGuardPlugin ladder corrected: %s", c)
+        # Pressure line (#128): between WARN and REJECT; default 85% of the
+        # effective window. 0 disables the ladder.
+        pct = env_int("ADK_CC_CONTEXT_PRESSURE_PCT", 85)
+        self._pressure = (int(self._effective * pct / 100)
+                          if 0 < pct < 100 else None)
+        if self._pressure:
+            _log.info("ContextGuardPlugin: PRESSURE=%d (%d%%)",
+                      self._pressure, pct)
         self._check_compaction_threshold()
 
     def _check_compaction_threshold(self) -> None:
@@ -233,6 +247,49 @@ class ContextGuardPlugin(BasePlugin):
                 "backstop.", thr_i, self._warn,
             )
 
+    # ---- calibration (#128 P0a) ----------------------------------------
+    # chars/4 undercounts real tokenizers by enough that a 219K request can
+    # measure under the 190K reject line (observed live: 128K -> 219K mid-
+    # turn, ~98% of window, no reject). The API tells us the REAL count on
+    # every response — learn the per-session ratio and correct the estimate.
+    _CAL_CAP = 256  # sessions tracked; FIFO-ish trim
+
+    def _correction(self, sid: str) -> float:
+        return self._cal.get(sid, 1.0) if sid else 1.0
+
+    def _note_usage(self, sid: str, estimated: int, actual: int) -> None:
+        if not sid or estimated <= 0 or actual <= 0:
+            return
+        ratio = max(0.5, min(3.0, actual / estimated))
+        old = self._cal.get(sid, 1.0)
+        smoothed = 0.5 * old + 0.5 * ratio
+        self._cal[sid] = smoothed
+        if len(self._cal) > self._CAL_CAP:
+            self._cal.pop(next(iter(self._cal)))
+        if abs(ratio - 1.0) > 0.10:
+            _log.warning(
+                "context guard calibration: estimate drifted %.0f%% from the "
+                "API's prompt_token_count (est=%d actual=%d, session %s) — "
+                "correction now %.2f", (ratio - 1.0) * 100, estimated, actual,
+                sid, smoothed)
+
+    async def after_model_callback(
+        self, *, callback_context: CallbackContext,
+        llm_response: LlmResponse,
+    ) -> Optional[LlmResponse]:
+        if self._max is None:
+            return None
+        try:
+            usage = getattr(llm_response, "usage_metadata", None)
+            actual = getattr(usage, "prompt_token_count", None)
+            sid = self._session_id(callback_context)
+            est = self._last_estimate.pop(sid, None)
+            if actual and est:
+                self._note_usage(sid, est, int(actual))
+        except Exception:  # noqa: BLE001 — calibration must never break a turn
+            pass
+        return None
+
     async def before_model_callback(
         self,
         *,
@@ -248,8 +305,47 @@ class ContextGuardPlugin(BasePlugin):
         # shortcut. max() so a mid-invocation payload burst can't hide
         # behind the previous call's smaller usage number.
         request_est = estimate_request_tokens(llm_request)
-        tokens = max(base, request_est)
+        raw_tokens = max(base, request_est)
+        sid_for_cal = self._session_id(callback_context)
+        self._last_estimate[sid_for_cal] = raw_tokens
+        tokens = int(raw_tokens * self._correction(sid_for_cal))
         ratio = tokens / self._effective if self._effective else 0.0
+
+        # ---- pressure ladder (#128 P0b): act BEFORE the reject line ------
+        # WARN only logs and REJECT kills the call; the observed incident
+        # sailed between them. At the pressure line, rewrite aggressively
+        # (progressively smaller keep_recent) targeting ~70% of effective —
+        # a degraded request beats both refusal and an API overflow.
+        if self._pressure and tokens >= self._pressure and tokens < self._reject:
+            from .microcompact import rewrite_request
+
+            target = int(0.70 * self._effective)
+            entry_tokens, rewritten, freed = tokens, 0, 0
+            # Escalate keep_recent 2→1→0: a request whose weight sits in one
+            # or two huge results (the incident shape) is invisible to the
+            # polite first pass — `targets <= keep_recent` rewrites nothing.
+            for keep in (2, 1, 0):
+                stats = await rewrite_request(
+                    llm_request, keep_recent=keep, min_tokens=400,
+                    budget_tokens=max(0, tokens - target),
+                )
+                rewritten += stats["rewritten"]
+                freed += stats["freed"]
+                if stats["rewritten"]:
+                    request_est = max(0, estimate_request_tokens(llm_request))
+                    raw_tokens = max(
+                        estimate_prompt_tokens(
+                            llm_request, session_events=session_events),
+                        request_est)
+                    tokens = int(raw_tokens * self._correction(sid_for_cal))
+                if tokens < self._pressure:
+                    break
+            if rewritten:
+                ratio = tokens / self._effective if self._effective else 0.0
+                _log.info(
+                    "context pressure: %d tokens >= %d — rewrote %d result(s), "
+                    "~%d freed, now ~%d", entry_tokens, self._pressure,
+                    rewritten, freed, tokens)
 
         # Diagnostic-only: when DEBUG is on, also compute the
         # litellm-based count so operators investigating an
@@ -291,8 +387,10 @@ class ContextGuardPlugin(BasePlugin):
                 request_est = max(0, request_est - stats["freed"])
                 # base reflects the PRE-rewrite conversation (the server
                 # already accepted a call that big); the measured
-                # post-rewrite request decides now.
-                tokens = request_est
+                # post-rewrite request decides now — with the session's
+                # learned correction still applied (#128: the raw estimate
+                # undercounting real tokenizers is exactly the incident).
+                tokens = int(request_est * self._correction(sid_for_cal))
                 _log.warning(
                     "ContextGuardPlugin EVICT: rewrote %d old tool result(s) "
                     "(%d summarized, ~%d tokens) — request now ~%d, session_id=%s",
@@ -308,7 +406,7 @@ class ContextGuardPlugin(BasePlugin):
                     llm_request, keep_recent=0, min_tokens=64)
                 if stats2["rewritten"]:
                     request_est = max(0, request_est - stats2["freed"])
-                    tokens = request_est
+                    tokens = int(request_est * self._correction(sid_for_cal))
                     _log.warning(
                         "ContextGuardPlugin EVICT(desperation): %d more "
                         "rewrite(s), ~%d tokens — request now ~%d, session_id=%s",
