@@ -152,6 +152,9 @@ export function ChatPage({
   // Right-side panel (artifacts on web / file tree on desktop) mobile drawer.
   const [rightPanelOpen, setRightPanelOpen] = useState(false)
   const [notesOpen, setNotesOpen] = useState(false)
+  // null = viewing; a string = the in-progress edit (#129 notes self-editing)
+  const [notesDraft, setNotesDraft] = useState<string | null>(null)
+  const [notesSaving, setNotesSaving] = useState(false)
   const [showSessionId, setShowSessionId] = useState(
     () => localStorage.getItem("adk.showSessionIds") === "1",
   )
@@ -832,23 +835,92 @@ export function ChatPage({
         {notesOpen && (
           <div
             className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-4"
-            onClick={() => setNotesOpen(false)}
+            onClick={() => {
+              // Don't lose an in-progress edit to a stray backdrop click.
+              if (notesDraft === null) setNotesOpen(false)
+            }}
           >
             <div
               className="max-h-[70vh] w-full max-w-lg overflow-auto rounded-lg border border-border bg-background p-4 shadow-xl"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="mb-2 text-sm font-semibold">Session notes</div>
-              <pre
-                data-session-notes
-                className="whitespace-pre-wrap text-xs text-muted-foreground"
-              >
-                {String(
-                  (session?.state as Record<string, unknown> | undefined)
-                    ?.session_notes ?? "(no notes yet — the agent records "
-                    + "decisions and task state here as the session runs)",
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-sm font-semibold">Session notes</span>
+                {notesDraft === null ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7"
+                    onClick={() =>
+                      setNotesDraft(
+                        String(
+                          (session?.state as Record<string, unknown> | undefined)
+                            ?.session_notes ?? "",
+                        ),
+                      )
+                    }
+                  >
+                    Edit
+                  </Button>
+                ) : (
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7"
+                      disabled={notesSaving}
+                      onClick={() => setNotesDraft(null)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      className="h-7"
+                      disabled={notesSaving}
+                      onClick={() => {
+                        if (!appName || !session || notesDraft === null) return
+                        setNotesSaving(true)
+                        patchSessionState(appName, userId, session.id, {
+                          session_notes: notesDraft.trim() || null,
+                        })
+                          .then((s) => {
+                            setSession(s)
+                            setEvents(s.events)
+                            setNotesDraft(null)
+                          })
+                          .catch((e) =>
+                            setError(
+                              `Failed to save notes: ${(e as Error).message}`,
+                            ),
+                          )
+                          .finally(() => setNotesSaving(false))
+                      }}
+                    >
+                      {notesSaving ? "Saving…" : "Save"}
+                    </Button>
+                  </div>
                 )}
-              </pre>
+              </div>
+              {notesDraft === null ? (
+                <pre
+                  data-session-notes
+                  className="whitespace-pre-wrap text-xs text-muted-foreground"
+                >
+                  {String(
+                    (session?.state as Record<string, unknown> | undefined)
+                      ?.session_notes ?? "(no notes yet — the agent records "
+                      + "decisions and task state here as the session runs)",
+                  )}
+                </pre>
+              ) : (
+                <textarea
+                  data-session-notes-edit
+                  className="h-64 w-full resize-y rounded border border-border bg-background p-2 font-mono text-xs"
+                  value={notesDraft}
+                  onChange={(e) => setNotesDraft(e.target.value)}
+                  autoFocus
+                />
+              )}
             </div>
           </div>
         )}
