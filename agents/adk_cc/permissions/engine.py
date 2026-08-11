@@ -170,11 +170,12 @@ def decide(
     workspace_root: Optional[str] = None,
     cmd_out_of_scope: bool = False,
     remote_home: Optional[str] = None,
+    sandbox_isolated: bool = False,
 ) -> PermissionDecision:
     decision = _decide_impl(
         tool=tool, args=args, mode=mode, settings=settings,
         workspace_root=workspace_root, cmd_out_of_scope=cmd_out_of_scope,
-        remote_home=remote_home,
+        remote_home=remote_home, sandbox_isolated=sandbox_isolated,
     )
     matched_rule_dump = (
         decision.matched_rule.model_dump() if decision.matched_rule else None
@@ -270,7 +271,17 @@ def _decide_impl(
     workspace_root: Optional[str] = None,
     cmd_out_of_scope: bool = False,
     remote_home: Optional[str] = None,
+    sandbox_isolated: bool = False,
 ) -> PermissionDecision:
+    # #122: an ISOLATED sandbox session (docker/daytona/..., web per-session
+    # workspace since #124) gets bypass-grade convenience with the SAME
+    # danger floor this function already enforces UNDER bypass: catastrophic
+    # still denies, dangerous still asks, operator deny rules still win.
+    # plan and dontAsk are deliberately untouched — isolation is about blast
+    # radius, not about the user's explicit posture choices.
+    if sandbox_isolated and mode in (PermissionMode.DEFAULT,
+                                     PermissionMode.ACCEPT_EDITS):
+        mode = PermissionMode.BYPASS_PERMISSIONS
     rules = settings.all_rules()
     tool_name = tool.meta.name
 

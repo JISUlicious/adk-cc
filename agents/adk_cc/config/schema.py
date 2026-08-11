@@ -285,6 +285,19 @@ FIELDS: list[Var] = [
         "shell config (~/.zshrc, ~/.gitconfig, .git/config) still asks.",
         default="bypassPermissions",
         choices=("default","plan","acceptEdits","bypassPermissions","dontAsk")),
+    Var("ADK_CC_UPLOAD_MAX_MB", Tier.COMMON, "Uploads",
+        "Max size (MB) for a file upload into the session workspace "
+        "(PUT /desktop/uploads, /api/uploads).", default="100"),
+    Var("ADK_CC_TURN_INLINE_MAX_MB", Tier.COMMON, "Uploads",
+        "Max total inline_data (MB) accepted in one /api/turns message — "
+        "blobs persist into every session JSONL rewrite and bypass the "
+        "context defenses; upload files instead.", default="1"),
+    Var("ADK_CC_SANDBOX_RELAXED", Tier.COMMON, "Permissions",
+        "=0 disables #122: by default, sessions whose backend is a real "
+        "isolation boundary (docker/daytona/sandbox_service; web mode only) "
+        "skip routine exec/write confirmations — the danger floor "
+        "(catastrophic deny, dangerous ask) still applies.",
+        default="1"),
     Var("ADK_CC_PERMISSIONS_YAML", Tier.COMMON, "Permissions",
         "Path to a YAML of permission rules + authz policies.",
         default=None, parse=as_path),

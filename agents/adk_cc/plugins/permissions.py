@@ -286,6 +286,27 @@ class PermissionPlugin(BasePlugin):
         self._settings = settings
         self._default_mode = default_mode
 
+    def _sandbox_isolated(self, tool_context) -> bool:
+        """True when THIS session's resolved backend is a real isolation
+        boundary (#122): non-desktop (web workspaces are per-session since
+        #124), relaxation not opted out, and the tenancy-seeded backend is
+        one of the container/VM-boundary backends. Desktop is excluded
+        wholesale — its containers bind-mount the real project."""
+        from .. import deployment
+
+        if deployment.is_desktop():
+            return False
+        if os.environ.get("ADK_CC_SANDBOX_RELAXED", "1").lower() in ("0", "false"):
+            return False
+        try:
+            state = getattr(tool_context, "state", None)
+            backend = state.get("temp:sandbox_backend") if state is not None else None
+        except Exception:  # noqa: BLE001 — no state, no relaxation
+            return False
+        from ..sandbox import _ISOLATED_BACKEND_NAMES
+
+        return getattr(backend, "name", None) in _ISOLATED_BACKEND_NAMES
+
     async def before_tool_callback(
         self,
         *,
@@ -301,6 +322,12 @@ class PermissionPlugin(BasePlugin):
         # while the agent's own write_file to that same path was stopped by the
         # floor and asked.
         if getattr(tool, "name", "") == SKILL_SCRIPT_TOOL:
+            # #122: in an ISOLATED sandbox the script cannot touch the host —
+            # its authority is one session's scratch inside a container. Skip
+            # the third-party-code ask there (danger floor still applies to
+            # anything it routes through run_bash).
+            if self._sandbox_isolated(tool_context):
+                return None
             return await self._gate_skill_script(tool, tool_args, tool_context)
 
         # The same gate for the bash route into a project skill's scripts.
@@ -311,7 +338,8 @@ class PermissionPlugin(BasePlugin):
             if m is not None:
                 from ..tools.bash.readonly import is_read_only_command
 
-                if not is_read_only_command(str(tool_args.get("command") or "")):
+                if (not is_read_only_command(str(tool_args.get("command") or ""))
+                        and not self._sandbox_isolated(tool_context)):
                     gate = await self._gate_skill_script(
                         tool, {"skill_name": m[0], "file_path": m[1]},
                         tool_context, via_bash=True)
@@ -357,6 +385,7 @@ class PermissionPlugin(BasePlugin):
                 tool, tool_args, tool_context, workspace_root
             ),
             remote_home=self._remote_home(tool_context),
+            sandbox_isolated=self._sandbox_isolated(tool_context),
         )
 
         if decision.behavior == "deny":
