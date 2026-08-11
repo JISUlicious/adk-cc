@@ -188,9 +188,39 @@ def promote_and_routing_units() -> None:
           "SESSION:" not in off and "SESSION:" in on)
 
 
+def routing_append_unit() -> None:
+    """P1's risky half: _append_session_notes merges + caps + appends a
+    state-delta event through the session service."""
+    from adk_cc.plugins.memory import MemoryPlugin
+
+    appended = []
+
+    class Svc:
+        async def append_event(self, session, event):  # noqa: ANN001
+            appended.append(event)
+
+    class Sess:
+        id = "s1"
+        state = {"session_notes": "existing note"}
+
+    class Ictx:
+        session = Sess()
+        session_service = Svc()
+        invocation_id = "inv1"
+
+    asyncio.run(MemoryPlugin()._append_session_notes(
+        Ictx(), ["decided approach C", "API caps at 100"]))
+    check("routing appends ONE state-delta event", len(appended) == 1)
+    delta = appended[0].actions.state_delta["session_notes"]
+    check("routing merges below existing notes",
+          delta.startswith("existing note") and "- decided approach C" in delta
+          and "- API caps at 100" in delta, delta[:80])
+
+
 def main() -> int:
     tool_units()
     promote_and_routing_units()
+    routing_append_unit()
 
     r = asyncio.run(_runner_scenario(with_plugin=True))
     check("A/B with plugin: compaction ran", r["compacted"])
