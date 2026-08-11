@@ -94,6 +94,22 @@ def main() -> int:
     check("helper: no seeded backend → NOT isolated",
           not plugin._sandbox_isolated(_Ctx(None)))
 
+    # #125: an EXPLICIT session posture beats relaxation.
+    class _CtxMode:
+        def __init__(self, backend, mode):
+            self.state = {"temp:sandbox_backend": backend,
+                          "permission_mode": mode}
+
+    check("explicit 'default' posture suppresses relaxation (#125)",
+          not plugin._relaxation_active(_CtxMode(_Backend("docker"), "default")))
+    check("env-default session (no state mode) keeps relaxation",
+          plugin._relaxation_active(_Ctx(_Backend("docker"))))
+
+    import inspect
+    src = inspect.getsource(type(plugin))
+    check("decide() wiring uses _relaxation_active",
+          "sandbox_isolated=self._relaxation_active" in src)
+
     os.environ["ADK_CC_SANDBOX_RELAXED"] = "0"
     try:
         check("helper: opt-out env disables",

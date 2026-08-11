@@ -284,6 +284,15 @@ export function Composer({
               </span>
             </div>
             <div className="ml-auto flex items-center gap-2 shrink-0">
+              {mode && mode !== "plan" && (
+                <span
+                  data-mode-chip={mode}
+                  className="text-[10px] text-muted-foreground"
+                  title="Session permission mode — /mode-… to change"
+                >
+                  {mode === "bypassPermissions" ? "bypass" : mode}
+                </span>
+              )}
               <SandboxBadge sessionId={sessionId} userId={userId} />
               {footer && <div className="adk-gauge-slot">{footer}</div>}
             </div>

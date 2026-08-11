@@ -582,6 +582,33 @@ export function ChatPage({
         clearToken()
         location.assign("/")
         return
+      case "mode-default":
+      case "mode-acceptEdits":
+      case "mode-bypass": {
+        if (!appName || !session) return
+        // The user's EXPLICIT posture for this session (#125). Also clears
+        // any plan marker; the server treats an explicit mode as overriding
+        // the isolated-sandbox relaxation (#122).
+        const chosen =
+          action === "mode-bypass"
+            ? "bypassPermissions"
+            : action === "mode-acceptEdits"
+              ? "acceptEdits"
+              : "default"
+        patchSessionState(appName, userId, session.id, {
+          permission_mode: chosen,
+          plan_previous_mode: null,
+        })
+          .then((s) => {
+            setSession(s)
+            setEvents(s.events)
+            setRefreshTick((t) => t + 1)
+          })
+          .catch((e) =>
+            setError(`Failed to set permission mode: ${(e as Error).message}`),
+          )
+        return
+      }
       case "plan":
       case "exit-plan": {
         // Direct state mutation — no LLM turn. ADK appends a synthetic

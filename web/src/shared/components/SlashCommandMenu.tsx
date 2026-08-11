@@ -29,6 +29,9 @@ import { IS_DESKTOP } from "@/shared/lib/platform"
 export type SlashAction =
   | "help"
   | "clear"
+  | "mode-default"
+  | "mode-acceptEdits"
+  | "mode-bypass"
   | "settings"
   | "theme"
   | "signout"
@@ -77,6 +80,24 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "See the skills the agent can use, and turn them on or off",
     icon: Boxes,
     kind: { type: "action", action: "skills" },
+  },
+  {
+    name: "mode-default",
+    icon: ClipboardList,
+    description: "This session asks before commands and edits",
+    kind: { type: "action", action: "mode-default" },
+  },
+  {
+    name: "mode-acceptEdits",
+    icon: ClipboardList,
+    description: "This session auto-accepts in-project edits and benign commands",
+    kind: { type: "action", action: "mode-acceptEdits" },
+  },
+  {
+    name: "mode-bypass",
+    icon: ClipboardList,
+    description: "This session skips confirmations (danger floor still asks)",
+    kind: { type: "action", action: "mode-bypass" },
   },
   {
     name: "model",

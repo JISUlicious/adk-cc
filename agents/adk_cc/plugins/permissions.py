@@ -307,6 +307,21 @@ class PermissionPlugin(BasePlugin):
 
         return getattr(backend, "name", None) in _ISOLATED_BACKEND_NAMES
 
+    def _mode_explicit(self, tool_context) -> bool:
+        """True when THIS session carries an explicit permission_mode in
+        state — the user (or /mode, #125) chose a posture. An explicit
+        choice beats #122's isolation relaxation: someone who picked
+        'default' inside a sandbox asked for confirmations."""
+        try:
+            state = getattr(tool_context, "state", None)
+            return bool(state.get("permission_mode")) if state is not None else False
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _relaxation_active(self, tool_context) -> bool:
+        return (self._sandbox_isolated(tool_context)
+                and not self._mode_explicit(tool_context))
+
     async def before_tool_callback(
         self,
         *,
@@ -326,7 +341,7 @@ class PermissionPlugin(BasePlugin):
             # its authority is one session's scratch inside a container. Skip
             # the third-party-code ask there (danger floor still applies to
             # anything it routes through run_bash).
-            if self._sandbox_isolated(tool_context):
+            if self._relaxation_active(tool_context):
                 return None
             return await self._gate_skill_script(tool, tool_args, tool_context)
 
@@ -339,7 +354,7 @@ class PermissionPlugin(BasePlugin):
                 from ..tools.bash.readonly import is_read_only_command
 
                 if (not is_read_only_command(str(tool_args.get("command") or ""))
-                        and not self._sandbox_isolated(tool_context)):
+                        and not self._relaxation_active(tool_context)):
                     gate = await self._gate_skill_script(
                         tool, {"skill_name": m[0], "file_path": m[1]},
                         tool_context, via_bash=True)
@@ -385,7 +400,7 @@ class PermissionPlugin(BasePlugin):
                 tool, tool_args, tool_context, workspace_root
             ),
             remote_home=self._remote_home(tool_context),
-            sandbox_isolated=self._sandbox_isolated(tool_context),
+            sandbox_isolated=self._relaxation_active(tool_context),
         )
 
         if decision.behavior == "deny":
