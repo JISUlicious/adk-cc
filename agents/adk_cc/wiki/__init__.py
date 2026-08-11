@@ -34,6 +34,7 @@ from .librarian import (
     make_llm_merge_verifier,
 )
 from .page import Page, parse, serialize, slugify
+from .personal import PersonalWikiView
 from .store import InboxDoc, WikiStore, wiki_root_from_env
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "serialize",
     "slugify",
     "InboxDoc",
+    "PersonalWikiView",
     "WikiStore",
     "wiki_root_from_env",
     "Librarian",

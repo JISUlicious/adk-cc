@@ -89,7 +89,8 @@ def _make_page_synthesizer(model):
     return _synth
 
 
-async def _run(root: str, tenants: list[str], use_model: bool, compact: bool) -> int:
+async def _run(root: str, tenants: list[str], use_model: bool, compact: bool,
+               personal: bool = False) -> int:
     classifier = None
     synthesizer = None
     verifier = None
@@ -131,6 +132,24 @@ async def _run(root: str, tenants: list[str], use_model: bool, compact: bool) ->
                 "tenant %s: compaction merged=%d group(s)=%d pages %d→%d",
                 tenant, crep.merged, crep.groups, crep.pages_before, crep.pages_after,
             )
+        if personal:
+            # #129-3: the SAME librarian core against each user's personal
+            # wiki (users/<uid>/wiki). Runs once per user — cost scales with
+            # the user count, hence opt-in and typically a lower cadence
+            # than the domain merge. Consumption is marker-based, so this
+            # never races the domain pass over the shared inbox.
+            from adk_cc.wiki import PersonalWikiView
+
+            for uid in store.list_user_ids():
+                plib = Librarian(PersonalWikiView(store, uid),
+                                 classifier=classifier, synthesizer=synthesizer)
+                prep = await plib.run()
+                if prep.claims_seen:
+                    _log.info(
+                        "tenant %s personal[%s]: seen=%d actions=%s slugs=%d",
+                        tenant, uid, prep.claims_seen, prep.actions,
+                        len(prep.slugs_touched),
+                    )
     return overall
 
 
@@ -143,6 +162,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="after merging, re-dedup the published domain pages "
                          "(verified). With a model, catches true aliases; "
                          "without, hyphenation variants.")
+    ap.add_argument("--personal", action="store_true",
+                    default=os.environ.get("ADK_CC_PERSONAL_WIKI", "") in
+                    ("1", "true", "yes", "on"),
+                    help="also consolidate each user's notes into their "
+                         "PERSONAL wiki (users/<uid>/wiki) with the same "
+                         "librarian core (#129-3). Cost scales per user — "
+                         "consider a lower cadence. Env: ADK_CC_PERSONAL_WIKI=1.")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
 
@@ -163,7 +189,8 @@ def main(argv: list[str] | None = None) -> int:
 
     _log.info("merging %d tenant(s) under %s (model=%s)",
               len(tenants), root, "off" if args.no_model else "on")
-    return asyncio.run(_run(root, tenants, use_model=not args.no_model, compact=args.compact))
+    return asyncio.run(_run(root, tenants, use_model=not args.no_model,
+                            compact=args.compact, personal=args.personal))
 
 
 if __name__ == "__main__":

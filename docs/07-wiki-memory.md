@@ -5,8 +5,10 @@ Three scopes, each with its own home (#127 completed the set):
 - **Session → notes** — a curated per-session document in session state:
   the agent records decisions/constraints/task state via
   `update_session_notes`, the block re-injects into every request (so it
-  survives context compaction), `/notes` shows it, and it dies with the
-  session. `mode=promote` lifts a note into user memory. Knobs:
+  survives context compaction), `/notes` shows it — and lets you EDIT it
+  (#129: Edit → Save persists through the state PATCH; the edited text is
+  what reaches the model next turn) — and it dies with the session.
+  `mode=promote` lifts a note into user memory. Knobs:
   `ADK_CC_SESSION_NOTES_BUDGET` (2000 tokens),
   `ADK_CC_SESSION_NOTES_AUTOCAPTURE` (=1, web: capture routes
   session-scoped facts into notes instead of dropping them; default off).
@@ -20,10 +22,27 @@ Two related but deliberately separate subsystems for the other scopes:
   (conflict policy: auto-supersede; contradictions need `corroboration_n`
   independent users + an external source, else quarantine). Nothing is
   injected automatically — the model must search.
+
+  **Curation (#129):** with the admin panel on (`ADK_CC_ADMIN_PANEL=1`),
+  admins can edit/delete domain pages and adjudicate the review queue from
+  the knowledge page. A hand-edited page is stamped `human_edited` and the
+  librarian will NEVER auto-supersede it — a conflicting note goes to the
+  Review pane instead, where accepting it lets the change through on the
+  next run. **Personal wiki** (`--personal` on the librarian cron, or
+  `ADK_CC_PERSONAL_WIKI=1`): the same merge engine also consolidates each
+  user's notes into `users/<uid>/wiki/` — amber nodes on the graph,
+  `scope=personal` in `wiki_search`/`wiki_read` (auto order: raw inbox
+  note → personal page → shared domain). Cost scales per user per run —
+  prefer a lower cadence than the domain merge.
 - **Memory** — an *autonomous* per-user memory. No tools: a plugin recalls
   a budgeted block into every turn's system instruction and captures facts
   after each turn (LLM extract → verified identity-resolve → episodic
   store), with episodic→semantic consolidation on a scheduler or cron.
+  Consolidation folds near-duplicate topic slugs (#129-4:
+  'preferred-language' ≡ 'user-preferred-language') into one semantic
+  node, merges variant nodes that already grew, and the capture prompt
+  reuses your existing slugs — `ADK_CC_MEMORY_CANONICALIZE=0` restores
+  exact-slug clustering.
 
 ## 1. Is it on by default?
 

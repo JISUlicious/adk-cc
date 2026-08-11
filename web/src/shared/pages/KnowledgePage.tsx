@@ -8,6 +8,7 @@ import {
   fetchWikiGraph,
   fetchWikiInbox,
   fetchWikiPage,
+  fetchWikiPersonal,
   fetchMemoryGraph,
   fetchMemoryItem,
   type Graph,
@@ -34,6 +35,7 @@ type Tab = "wiki" | "memory"
 const NODE_COLOR: Record<string, string> = {
   domain: "#10b981",   // emerald
   inbox: "#3b82f6",    // blue
+  personal: "#f59e0b", // amber — your consolidated personal wiki (#129-3)
   semantic: "#8b5cf6", // violet
   episodic: "#9ca3af", // gray
 }
@@ -121,6 +123,12 @@ export function KnowledgePage() {
                   .map((n) => n.text)
                   .join("\n\n---\n\n"),
               }))
+            .catch((e) => setError(String(e)))
+          return
+        }
+        if (node.kind === "personal") {
+          fetchWikiPersonal(node.id.replace(/^personal:/, ""), user)
+            .then(setDetail)
             .catch((e) => setError(String(e)))
           return
         }

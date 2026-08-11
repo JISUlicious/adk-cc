@@ -93,7 +93,55 @@ def mount_knowledge_routes(app) -> None:
                 if doc.slug in known:
                     links.append({"source": n["id"], "target": doc.slug, "overlay": True})
             n["notes"] += 1
+        # #129-3: the caller's PERSONAL wiki pages (librarian-consolidated
+        # from their notes). Distinct kind + id namespace — a personal page
+        # and a domain page may share a slug.
+        from ..wiki import PersonalWikiView
+
+        personal = PersonalWikiView(wiki, user_id)
+        pslugs = set(personal.list_domain_pages())
+        for slug in sorted(pslugs):
+            page = personal.read_domain_page(slug)
+            if page is None:
+                continue
+            nodes.append({
+                "id": f"personal:{slug}",
+                "label": page.title,
+                "kind": "personal",
+                "type": page.type,
+                "tags": page.tags,
+                "contested": bool(page.contested),
+                "sources": len(page.sources),
+            })
+            for target in page.wikilinks:
+                links.append({
+                    "source": f"personal:{slug}",
+                    "target": (f"personal:{target}" if target in pslugs
+                               else target),
+                    "missing": target not in pslugs and target not in known,
+                })
         return {"nodes": nodes, "links": links}
+
+    @app.get("/api/knowledge/wiki/personal/{slug}", include_in_schema=False)
+    def _wiki_personal_page(slug: str, request: Request):  # noqa: ANN202
+        """The CALLER'S personal wiki page — principal-scoped like every
+        route here; there is no way to read another user's personal wiki."""
+        from ..wiki import PersonalWikiView
+
+        tenant_id, user_id = _principal(request)
+        wiki = WikiStore.for_tenant(tenant_id).ensure()
+        page = PersonalWikiView(wiki, user_id).read_domain_page(slugify(slug))
+        if page is None:
+            return {"status": "not_found", "slug": slug}
+        return {
+            "status": "ok",
+            "slug": page.slug,
+            "title": page.title,
+            "contested": bool(page.contested),
+            "frontmatter": page.frontmatter,
+            "body": page.body,
+            "sources": page.sources,
+        }
 
     @app.get("/api/knowledge/wiki/inbox/{slug}", include_in_schema=False)
     def _wiki_inbox(slug: str, request: Request):  # noqa: ANN202

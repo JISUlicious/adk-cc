@@ -4,7 +4,7 @@ import { apiFetch } from "./client"
 export interface GraphNode {
   id: string
   label: string
-  kind: "domain" | "inbox" | "semantic" | "episodic"
+  kind: "domain" | "inbox" | "personal" | "semantic" | "episodic"
   contested?: boolean
   sources?: number
   confidence?: number
@@ -57,6 +57,9 @@ export const fetchWikiGraph = (user?: string) =>
   apiFetch<Graph>(`/api/knowledge/wiki/graph${_u(user)}`)
 export const fetchWikiPage = (slug: string, user?: string) =>
   apiFetch<WikiPage>(`/api/knowledge/wiki/page/${encodeURIComponent(slug)}${_u(user)}`)
+/** The caller's own personal wiki page (#129-3, librarian-consolidated). */
+export const fetchWikiPersonal = (slug: string, user?: string) =>
+  apiFetch<WikiPage>(`/api/knowledge/wiki/personal/${encodeURIComponent(slug)}${_u(user)}`)
 export interface WikiInboxNotes {
   status: string
   slug: string

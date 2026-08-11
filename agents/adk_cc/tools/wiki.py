@@ -120,14 +120,27 @@ class WikiReadTool(AdkCcTool):
                     if doc.slug == slug:
                         inbox_page = doc.page
                         break
+            personal_page = None
+            if scope in ("auto", "personal"):
+                from ..wiki import PersonalWikiView
+
+                personal_page = PersonalWikiView(store, user_id).read_domain_page(slug)
             domain_page = store.read_domain_page(slug) if scope in ("auto", "domain") else None
             if scope == "inbox":
                 chosen, chosen_scope = inbox_page, "inbox"
             elif scope == "domain":
                 chosen, chosen_scope = domain_page, "domain"
-            else:  # auto: private note shadows shared wiki for this user
-                chosen = inbox_page if inbox_page is not None else domain_page
-                chosen_scope = "inbox" if inbox_page is not None else "domain"
+            elif scope == "personal":
+                chosen, chosen_scope = personal_page, "personal"
+            else:  # auto: raw note > consolidated personal page > shared wiki
+                for cand, cs in ((inbox_page, "inbox"),
+                                 (personal_page, "personal"),
+                                 (domain_page, "domain")):
+                    if cand is not None:
+                        chosen, chosen_scope = cand, cs
+                        break
+                else:
+                    chosen, chosen_scope = None, scope
             # When auto-reading the private note, note if the shared wiki also
             # has this topic so the model reconciles rather than assumes.
             also = chosen_scope == "inbox" and store.read_domain_page(slug) is not None

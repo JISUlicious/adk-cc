@@ -23,7 +23,7 @@ _CHARS_PER_TOKEN = 4
 class Hit:
     slug: str
     title: str
-    scope: str  # "domain" | "inbox"
+    scope: str  # "domain" | "inbox" | "personal"
     score: float
     snippet: str
     contested: bool = False
@@ -36,22 +36,30 @@ def search(
     user_id: Optional[str] = None,
     limit: int = 5,
 ) -> list[Hit]:
-    """Rank domain pages (and the caller's inbox, if `user_id` given) for a
-    query, delegating the scoring to the backend. Inbox hits are tagged
-    scope='inbox'. Sorted by score desc."""
+    """Rank domain pages (and, if `user_id` given, the caller's inbox AND
+    their personal wiki pages, #129-3) for a query, delegating the scoring
+    to the backend. Hits are tagged by scope. Sorted by score desc."""
     collections = [WikiStore.DOMAIN_COLLECTION]
+    personal_coll = None
     if user_id:
         collections.append(store.inbox_collection(user_id))
+        from .personal import personal_pages_collection
+
+        personal_coll = personal_pages_collection(user_id)
+        collections.append(personal_coll)
     out: list[Hit] = []
     for h in store.store.search(collections, query, limit=limit):
         domain = h.collection == WikiStore.DOMAIN_COLLECTION
-        slug = h.doc_id if domain else str(h.frontmatter.get("slug") or h.doc_id)
+        personal = personal_coll is not None and h.collection == personal_coll
+        slug = (h.doc_id if (domain or personal)
+                else str(h.frontmatter.get("slug") or h.doc_id))
         title = str(h.frontmatter.get("title") or slug)
         out.append(
             Hit(
                 slug=slug,
                 title=title,
-                scope="domain" if domain else "inbox",
+                scope=("domain" if domain
+                       else "personal" if personal else "inbox"),
                 score=h.score,
                 snippet=h.snippet,
                 contested=bool(h.frontmatter.get("contested")),

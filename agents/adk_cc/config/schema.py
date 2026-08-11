@@ -693,6 +693,12 @@ FIELDS: list[Var] = [
         default=None, default_display="llm"),
     Var("ADK_CC_MEMORY_AUTOCAPTURE", Tier.ADVANCED, "Memory & Wiki",
         "Capture memories after turns (0 = recall-only).", default=True, parse=as_bool),
+    Var("ADK_CC_PERSONAL_WIKI", Tier.ADVANCED, "Memory & Wiki",
+        "=1: the librarian cron also consolidates each user's notes into a "
+        "PERSONAL wiki (users/<uid>/wiki) with the same merge engine "
+        "(#129-3). Cost scales per user per run — consider a lower cadence. "
+        "Equivalent to scripts/wiki_librarian.py --personal.",
+        default=False, parse=as_bool),
     Var("ADK_CC_MEMORY_CANONICALIZE", Tier.ADVANCED, "Memory & Wiki",
         "=0 disables topic canonicalization (#129-4): consolidation folds "
         "near-duplicate topic slugs ('preferred-language' / "
