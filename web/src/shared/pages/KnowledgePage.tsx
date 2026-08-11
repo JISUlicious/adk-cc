@@ -54,7 +54,18 @@ export function KnowledgePage() {
     const load = tab === "wiki" ? fetchWikiGraph : fetchMemoryGraph
     load(user)
       .then((g) => setGraph(g))
-      .catch((e) => setError(String(e)))
+      .catch((e) => {
+        // A 404 means the SERVER has the knowledge view off (the page ships
+        // in both shells regardless) — explain instead of a broken graph.
+        const msg = String((e as Error).message ?? e)
+        setError(
+          /\b404\b/.test(msg)
+            ? "The knowledge view is not enabled on this server. Set " +
+              "ADK_CC_KNOWLEDGE_UI=1 (with ADK_CC_WIKI=1 and/or " +
+              "ADK_CC_MEMORY=1) and restart — see docs/07-wiki-memory.md."
+            : msg,
+        )
+      })
       .finally(() => setLoading(false))
   }, [tab, user])
 
