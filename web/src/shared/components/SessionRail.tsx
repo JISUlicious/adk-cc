@@ -223,7 +223,7 @@ export function SessionRail({
         {/* Knowledge graph entry (parity with the desktop rail): the page
             itself explains when the server has ADK_CC_KNOWLEDGE_UI off. */}
         <Link
-          to="/knowledge"
+          to={userId ? `/knowledge?user=${encodeURIComponent(userId)}` : "/knowledge"}
           className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-muted-foreground hover:bg-accent"
           title="Knowledge graph — wiki + your memory"
         >

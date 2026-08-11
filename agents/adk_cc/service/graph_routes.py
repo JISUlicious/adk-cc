@@ -27,16 +27,15 @@ def _principal(request) -> tuple[str, str]:
     Authenticated (web): from the principal — NEVER a query param, preserving the
     per-user isolation proven in the security e2e.
 
-    No-auth DESKTOP: single-user localhost, where `user_id` selects the *project*
-    (memory/inbox are per-project). There's no cross-user boundary to breach, so
-    the current project may be passed via `?user=`. Falls back to 'local'."""
+    No-auth (desktop OR dev web): there is no principal and no cross-user
+    boundary to breach — `?user=` selects the scope, exactly as the shells
+    pass it (desktop: the project id; no-auth web: the session's user id).
+    A hardcoded 'local' here made capture (session uid) and display
+    (principal) read DIFFERENT stores on no-auth web — wiki_add notes
+    existed but never rendered. Falls back to 'local'."""
     auth = getattr(request.state, "adk_cc_auth", None)
     if auth is None:
-        from .. import deployment
-
-        if deployment.is_desktop():
-            return "local", (request.query_params.get("user") or "local")
-        return "local", "local"
+        return "local", (request.query_params.get("user") or "local")
     try:
         user_id, tenant_id = auth[0], auth[1]
         return (tenant_id or "local"), (user_id or "local")
