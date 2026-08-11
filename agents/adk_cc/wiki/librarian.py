@@ -181,6 +181,7 @@ class MergeReport:
     claims_seen: int = 0
     skipped_no_promote: int = 0
     skipped_queued: int = 0
+    pii_withheld: int = 0
     actions: dict[str, int] = field(default_factory=dict)
     slugs_touched: list[str] = field(default_factory=list)
     quarantined: list[str] = field(default_factory=list)
@@ -229,6 +230,24 @@ class Librarian:
     async def run(self) -> MergeReport:
         report = MergeReport(tenant_id=self.store.tenant_id)
         clusters = await self._collect(report)
+        # Publish-time PII refusal (#126 P1): wiki_add filters the inbox
+        # door, but publish is where content crosses USERS — anything
+        # personal that slipped in stays a private inbox note, never a
+        # shared domain page.
+        from .pii import looks_personal
+
+        for slug in list(clusters):
+            kept = [(d, c) for (d, c) in clusters[slug]
+                    if not looks_personal(slug, getattr(c, "text", "") or "")]
+            dropped = len(clusters[slug]) - len(kept)
+            if dropped:
+                _log.info("librarian: %d personal claim(s) on %r withheld "
+                          "from publish", dropped, slug)
+                report.pii_withheld += dropped
+            if kept:
+                clusters[slug] = kept
+            else:
+                del clusters[slug]
         for slug, claims in sorted(clusters.items()):
             try:
                 await self._merge_slug(slug, claims, report)

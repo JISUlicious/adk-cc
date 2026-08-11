@@ -71,6 +71,8 @@ class Discrepancy:
     inbox_excerpt: str
 
 
+# NOTE: currently unused in production (explicit-only wiki);
+# kept for tests + a future recall surface.
 def find_discrepancies(store: WikiStore, user_id: str) -> list[Discrepancy]:
     """Inbox docs whose slug also exists in domain. Read-time conflict
     surfacing: 'your notes differ from the shared wiki on X'. Cheap text
@@ -94,6 +96,8 @@ def find_discrepancies(store: WikiStore, user_id: str) -> list[Discrepancy]:
     return out
 
 
+# NOTE: currently unused in production (explicit-only wiki);
+# kept for tests + a future recall surface.
 def recall_context(
     store: WikiStore,
     query: str,

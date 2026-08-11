@@ -18,7 +18,7 @@ OFF by default. Enable by setting a positive interval:
     ADK_CC_MEMORY=1                             # memory subsystem on (required)
     ADK_CC_MEMORY_CONSOLIDATE_INTERVAL_S=3600   # run every hour (enables this)
 
-Deterministic latest-wins synthesis only — NO model calls. This loop runs
+LLM synthesis by default (ADK_CC_MEMORY_SYNTH=deterministic for model-free). This loop runs
 unattended against the shared, rate-limited model endpoint, so model-backed
 synthesis stays in the cron (`memory_consolidator.py --model`), never here.
 

@@ -1,4 +1,4 @@
-"""PROTOTYPE: topic canonicalization for memory consolidation.
+""": topic canonicalization for memory consolidation.
 
 Problem (see the long-run investigation): consolidate_user clusters episodics by
 EXACT topic slug, and the capture LLM emits a fresh slug for the same fact every

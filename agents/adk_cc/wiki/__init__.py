@@ -20,7 +20,7 @@ Layers:
   - `librarian` — the offline merge/lint agent + pipeline.
 
 Surfaced as: `wiki_search`/`wiki_read`/`wiki_add` tools (user-scope writes
-only), a recall plugin, and a cron-run librarian. Gated by `ADK_CC_WIKI=1`.
+only), explicit tools only — no recall plugin exists;
 """
 
 from __future__ import annotations

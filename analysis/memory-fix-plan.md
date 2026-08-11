@@ -1,6 +1,6 @@
 # Memory System — Fix Plan
 
-Status: in progress. Cost (model rate limit) is **not** a constraint for this
+Status: Fixes A-D,F,G shipped; only Fix E (embedding recall) remains. Cost (model rate limit) is **not** a constraint for this
 plan — the LLM is the default resolver/synthesizer wherever it improves quality.
 Correctness guardrails (merge verification) and reliability fallbacks
 (deterministic on failure) stay, because those are about correctness/uptime, not

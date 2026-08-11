@@ -1,6 +1,6 @@
 # Plan: Knowledge graph visualizer (wiki + memory)
 
-Status: planned (not started). Decision: **any authenticated user** sees the
+Status: Task 1 (graph view) SHIPPED (35c4ac7); remainder unscheduled. Decision: **any authenticated user** sees the
 shared wiki graph + their **own** memory graph (per-user isolation enforced);
 memory graph is rich (episodic→semantic + supersession leaves).
 

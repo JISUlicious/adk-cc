@@ -32,15 +32,9 @@ _TENANT_KEY = "temp:tenant_context"
 
 # The shared wiki is for durable DOMAIN knowledge, not personal user facts
 # (name/role/preferences/identity) — those belong in the per-user memory system.
-# Conservative, high-precision signals so genuine domain docs aren't blocked.
-# A topic slug naming a person/profile:
-_PERSONAL_TOPIC_RE = re.compile(
-    r"^(user(-|$)|about-me|my-|profile$|bio$|user-profile)", re.IGNORECASE)
-# First-person identity / preference / memory-directive phrasing:
-_PERSONAL_TEXT_RE = re.compile(
-    r"\b(my name is|remember (about )?me|i am (a|an|the)\b.*\b(engineer|developer|"
-    r"manager|designer|lead|architect|scientist)|i (prefer|like|use|work)\b|"
-    r"the user'?s? (name|role|identity|preference|profile))", re.IGNORECASE)
+# Shared with the librarian (publish-time enforcement) — see wiki/pii.py.
+from ..wiki.pii import PERSONAL_TEXT_RE as _PERSONAL_TEXT_RE
+from ..wiki.pii import PERSONAL_TOPIC_RE as _PERSONAL_TOPIC_RE
 
 
 def _personal_info_reason(text: str, topic: Optional[str], title: Optional[str]) -> Optional[str]:
