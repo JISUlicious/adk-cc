@@ -1,6 +1,7 @@
 import { BRAND } from "@/shared/brand"
 import { useEffect, useState } from "react"
-import { Plus, X, Settings as SettingsIcon } from "lucide-react"
+import { Network, Plus, X, Settings as SettingsIcon } from "lucide-react"
+import { Link } from "react-router-dom"
 import {
   createSession,
   deleteSession,
@@ -219,6 +220,16 @@ export function SessionRail({
       </div>
       {/* Account footer — user + settings, pinned to the bottom (claude.ai-style). */}
       <div className="border-t border-border/60 p-2">
+        {/* Knowledge graph entry (parity with the desktop rail): the page
+            itself explains when the server has ADK_CC_KNOWLEDGE_UI off. */}
+        <Link
+          to="/knowledge"
+          className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-muted-foreground hover:bg-accent"
+          title="Knowledge graph — wiki + your memory"
+        >
+          <Network className="h-4 w-4" />
+          Knowledge
+        </Link>
         <button
           type="button"
           onClick={onOpenSettings}
