@@ -188,6 +188,35 @@ def mount_turn_routes(app: Any, broker: Any) -> None:
 
         return json.dumps({"status": turn.status, "error": turn.error})
 
+    @app.post("/api/compact", include_in_schema=False)
+    async def manual_compact_route(request: Request):
+        """#128 guided /compact: user-initiated compaction of a quiescent
+        session, with an optional emphasis guide. 409 while a turn runs —
+        compaction appends a session event and must not race the runner."""
+        body = await request.json()
+        app_name, user_id, session_id = _ids(body)
+        auth = getattr(request.state, "adk_cc_auth", None)
+        if (auth is not None and getattr(auth, "user_id", None)
+                and user_id != auth.user_id):
+            raise HTTPException(
+                status_code=403,
+                detail="userId does not match the authenticated principal")
+        session = await broker.session_service.get_session(
+            app_name=app_name, user_id=user_id, session_id=session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        cur = broker.latest_for(app_name, user_id, session_id)
+        if cur is not None and cur.status == "running":
+            raise HTTPException(
+                status_code=409,
+                detail=f"session busy: turn {cur.id} is running — "
+                       "compact after it finishes")
+        from ..plugins.precompact import manual_compact
+
+        guide = str(body.get("guide") or "").strip()[:2000]
+        return await manual_compact(session, broker.session_service,
+                                    guide or None)
+
     @app.post("/api/turns/retry-last", include_in_schema=False)
     async def retry_last(request: Request):
         body = await request.json()

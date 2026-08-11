@@ -1,5 +1,6 @@
 import { useMemo } from "react"
 import {
+  Archive,
   Boxes,
   ClipboardList,
   Cpu,
@@ -29,6 +30,7 @@ import { IS_DESKTOP } from "@/shared/lib/platform"
 export type SlashAction =
   | "help"
   | "clear"
+  | "compact"
   | "notes"
   | "mode-default"
   | "mode-acceptEdits"
@@ -54,6 +56,10 @@ export interface SlashCommand {
   kind: { type: "action"; action: SlashAction } | { type: "message"; text: string }
   /** Desktop-shell-only command (hidden in the web shell). */
   desktopOnly?: boolean
+  /** The command accepts free text after its name ("/compact keep #127").
+   * filterSlash keeps matching once the name is complete, and the picker
+   * hands the remainder to the action handler. */
+  takesArgs?: boolean
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
@@ -81,6 +87,15 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "See the skills the agent can use, and turn them on or off",
     icon: Boxes,
     kind: { type: "action", action: "skills" },
+  },
+  {
+    name: "compact",
+    icon: Archive,
+    description:
+      "Summarize this session's history now — add a guide after the command " +
+      "to steer it (e.g. /compact keep #127, drop finished tasks)",
+    kind: { type: "action", action: "compact" },
+    takesArgs: true,
   },
   {
     name: "notes",
@@ -212,5 +227,10 @@ export function filterSlash(query: string): SlashCommand[] {
   const q = query.trim().toLowerCase()
   const avail = SLASH_COMMANDS.filter((c) => !c.desktopOnly || IS_DESKTOP)
   if (!q) return avail
-  return avail.filter((c) => c.name.toLowerCase().startsWith(q))
+  return avail.filter(
+    (c) =>
+      c.name.toLowerCase().startsWith(q) ||
+      // args-taking commands stay matched while the user types the guide
+      (c.takesArgs && q.startsWith(c.name.toLowerCase() + " ")),
+  )
 }

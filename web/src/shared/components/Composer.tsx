@@ -59,7 +59,7 @@ export function Composer({
 }: {
   onSend: (text: string) => void
   onAbort: () => void
-  onSlashAction: (action: SlashAction) => void
+  onSlashAction: (action: SlashAction, args?: string) => void
   isStreaming: boolean
   disabled: boolean
   mode: string | undefined
@@ -177,10 +177,15 @@ export function Composer({
 
   function pickSlash(cmd: SlashCommand) {
     if (cmd.kind.type === "action") {
+      // Args-taking commands ("/compact keep #127") hand the remainder
+      // after the name to the handler.
+      const rest = cmd.takesArgs
+        ? value.slice(1 + cmd.name.length).trim()
+        : undefined
       // Clear input and dispatch — no message hits the wire.
       setValue("")
       setSlashCursor(0)
-      onSlashAction(cmd.kind.action)
+      onSlashAction(cmd.kind.action, rest || undefined)
       ref.current?.focus()
     } else {
       // Send the templated text now. Don't leave it sitting in the

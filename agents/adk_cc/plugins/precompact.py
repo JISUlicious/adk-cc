@@ -190,13 +190,18 @@ def _threshold() -> Optional[int]:
 async def _summarize_and_append(
     session: Any, svc: Any, head: list[Any], *,
     force: bool, label: str, audit_name: str, before_tokens: int,
-) -> bool:
+    summarizer: Any = None,
+) -> Optional[str]:
     """Shared core: digest → summarize (mechanical fallback under force) →
-    append the compaction event. Returns True when an event was appended."""
-    # Lazy import: agent.py imports this module at load time.
-    from ..agent import _make_compaction_summarizer
+    append the compaction event. Returns "summarized" / "mechanical" when
+    an event was appended (truthy), None otherwise. `summarizer` overrides
+    the default stack (the guided /compact path passes one carrying the
+    user's emphasis)."""
+    if summarizer is None:
+        # Lazy import: agent.py imports this module at load time.
+        from ..agent import _make_compaction_summarizer
 
-    summarizer = _make_compaction_summarizer()
+        summarizer = _make_compaction_summarizer()
     digested, digest_saved = await _digest_head_for_summary(head)
     if digest_saved:
         _log.info(
@@ -213,17 +218,19 @@ async def _summarize_and_append(
         _log.warning("%s: summarizer raised (%s: %s)",
                      label, type(e).__name__, str(e)[:150])
         compaction_event = None
+    mode = "summarized"
     if compaction_event is None:
         if not force:
             # Summarizer declined (churn floor, breaker, failure) —
             # the per-call layers still protect this turn.
-            return False
+            return None
         compaction_event = _mechanical_compaction_event(head)
+        mode = "mechanical"
         _log.warning(
             "%s FORCE: summarizer unavailable — appended a "
             "MECHANICAL digest of %d event(s)", label, len(head))
     if svc is None:
-        return False
+        return None
     await svc.append_event(session, compaction_event)
     after = estimate_events_tokens(list(getattr(session, "events", None) or []))
     _log.info("%s: appended compaction event — session now "
@@ -238,7 +245,30 @@ async def _summarize_and_append(
         })
     except Exception:  # noqa: BLE001
         pass
-    return True
+    return mode
+
+
+def _clamp_head_pending(events: list[Any], head_len: int) -> int:
+    """#119 for the DIRECT-summarizer paths (mid-turn, /compact): never
+    fold an event carrying a PENDING function call — a call parked behind
+    a confirmation looks answered (interim needs_confirmation response),
+    and folding it orphans the post-approval result. Returns the largest
+    head length <= head_len whose events carry no pending call. Pending is
+    computed name-aware over the WHOLE list (answers can sit past the
+    head)."""
+    try:
+        from ..context.compaction_pin import _pending_ids_name_aware
+
+        pending = _pending_ids_name_aware(list(events))
+        if not pending:
+            return head_len
+        for i, ev in enumerate(events[:head_len]):
+            calls = ev.get_function_calls()
+            if any(getattr(fc, "id", None) in pending for fc in calls):
+                return i
+    except Exception:  # noqa: BLE001 — stub events in tests, odd shapes
+        return head_len
+    return head_len
 
 
 # Mid-turn (#128 P2) keeps a shorter prior tail than before_run: the
@@ -279,9 +309,10 @@ async def midturn_compact_prior(callback_context: Any) -> bool:
                 cut = i
                 break
         prior = events[:cut]
-        if len(prior) - _MIDTURN_KEEP_TAIL < _MIDTURN_MIN_HEAD:
+        head_len = _clamp_head_pending(events, len(prior) - _MIDTURN_KEEP_TAIL)
+        if head_len < _MIDTURN_MIN_HEAD:
             return False
-        head = prior[:-_MIDTURN_KEEP_TAIL]
+        head = prior[:head_len]
         measured = estimate_events_tokens(events)
         _log.info(
             "midturn-compact: session %s ~%d tokens — summarizing %d "
@@ -293,6 +324,40 @@ async def midturn_compact_prior(callback_context: Any) -> bool:
     except Exception as e:  # noqa: BLE001 — never break a turn on prevention
         _log.warning("midturn-compact skipped (%s: %s)", type(e).__name__, e)
         return False
+
+
+# Manual /compact keeps the same tail as threshold-mode precompact — the
+# user is tidying, not escaping an emergency; recent context stays whole.
+_MANUAL_MIN_HEAD = 2
+
+
+async def manual_compact(session: Any, svc: Any,
+                         guide: Optional[str] = None) -> dict:
+    """#128 guided /compact: user-initiated compaction of a QUIESCENT
+    session (the route 409s while a turn runs). `guide` biases the summary
+    ("keep #127 details, drop 125/126") — emphasis, never deletion of
+    protected material; the pending-call clamp applies as everywhere.
+    Force mode: the user asked explicitly, so the churn floor is skipped
+    and a dead summarizer degrades to the mechanical digest."""
+    events = list(getattr(session, "events", None) or [])
+    head_len = _clamp_head_pending(events, len(events) - _KEEP_TAIL)
+    if head_len < _MANUAL_MIN_HEAD:
+        return {"status": "nothing_to_compact", "events": len(events)}
+    head = events[:head_len]
+    measured = estimate_events_tokens(events)
+    from ..agent import _make_compaction_summarizer
+
+    summarizer = _make_compaction_summarizer(guide=(guide or None))
+    mode = await _summarize_and_append(
+        session, svc, head, force=True, label="manual-compact",
+        audit_name="context_manual_compact", before_tokens=measured,
+        summarizer=summarizer)
+    if not mode:
+        return {"status": "failed", "events": len(events)}
+    after = estimate_events_tokens(list(getattr(session, "events", None) or []))
+    return {"status": mode, "before_tokens": measured,
+            "after_tokens": after, "compacted_events": head_len,
+            "guided": bool(guide)}
 
 
 class PrecompactPlugin(BasePlugin):
@@ -326,9 +391,10 @@ class PrecompactPlugin(BasePlugin):
                 return None
 
             keep_tail = 2 if force else _KEEP_TAIL
-            if len(events) <= keep_tail:
+            head_len = _clamp_head_pending(events, len(events) - keep_tail)
+            if head_len < 1:
                 return None
-            head = events[:-keep_tail]
+            head = events[:head_len]
             _log.info(
                 "precompact%s: session %s measures ~%d tokens (threshold %s, "
                 "force_line %s) — summarizing %d event(s) before the turn",

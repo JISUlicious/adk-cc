@@ -35,6 +35,7 @@ import { RewindDialog } from "@/shared/components/RewindDialog"
 import {
   TurnFailedError,
   latestTurn,
+  manualCompact,
   retryLastTurn,
   streamExistingTurn,
   type CancelStream,
@@ -488,14 +489,47 @@ export function ChatPage({
     setIsStreaming(false)
   }
 
-  function handleSlashAction(action: SlashAction) {
+  function handleSlashAction(action: SlashAction, args?: string) {
     switch (action) {
+      case "compact":
+        // #128 guided compaction: summarize the session's history NOW,
+        // optionally steered by the text after the command. Server-side;
+        // 409s while a turn is running.
+        if (!appName || !session) return
+        void (async () => {
+          try {
+            const r = await manualCompact(appName, userId, session.id, args)
+            if (r.status === "nothing_to_compact") {
+              showNotice("Nothing to compact yet — the session is still small.")
+            } else if (r.status === "failed") {
+              setError("Compaction failed — see server logs.")
+            } else {
+              const drop =
+                r.before_tokens && r.after_tokens
+                  ? ` (~${Math.round(r.before_tokens / 1000)}k → ~${Math.round(r.after_tokens / 1000)}k tokens)`
+                  : ""
+              showNotice(
+                `✓ Compacted ${r.compacted_events ?? 0} events${drop}` +
+                  (r.status === "mechanical"
+                    ? " — summarizer unavailable, mechanical digest used"
+                    : "") +
+                  (r.guided ? " — guide applied" : ""),
+              )
+              setRefreshTick((t) => t + 1)
+            }
+          } catch (e) {
+            setError(`Compaction failed: ${(e as Error).message}`)
+          }
+        })()
+        return
       case "help":
         // No backend protocol — we just send a plain user message
         // listing available shortcuts. Cheap, no schema.
         if (appName && session) {
           handleSend(
             "Available slash commands: /help, /clear (new session), " +
+              "/compact [guide] (summarize this session's history now — " +
+              "optionally steer it: /compact keep #127, drop finished tasks), " +
               "/plan, /exit-plan, /theme, /settings, /signout, " +
               "/wiki (open the knowledge graph — wiki pages + memory)" +
               (IS_DESKTOP ? ", /model (pin a model for this session; default set in Settings), /rewind (rewind to a checkpoint — roll back files + conversation), /add-dir (grant a working directory outside the project)" : "") +

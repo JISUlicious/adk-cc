@@ -1183,8 +1183,13 @@ def _summary_bytes(event) -> int:
         return 0
 
 
-def _make_compaction_summarizer():
+def _make_compaction_summarizer(guide: "Optional[str]" = None):
     """Build a summarizer instance for `EventsCompactionConfig`.
+
+    `guide` (#128 /compact): a user-supplied emphasis for a MANUAL
+    compaction ("keep events related to #127, drop 125/126"). It biases
+    what the summary keeps and how much detail it gives — it never
+    licenses dropping unfinished work or pending confirmations.
 
     Always returns the lazy wrapper so audit + DEBUG hooks fire on
     every compaction call. Model id resolution:
@@ -1224,12 +1229,23 @@ def _make_compaction_summarizer():
         timeout_seconds = 30.0
     if timeout_seconds < 0:
         timeout_seconds = 0.0
+    prompt = _resolve_compaction_prompt()
+    if guide:
+        prompt = (
+            prompt.rstrip()
+            + "\n\n## User guidance for THIS compaction\n"
+            "The user manually requested this compaction with the emphasis "
+            "below. Bias what you keep and the level of detail accordingly — "
+            "expand what it asks to keep, compress hard what it asks to drop "
+            "— but NEVER omit unfinished work, pending confirmations or "
+            "questions, or safety-relevant state:\n" + guide[:2000]
+        )
     cls = _make_lazy_summarizer_class()
     return cls(
         model_id=model_id,
         api_base=api_base,
         api_key=api_key,
-        prompt_template=_resolve_compaction_prompt(),
+        prompt_template=prompt,
         timeout_seconds=timeout_seconds,
     )
 

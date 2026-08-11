@@ -84,6 +84,26 @@ export async function retryLastTurn(
   })
 }
 
+export interface CompactResult {
+  status: "summarized" | "mechanical" | "nothing_to_compact" | "failed"
+  before_tokens?: number
+  after_tokens?: number
+  compacted_events?: number
+  guided?: boolean
+}
+
+/** #128 guided /compact — manual compaction of a quiescent session. The
+ * optional guide biases what the summary keeps ("keep #127, drop 125").
+ * Server 409s while a turn is running. */
+export async function manualCompact(
+  appName: string, userId: string, sessionId: string, guide?: string,
+): Promise<CompactResult> {
+  return apiFetch<CompactResult>(`/api/compact`, {
+    method: "POST",
+    body: JSON.stringify({ appName, userId, sessionId, guide: guide ?? "" }),
+  })
+}
+
 async function _startTurn(
   args: { appName: string; userId: string; sessionId: string },
   newMessage: unknown,
