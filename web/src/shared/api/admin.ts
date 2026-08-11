@@ -130,3 +130,66 @@ export async function activateModelEndpoint(name: string): Promise<void> {
     method: "POST",
   })
 }
+
+// --- Wiki document management (#129) --------------------------------------
+// Admin/owner curation of the shared domain wiki: edit/delete pages and
+// adjudicate the librarian's review queue. Server-side: a PUT stamps the
+// page human_edited, and the librarian holds any would-be supersession of
+// such a page until a human accepts it here.
+
+export interface WikiAdminPage {
+  slug: string
+  title: string
+  contested: boolean
+  human_edited: string | null
+}
+
+export interface WikiReviewItem {
+  claim_hash: string
+  status: string
+  slug?: string
+  user_id?: string
+  claim?: string
+  classification?: string
+  reason?: string
+}
+
+export async function listWikiPages(): Promise<WikiAdminPage[]> {
+  const r = await apiFetch<{ pages: WikiAdminPage[] }>(`${T()}/wiki-pages`)
+  return r.pages
+}
+
+export async function putWikiPage(
+  slug: string,
+  body: string,
+  frontmatter?: Record<string, unknown>,
+): Promise<void> {
+  await apiFetch(`${T()}/wiki-pages/${encodeURIComponent(slug)}`, {
+    method: "PUT",
+    body: JSON.stringify({ body, frontmatter }),
+  })
+}
+
+export async function deleteWikiPage(slug: string): Promise<void> {
+  await apiFetch(`${T()}/wiki-pages/${encodeURIComponent(slug)}`, {
+    method: "DELETE",
+  })
+}
+
+export async function listWikiReview(): Promise<{
+  queue: WikiReviewItem[]
+  contested_pages: string[]
+}> {
+  return apiFetch(`${T()}/wiki-review`)
+}
+
+export async function adjudicateWikiClaim(
+  claimHash: string,
+  action: "accept" | "reject",
+  note = "",
+): Promise<void> {
+  await apiFetch(`${T()}/wiki-review/${encodeURIComponent(claimHash)}`, {
+    method: "POST",
+    body: JSON.stringify({ action, note }),
+  })
+}
