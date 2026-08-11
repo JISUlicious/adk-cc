@@ -186,6 +186,7 @@ class ContextGuardPlugin(BasePlugin):
         self._cal: dict = {}
         self._last_estimate: dict = {}
         self._pressure: Optional[int] = None
+        self._midturn_attempted: set = set()
 
         if self._max is None:
             self._warn = None
@@ -346,6 +347,24 @@ class ContextGuardPlugin(BasePlugin):
                     "context pressure: %d tokens >= %d — rewrote %d result(s), "
                     "~%d freed, now ~%d", entry_tokens, self._pressure,
                     rewritten, freed, tokens)
+            if tokens >= self._pressure:
+                # Request-layer rewriting couldn't reach the line — the
+                # weight sits in event history it can't touch. Durably
+                # compact PRIOR-invocation events so every subsequent call
+                # of this turn rebuilds smaller (#128 P2). Once per
+                # invocation, success or not: the second attempt would see
+                # the same history.
+                inv = getattr(callback_context, "invocation_id", None) or ""
+                if inv and inv not in self._midturn_attempted:
+                    self._midturn_attempted.add(inv)
+                    if len(self._midturn_attempted) > 512:
+                        self._midturn_attempted.pop()
+                    from .precompact import midturn_compact_prior
+
+                    if await midturn_compact_prior(callback_context):
+                        _log.info(
+                            "context pressure: compacted prior-invocation "
+                            "history mid-turn (session %s)", sid_for_cal)
 
         # Diagnostic-only: when DEBUG is on, also compute the
         # litellm-based count so operators investigating an

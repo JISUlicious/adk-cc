@@ -297,6 +297,12 @@ FIELDS: list[Var] = [
         "request AGGRESSIVELY before the reject line (85 default; 0 "
         "disables). #128: WARN only logged and REJECT killed the call — a "
         "mid-turn 128K->219K growth sailed between them.", default="85"),
+    Var("ADK_CC_MIDTURN_COMPACT", Tier.ADVANCED, "Context",
+        "=0 disables mid-turn compaction of PRIOR-invocation session events "
+        "(#128 P2): when the guard's pressure line stays hot after request "
+        "rewriting, prior turns are durably summarized so later calls of "
+        "the same turn rebuild smaller. Current-invocation events are "
+        "never touched.", default="1"),
     Var("ADK_CC_SESSION_NOTES_AUTOCAPTURE", Tier.ADVANCED, "Memory & Wiki",
         "=1 (web only): the memory capture pass routes session-scoped facts "
         "into session notes instead of dropping them. Default off — "

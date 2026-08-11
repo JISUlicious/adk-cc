@@ -187,6 +187,114 @@ def _threshold() -> Optional[int]:
         return None
 
 
+async def _summarize_and_append(
+    session: Any, svc: Any, head: list[Any], *,
+    force: bool, label: str, audit_name: str, before_tokens: int,
+) -> bool:
+    """Shared core: digest → summarize (mechanical fallback under force) →
+    append the compaction event. Returns True when an event was appended."""
+    # Lazy import: agent.py imports this module at load time.
+    from ..agent import _make_compaction_summarizer
+
+    summarizer = _make_compaction_summarizer()
+    digested, digest_saved = await _digest_head_for_summary(head)
+    if digest_saved:
+        _log.info(
+            "%s: digested head for summarization (~%d chars of tool "
+            "material swapped for cached summaries/heads)", label, digest_saved)
+    try:
+        # force=True skips the churn floor: both callers reach here in a
+        # state where NOT compacting has a known bad ending (reject loop /
+        # mid-turn overflow); the floor guards against pointless
+        # re-compaction, not against these.
+        compaction_event = await summarizer.maybe_summarize_events(
+            events=digested, force=force)
+    except Exception as e:  # noqa: BLE001
+        _log.warning("%s: summarizer raised (%s: %s)",
+                     label, type(e).__name__, str(e)[:150])
+        compaction_event = None
+    if compaction_event is None:
+        if not force:
+            # Summarizer declined (churn floor, breaker, failure) —
+            # the per-call layers still protect this turn.
+            return False
+        compaction_event = _mechanical_compaction_event(head)
+        _log.warning(
+            "%s FORCE: summarizer unavailable — appended a "
+            "MECHANICAL digest of %d event(s)", label, len(head))
+    if svc is None:
+        return False
+    await svc.append_event(session, compaction_event)
+    after = estimate_events_tokens(list(getattr(session, "events", None) or []))
+    _log.info("%s: appended compaction event — session now "
+              "measures ~%d tokens", label, after)
+    try:
+        from .audit import emit_audit_event
+        emit_audit_event({
+            "event": audit_name,
+            "session_id": getattr(session, "id", "?"),
+            "before_tokens": before_tokens, "after_tokens": after,
+            "compacted_events": len(head),
+        })
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
+# Mid-turn (#128 P2) keeps a shorter prior tail than before_run: the
+# request-layer rewriter already preserves recent tool results, and the
+# turn's working set lives in CURRENT-invocation events, which are never
+# candidates at all.
+_MIDTURN_KEEP_TAIL = 2
+_MIDTURN_MIN_HEAD = 4
+
+
+async def midturn_compact_prior(callback_context: Any) -> bool:
+    """#128 P2: durably compact PRIOR-invocation events in the MIDDLE of a
+    turn, called by the context guard when its pressure line stays hot
+    after request-layer rewriting (the weight sits in event history the
+    rewriter can't touch).
+
+    Current-invocation events are never included — the active flow
+    (pending tool pairs, a call parked behind a confirmation) lives there;
+    prior invocations are quiescent history. The appended compaction event
+    makes every SUBSEQUENT model call of this turn rebuild smaller.
+    Returns True when a compaction event was appended.
+    """
+    if not (_enabled() and env_bool("ADK_CC_MIDTURN_COMPACT", default=True)):
+        return False
+    try:
+        ictx = getattr(callback_context, "_invocation_context", None)
+        session = (getattr(callback_context, "session", None)
+                   or getattr(ictx, "session", None))
+        svc = getattr(ictx, "session_service", None)
+        current = (getattr(callback_context, "invocation_id", None)
+                   or getattr(ictx, "invocation_id", None))
+        if session is None or svc is None or not current:
+            return False
+        events = list(getattr(session, "events", None) or [])
+        cut = len(events)
+        for i, ev in enumerate(events):
+            if getattr(ev, "invocation_id", None) == current:
+                cut = i
+                break
+        prior = events[:cut]
+        if len(prior) - _MIDTURN_KEEP_TAIL < _MIDTURN_MIN_HEAD:
+            return False
+        head = prior[:-_MIDTURN_KEEP_TAIL]
+        measured = estimate_events_tokens(events)
+        _log.info(
+            "midturn-compact: session %s ~%d tokens — summarizing %d "
+            "prior-invocation event(s) mid-turn",
+            getattr(session, "id", "?"), measured, len(head))
+        return await _summarize_and_append(
+            session, svc, head, force=True, label="midturn-compact",
+            audit_name="context_midturn_compact", before_tokens=measured)
+    except Exception as e:  # noqa: BLE001 — never break a turn on prevention
+        _log.warning("midturn-compact skipped (%s: %s)", type(e).__name__, e)
+        return False
+
+
 class PrecompactPlugin(BasePlugin):
     """Measured pre-turn compaction for oversized inherited history."""
 
@@ -227,53 +335,10 @@ class PrecompactPlugin(BasePlugin):
                 " FORCE" if force else "", getattr(session, "id", "?"),
                 measured, threshold, force_line, len(head),
             )
-            # Lazy import: agent.py imports this module at load time.
-            from ..agent import _make_compaction_summarizer
-
-            summarizer = _make_compaction_summarizer()
-            digested, digest_saved = await _digest_head_for_summary(head)
-            if digest_saved:
-                _log.info(
-                    "precompact: digested head for summarization (~%d chars "
-                    "of tool material swapped for cached summaries/heads)",
-                    digest_saved)
-            try:
-                # force=True in FORCE mode: the churn floor guards against
-                # pointless re-compaction, not against a first compaction of
-                # deliberately-small digested input (measured live: it pushed
-                # a recoverable session onto the lossier mechanical path).
-                compaction_event = await summarizer.maybe_summarize_events(
-                    events=digested, force=force)
-            except Exception as e:  # noqa: BLE001
-                _log.warning("precompact: summarizer raised (%s: %s)",
-                             type(e).__name__, str(e)[:150])
-                compaction_event = None
-            if compaction_event is None:
-                if not force:
-                    # Summarizer declined (churn floor, breaker, failure) —
-                    # the per-call layers still protect this turn.
-                    return None
-                compaction_event = _mechanical_compaction_event(head)
-                _log.warning(
-                    "precompact FORCE: summarizer unavailable — appended a "
-                    "MECHANICAL digest of %d event(s)", len(head))
-            svc = getattr(invocation_context, "session_service", None)
-            if svc is None:
-                return None
-            await svc.append_event(session, compaction_event)
-            after = estimate_events_tokens(list(getattr(session, "events", None) or []))
-            _log.info("precompact: appended compaction event — session now "
-                      "measures ~%d tokens", after)
-            try:
-                from .audit import emit_audit_event
-                emit_audit_event({
-                    "event": "context_precompact",
-                    "session_id": getattr(session, "id", "?"),
-                    "before_tokens": measured, "after_tokens": after,
-                    "compacted_events": len(head),
-                })
-            except Exception:  # noqa: BLE001
-                pass
+            await _summarize_and_append(
+                session, getattr(invocation_context, "session_service", None),
+                head, force=force, label="precompact",
+                audit_name="context_precompact", before_tokens=measured)
         except Exception as e:  # noqa: BLE001 — never block a turn on prevention
             _log.warning("precompact skipped (%s: %s)", type(e).__name__, e)
         return None
