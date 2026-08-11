@@ -183,6 +183,8 @@ def mount_knowledge_routes(app) -> None:
         links: list[dict[str, Any]] = []
         sem_topics = set()
         for item in mem.list_semantic(user_id):
+            if item.status == "archived":
+                continue  # reversibly swept — not part of the live picture
             sem_topics.add(item.topic)
             nodes.append({
                 "id": f"sem:{item.id}",
@@ -193,6 +195,8 @@ def mount_knowledge_routes(app) -> None:
                 "topic": item.topic,
             })
         for item in mem.list_episodic(user_id):
+            if item.status == "archived":
+                continue
             nid = f"epi:{item.id}"
             nodes.append({
                 "id": nid,

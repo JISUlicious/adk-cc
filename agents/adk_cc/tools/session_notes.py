@@ -38,8 +38,9 @@ class UpdateSessionNotesArgs(BaseModel):
         default="append",
         description="append adds a new entry below existing notes; "
                     "replace rewrites them entirely; promote writes the "
-                    "content into the USER'S long-term memory instead "
-                    "(for facts that should outlive this session).")
+                    "content into the USER'S long-term memory AND keeps it "
+                    "in this session's notes (for facts that should "
+                    "outlive this session).")
 
 
 class UpdateSessionNotesTool(AdkCcTool):
@@ -63,7 +64,14 @@ class UpdateSessionNotesTool(AdkCcTool):
         self, args: UpdateSessionNotesArgs, ctx: ToolContext
     ) -> Optional[dict[str, Any]]:
         if args.mode == "promote":
-            return self._promote(args, ctx)
+            # Promote COPIES up, it does not move: the fact goes to user
+            # memory AND stays in this session's notes. (Observed live: a
+            # promote-only write left /notes empty right after the model
+            # said it had recorded a note — confusing for the user.)
+            result = self._promote(args, ctx)
+            if result.get("status") == "ok":
+                self._append_note(args.content, ctx)
+            return result
         try:
             existing = str(ctx.state.get(STATE_KEY) or "")
         except Exception:  # noqa: BLE001
@@ -106,6 +114,22 @@ class UpdateSessionNotesTool(AdkCcTool):
             item = MemoryStore.for_tenant(tenant).add_episodic(
                 user, args.content.strip(), sources=["session-notes-promote"])
             return {"status": "ok", "promoted": True,
-                    "memory_id": getattr(item, "doc_id", None)}
+                    "memory_id": getattr(item, "id", None)}
         except Exception as e:  # noqa: BLE001
             return {"status": "error", "error": f"promote failed: {e}"}
+
+    def _append_note(self, content: str, ctx: ToolContext) -> None:
+        """Best-effort append into session notes (shared by promote)."""
+        try:
+            existing = str(ctx.state.get(STATE_KEY) or "")
+            merged = (existing.rstrip() + "\n\n" + content.strip()
+                      if existing else content.strip())
+            cap = notes_budget_chars()
+            if len(merged) > cap:
+                merged = merged[-cap:]
+                nl = merged.find("\n")
+                if 0 <= nl < 200:
+                    merged = merged[nl + 1:]
+            ctx.state[STATE_KEY] = merged
+        except Exception:  # noqa: BLE001 — the promote itself succeeded
+            pass

@@ -164,9 +164,17 @@ def promote_and_routing_units() -> None:
     root = tempfile.mkdtemp(prefix="notes-promote-")
     os.environ.update({"ADK_CC_MEMORY": "1", "ADK_CC_MEMORY_ROOT": root})
     try:
+        ctx3 = Ctx()
         r = asyncio.run(t._execute(UpdateSessionNotesArgs(
-            content="uses pandas 2.x", mode="promote"), Ctx()))
+            content="uses pandas 2.x", mode="promote"), ctx3))
         check("promote writes episodic memory", r.get("promoted") is True, r)
+        check("promote returns the memory id (was null — id, not doc_id)",
+              bool(r.get("memory_id")), r)
+        from adk_cc.tools.session_notes import STATE_KEY as _SK
+        check("promote ALSO keeps the note in session notes "
+              "(observed live: promote-only left /notes empty)",
+              "uses pandas 2.x" in str(ctx3.state.get(_SK, "")),
+              ctx3.state.get(_SK))
         import glob
         hits = glob.glob(os.path.join(root, "local", "users", "kim",
                                       "episodic", "*.md"))
