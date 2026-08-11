@@ -35,6 +35,8 @@ from .store import (
 
 # (existing_semantic_text_or_None, [episodic_texts_newest_first]) -> merged text
 Synthesizer = Callable[[Optional[str], list[str]], str]
+# [topics] -> {topic: canonical_topic}
+Canonicalizer = Callable[[list[str]], dict]
 
 
 @dataclass
@@ -46,6 +48,7 @@ class ConsolidationReport:
     updated: int = 0
     archived_stale: int = 0
     pruned_episodic: int = 0
+    duplicates_merged: int = 0
     topics: list[str] = field(default_factory=list)
 
 
@@ -62,6 +65,50 @@ def _episodic_cap() -> int:
 def _default_synth(existing: Optional[str], episodic_newest_first: list[str]) -> str:
     """Latest capture is the current statement (single-user: newest wins)."""
     return episodic_newest_first[0] if episodic_newest_first else (existing or "")
+
+
+def _default_canonicalizer() -> Optional[Canonicalizer]:
+    """#129-4: deterministic topic canonicalization ON by default — the
+    capture LLM mints a fresh slug for the same fact each time
+    ('preferred-language' / 'user-preferred-language' / …), and exact-slug
+    clustering then never folds them. ADK_CC_MEMORY_CANONICALIZE=0 turns it
+    off (a cron caller can inject make_llm_canonical instead)."""
+    if os.environ.get("ADK_CC_MEMORY_CANONICALIZE", "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        return None
+    from .canonicalize import deterministic_canonical
+
+    return deterministic_canonical
+
+
+def _canonical_map(
+    canon: Optional[Canonicalizer],
+    fresh_topics: list[str],
+    semantic_topics: list[str],
+) -> dict:
+    """{topic: canonical} over fresh + existing-semantic topics, with the
+    representative FORCED onto an existing semantic topic whenever a group
+    contains one — variants must fold onto the node we already have, not
+    mint a sibling and strand the original."""
+    if canon is None:
+        return {}
+    universe = list(dict.fromkeys(fresh_topics + semantic_topics))
+    try:
+        mapping = dict(canon(universe))
+    except Exception:  # noqa: BLE001 — canonicalization is an optimization
+        return {}
+    sem = set(semantic_topics)
+    groups: dict[str, list[str]] = {}
+    for t in universe:
+        groups.setdefault(mapping.get(t, t), []).append(t)
+    for rep, members in groups.items():
+        if rep in sem:
+            continue
+        sem_members = sorted(m for m in members if m in sem)
+        if sem_members:
+            for m in members:
+                mapping[m] = sem_members[0]
+    return mapping
 
 
 def _confidence(n_support: int, had_existing: bool) -> float:
@@ -85,27 +132,80 @@ def consolidate_user(
     stale_days: int = 90,
     now_epoch: Optional[float] = None,
     only_topics: Optional[set] = None,
+    topic_canonicalizer: Optional[Canonicalizer] = None,
 ) -> ConsolidationReport:
     """Fold a user's fresh episodic memories into semantic facts, then sweep
     stale semantic items to archived. `only_topics` restricts the promotion to
     those topics (the per-topic threshold trigger passes the corroborated
-    ones); None promotes everything pending (the periodic sweep)."""
+    ones); None promotes everything pending (the periodic sweep).
+    `topic_canonicalizer` folds near-duplicate topic slugs (#129-4): default
+    deterministic clustering, ADK_CC_MEMORY_CANONICALIZE=0 disables, cron may
+    inject make_llm_canonical."""
     synth = synthesizer or _default_synth
+    canon = (topic_canonicalizer if topic_canonicalizer is not None
+             else _default_canonicalizer())
     now = now_epoch if now_epoch is not None else time.time()
     report = ConsolidationReport(user_id=user_id)
 
-    # 1. cluster fresh episodic by topic (newest first within a topic)
+    # 1. cluster fresh episodic by CANONICAL topic (newest first within one)
     fresh = [
         i for i in store.list_episodic(user_id) if i.status in (ACTIVE, DRAFT)
     ]
     report.episodic_seen = len(fresh)
+    sem_topics = [s.topic for s in store.list_semantic(user_id)
+                  if s.status in (ACTIVE, CONSOLIDATED)]
+    mapping = _canonical_map(canon, [i.topic for i in fresh], sem_topics)
+    canonical = lambda t: mapping.get(t, t)  # noqa: E731
+    only = ({canonical(t) for t in only_topics}
+            if only_topics is not None else None)
     clusters: dict[str, list[MemoryItem]] = {}
     for item in fresh:
-        if only_topics is not None and item.topic not in only_topics:
+        ct = canonical(item.topic)
+        if only is not None and ct not in only:
             continue
-        clusters.setdefault(item.topic, []).append(item)
+        clusters.setdefault(ct, []).append(item)
     for items in clusters.values():
         items.sort(key=lambda i: i.created, reverse=True)
+
+    # 1.5 duplicate-semantic merge (#129-4): variant slugs that already grew
+    # their own semantic nodes fold into the group's representative — the
+    # newest value wins as current text, older ones survive as supersession
+    # history, and the variant node is reversibly archived.
+    dup_groups: dict[str, list[str]] = {}
+    for t in sem_topics:
+        ct = canonical(t)
+        if ct != t:
+            dup_groups.setdefault(ct, []).append(t)
+    for rep, variants in sorted(dup_groups.items()):
+        target = store.get_semantic(user_id, rep)
+        for vt in variants:
+            dup = store.get_semantic(user_id, vt)
+            if dup is None or target is None:
+                continue
+            newer, older = ((dup, target)
+                            if (dup.updated or dup.created)
+                            > (target.updated or target.created)
+                            else (target, dup))
+            supersedes = list(newer.supersedes)
+            for o in [older.text] + list(older.supersedes):
+                o = o.strip()
+                if o and o != newer.text and o not in supersedes:
+                    supersedes.append(o)
+            srcs = list(newer.sources)
+            for s in older.sources:
+                if s not in srcs:
+                    srcs.append(s)
+            target = MemoryItem(
+                id=rep, topic=rep, text=newer.text,
+                memory_type=SEMANTIC, status=CONSOLIDATED,
+                confidence=max(target.confidence, dup.confidence),
+                created=min(target.created, dup.created),
+                updated=_now_iso(now), sources=srcs, supersedes=supersedes,
+                access_count=target.access_count + dup.access_count,
+            )
+            store.put_semantic(user_id, target)
+            store.set_status(user_id, SEMANTIC, dup.id, ARCHIVED)
+            report.duplicates_merged += 1
 
     # 2. merge each topic into its semantic item
     for topic, items in sorted(clusters.items()):

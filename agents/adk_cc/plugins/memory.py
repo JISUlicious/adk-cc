@@ -113,10 +113,20 @@ async def maybe_threshold_consolidate(store: MemoryStore, user_id: str, model=No
         if threshold <= 0:
             return None
         from ..memory.store import ACTIVE, DRAFT
+        from ..memory.consolidate import _canonical_map, _default_canonicalizer
+
+        pending = [i for i in store.list_episodic(user_id)
+                   if i.status in (ACTIVE, DRAFT)]
+        # #129-4: count by CANONICAL topic — the capture LLM mints slug
+        # variants for one fact ('preferred-language' /
+        # 'user-preferred-language'), and exact counting kept each variant
+        # forever below the corroboration bar.
+        mapping = _canonical_map(_default_canonicalizer(),
+                                 [i.topic for i in pending], [])
         per_topic: dict[str, int] = {}
-        for item in store.list_episodic(user_id):
-            if item.status in (ACTIVE, DRAFT):
-                per_topic[item.topic] = per_topic.get(item.topic, 0) + 1
+        for item in pending:
+            t = mapping.get(item.topic, item.topic)
+            per_topic[t] = per_topic.get(t, 0) + 1
         eligible = {t for t, n in per_topic.items() if n >= threshold}
         if not eligible:
             return None
@@ -194,7 +204,7 @@ def _notes_autocapture() -> bool:
     return env_bool("ADK_CC_SESSION_NOTES_AUTOCAPTURE", False)
 
 
-def _capture_prompt(turn: str) -> str:
+def _capture_prompt(turn: str, known_topics: Optional[list[str]] = None) -> str:
     from .. import deployment
 
     scope = (_CAPTURE_SCOPE_PROJECT if deployment.is_desktop()
@@ -205,7 +215,36 @@ def _capture_prompt(turn: str) -> str:
         scope += ("\nEXCEPTION: if a fact matters only for THIS session's "
                   "work (a decision, a discovered constraint, task state), "
                   "output it as:\nSESSION: <one concise sentence>")
+    if known_topics:
+        # #129-4b: bias proposed slugs toward EXISTING topics at the source —
+        # a fresh slug for a known fact litters the episodic tier and leans
+        # on the resolver/canonicalizer to clean up after the fact.
+        scope += ("\nKNOWN TOPICS: " + ", ".join(known_topics)
+                  + "\nWhen a fact corroborates or updates one of these, "
+                    "REUSE that exact slug as its topic; if it is already "
+                    "recorded there verbatim, do not output it at all.")
     return _CAPTURE_PROMPT.format(scope=scope, turn=turn)
+
+
+_KNOWN_TOPICS_CAP = 40
+
+
+def _known_topics(store: MemoryStore, user_id: str) -> list[str]:
+    """The user's existing topic slugs (semantic first — the durable ones —
+    then pending episodic), capped so the capture prompt stays small."""
+    from ..memory.store import ACTIVE, CONSOLIDATED, DRAFT
+
+    out: dict[str, None] = {}
+    try:
+        for s in store.list_semantic(user_id):
+            if s.status in (ACTIVE, CONSOLIDATED):
+                out.setdefault(s.topic)
+        for e in store.list_episodic(user_id):
+            if e.status in (ACTIVE, DRAFT):
+                out.setdefault(e.topic)
+    except Exception:  # noqa: BLE001 — a hint, never a blocker
+        pass
+    return list(out)[:_KNOWN_TOPICS_CAP]
 
 
 def _recall_budget() -> int:
@@ -346,8 +385,15 @@ class MemoryPlugin(BasePlugin):
             if not transcript.strip():
                 _log.info("memory: capture skipped (empty transcript)")
                 return None
+            state = getattr(ictx.session, "state", None)
+            tenant_id, user_id = _tenant_user(state)
+            store = MemoryStore.for_tenant(tenant_id)
+            # #129-4b: existing slugs go INTO the capture prompt so the
+            # extractor reuses them instead of minting variants.
+            known = await asyncio.to_thread(_known_topics, store, user_id)
             raw = await asyncio.wait_for(
-                self._extract(model, transcript), timeout=_capture_timeout()
+                self._extract(model, transcript, known_topics=known),
+                timeout=_capture_timeout(),
             )
             facts = _parse_facts(raw)
             session_lines = [l[len("SESSION:"):].strip()
@@ -360,9 +406,6 @@ class MemoryPlugin(BasePlugin):
                     "memory: capture found no durable facts (raw %d chars: %r)",
                     len(raw or ""), (raw or "")[:80])
                 return None
-            state = getattr(ictx.session, "state", None)
-            tenant_id, user_id = _tenant_user(state)
-            store = MemoryStore.for_tenant(tenant_id)
             sid = getattr(ictx.session, "id", None) or ""
             # Fix A+D: resolve each fact to an existing topic (corroborate/update)
             # or NEW, so drifted slugs fold at write time. Falls back to the
@@ -422,12 +465,14 @@ class MemoryPlugin(BasePlugin):
             _log.warning("session-notes routing skipped (%s: %s)",
                          type(e).__name__, e)
 
-    async def _extract(self, model, transcript: str) -> str:
+    async def _extract(self, model, transcript: str,
+                       known_topics: Optional[list[str]] = None) -> str:
         req = LlmRequest(
             contents=[
                 types.Content(
                     role="user",
-                    parts=[types.Part(text=_capture_prompt(transcript))],
+                    parts=[types.Part(
+                        text=_capture_prompt(transcript, known_topics))],
                 )
             ],
             config=types.GenerateContentConfig(),

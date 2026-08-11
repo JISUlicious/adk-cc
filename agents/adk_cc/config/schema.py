@@ -693,6 +693,12 @@ FIELDS: list[Var] = [
         default=None, default_display="llm"),
     Var("ADK_CC_MEMORY_AUTOCAPTURE", Tier.ADVANCED, "Memory & Wiki",
         "Capture memories after turns (0 = recall-only).", default=True, parse=as_bool),
+    Var("ADK_CC_MEMORY_CANONICALIZE", Tier.ADVANCED, "Memory & Wiki",
+        "=0 disables topic canonicalization (#129-4): consolidation folds "
+        "near-duplicate topic slugs ('preferred-language' / "
+        "'user-preferred-language') into one semantic node and merges "
+        "variant nodes that already grew; the threshold trigger counts "
+        "corroboration across variants.", default=True, parse=as_bool),
     Var("ADK_CC_MEMORY_RESOLVE", Tier.ADVANCED, "Memory & Wiki",
         "Identity-resolution model call (0 disables).", default=True, parse=as_bool),
     Var("ADK_CC_MEMORY_RESOLVE_VERIFY", Tier.ADVANCED, "Memory & Wiki",
