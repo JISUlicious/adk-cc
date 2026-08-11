@@ -1,6 +1,6 @@
 # Session-scope knowledge: review + upgrade plan
 
-Status: PLAN (2026-08-12). Task #127.
+Status: SHIPPED (2026-08-12) — P0 b1cd2cc+c8a38e7, P1-P3 e2d4dfc, tests a9f4632. Task #127 complete. (P2's compaction-seeding item was dropped as redundant: notes re-inject from state every turn.)
 
 ## Current state (verified this week)
 

@@ -1,6 +1,17 @@
 # Running with the wiki and memory
 
-Two related but deliberately separate subsystems:
+Three scopes, each with its own home (#127 completed the set):
+
+- **Session → notes** — a curated per-session document in session state:
+  the agent records decisions/constraints/task state via
+  `update_session_notes`, the block re-injects into every request (so it
+  survives context compaction), `/notes` shows it, and it dies with the
+  session. `mode=promote` lifts a note into user memory. Knobs:
+  `ADK_CC_SESSION_NOTES_BUDGET` (2000 tokens),
+  `ADK_CC_SESSION_NOTES_AUTOCAPTURE` (=1, web: capture routes
+  session-scoped facts into notes instead of dropping them; default off).
+
+Two related but deliberately separate subsystems for the other scopes:
 
 - **Wiki** — an *explicit*, shared domain-knowledge base. The agent gets
   three tools (`wiki_search`, `wiki_read`, `wiki_add`); `wiki_add` writes
