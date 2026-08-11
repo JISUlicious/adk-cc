@@ -34,10 +34,12 @@ def notes_budget_chars() -> int:
 
 class UpdateSessionNotesArgs(BaseModel):
     content: str = Field(description="Markdown note content.")
-    mode: Literal["append", "replace"] = Field(
+    mode: Literal["append", "replace", "promote"] = Field(
         default="append",
         description="append adds a new entry below existing notes; "
-                    "replace rewrites them entirely.")
+                    "replace rewrites them entirely; promote writes the "
+                    "content into the USER'S long-term memory instead "
+                    "(for facts that should outlive this session).")
 
 
 class UpdateSessionNotesTool(AdkCcTool):
@@ -60,6 +62,8 @@ class UpdateSessionNotesTool(AdkCcTool):
     async def _execute(
         self, args: UpdateSessionNotesArgs, ctx: ToolContext
     ) -> Optional[dict[str, Any]]:
+        if args.mode == "promote":
+            return self._promote(args, ctx)
         try:
             existing = str(ctx.state.get(STATE_KEY) or "")
         except Exception:  # noqa: BLE001
@@ -82,3 +86,26 @@ class UpdateSessionNotesTool(AdkCcTool):
         except Exception as e:  # noqa: BLE001
             return {"status": "error", "error": f"could not update state: {e}"}
         return {"status": "ok", "chars": len(merged), "trimmed": trimmed}
+
+    def _promote(self, args: UpdateSessionNotesArgs, ctx: ToolContext) -> dict:
+        """#127 P3: 'keep this beyond the session' — write the content as an
+        episodic USER memory (same store the autonomous capture uses), with
+        session provenance."""
+        from ..config.schema import env_bool
+
+        if not env_bool("ADK_CC_MEMORY", False):
+            return {"status": "error",
+                    "error": "memory is not enabled on this server "
+                             "(ADK_CC_MEMORY=1) — cannot promote"}
+        try:
+            tc = ctx.state.get("temp:tenant_context")
+            tenant = getattr(tc, "tenant_id", None) or "local"
+            user = getattr(tc, "user_id", None) or "local"
+            from ..memory.store import MemoryStore
+
+            item = MemoryStore.for_tenant(tenant).add_episodic(
+                user, args.content.strip(), sources=["session-notes-promote"])
+            return {"status": "ok", "promoted": True,
+                    "memory_id": getattr(item, "doc_id", None)}
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "error": f"promote failed: {e}"}

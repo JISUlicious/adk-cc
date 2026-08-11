@@ -149,6 +149,7 @@ export function ChatPage({
   const [railOpen, setRailOpen] = useState(false)
   // Right-side panel (artifacts on web / file tree on desktop) mobile drawer.
   const [rightPanelOpen, setRightPanelOpen] = useState(false)
+  const [notesOpen, setNotesOpen] = useState(false)
   const [showSessionId, setShowSessionId] = useState(
     () => localStorage.getItem("adk.showSessionIds") === "1",
   )
@@ -582,6 +583,9 @@ export function ChatPage({
         clearToken()
         location.assign("/")
         return
+      case "notes":
+        setNotesOpen(true)
+        return
       case "mode-default":
       case "mode-acceptEdits":
       case "mode-bypass": {
@@ -774,6 +778,29 @@ export function ChatPage({
             )}
           </div>
         </header>
+        {notesOpen && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/30 p-4"
+            onClick={() => setNotesOpen(false)}
+          >
+            <div
+              className="max-h-[70vh] w-full max-w-lg overflow-auto rounded-lg border border-border bg-background p-4 shadow-xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="mb-2 text-sm font-semibold">Session notes</div>
+              <pre
+                data-session-notes
+                className="whitespace-pre-wrap text-xs text-muted-foreground"
+              >
+                {String(
+                  (session?.state as Record<string, unknown> | undefined)
+                    ?.session_notes ?? "(no notes yet — the agent records "
+                    + "decisions and task state here as the session runs)",
+                )}
+              </pre>
+            </div>
+          </div>
+        )}
         {error && (
           <div className="flex items-center gap-3 border-b bg-destructive/10 px-6 py-2 text-sm text-destructive">
             <span className="min-w-0 flex-1 truncate">{error}</span>

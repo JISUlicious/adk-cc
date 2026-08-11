@@ -190,11 +190,21 @@ _CAPTURE_PROMPT = (
 )
 
 
+def _notes_autocapture() -> bool:
+    return env_bool("ADK_CC_SESSION_NOTES_AUTOCAPTURE", False)
+
+
 def _capture_prompt(turn: str) -> str:
     from .. import deployment
 
     scope = (_CAPTURE_SCOPE_PROJECT if deployment.is_desktop()
              else _CAPTURE_SCOPE_USER)
+    if _notes_autocapture() and not deployment.is_desktop():
+        # #127 P1: route session-scoped facts into SESSION NOTES instead of
+        # dropping them — still excluded from user memory.
+        scope += ("\nEXCEPTION: if a fact matters only for THIS session's "
+                  "work (a decision, a discovered constraint, task state), "
+                  "output it as:\nSESSION: <one concise sentence>")
     return _CAPTURE_PROMPT.format(scope=scope, turn=turn)
 
 
@@ -340,6 +350,11 @@ class MemoryPlugin(BasePlugin):
                 self._extract(model, transcript), timeout=_capture_timeout()
             )
             facts = _parse_facts(raw)
+            session_lines = [l[len("SESSION:"):].strip()
+                             for l in (raw or "").splitlines()
+                             if l.strip().upper().startswith("SESSION:")]
+            if session_lines and _notes_autocapture():
+                await self._append_session_notes(ictx, session_lines)
             if not facts:
                 _log.info(
                     "memory: capture found no durable facts (raw %d chars: %r)",
@@ -375,6 +390,37 @@ class MemoryPlugin(BasePlugin):
         except Exception as e:  # noqa: BLE001
             _log.warning("memory: capture skipped (%s: %s)", type(e).__name__, e)
         return None
+
+    async def _append_session_notes(self, ictx, lines: list) -> None:
+        """#127 P1: fold capture-routed session facts into the notes state
+        via a state-delta event (the session_title precedent) — the notes
+        block then re-injects them next turn."""
+        try:
+            from google.adk.events.event import Event
+            from google.adk.events.event_actions import EventActions
+
+            from ..tools.session_notes import STATE_KEY, notes_budget_chars
+
+            state = getattr(ictx.session, "state", None) or {}
+            existing = str(state.get(STATE_KEY) or "").rstrip()
+            add = "\n".join(f"- {l}" for l in lines if l)
+            merged = (existing + "\n\n" + add).strip() if existing else add
+            cap = notes_budget_chars()
+            if len(merged) > cap:
+                merged = merged[-cap:]
+            service = getattr(ictx, "session_service", None)
+            if service is None:
+                return
+            await service.append_event(
+                ictx.session,
+                Event(invocation_id=ictx.invocation_id, author=self.name,
+                      actions=EventActions(state_delta={STATE_KEY: merged})),
+            )
+            _log.info("memory: routed %d session-scoped fact(s) into notes",
+                      len(lines))
+        except Exception as e:  # noqa: BLE001
+            _log.warning("session-notes routing skipped (%s: %s)",
+                         type(e).__name__, e)
 
     async def _extract(self, model, transcript: str) -> str:
         req = LlmRequest(

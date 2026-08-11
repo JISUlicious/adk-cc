@@ -29,6 +29,7 @@ import { IS_DESKTOP } from "@/shared/lib/platform"
 export type SlashAction =
   | "help"
   | "clear"
+  | "notes"
   | "mode-default"
   | "mode-acceptEdits"
   | "mode-bypass"
@@ -80,6 +81,12 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     description: "See the skills the agent can use, and turn them on or off",
     icon: Boxes,
     kind: { type: "action", action: "skills" },
+  },
+  {
+    name: "notes",
+    icon: ClipboardList,
+    description: "Show this session's notes (the agent's working memory)",
+    kind: { type: "action", action: "notes" },
   },
   {
     name: "mode-default",

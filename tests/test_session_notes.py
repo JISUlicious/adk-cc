@@ -140,8 +140,57 @@ async def _runner_scenario(with_plugin: bool) -> dict:
             "final_instruction": seen_instructions[-1] if seen_instructions else ""}
 
 
+def promote_and_routing_units() -> None:
+    import tempfile
+    from adk_cc.tools.session_notes import (
+        UpdateSessionNotesArgs, UpdateSessionNotesTool,
+    )
+
+    class TC:  # tenant context stub
+        tenant_id, user_id = "local", "kim"
+
+    class Ctx:
+        def __init__(self):
+            self.state = {"temp:tenant_context": TC()}
+
+    t = UpdateSessionNotesTool()
+    # promote without memory enabled → clear error
+    os.environ.pop("ADK_CC_MEMORY", None)
+    r = asyncio.run(t._execute(UpdateSessionNotesArgs(
+        content="uses pandas 2.x", mode="promote"), Ctx()))
+    check("promote without ADK_CC_MEMORY errors clearly",
+          r["status"] == "error" and "ADK_CC_MEMORY" in r["error"])
+    # promote with memory on → lands in the user's episodic store
+    root = tempfile.mkdtemp(prefix="notes-promote-")
+    os.environ.update({"ADK_CC_MEMORY": "1", "ADK_CC_MEMORY_ROOT": root})
+    try:
+        r = asyncio.run(t._execute(UpdateSessionNotesArgs(
+            content="uses pandas 2.x", mode="promote"), Ctx()))
+        check("promote writes episodic memory", r.get("promoted") is True, r)
+        import glob
+        hits = glob.glob(os.path.join(root, "local", "users", "kim",
+                                      "episodic", "*.md"))
+        check("promoted item on disk under the USER", len(hits) == 1, hits)
+    finally:
+        os.environ.pop("ADK_CC_MEMORY", None)
+        os.environ.pop("ADK_CC_MEMORY_ROOT", None)
+
+    # P1 prompt routing: flag off → no SESSION instruction; on → present (web)
+    from adk_cc.plugins.memory import _capture_prompt
+    os.environ.pop("ADK_CC_SESSION_NOTES_AUTOCAPTURE", None)
+    off = _capture_prompt("T")
+    os.environ["ADK_CC_SESSION_NOTES_AUTOCAPTURE"] = "1"
+    try:
+        on = _capture_prompt("T")
+    finally:
+        os.environ.pop("ADK_CC_SESSION_NOTES_AUTOCAPTURE", None)
+    check("P1 routing line only under the flag",
+          "SESSION:" not in off and "SESSION:" in on)
+
+
 def main() -> int:
     tool_units()
+    promote_and_routing_units()
 
     r = asyncio.run(_runner_scenario(with_plugin=True))
     check("A/B with plugin: compaction ran", r["compacted"])

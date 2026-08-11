@@ -292,6 +292,10 @@ FIELDS: list[Var] = [
         "Max total inline_data (MB) accepted in one /api/turns message — "
         "blobs persist into every session JSONL rewrite and bypass the "
         "context defenses; upload files instead.", default="1"),
+    Var("ADK_CC_SESSION_NOTES_AUTOCAPTURE", Tier.ADVANCED, "Memory & Wiki",
+        "=1 (web only): the memory capture pass routes session-scoped facts "
+        "into session notes instead of dropping them. Default off — "
+        "explicit-first.", default="0"),
     Var("ADK_CC_SESSION_NOTES_BUDGET", Tier.ADVANCED, "Memory & Wiki",
         "Token budget for the per-session notes block (update_session_notes "
         "tool + every-turn injection). Oldest lines trim past it.",
