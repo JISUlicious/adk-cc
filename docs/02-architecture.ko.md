@@ -385,20 +385,24 @@ ADK의 tool-dispatch flow(`google/adk/flows/llm_flows/functions.py:489-504`)는 
 
 ## 7.5. Context-length 가드레일
 
-두 계층이 LLM context window 채워짐을 막습니다.
+계층화된 스택이 LLM context window 채워짐을 막습니다. Durable한 것부터 per-call 순서로:
 
-**1차 방어 — ADK의 `EventsCompactionConfig`**(`google/adk/apps/compaction.py`). adk-cc의 `agent.py`는 env(`ADK_CC_COMPACTION_TOKEN_THRESHOLD` + `ADK_CC_COMPACTION_EVENT_RETENTION` for token-threshold mode; `ADK_CC_COMPACTION_INTERVAL` + `ADK_CC_COMPACTION_OVERLAP` for sliding-window)에서 구성하고 `App(events_compaction_config=...)`에 전달. ADK runner가 invocation 후 compaction을 트리거; `LlmEventSummarizer`가 LLM 호출을 처리, function-call/response 페어링을 보존하고 pending call의 compaction을 피하는 안전 split 로직. 여기에 adk-cc 패치 하나: ADK는 *모든* function_response를 응답으로 간주하지만, confirmation으로 gate된 call은 사용자를 기다리는 동안 interim `needs_confirmation` response로 닫혀 있음 — 그대로면 ADK가 parked call의 이벤트를 compact해 버리고, 승인 후의 실제 response가 고아가 됨("No function call event found…"). `context/compaction_pin.py`(config와 함께 설치)가 pending-call 계산을 name/payload 인식으로 바꿔 parked confirmation이 compaction에서 살아남게 함.
+**ADK의 `EventsCompactionConfig`**(`google/adk/apps/compaction.py`). adk-cc의 `agent.py`는 env(`ADK_CC_COMPACTION_TOKEN_THRESHOLD` + `ADK_CC_COMPACTION_EVENT_RETENTION` for token-threshold mode; `ADK_CC_COMPACTION_INTERVAL` + `ADK_CC_COMPACTION_OVERLAP` for sliding-window)에서 구성하고 `App(events_compaction_config=...)`에 전달. ADK runner가 invocation 후 compaction을 트리거; `LlmEventSummarizer`가 LLM 호출을 처리, function-call/response 페어링을 보존하고 pending call의 compaction을 피하는 안전 split 로직. 여기에 adk-cc 패치 하나: ADK는 *모든* function_response를 응답으로 간주하지만, confirmation으로 gate된 call은 사용자를 기다리는 동안 interim `needs_confirmation` response로 닫혀 있음 — 그대로면 ADK가 parked call의 이벤트를 compact해 버리고, 승인 후의 실제 response가 고아가 됨("No function call event found…"). `context/compaction_pin.py`(config와 함께 설치)가 pending-call 계산을 name/payload 인식으로 바꿔 parked confirmation이 compaction에서 살아남게 함(#119). 전용 compaction 모델은 `ADK_CC_COMPACTION_MODEL` (+ 선택적 `_API_BASE`/`_API_KEY`); unset 시 main 모델로 fallback.
 
-전용 compaction 모델은 `ADK_CC_COMPACTION_MODEL` (+ 완전히 별도 provider용 선택적 `_API_BASE`/`_API_KEY`)을 통해 지원됨. Unset 시 ADK가 에이전트의 main 모델로 auto-default.
+**Precompact**(`plugins/precompact.py`). ADK의 트리거는 마지막 이벤트의 model-reported usage를 읽는데, 세션이 오염된 순간에 정확히 stale해짐 — 이 플러그인은 `before_run`에서 이벤트를 payload 포함으로 측정하고, 오버사이즈로 물려받은 히스토리를 turn의 첫 모델 호출 *전에* 같은 summarizer 스택으로 compact(digest-before-summarize, guard reject 라인의 FORCE 모드에선 model-free mechanical fallback). 같은 코어가 두 개의 on-demand 경로도 구동:
 
-**안전망 — `ContextGuardPlugin`**(`adk_cc/plugins/context_guard.py`). ADK의 compaction은 반응적 — 성공한 invocation 후에 실행. 단일 turn이 threshold 아래에서 모델 window 초과로 한 step에 점프(예: 하나의 큰 tool 결과)하면 compaction이 반응하기 전에 모델 서버에 500. 플러그인의 `before_model_callback`이 token을 카운트(`litellm.token_counter`, chars/4 fallback)하고:
+- **Mid-turn compaction**(`midturn_compact_prior`, kill switch `ADK_CC_MIDTURN_COMPACT=0`): guard의 pressure 라인이 request 재작성 후에도 뜨거우면, PRIOR-invocation 이벤트를 turn 중간에 durable하게 요약 — 이후의 모든 호출이 더 작게 rebuild됨. 현재 invocation의 이벤트는 절대 후보가 아님.
+- **Guided `/compact`**(`manual_compact`, `POST /api/compact`): 사용자가 quiescent 세션을 직접 compaction(turn 실행 중엔 409), 선택적 emphasis guide("keep #127, drop finished tasks")가 summarizer 프롬프트에 붙음. Interactive summarizer cap 60s; mechanical fallback 보장.
 
-- **WARN** at `ADK_CC_CONTEXT_WARN_TOKENS` (기본 `ADK_CC_MAX_CONTEXT_TOKENS`의 75%): 관측성을 위한 구조화 로그 라인.
-- **REJECT** at `ADK_CC_CONTEXT_REJECT_TOKENS` (기본 95%): 모델 호출 실패 대신 친절한 "context near full" 메시지로 early `LlmResponse` 반환.
+세 direct-summarizer 경로 모두 `_clamp_head_pending`으로 #119 pending 규칙을 적용 — confirmation 뒤에 parked된 call을 실은 이벤트는 절대 fold되지 않음.
 
-플러그인은 항상 attached. `ADK_CC_MAX_CONTEXT_TOKENS` unset 시 no-op — 배포 간 플러그인 체인을 균일하게 유지.
+**Microcompact**(`plugins/microcompact.py`, 기본 on, `ADK_CC_MICROCOMPACT=0`으로 비활성). OUTGOING request만 재작성(ADK가 매 호출마다 이벤트에서 rebuild하므로 저장된 히스토리는 원문 유지). 세 가지 shape: allowlist된 `function_response` payload, foreign-tool-result TEXT 렌더링, 그리고 COMPLETED `function_call`의 큰 string arg(`write_file` body는 result가 아니라 call에 실림; 실제 응답이 없는 call은 건드리지 않음). Cached LLM summary 우선, stub fallback.
 
-플러그인은 trim하지 않음, summarize하지 않음, LLM을 호출하지 않음. Content-preserving 복구는 ADK의 compaction 소유. 플러그인은 fail-soft만.
+**`ContextGuardPlugin`**(`plugins/context_guard.py`) — per-call 안전망, `before_model_callback`. 항상 attached; `ADK_CC_MAX_CONTEXT_TOKENS` unset 시 no-op. Outgoing request를 payload 포함으로 추정하고, API의 `usage_metadata.prompt_token_count`로 세션별 **calibration**(chars/4는 실제 tokenizer 대비 undercount — mid-turn 128K→219K 성장이 reject 라인 아래로 통과한 사고). Ladder:
+
+- **WARN** at `ADK_CC_CONTEXT_WARN_TOKENS`(기본 effective의 75%): 구조화 로그 라인.
+- **PRESSURE** at `ADK_CC_CONTEXT_PRESSURE_PCT`(기본 85%, 0이면 비활성): request를 공격적으로 재작성(`keep_recent` 2→1→0 에스컬레이션, ~70% 타깃), 그래도 뜨거우면 위의 mid-turn prior-invocation compaction을 트리거(invocation당 1회).
+- **REJECT** at `ADK_CC_CONTEXT_REJECT_TOKENS`(기본 95%): 마지막 재작성 pass(keep-nothing desperation까지), 그 후에도 넘으면 모델 서버 500 대신 친절한 "context near full" `LlmResponse` — precompact FORCE가 다음 turn에 세션을 복구.
 
 ## 7.6. 워크스페이스 레이아웃 (per-user / per-session)
 
