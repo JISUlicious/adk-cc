@@ -361,6 +361,21 @@ def test_pending_call_args_never_touched():
     assert stats["rewritten"] == 0, stats
 
 
+def test_parked_confirmation_call_args_never_touched():
+    # #119 name-aware: the gate closes a parked call with an interim
+    # needs_confirmation response using the SAME id. That is not an answer —
+    # even the guard's desperation settings must keep the args whole so the
+    # model can still quote what it is about to do while the user decides.
+    parts = [_fat_call(cid="w-1"),
+             _resp_part("write_file", {"status": "needs_confirmation"})]
+    parts[1].function_response.id = "w-1"
+    req = _req(parts)
+    stats = asyncio.run(rewrite_request(req, keep_recent=0, min_tokens=16,
+                                        allow_summaries=False))
+    assert "b" * 100 in parts[0].function_call.args["content"]
+    assert stats["rewritten"] == 0, stats
+
+
 def test_call_args_idempotent():
     parts = [_fat_call(cid="w-1"), _resp_part("write_file", {"status": "ok"})]
     parts[1].function_response.id = "w-1"

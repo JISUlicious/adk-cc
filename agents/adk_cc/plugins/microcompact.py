@@ -127,14 +127,19 @@ async def rewrite_request(
     use); otherwise rewrite everything eligible (the always-on pass).
     Returns {"rewritten": n, "freed": tokens, "summarized": n}.
     """
-    # A function_call is rewriteable ONLY once answered — a call still
-    # pending (mid-execution, or parked behind a user confirmation) must
-    # keep its args byte-for-byte or the eventual execution replays garbage.
+    # A function_call is rewriteable ONLY once REALLY answered — a call
+    # still pending (mid-execution, or parked behind a user confirmation)
+    # keeps its args byte-for-byte so the model can still quote what it is
+    # about to do. Name-aware (#119): a gate's interim needs_confirmation
+    # close is NOT an answer.
+    from ..context.compaction_pin import _is_real_answer
+
     answered_ids = set()
     for content in llm_request.contents or []:
         for part in content.parts or []:
             fr = getattr(part, "function_response", None)
-            if fr is not None and getattr(fr, "id", None):
+            if (fr is not None and getattr(fr, "id", None)
+                    and _is_real_answer(fr)):
                 answered_ids.add(fr.id)
 
     targets = []  # (part, kind, size_tokens)
