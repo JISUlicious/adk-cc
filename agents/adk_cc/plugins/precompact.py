@@ -329,6 +329,11 @@ async def midturn_compact_prior(callback_context: Any) -> bool:
 # Manual /compact keeps the same tail as threshold-mode precompact — the
 # user is tidying, not escaping an emergency; recent context stays whole.
 _MANUAL_MIN_HEAD = 2
+# The user is WAITING on this HTTP response: cap the summarizer well below
+# the background paths' timeout (observed live: a 300s operator setting left
+# /compact apparently dead in the UI). Force mode still guarantees the
+# mechanical fallback after the cap.
+_MANUAL_TIMEOUT_S = 60.0
 
 
 async def manual_compact(session: Any, svc: Any,
@@ -348,6 +353,12 @@ async def manual_compact(session: Any, svc: Any,
     from ..agent import _make_compaction_summarizer
 
     summarizer = _make_compaction_summarizer(guide=(guide or None))
+    try:
+        t = float(getattr(summarizer, "timeout_seconds", 0) or 0)
+        if t <= 0 or t > _MANUAL_TIMEOUT_S:
+            summarizer.timeout_seconds = _MANUAL_TIMEOUT_S
+    except Exception:  # noqa: BLE001 — stub summarizers in tests
+        pass
     mode = await _summarize_and_append(
         session, svc, head, force=True, label="manual-compact",
         audit_name="context_manual_compact", before_tokens=measured,

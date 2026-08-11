@@ -25,6 +25,7 @@ import { ContextGauge } from "@/shared/components/ContextGauge"
 import { sessionTitle } from "@/shared/sessions/SessionList"
 import { CompactionBadge } from "@/shared/components/CompactionBadge"
 import { fetchContextLimits, type ContextLimits } from "@/shared/api/context"
+import { ApiError } from "@/shared/api/client"
 import { SettingsModal } from "@/shared/components/SettingsModal"
 import { listSecrets } from "@/shared/api/account"
 import { IS_DESKTOP } from "@/shared/lib/platform"
@@ -498,7 +499,23 @@ export function ChatPage({
         if (!appName || !session) return
         void (async () => {
           try {
-            const r = await manualCompact(appName, userId, session.id, args)
+            showNotice("Compacting session history…")
+            // The visible turn can end while its server-side task lingers
+            // (post-turn capture, title) — a fresh /compact then 409s.
+            // Retry briefly, same pattern as confirmation answers.
+            let r
+            for (let attempt = 0; ; attempt++) {
+              try {
+                r = await manualCompact(appName, userId, session.id, args)
+                break
+              } catch (e) {
+                if (e instanceof ApiError && e.status === 409 && attempt < 5) {
+                  await new Promise((res) => setTimeout(res, 2000))
+                  continue
+                }
+                throw e
+              }
+            }
             if (r.status === "nothing_to_compact") {
               showNotice("Nothing to compact yet — the session is still small.")
             } else if (r.status === "failed") {
