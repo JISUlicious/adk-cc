@@ -168,6 +168,64 @@ async def _loop() -> None:
         await asyncio.sleep(interval)
 
 
+# ---- responsive trigger (#130 P2) -----------------------------------------
+# The interval tick bounds staleness; this bounds LATENCY: a wiki_add that
+# pushes a tenant's pending inbox to the threshold schedules ONE debounced
+# in-process run, so a captured note publishes in seconds. The P0 tenant
+# lock backstops any race with the tick or an external cron.
+_DEBOUNCE_S = 5.0
+_TRIGGER_TASKS: dict[str, "asyncio.Task"] = {}
+
+
+def _threshold() -> int:
+    try:
+        return max(0, int(
+            os.environ.get("ADK_CC_WIKI_LIBRARIAN_THRESHOLD", "")))
+    except ValueError:
+        return 0
+
+
+def maybe_trigger_librarian(tenant_id: str) -> bool:
+    """Called after a successful wiki_add (guarded import there — the tool
+    must work when the service layer is absent). Returns True when a
+    debounced run was scheduled; one in-flight task per tenant."""
+    if _threshold() <= 0 or not env_bool("ADK_CC_WIKI"):
+        return False
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return False  # no loop (sync/test context) — the tick will catch it
+    t = _TRIGGER_TASKS.get(tenant_id)
+    if t is not None and not t.done():
+        return False  # burst of adds → one run
+    from ..wiki import WikiStore
+
+    try:
+        store = WikiStore.for_tenant(tenant_id)
+        pending = sum(len(store.list_inbox(u))
+                      for u in store.list_user_ids())
+    except Exception:  # noqa: BLE001
+        return False
+    if pending < _threshold():
+        return False
+
+    async def _later() -> None:
+        await asyncio.sleep(_DEBOUNCE_S)
+        from ..wiki import wiki_root_from_env
+
+        classifier, synthesizer = make_librarian_stack()
+        await run_librarian_once(
+            wiki_root_from_env(), personal=False,
+            classifier=classifier, synthesizer=synthesizer,
+            tenants=[tenant_id])
+
+    _TRIGGER_TASKS[tenant_id] = loop.create_task(
+        _later(), name=f"adk_cc_wiki_trigger:{tenant_id}")
+    _log.info("wiki scheduler: debounced librarian run scheduled for "
+              "tenant %s (%d pending)", tenant_id, pending)
+    return True
+
+
 def make_wiki_lifespan(inner):
     """Wrap the server's existing lifespan (memory scheduler + model warm)
     with the librarian loop. ADK accepts ONE lifespan — this is the

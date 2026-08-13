@@ -135,6 +135,37 @@ def main() -> int:
         finally:
             ws.run_librarian_once = real_once
 
+    # ---- #130 P2: wiki_add threshold trigger -----------------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ.update({"ADK_CC_WIKI_ROOT": tmp, "ADK_CC_WIKI": "1",
+                           "ADK_CC_WIKI_LIBRARIAN_MODEL": "0"})
+        os.environ.pop("ADK_CC_WIKI_LIBRARIAN_THRESHOLD", None)
+        st = WikiStore.for_tenant("local").ensure()
+        st.add_inbox("u1", "Fact one.", topic="fact-one")
+
+        async def no_thr():
+            return ws.maybe_trigger_librarian("local")
+
+        check("threshold unset: no trigger", not asyncio.run(no_thr()))
+
+        os.environ["ADK_CC_WIKI_LIBRARIAN_THRESHOLD"] = "1"
+        ws._DEBOUNCE_S = 0.05
+
+        async def trig():
+            first = ws.maybe_trigger_librarian("local")
+            burst = ws.maybe_trigger_librarian("local")  # one in-flight
+            for _ in range(60):
+                await asyncio.sleep(0.05)
+                if st.read_domain_page("fact-one") is not None:
+                    return first, burst, True
+            return first, burst, False
+
+        first, burst, published = asyncio.run(trig())
+        check("threshold=1: trigger scheduled", first)
+        check("burst: second add coalesces into the in-flight run", not burst)
+        check("triggered run publishes the note (heuristic path)", published)
+        os.environ.pop("ADK_CC_WIKI_LIBRARIAN_THRESHOLD", None)
+
     # ---- interval unset → lifespan starts no task ------------------------
     os.environ.pop("ADK_CC_WIKI_LIBRARIAN_INTERVAL_S", None)
 

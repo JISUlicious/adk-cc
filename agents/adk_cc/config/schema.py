@@ -708,6 +708,11 @@ FIELDS: list[Var] = [
         "classification/synthesis) — for rate-limited API-key endpoints. "
         "The wiki is an LLM system; leave on where the endpoint allows.",
         default=True, parse=as_bool),
+    Var("ADK_CC_WIKI_LIBRARIAN_THRESHOLD", Tier.ADVANCED, "Memory & Wiki",
+        "When > 0: a wiki_add that brings a tenant's pending inbox to this "
+        "count schedules ONE debounced in-process librarian run (#130 P2) — "
+        "notes publish in seconds instead of at the next tick/cron. "
+        "0/unset = off.", default=None, default_display="0 (off; desktop 1)"),
     Var("ADK_CC_WIKI_LIBRARIAN_PERSONAL_EVERY", Tier.ADVANCED, "Memory & Wiki",
         "Run the personal-wiki pass every Nth scheduler tick (cost scales "
         "per user; needs ADK_CC_PERSONAL_WIKI=1).",

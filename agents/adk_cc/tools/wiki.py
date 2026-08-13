@@ -215,6 +215,15 @@ class WikiAddTool(AdkCcTool):
             type=args.type,
             tags=args.tags,
         )
+        # #130 P2: prompt publish — under ADK_CC_WIKI_LIBRARIAN_THRESHOLD,
+        # this add may schedule a debounced in-process librarian run.
+        # Guarded: the tool must keep working without the service layer.
+        try:
+            from ..service.wiki_scheduler import maybe_trigger_librarian
+
+            maybe_trigger_librarian(store.tenant_id)
+        except Exception:  # noqa: BLE001
+            pass
         return {
             "status": "ok",
             "scope": "inbox",
