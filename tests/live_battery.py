@@ -325,8 +325,8 @@ def run_web(pw):  # noqa: PLR0915
         # ---- 5. MEMORY across sessions -------------------------------
         sid = new_session()
         turn("A durable fact about me you should remember: I only ever use "
-             "pnpm, never npm or yarn. Acknowledge briefly.", ["pnpm"],
-             tries=60)
+             "pnpm, never npm or yarn. Acknowledge by repeating the package "
+             "manager name.", ["pnpm"], tries=60)
         settle(base, "alice", sid, timeout_s=120)  # post-turn capture
         import glob
         epis = glob.glob(os.path.join(mem_root, "local", "users", "*",
@@ -334,8 +334,11 @@ def run_web(pw):  # noqa: PLR0915
         check("web", "memory: capture wrote an episodic item", bool(epis),
               mem_root)
         new_session()
-        ok = turn("Which JavaScript package manager do I use? One word.",
-                  "pnpm", tries=60)
+        # Keyword-fair phrasing: recall is keyword search (embedding recall
+        # is the unshipped Fix E) — the query must share a term with the
+        # stored note, or an honest miss is expected.
+        ok = turn("Between pnpm, npm and yarn — which one do I use? Answer "
+                  "from what you know about me, one word.", "pnpm", tries=60)
         check("web", "memory: fresh session recalls the fact", ok)
         page.screenshot(path=os.path.join(data, "memory.png"))
         browser.close()
