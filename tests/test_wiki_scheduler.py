@@ -135,6 +135,24 @@ def main() -> int:
         finally:
             ws.run_librarian_once = real_once
 
+    # ---- synthesis duplication guard (observed live in the #130 proof) ---
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["ADK_CC_WIKI_ROOT"] = tmp
+        from adk_cc.wiki import Librarian
+
+        st = WikiStore.for_tenant("local").ensure()
+        st.add_inbox("u1", "Fact once.", topic="fact-once")
+
+        async def echo_twice(slug, body):  # a model echoing the whole body
+            return body + body
+
+        asyncio.run(Librarian(st, classifier=classify,
+                              synthesizer=echo_twice).run())
+        page = st.read_domain_page("fact-once")
+        check("duplicating synthesis rejected (deterministic body kept)",
+              page is not None and page.body.count("_(by ") == 1,
+              page.body[:120] if page else None)
+
     # ---- #130 P2: wiki_add threshold trigger -----------------------------
     with tempfile.TemporaryDirectory() as tmp:
         os.environ.update({"ADK_CC_WIKI_ROOT": tmp, "ADK_CC_WIKI": "1",

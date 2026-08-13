@@ -499,9 +499,12 @@ class Librarian:
             if inspect.isawaitable(out):
                 out = await out
             polished = (out or "").strip()
-            # provenance guard: never accept a synthesis that drops provenance
-            # markers (cite-or-quarantine must survive the prose rewrite).
-            if polished and polished.count("_(by ") >= deterministic_body.count("_(by "):
+            # provenance guard: never accept a synthesis that DROPS a
+            # provenance marker (cite-or-quarantine must survive the prose
+            # rewrite) — or DUPLICATES them: observed live (#130 battery),
+            # a model echoed the whole body twice and the old >= check
+            # waved the doubled page through.
+            if polished and polished.count("_(by ") == deterministic_body.count("_(by "):
                 return polished + "\n"
         except Exception as e:  # noqa: BLE001 — synthesis is polish, never fatal
             _log.warning("librarian: synthesis skipped for %s (%s)", slug, type(e).__name__)
