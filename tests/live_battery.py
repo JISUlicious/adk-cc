@@ -30,7 +30,10 @@ import requests
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL = "chatgpt-codex/gpt-5.4-mini"
-BATTERY = os.path.expanduser("~/adk-cc-battery")
+BATTERY = os.path.expanduser(os.environ.get("BATTERY_ROOT", "~/adk-cc-battery"))
+# Port base overridable so a branch-validation run can leave an earlier
+# battery's kept servers untouched.
+PORT_BASE = int(os.environ.get("BATTERY_PORT_BASE", "8961"))
 KEEP_UP = os.environ.get("BATTERY_KEEP_UP", "1") == "1"
 _passed = _failed = 0
 _results: list[str] = []
@@ -214,7 +217,7 @@ def run_web(pw):  # noqa: PLR0915
     wiki_root = os.path.join(data, "wiki")
     mem_root = os.path.join(data, "memory")
     _mkdirs(data, wsroot)
-    proc, base = boot("web", 8961, data, {
+    proc, base = boot("web", PORT_BASE, data, {
         "ADK_CC_WORKSPACE_ROOT": wsroot,
         "ADK_CC_WIKI": "1", "ADK_CC_WIKI_ROOT": wiki_root,
         "ADK_CC_MEMORY": "1", "ADK_CC_MEMORY_ROOT": mem_root,
@@ -355,8 +358,13 @@ def run_desktop(pw):
     _mkdirs(data, proj)
     subprocess.run(["git", "init", "-q", proj], capture_output=True)
     # Mirror the desktop launcher: wiki/memory hard-wired ON, per-project.
-    proc, base = boot("desktop", 8963, data, {
+    proc, base = boot("desktop", PORT_BASE + 2, data, {
         "ADK_CC_DESKTOP": "1",
+        # #130: the in-process librarian IS the desktop wiki publisher —
+        # fast cadence here so the live proof lands within the test window.
+        "ADK_CC_WIKI_LIBRARIAN_INTERVAL_S": "10",
+        "ADK_CC_WIKI_LIBRARIAN_DELAY_S": "0",
+        "ADK_CC_WIKI_LIBRARIAN_THRESHOLD": "1",
         "ADK_CC_WIKI": "1", "ADK_CC_WIKI_ROOT": os.path.join(data, "wiki"),
         "ADK_CC_MEMORY": "1",
         "ADK_CC_MEMORY_ROOT": os.path.join(data, "memory"),
@@ -436,8 +444,23 @@ def run_desktop(pw):
         import glob as _g
         inbox = _g.glob(os.path.join(data, "wiki", "local", "users", "*",
                                      "inbox", "*wal*"))
-        check("desktop", "wiki session: wiki_add lands in the inbox",
-              ok and bool(inbox), inbox)
+        merged = _g.glob(os.path.join(data, "wiki", "local", "users", "*",
+                                      "merged", "*wal*"))
+        check("desktop", "wiki session: wiki_add captured",
+              ok and bool(inbox or merged), (inbox, merged))
+        # #130 live proof: NO manual librarian run — the in-process
+        # scheduler/threshold must publish the domain page on its own,
+        # through the REAL model stack (registry endpoint).
+        dom = os.path.join(data, "wiki", "local", "domain", "wiki",
+                           "wal-checkpointing.md")
+        auto = False
+        for _ in range(25):
+            if os.path.isfile(dom):
+                auto = True
+                break
+            time.sleep(3)
+        check("desktop", "wiki: in-process librarian publishes UNAIDED "
+              "(#130)", auto, dom)
 
         s4 = mk("s-qna")
         ok = (api_turn(base, pid, s4,
@@ -484,8 +507,8 @@ def main() -> int:
     print(f"artifacts: {wdata}  {ddata}")
     if KEEP_UP:
         print("servers LEFT RUNNING for inspection:")
-        print("  web shell:     http://127.0.0.1:8961")
-        print("  desktop shell: http://127.0.0.1:8963")
+        print(f"  web shell:     http://127.0.0.1:{PORT_BASE}")
+        print(f"  desktop shell: http://127.0.0.1:{PORT_BASE + 2}")
         print(f"relaunch later: {BATTERY}/serve-web.sh · "
               f"{BATTERY}/serve-desktop.sh")
     return 1 if _failed else 0

@@ -390,6 +390,13 @@ fn spawn_backend(data: &PathBuf) -> std::io::Result<Child> {
         .env("ADK_CC_MEMORY", "1")
         .env("ADK_CC_MEMORY_ROOT", data.join("memory"))
         .env("ADK_CC_KNOWLEDGE_UI", "1")
+        // #130: desktop has no cron — the in-process librarian is what makes
+        // the wiki actually PUBLISH here. Interval sweep + publish-on-capture
+        // threshold + the personal wiki pass, all against the user's own
+        // model endpoint (idle ticks make zero model calls).
+        .env("ADK_CC_WIKI_LIBRARIAN_INTERVAL_S", "900")
+        .env("ADK_CC_WIKI_LIBRARIAN_THRESHOLD", "1")
+        .env("ADK_CC_PERSONAL_WIKI", "1")
         .env("ADK_CC_SANDBOX_BACKEND", "noop");
     // Packaged: adk_cc isn't pip-installed — import it from the shipped source
     // (deps live in the bundled python). Mirrors the dev editable install.

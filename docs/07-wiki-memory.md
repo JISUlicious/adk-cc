@@ -85,9 +85,22 @@ ADK_CC_MEMORY_CONSOLIDATE_THRESHOLD=2
 ```
 
 …or cron on multi-worker deployments: `scripts/memory_consolidator.py`
-hourly. The wiki librarian is **cron-only**: `scripts/wiki_librarian.py`
-(suggested `*/15 * * * *`) — without it, inbox notes never reach the
-shared pages.
+hourly. The wiki librarian runs **either way** (#130):
+
+- **cron** — `scripts/wiki_librarian.py` (suggested `*/15 * * * *`),
+  model-backed by default (`--no-model` opts out). The recommended mode
+  for multi-worker / multi-replica production.
+- **in-process** — `ADK_CC_WIKI_LIBRARIAN_INTERVAL_S=900` runs the same
+  model-backed merge from the server's own lifespan (single-worker; a
+  per-tenant lock makes any overlap a skip, never a race). Add
+  `ADK_CC_WIKI_LIBRARIAN_THRESHOLD=1` to also publish within seconds of
+  a `wiki_add`. `ADK_CC_WIKI_LIBRARIAN_MODEL=0` degrades to the
+  heuristic classifier for rate-limited endpoints. Idle ticks make zero
+  model calls — cost tracks captures, not uptime.
+
+Without either, inbox notes never reach the shared pages. The desktop
+app ships with the in-process librarian ON (15-min sweep + instant
+threshold + personal wiki) — the wiki publishes there with zero setup.
 
 **Knobs that matter** (full list: `.env.example`, group "Memory & Wiki"):
 
@@ -143,4 +156,6 @@ scope to the **authenticated** user; there is no cross-user view.
 3. Run the consolidator (or wait for the scheduler); the fact moves to
    `semantic/`, visible on the `/knowledge` memory tab.
 4. Ask the agent to `wiki_add` a domain fact; it appears in your inbox on
-   the wiki tab; run `scripts/wiki_librarian.py`; it merges into `domain/`.
+   the wiki tab. With the in-process librarian on (desktop default, or
+   `ADK_CC_WIKI_LIBRARIAN_THRESHOLD=1`) it merges into `domain/` within
+   seconds on its own; otherwise run `scripts/wiki_librarian.py`.
