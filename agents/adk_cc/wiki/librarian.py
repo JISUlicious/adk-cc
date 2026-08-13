@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional, Union
@@ -182,6 +183,9 @@ class MergeReport:
     skipped_no_promote: int = 0
     skipped_queued: int = 0
     pii_withheld: int = 0
+    # #130 P0: another librarian run held this tenant's single-writer lock —
+    # nothing was read or written; retry at the next tick/cron.
+    skipped_locked: bool = False
     actions: dict[str, int] = field(default_factory=dict)
     slugs_touched: list[str] = field(default_factory=list)
     quarantined: list[str] = field(default_factory=list)
@@ -198,10 +202,79 @@ class CompactReport:
     merged: int = 0           # domain pages folded away
     pages_before: int = 0
     pages_after: int = 0
+    skipped_locked: bool = False
     actions: dict[str, int] = field(default_factory=dict)
 
     def bump(self, action: str) -> None:
         self.actions[action] = self.actions.get(action, 0) + 1
+
+
+# ---- single-writer lock (#130 P0) -----------------------------------------
+# The librarian must be the ONLY writer to a tenant's wiki. Until now that
+# was enforced by cron discipline alone — two overlapping runs (a slow cron
+# beside the next tick, or cron beside the in-process scheduler) would race
+# on the shared domain pages. The lock makes every entry point safe:
+# whoever loses simply skips (skipped_locked) and the next tick retries.
+_TENANT_LOCKS: dict[str, "threading.Lock"] = {}
+_TENANT_LOCKS_GUARD = None  # created lazily to keep import light
+
+
+class _LibrarianLock:
+    """Non-blocking per-tenant lock: flock on <docstore base>/.librarian.lock
+    when the store is file-backed (covers cron + scheduler + other
+    processes), a process-global threading.Lock otherwise (or when flock is
+    unavailable). PersonalWikiView shares the base → the same lock
+    serializes domain and personal passes for a tenant."""
+
+    def __init__(self, store: WikiStore) -> None:
+        base = getattr(getattr(store, "store", None), "base", None)
+        self._path = (os.path.join(str(base), ".librarian.lock")
+                      if base else None)
+        self._key = str(base) if base else f"tenant:{store.tenant_id}"
+        self._fd: Optional[int] = None
+        self._tl = None
+
+    def acquire(self) -> bool:
+        if self._path:
+            try:
+                import fcntl
+
+                os.makedirs(os.path.dirname(self._path), exist_ok=True)
+                fd = os.open(self._path, os.O_CREAT | os.O_RDWR, 0o644)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    os.close(fd)
+                    return False
+                self._fd = fd
+                return True
+            except (ImportError, OSError):
+                pass  # no flock here — fall through to the in-process lock
+        import threading
+
+        global _TENANT_LOCKS_GUARD
+        if _TENANT_LOCKS_GUARD is None:
+            _TENANT_LOCKS_GUARD = threading.Lock()
+        with _TENANT_LOCKS_GUARD:
+            tl = _TENANT_LOCKS.setdefault(self._key, threading.Lock())
+        if tl.acquire(blocking=False):
+            self._tl = tl
+            return True
+        return False
+
+    def release(self) -> None:
+        if self._fd is not None:
+            try:
+                import fcntl
+
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+            except (ImportError, OSError):
+                pass
+            os.close(self._fd)
+            self._fd = None
+        if self._tl is not None:
+            self._tl.release()
+            self._tl = None
 
 
 class Librarian:
@@ -229,6 +302,18 @@ class Librarian:
     # -------------------------------------------------------------- run ----
     async def run(self) -> MergeReport:
         report = MergeReport(tenant_id=self.store.tenant_id)
+        lock = _LibrarianLock(self.store)
+        if not lock.acquire():
+            report.skipped_locked = True
+            _log.info("librarian: tenant %s is locked by another run — "
+                      "skipped", self.store.tenant_id)
+            return report
+        try:
+            return await self._run_locked(report)
+        finally:
+            lock.release()
+
+    async def _run_locked(self, report: MergeReport) -> MergeReport:
         clusters = await self._collect(report)
         # Publish-time PII refusal (#126 P1): wiki_add filters the inbox
         # door, but publish is where content crosses USERS — anything
@@ -467,6 +552,19 @@ class Librarian:
         pages against each other and folds duplicates that drifted (or that an
         improved resolver now recognizes), verified (Fix D) and logged for
         rollback. Single-writer (librarian) → safe to mutate the domain here."""
+        lock = _LibrarianLock(self.store)
+        if not lock.acquire():
+            report = CompactReport(tenant_id=self.store.tenant_id)
+            report.skipped_locked = True
+            _log.info("librarian: compact skipped — tenant %s locked",
+                      self.store.tenant_id)
+            return report
+        try:
+            return await self._compact_locked()
+        finally:
+            lock.release()
+
+    async def _compact_locked(self) -> "CompactReport":
         slugs = self.store.list_domain_pages()
         report = CompactReport(tenant_id=self.store.tenant_id, pages_before=len(slugs))
         if len(slugs) < 2:
