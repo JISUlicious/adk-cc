@@ -112,6 +112,13 @@ def build_fastapi_app(
     # server's lifetime. ADK wraps the passed lifespan in its own (async with
     # lifespan), so startup/shutdown both fire.
     from .memory_scheduler import make_consolidation_lifespan
+    # #130: the in-process wiki librarian rides the same lifespan — a
+    # combinator wraps the memory/warm lifespan with the librarian loop
+    # (OFF unless ADK_CC_WIKI_LIBRARIAN_INTERVAL_S > 0).
+    from .wiki_scheduler import make_wiki_lifespan
+
+    def _make_server_lifespan():
+        return make_wiki_lifespan(make_consolidation_lifespan())
 
     # Desktop file-based session store: register the `adkccfiles://` scheme so a
     # session_service_uri of that scheme resolves (via ADK's service registry) to
@@ -126,7 +133,7 @@ def build_fastapi_app(
         session_service_uri=session_service_uri,
         artifact_service_uri=artifact_uri,
         web=serve_web,
-        lifespan=make_consolidation_lifespan(),
+        lifespan=_make_server_lifespan(),
     )
 
     # Durable runs (Turn Broker — analysis/durable-runs-design.md): turns

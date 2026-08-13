@@ -693,6 +693,25 @@ FIELDS: list[Var] = [
         default=None, default_display="llm"),
     Var("ADK_CC_MEMORY_AUTOCAPTURE", Tier.ADVANCED, "Memory & Wiki",
         "Capture memories after turns (0 = recall-only).", default=True, parse=as_bool),
+    Var("ADK_CC_WIKI_LIBRARIAN_INTERVAL_S", Tier.ADVANCED, "Memory & Wiki",
+        "In-process librarian cadence in seconds (#130); 0/unset = OFF — "
+        "run the cron instead. Merges inbox notes into the shared wiki "
+        "from the server's own lifespan (single-worker deployments; the "
+        "per-tenant lock makes multi-worker overlap a skip, not a race). "
+        "Model-backed by default; idle ticks make zero model calls.",
+        default=None, default_display="0 (off; desktop launcher sets 900)"),
+    Var("ADK_CC_WIKI_LIBRARIAN_DELAY_S", Tier.ADVANCED, "Memory & Wiki",
+        "Boot-settle delay before the in-process librarian's first pass.",
+        default=None, default_display="120"),
+    Var("ADK_CC_WIKI_LIBRARIAN_MODEL", Tier.ADVANCED, "Memory & Wiki",
+        "=0: the in-process librarian runs heuristic-only (no LLM "
+        "classification/synthesis) — for rate-limited API-key endpoints. "
+        "The wiki is an LLM system; leave on where the endpoint allows.",
+        default=True, parse=as_bool),
+    Var("ADK_CC_WIKI_LIBRARIAN_PERSONAL_EVERY", Tier.ADVANCED, "Memory & Wiki",
+        "Run the personal-wiki pass every Nth scheduler tick (cost scales "
+        "per user; needs ADK_CC_PERSONAL_WIKI=1).",
+        default=None, default_display="4"),
     Var("ADK_CC_PERSONAL_WIKI", Tier.ADVANCED, "Memory & Wiki",
         "=1: the librarian cron also consolidates each user's notes into a "
         "PERSONAL wiki (users/<uid>/wiki) with the same merge engine "
