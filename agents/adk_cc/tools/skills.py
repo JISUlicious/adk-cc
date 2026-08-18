@@ -1848,10 +1848,11 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             # where the first attempt went wrong — `id(self._base_executor)`
             # changes per call, so every run looked cold and shipped 1.1 MB.
             res = await self._exec(invocation_context, self._wrapper(
-                cache, file_path, argv, None, tiers, deps))
+                cache, file_path, argv, None, tiers, deps, skill_name=name))
             if res.get("__needs_materialize__"):
                 res = await self._exec(invocation_context, self._wrapper(
-                    cache, file_path, argv, files, tiers, deps))
+                    cache, file_path, argv, files, tiers, deps,
+                    skill_name=name))
         except Exception as e:  # noqa: BLE001 — same shape as ADK's catch
             _log.exception("skill script '%s' of '%s' failed", file_path, name)
             return {"error": f"Failed to execute script '{file_path}':"
@@ -1887,7 +1888,8 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
 
     def _wrapper(self, cache: str, file_path: str, argv: list[str],
                  files: Optional[dict[str, Any]], tiers: list[str],
-                 deps: Optional[list[str]] = None) -> str:
+                 deps: Optional[list[str]] = None,
+                 skill_name: str = "") -> str:
         """The code that runs in the sandbox.
 
         Sent without `files` first: if this workspace already has the skill at
@@ -1910,6 +1912,9 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
         return "\n".join([
             # Read by the sandbox executor to size the analysis environment.
             f"# adk-cc-skill-tiers: {' '.join(tiers)}",
+            # Read by the sandbox executor to LABEL this run in the process
+            # panel (#131) — "skill: <name> <script>" beats a content hash.
+            f"# adk-cc-skill-script: {skill_name} {file_path}".rstrip(),
             "import os, sys, json as _json, shutil, subprocess",
             # This runs as its OWN process, so every name the generated code
             # uses has to exist in the generated code. The dep-install notes

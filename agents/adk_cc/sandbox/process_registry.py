@@ -81,6 +81,16 @@ class ProcessRecord:
     # REMOTE backends only: the log lives on the other machine and is pulled
     # on demand (a second long-lived channel per process would be worse).
     remote_log_path: str = ""
+    # #131: "background" (detached, outlives the turn) or "foreground" (a
+    # skill script / analysis run INSIDE a turn — visible while it runs,
+    # history afterwards).
+    kind: str = "background"
+    # Foreground only: the wrapped command writes its own pgid here (`$$` of
+    # the exec'd shell; noop's start_new_session makes it the group leader).
+    # Read LAZILY at terminate time — the executor never learns the pid.
+    pidfile_path: str = ""
+    # Foreground only: the exec's timeout budget, for elapsed/budget UI.
+    timeout_s: Optional[int] = None
 
     def elapsed_s(self) -> float:
         """Wall-clock age: how long it ran, or has been running."""
@@ -130,15 +140,22 @@ class ProcessRegistry:
     # ---- lifecycle ---------------------------------------------------
     def create(self, *, session_key: str, project_id: str, label: str,
                command: str, cwd: str, backend: str,
-               can_terminate: bool = True) -> ProcessRecord:
+               can_terminate: bool = True, kind: str = "background",
+               log_path: str = "", pidfile_path: str = "",
+               timeout_s: Optional[int] = None) -> ProcessRecord:
         pid_ = uuid.uuid4().hex[:12]
         rec = ProcessRecord(
             id=pid_, session_key=session_key, project_id=project_id,
             label=label or _label_from_command(command),
             command=_redact(command), cwd=cwd, backend=backend,
-            log_path=str(self.dir / f"{pid_}.log"),
-            can_terminate=can_terminate,
+            # Foreground runs may point the log at a workspace file the
+            # command itself writes — that's what makes the tail LIVE.
+            log_path=log_path or str(self.dir / f"{pid_}.log"),
+            can_terminate=can_terminate, kind=kind,
+            pidfile_path=pidfile_path, timeout_s=timeout_s,
         )
+        if kind == "foreground":
+            self._cap_foreground_history()
         # Port from the COMMAND, immediately: `--port 5173`, `-p 3000`,
         # `http.server 8000`. Log-sniffing (below) is better when the server
         # announces itself, but many do so only after a slow boot — and a dev
@@ -146,9 +163,47 @@ class ProcessRegistry:
         # gave up on.
         rec.port = _port_from_command(command)
         self._records[pid_] = rec
+        # A foreground log may live in the WORKSPACE (the redirected .out
+        # file) whose directory doesn't exist yet at record time.
+        Path(rec.log_path).parent.mkdir(parents=True, exist_ok=True)
         Path(rec.log_path).touch()
         self._save()
         return rec
+
+    _FOREGROUND_HISTORY_CAP = 20
+
+    def _cap_foreground_history(self) -> None:
+        """Foreground runs are frequent (every skill script); keep the list
+        useful by dropping the OLDEST finished ones past the cap. Background
+        records are never touched — those are the user's own processes."""
+        done = [r for r in self._records.values()
+                if r.kind == "foreground"
+                and r.status not in ("running", "starting")]
+        done.sort(key=lambda r: r.finished_at or r.started_at)
+        for old in done[: max(0, len(done) - self._FOREGROUND_HISTORY_CAP + 1)]:
+            self._records.pop(old.id, None)
+
+    def mark_running(self, pid_: str) -> None:
+        """Foreground: the exec is in flight; no pid is known host-side yet
+        (the pidfile carries it, read lazily at terminate time)."""
+        rec = self._records.get(pid_)
+        if rec:
+            rec.status = "running"
+            self._save()
+
+    def finalize_foreground(self, pid_: str, *, exit_code: Optional[int],
+                            timed_out: bool = False) -> None:
+        """Close a foreground record. Never downgrades a 'killed' verdict —
+        the terminate path already told the user what happened."""
+        rec = self._records.get(pid_)
+        if not rec:
+            return
+        if rec.status == "killed":
+            rec.finished_at = rec.finished_at or time.time()
+            self._save()
+            return
+        self.mark_exited(pid_, exit_code=exit_code,
+                         status="failed" if timed_out else "exited")
 
     def mark_started(self, pid_: str, *, pid: int, pgid: int) -> None:
         rec = self._records.get(pid_)
@@ -302,7 +357,18 @@ class ProcessRegistry:
         timeout path already uses, because killing only the shell leaves the
         real child (the server) alive holding the port."""
         rec = self._records.get(pid_)
-        if not rec or not rec.pgid:
+        if not rec:
+            return False
+        # #131 foreground: the pgid lives in the pidfile the wrapped command
+        # wrote as its first act (`echo $$ > …; exec cmd`). Read it lazily —
+        # a Stop that races the shell's first millisecond simply fails and
+        # the user clicks again.
+        if not rec.pgid and rec.pidfile_path:
+            try:
+                rec.pgid = int(Path(rec.pidfile_path).read_text().strip())
+            except Exception:  # noqa: BLE001 — not written yet / gone
+                return False
+        if not rec.pgid:
             return False
         if rec.status not in ("running", "starting"):
             return True
