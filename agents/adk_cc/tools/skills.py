@@ -2053,10 +2053,39 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             # data-analyst's premodel_audit hung for the FULL exec timeout and
             # returned nothing, surfacing as "no output from the skill-script
             # launcher"; the identical command with </dev/null finished in 5s.
-            "    _r = subprocess.run(_cmd + [_abs] + _argv, capture_output=True,",
-            f"        text=True, timeout={timeout!r}, cwd=os.getcwd(),",
-            "        stdin=subprocess.DEVNULL)",
-            "    _emit(stdout=_r.stdout, stderr=_r.stderr, returncode=_r.returncode)",
+            # STREAM the child's stdout line-by-line to the wrapper's own
+            # stdout (#131): the executor redirects that stream to a file the
+            # process panel tails, so a slow script's progress is visible
+            # LIVE. The envelope parser scans lines in REVERSE for the JSON
+            # result, so mirrored lines ahead of it are harmless. stderr
+            # stays fully captured (a tee'd pipe pair risks deadlock; stderr
+            # is rarely the live signal).
+            "    import tempfile as _tf, time as _time, threading as _th",
+            "    _ef = _tf.TemporaryFile(mode='w+')",
+            "    _p = subprocess.Popen(_cmd + [_abs] + _argv,",
+            "        stdout=subprocess.PIPE, stderr=_ef, text=True,",
+            "        stdin=subprocess.DEVNULL, cwd=os.getcwd())",
+            # A read loop alone cannot time out a SILENT child (it blocks on
+            # the pipe) — a sleeping watchdog enforces the deadline whether
+            # or not the script ever prints again.
+            f"    _deadline = _time.monotonic() + {timeout!r}",
+            "    _timed_out = []",
+            "    def _watch():",
+            "        _left = _deadline - _time.monotonic()",
+            "        if _left > 0: _time.sleep(_left)",
+            "        if _p.poll() is None:",
+            "            _timed_out.append(True); _p.kill()",
+            "    _th.Thread(target=_watch, daemon=True).start()",
+            "    _lines = []",
+            "    for _ln in _p.stdout:",
+            "        _lines.append(_ln)",
+            "        print(_ln, end='', flush=True)",
+            "    _rc = _p.wait()",
+            "    if _timed_out:",
+            "        raise subprocess.TimeoutExpired(_cmd, "
+            f"{timeout!r}, output=''.join(_lines))",
+            "    _ef.seek(0)",
+            "    _emit(stdout=''.join(_lines), stderr=_ef.read(), returncode=_rc)",
             "except subprocess.TimeoutExpired as _e:",
             # TimeoutExpired carries BYTES even under text=True (CPython
             # decodes only on the success path), so emitting it raw raised

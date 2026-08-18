@@ -317,9 +317,11 @@ class SandboxBackedCodeExecutor(BaseCodeExecutor):
                 pidfile_path=pidfile_path,
                 timeout_s=self.timeout_seconds,
             )
+            _log.info("foreground record %s: %s", rec.id, label)
             return rec.id
-        except Exception as e:  # noqa: BLE001
-            _log.debug("foreground record skipped: %s", e)
+        except Exception as e:  # noqa: BLE001 — visibility must never break a run
+            _log.warning("foreground record skipped (%s: %s)",
+                         type(e).__name__, e)
             return None
 
     def _mark_running(self, rec_id: Optional[str]) -> None:

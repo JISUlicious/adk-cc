@@ -293,6 +293,10 @@ def build_fastapi_app(
         except Exception:  # noqa: BLE001 — never block startup
             pass
     mount_desktop_routes(fastapi_app)
+    # #131: the process panel's API serves BOTH shells (it lived inside the
+    # desktop mount and silently 404'd on web).
+    from .desktop_routes import mount_process_routes
+    mount_process_routes(fastapi_app)
     # Desktop layered settings (global + per-project MCP/skills/secrets, global
     # models) over the same stores the agent reads — no-auth, scope-keyed.
     from .desktop_settings import mount_desktop_settings_routes
