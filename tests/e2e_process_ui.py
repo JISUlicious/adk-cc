@@ -117,7 +117,7 @@ def main() -> int:  # noqa: PLR0915
                          "Run scripts/slow.py with run_skill_script.\n")
             with open(os.path.join(sk, "scripts", "slow.py"), "w") as fh:
                 fh.write("import time\n"
-                         "for i in range(90):\n"
+                         "for i in range(240):\n"
                          "    print(f'tick {i}', flush=True)\n"
                          "    time.sleep(1)\n"
                          "print('DONE')\n")
@@ -166,17 +166,47 @@ def main() -> int:  # noqa: PLR0915
             page.screenshot(path=os.path.join(OUT, "1-running.png"))
 
             # ---- live tail in the drawer ---------------------------------
-            if page.locator("[data-process-dock] button").count() > 0:
-                page.locator("[data-process-dock] button").first.click()
-            tick_seen = False
-            for _ in range(20):
-                page.wait_for_timeout(1000)
-                if page.get_by_text("tick", exact=False).count() > 0:
-                    tick_seen = True
+            # The FIRST exec is the materialisation probe (it also builds
+            # the analysis venv, cold) — the script itself is a SECOND
+            # record. Find the running record whose log already ticks, then
+            # open ITS drawer.
+            tick_rec = None
+            for _ in range(180):
+                time.sleep(1)
+                try:
+                    rows_ = requests.get(
+                        f"{BASE}/api/processes?project_id=alice",
+                        timeout=5).json()["processes"]
+                    for r_ in rows_:
+                        if r_["status"] != "running":
+                            continue
+                        lg = requests.get(
+                            f"{BASE}/api/processes/{r_['id']}/log",
+                            timeout=5).json().get("log", "")
+                        if "tick" in lg:
+                            tick_rec = r_["id"]
+                            break
+                except Exception:
+                    pass
+                if tick_rec:
                     break
+            check("a running record's log carries live ticks (API)",
+                  bool(tick_rec))
+            tick_seen = False
+            if tick_rec:
+                page.locator(f'[data-process="{tick_rec}"]') \
+                    .get_by_role("button").first.click()
+                for _ in range(15):
+                    page.wait_for_timeout(1000)
+                    if page.locator("[data-process-log]").get_by_text(
+                            "tick", exact=False).count() > 0:
+                        tick_seen = True
+                        break
             check("log drawer tails the ticks LIVE", tick_seen)
             page.screenshot(path=os.path.join(OUT, "2-live-log.png"))
-            page.keyboard.press("Escape")
+            close = page.get_by_label("Close log")
+            if close.count() > 0:
+                close.first.click()  # the drawer overlays the Stop button
             page.wait_for_timeout(500)
 
             # ---- Stop mid-run --------------------------------------------
@@ -195,7 +225,7 @@ def main() -> int:  # noqa: PLR0915
 
             # ---- the TURN survives the Stop ------------------------------
             replied = False
-            for _ in range(60):
+            for _ in range(120):
                 page.wait_for_timeout(2000)
                 if page.get_by_text("tick", exact=False).count() > 1:
                     # the model's reply quotes the partial output

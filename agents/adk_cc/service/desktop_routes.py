@@ -322,59 +322,6 @@ def mount_desktop_routes(app) -> None:
             raise HTTPException(status_code=400, detail="project has no bound repo")
         return repo
 
-    def _remote_backend_for(rec):  # noqa: ANN001, ANN202
-        """A throwaway backend able to reach the host `rec` runs on, or None.
-
-        Remote work (terminate, log tail) has to travel over the SAME channel
-        that started it — a remote pgid is meaningless to this host, and
-        signalling it locally would hit an unrelated local process. Cheap to
-        build: the ssh transport is a shared per-host ControlMaster, so this
-        reuses the live connection rather than opening one.
-        """
-        if rec.backend != "ssh":
-            return None
-        try:
-            from ..sandbox.backends.ssh_backend import SshBackend
-            from ..sandbox.ssh_transport import get_transport
-            from .desktop_workspace import project_remote
-
-            remote = project_remote(rec.project_id)
-            if not remote:
-                return None
-            return SshBackend(
-                session_id=rec.session_key or "processes",
-                tenant_id="local",
-                transport=get_transport(str(remote["host"]),
-                                        port=remote.get("port") or None),
-                workspace_path=str(remote["path"]),
-            )
-        except Exception:  # noqa: BLE001 — an unreachable host is not a 500
-            return None
-
-    def _audit_process(kind: str, rec) -> None:  # noqa: ANN001
-        """Record a human's process action. A background process outlives the
-        turn that started it, so "who stopped my server" has no trace in the
-        session transcript — this is the only place it can be answered."""
-        try:
-            from ..plugins.audit import emit_audit_event, is_audit_enabled
-
-            if not is_audit_enabled():
-                return
-            emit_audit_event({
-                "event": kind,
-                "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
-                "process_id": rec.id,
-                "project_id": rec.project_id,
-                "session_key": rec.session_key,
-                "backend": rec.backend,
-                "label": rec.label,
-                "command": rec.command,   # already redacted by the registry
-                "pid": rec.pid,
-                "elapsed_s": round(rec.elapsed_s(), 1),
-                "actor": "user",
-            })
-        except Exception:  # noqa: BLE001 — audit must never break a route
-            pass
 
     @app.get("/desktop/checkpoint/list", include_in_schema=False)
     async def checkpoint_list(request: Request):  # noqa: ANN202
@@ -454,6 +401,59 @@ def mount_process_routes(app) -> None:
     polled forever against nothing. Registry scoping (project_id) and the
     remote-backend log/terminate plumbing are shell-agnostic, so mount
     them unconditionally from server.py."""
+    def _remote_backend_for(rec):  # noqa: ANN001, ANN202
+        """A throwaway backend able to reach the host `rec` runs on, or None.
+
+        Remote work (terminate, log tail) has to travel over the SAME channel
+        that started it — a remote pgid is meaningless to this host, and
+        signalling it locally would hit an unrelated local process. Cheap to
+        build: the ssh transport is a shared per-host ControlMaster, so this
+        reuses the live connection rather than opening one.
+        """
+        if rec.backend != "ssh":
+            return None
+        try:
+            from ..sandbox.backends.ssh_backend import SshBackend
+            from ..sandbox.ssh_transport import get_transport
+            from .desktop_workspace import project_remote
+
+            remote = project_remote(rec.project_id)
+            if not remote:
+                return None
+            return SshBackend(
+                session_id=rec.session_key or "processes",
+                tenant_id="local",
+                transport=get_transport(str(remote["host"]),
+                                        port=remote.get("port") or None),
+                workspace_path=str(remote["path"]),
+            )
+        except Exception:  # noqa: BLE001 — an unreachable host is not a 500
+            return None
+
+    def _audit_process(kind: str, rec) -> None:  # noqa: ANN001
+        """Record a human's process action. A background process outlives the
+        turn that started it, so "who stopped my server" has no trace in the
+        session transcript — this is the only place it can be answered."""
+        try:
+            from ..plugins.audit import emit_audit_event, is_audit_enabled
+
+            if not is_audit_enabled():
+                return
+            emit_audit_event({
+                "event": kind,
+                "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                "process_id": rec.id,
+                "project_id": rec.project_id,
+                "session_key": rec.session_key,
+                "backend": rec.backend,
+                "label": rec.label,
+                "command": rec.command,   # already redacted by the registry
+                "pid": rec.pid,
+                "elapsed_s": round(rec.elapsed_s(), 1),
+                "actor": "user",
+            })
+        except Exception:  # noqa: BLE001 — audit must never break a route
+            pass
     # ---- long-running background processes (#108) --------------------
     # Scoped by PROJECT, not session: a dev server started in one session is
     # still what occupies the port in the next, and per-session scoping is how
