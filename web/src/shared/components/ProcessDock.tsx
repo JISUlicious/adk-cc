@@ -25,6 +25,10 @@ export type ProcessRow = {
   elapsed_s: number
   can_terminate: boolean
   adopted: boolean
+  /** #131: "foreground" = a skill script / analysis run inside a turn. */
+  kind?: "background" | "foreground"
+  /** Foreground only: the exec's timeout budget (elapsed/budget display). */
+  timeout_s?: number | null
 }
 
 const DOT: Record<ProcessRow["status"], string> = {
@@ -45,10 +49,18 @@ function fmt(s: number): string {
 }
 
 function statusText(p: ProcessRow): string {
-  if (p.status === "running" || p.status === "starting") return fmt(p.elapsed_s)
+  if (p.status === "running" || p.status === "starting") {
+    // A foreground run has a known budget — show how much of it is spent.
+    if (p.kind === "foreground" && p.timeout_s) {
+      return `${fmt(p.elapsed_s)} / ${fmt(p.timeout_s)}`
+    }
+    return fmt(p.elapsed_s)
+  }
   if (p.status === "killed") return "stopped"          // NOT "crashed": the
   // user pressed Stop; asking them to debug their own action is hostile.
-  if (p.status === "failed") return `exit ${p.exit_code ?? "?"}`
+  if (p.status === "failed")
+    return p.kind === "foreground" && p.exit_code == null
+      ? "timed out" : `exit ${p.exit_code ?? "?"}`
   if (p.status === "unknown") return "from an earlier session"
   return `exit ${p.exit_code ?? 0}`
 }
@@ -108,6 +120,12 @@ export function ProcessDock({
 
   if (rows.length === 0) return null
 
+  // #131: a foreground run (a skill script inside the CURRENT turn) is a
+  // different question than a background server — show it first, badged.
+  const fg = rows.filter((r) => r.kind === "foreground")
+  const bg = rows.filter((r) => r.kind !== "foreground")
+  const ordered = [...fg, ...bg]
+
   return (
     <div className="border-t border-border bg-card/30 px-3 py-2" data-process-dock>
       <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
@@ -118,12 +136,20 @@ export function ProcessDock({
         </span>
       </div>
       <div className="space-y-0.5">
-        {rows.slice(0, 6).map((p) => {
+        {ordered.slice(0, 8).map((p) => {
           const isLive = p.status === "running" || p.status === "starting"
           return (
             <div key={p.id} className="flex items-center gap-1.5 text-[11px]"
                  data-process={p.id}>
               <span className={`h-2 w-2 shrink-0 rounded-full ${DOT[p.status]}`} />
+              {p.kind === "foreground" && (
+                <span
+                  className="shrink-0 rounded bg-accent px-1 text-[9px] uppercase tracking-wide text-muted-foreground"
+                  title="A script the agent is running inside the current turn"
+                >
+                  script
+                </span>
+              )}
               <button
                 type="button"
                 onClick={() => onOpenLog?.(p)}

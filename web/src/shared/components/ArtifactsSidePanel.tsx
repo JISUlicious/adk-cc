@@ -13,6 +13,8 @@ import { UploadsList, WebFileViewer } from "./WorkspaceFilesPanel"
 import { fetchArtifact } from "@/shared/api/artifacts"
 import { isImage, isPdf } from "@/shared/lib/filetypes"
 import { SubagentsDock } from "@/shared/components/SubagentsDock"
+import { ProcessDock, type ProcessRow } from "@/shared/components/ProcessDock"
+import { ProcessLogDrawer } from "@/shared/components/ProcessLogDrawer"
 import { CodeView } from "@/shared/components/CodeView"
 import { Markdown } from "@/shared/lib/markdown"
 import { isMarkdown, langFromPath } from "@/shared/lib/filetypes"
@@ -51,6 +53,7 @@ export function ArtifactsSidePanel({
   // Workspace-file viewer (uploads): a flat section below the artifact
   // list, NOT a separate tree — see WorkspaceFilesPanel.tsx for why.
   const [fileSel, setFileSel] = useState<string | null>(null)
+  const [logProcess, setLogProcess] = useState<ProcessRow | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -105,7 +108,15 @@ export function ArtifactsSidePanel({
       open={open}
       onClose={onClose}
       headerRight={refresh}
-      footer={<SubagentsDock appName={appName} userId={userId} sessionId={sessionId} />}
+      footer={
+        <>
+          <SubagentsDock appName={appName} userId={userId} sessionId={sessionId} />
+          {/* #131: foreground skill/analysis runs + background processes —
+              the web shell scopes by user (its "project"). */}
+          <ProcessDock projectId={userId} onOpenLog={setLogProcess} />
+          <ProcessLogDrawer process={logProcess} onClose={() => setLogProcess(null)} />
+        </>
+      }
     >
       {fileSel ? (
         <WebFileViewer

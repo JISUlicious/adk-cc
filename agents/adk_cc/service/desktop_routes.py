@@ -322,6 +322,85 @@ def mount_desktop_routes(app) -> None:
             raise HTTPException(status_code=400, detail="project has no bound repo")
         return repo
 
+
+    @app.get("/desktop/checkpoint/list", include_in_schema=False)
+    async def checkpoint_list(request: Request):  # noqa: ANN202
+        q = request.query_params
+        project_id = q.get("project_id") or ""
+        session_id = q.get("session_id") or ""
+        if not project_id or not session_id:
+            raise HTTPException(status_code=400, detail="project_id and session_id required")
+        from .desktop_checkpoint import list_checkpoints, remote_checkpoint_supported
+
+        remote = project_remote(project_id)
+        if remote:
+            # Remote project: the log is local (instant), the shadow git is on
+            # the remote. `supported:false` when the remote lacks git — the
+            # panel shows WHY undo is unavailable instead of silently nothing.
+            from ..sandbox.ssh_transport import get_transport
+
+            supported = await remote_checkpoint_supported(
+                get_transport(str(remote["host"]), port=remote.get("port") or None)
+            )
+            return {
+                "checkpoints": list_checkpoints(project_id, session_id),
+                "supported": supported,
+                **({} if supported else {"reason": "remote device has no git — undo is unavailable"}),
+            }
+        _project_root(project_id)  # validate (ignore root here)
+        return {"checkpoints": list_checkpoints(project_id, session_id), "supported": True}
+
+    @app.post("/desktop/checkpoint/restore", include_in_schema=False)
+    async def checkpoint_restore(request: Request):  # noqa: ANN202
+        body = await request.json() or {}
+        project_id = str(body.get("project_id") or "")
+        session_id = str(body.get("session_id") or "")
+        # Unique checkpoint id (not the git sha, which can repeat). Optional →
+        # default: most recent (undo last turn). Accept legacy "sha" as a fallback.
+        checkpoint_id = body.get("id") or body.get("sha")
+        if not project_id or not session_id:
+            raise HTTPException(status_code=400, detail="project_id and session_id required")
+        from .desktop_checkpoint import restore, restore_remote
+
+        remote = project_remote(project_id)
+        if remote:
+            from ..sandbox.ssh_transport import get_transport
+
+            result = await restore_remote(
+                project_id,
+                session_id,
+                get_transport(str(remote["host"]), port=remote.get("port") or None),
+                str(remote["path"]).rstrip("/"),
+                checkpoint_id=checkpoint_id or None,
+            )
+        else:
+            root = _project_root(project_id)
+            result = restore(project_id, session_id, root, checkpoint_id=checkpoint_id or None)
+        # Roll the CONVERSATION back to that turn too (files + chat, like a real
+        # rewind) — truncate the session's events from the checkpoint's invocation
+        # onward. Best-effort: a hiccup here must not fail the (already-done) file
+        # restore.
+        inv = result.get("invocation_id") if isinstance(result, dict) else None
+        if isinstance(result, dict) and result.get("status") == "ok" and inv:
+            try:
+                from .. import deployment
+                from .file_session_service import FileSessionService
+
+                fss = FileSessionService(deployment.session_store_root())
+                result["events_kept"] = await fss.truncate_before_invocation(
+                    user_id=project_id, session_id=session_id, invocation_id=inv
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        return result
+
+
+def mount_process_routes(app) -> None:
+    """#131: the process panel's API, BOTH shells. These routes were born
+    inside mount_desktop_routes and silently 404'd on web — the dock
+    polled forever against nothing. Registry scoping (project_id) and the
+    remote-backend log/terminate plumbing are shell-agnostic, so mount
+    them unconditionally from server.py."""
     def _remote_backend_for(rec):  # noqa: ANN001, ANN202
         """A throwaway backend able to reach the host `rec` runs on, or None.
 
@@ -375,7 +454,6 @@ def mount_desktop_routes(app) -> None:
             })
         except Exception:  # noqa: BLE001 — audit must never break a route
             pass
-
     # ---- long-running background processes (#108) --------------------
     # Scoped by PROJECT, not session: a dev server started in one session is
     # still what occupies the port in the next, and per-session scoping is how
@@ -452,73 +530,3 @@ def mount_desktop_routes(app) -> None:
                 status_code=409, detail="still running (stop it first)")
         return {"id": process_id, "forgotten": True}
 
-    @app.get("/desktop/checkpoint/list", include_in_schema=False)
-    async def checkpoint_list(request: Request):  # noqa: ANN202
-        q = request.query_params
-        project_id = q.get("project_id") or ""
-        session_id = q.get("session_id") or ""
-        if not project_id or not session_id:
-            raise HTTPException(status_code=400, detail="project_id and session_id required")
-        from .desktop_checkpoint import list_checkpoints, remote_checkpoint_supported
-
-        remote = project_remote(project_id)
-        if remote:
-            # Remote project: the log is local (instant), the shadow git is on
-            # the remote. `supported:false` when the remote lacks git — the
-            # panel shows WHY undo is unavailable instead of silently nothing.
-            from ..sandbox.ssh_transport import get_transport
-
-            supported = await remote_checkpoint_supported(
-                get_transport(str(remote["host"]), port=remote.get("port") or None)
-            )
-            return {
-                "checkpoints": list_checkpoints(project_id, session_id),
-                "supported": supported,
-                **({} if supported else {"reason": "remote device has no git — undo is unavailable"}),
-            }
-        _project_root(project_id)  # validate (ignore root here)
-        return {"checkpoints": list_checkpoints(project_id, session_id), "supported": True}
-
-    @app.post("/desktop/checkpoint/restore", include_in_schema=False)
-    async def checkpoint_restore(request: Request):  # noqa: ANN202
-        body = await request.json() or {}
-        project_id = str(body.get("project_id") or "")
-        session_id = str(body.get("session_id") or "")
-        # Unique checkpoint id (not the git sha, which can repeat). Optional →
-        # default: most recent (undo last turn). Accept legacy "sha" as a fallback.
-        checkpoint_id = body.get("id") or body.get("sha")
-        if not project_id or not session_id:
-            raise HTTPException(status_code=400, detail="project_id and session_id required")
-        from .desktop_checkpoint import restore, restore_remote
-
-        remote = project_remote(project_id)
-        if remote:
-            from ..sandbox.ssh_transport import get_transport
-
-            result = await restore_remote(
-                project_id,
-                session_id,
-                get_transport(str(remote["host"]), port=remote.get("port") or None),
-                str(remote["path"]).rstrip("/"),
-                checkpoint_id=checkpoint_id or None,
-            )
-        else:
-            root = _project_root(project_id)
-            result = restore(project_id, session_id, root, checkpoint_id=checkpoint_id or None)
-        # Roll the CONVERSATION back to that turn too (files + chat, like a real
-        # rewind) — truncate the session's events from the checkpoint's invocation
-        # onward. Best-effort: a hiccup here must not fail the (already-done) file
-        # restore.
-        inv = result.get("invocation_id") if isinstance(result, dict) else None
-        if isinstance(result, dict) and result.get("status") == "ok" and inv:
-            try:
-                from .. import deployment
-                from .file_session_service import FileSessionService
-
-                fss = FileSessionService(deployment.session_store_root())
-                result["events_kept"] = await fss.truncate_before_invocation(
-                    user_id=project_id, session_id=session_id, invocation_id=inv
-                )
-            except Exception:  # noqa: BLE001
-                pass
-        return result

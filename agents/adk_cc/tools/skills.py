@@ -1848,10 +1848,11 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             # where the first attempt went wrong — `id(self._base_executor)`
             # changes per call, so every run looked cold and shipped 1.1 MB.
             res = await self._exec(invocation_context, self._wrapper(
-                cache, file_path, argv, None, tiers, deps))
+                cache, file_path, argv, None, tiers, deps, skill_name=name))
             if res.get("__needs_materialize__"):
                 res = await self._exec(invocation_context, self._wrapper(
-                    cache, file_path, argv, files, tiers, deps))
+                    cache, file_path, argv, files, tiers, deps,
+                    skill_name=name))
         except Exception as e:  # noqa: BLE001 — same shape as ADK's catch
             _log.exception("skill script '%s' of '%s' failed", file_path, name)
             return {"error": f"Failed to execute script '{file_path}':"
@@ -1887,7 +1888,8 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
 
     def _wrapper(self, cache: str, file_path: str, argv: list[str],
                  files: Optional[dict[str, Any]], tiers: list[str],
-                 deps: Optional[list[str]] = None) -> str:
+                 deps: Optional[list[str]] = None,
+                 skill_name: str = "") -> str:
         """The code that runs in the sandbox.
 
         Sent without `files` first: if this workspace already has the skill at
@@ -1910,6 +1912,9 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
         return "\n".join([
             # Read by the sandbox executor to size the analysis environment.
             f"# adk-cc-skill-tiers: {' '.join(tiers)}",
+            # Read by the sandbox executor to LABEL this run in the process
+            # panel (#131) — "skill: <name> <script>" beats a content hash.
+            f"# adk-cc-skill-script: {skill_name} {file_path}".rstrip(),
             "import os, sys, json as _json, shutil, subprocess",
             # This runs as its OWN process, so every name the generated code
             # uses has to exist in the generated code. The dep-install notes
@@ -2048,10 +2053,39 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             # data-analyst's premodel_audit hung for the FULL exec timeout and
             # returned nothing, surfacing as "no output from the skill-script
             # launcher"; the identical command with </dev/null finished in 5s.
-            "    _r = subprocess.run(_cmd + [_abs] + _argv, capture_output=True,",
-            f"        text=True, timeout={timeout!r}, cwd=os.getcwd(),",
-            "        stdin=subprocess.DEVNULL)",
-            "    _emit(stdout=_r.stdout, stderr=_r.stderr, returncode=_r.returncode)",
+            # STREAM the child's stdout line-by-line to the wrapper's own
+            # stdout (#131): the executor redirects that stream to a file the
+            # process panel tails, so a slow script's progress is visible
+            # LIVE. The envelope parser scans lines in REVERSE for the JSON
+            # result, so mirrored lines ahead of it are harmless. stderr
+            # stays fully captured (a tee'd pipe pair risks deadlock; stderr
+            # is rarely the live signal).
+            "    import tempfile as _tf, time as _time, threading as _th",
+            "    _ef = _tf.TemporaryFile(mode='w+')",
+            "    _p = subprocess.Popen(_cmd + [_abs] + _argv,",
+            "        stdout=subprocess.PIPE, stderr=_ef, text=True,",
+            "        stdin=subprocess.DEVNULL, cwd=os.getcwd())",
+            # A read loop alone cannot time out a SILENT child (it blocks on
+            # the pipe) — a sleeping watchdog enforces the deadline whether
+            # or not the script ever prints again.
+            f"    _deadline = _time.monotonic() + {timeout!r}",
+            "    _timed_out = []",
+            "    def _watch():",
+            "        _left = _deadline - _time.monotonic()",
+            "        if _left > 0: _time.sleep(_left)",
+            "        if _p.poll() is None:",
+            "            _timed_out.append(True); _p.kill()",
+            "    _th.Thread(target=_watch, daemon=True).start()",
+            "    _lines = []",
+            "    for _ln in _p.stdout:",
+            "        _lines.append(_ln)",
+            "        print(_ln, end='', flush=True)",
+            "    _rc = _p.wait()",
+            "    if _timed_out:",
+            "        raise subprocess.TimeoutExpired(_cmd, "
+            f"{timeout!r}, output=''.join(_lines))",
+            "    _ef.seek(0)",
+            "    _emit(stdout=''.join(_lines), stderr=_ef.read(), returncode=_rc)",
             "except subprocess.TimeoutExpired as _e:",
             # TimeoutExpired carries BYTES even under text=True (CPython
             # decodes only on the success path), so emitting it raw raised
