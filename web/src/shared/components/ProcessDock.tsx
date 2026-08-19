@@ -29,7 +29,16 @@ export type ProcessRow = {
   kind?: "background" | "foreground"
   /** Foreground only: the exec's timeout budget (elapsed/budget display). */
   timeout_s?: number | null
+  /** Epoch seconds when the run ended (drives the auto-clear grace). */
+  finished_at?: number | null
 }
+
+// Finished FOREGROUND rows auto-clear after this grace (user report: every
+// skill run left an 'exited' row and the panel silted up). Long enough to
+// read the outcome; the record + log stay in the registry, and the turn's
+// chat result carries any failure. Background rows keep the explicit X —
+// "my server exited" must not silently vanish.
+const FOREGROUND_LINGER_S = 6
 
 const DOT: Record<ProcessRow["status"], string> = {
   starting: "bg-amber-500",
@@ -74,6 +83,19 @@ export function ProcessDock({
 }) {
   const [rows, setRows] = useState<ProcessRow[]>([])
   const [busy, setBusy] = useState<string | null>(null)
+  const [nowS, setNowS] = useState(() => Date.now() / 1000)
+
+  // The auto-clear must fire BETWEEN fetches (idle polling is 15s): tick a
+  // local clock while any finished foreground row is still lingering.
+  const lingering = rows.some(
+    (r) => r.kind === "foreground" && r.finished_at
+      && nowS - r.finished_at < FOREGROUND_LINGER_S,
+  )
+  useEffect(() => {
+    if (!lingering) return
+    const iv = setInterval(() => setNowS(Date.now() / 1000), 1000)
+    return () => clearInterval(iv)
+  }, [lingering])
 
   const reload = useCallback(() => {
     if (!projectId) return
@@ -118,13 +140,18 @@ export function ProcessDock({
     }
   }
 
-  if (rows.length === 0) return null
-
   // #131: a foreground run (a skill script inside the CURRENT turn) is a
-  // different question than a background server — show it first, badged.
-  const fg = rows.filter((r) => r.kind === "foreground")
+  // different question than a background server — show it first, badged;
+  // clear it a few seconds after it finishes.
+  const fg = rows.filter(
+    (r) =>
+      r.kind === "foreground" &&
+      (!r.finished_at || nowS - r.finished_at < FOREGROUND_LINGER_S),
+  )
   const bg = rows.filter((r) => r.kind !== "foreground")
   const ordered = [...fg, ...bg]
+
+  if (ordered.length === 0) return null
 
   return (
     <div className="border-t border-border bg-card/30 px-3 py-2" data-process-dock>

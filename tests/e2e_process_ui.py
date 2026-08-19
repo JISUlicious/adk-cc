@@ -223,6 +223,17 @@ def main() -> int:  # noqa: PLR0915
             check("row flips to 'stopped'", stopped)
             page.screenshot(path=os.path.join(OUT, "3-stopped.png"))
 
+            # Finished foreground rows AUTO-CLEAR after a short grace (user
+            # report: the panel silted up with 'exited' rows).
+            cleared = False
+            for _ in range(15):
+                page.wait_for_timeout(1000)
+                if page.get_by_text("stopped", exact=False).count() == 0:
+                    cleared = True
+                    break
+            check("stopped row auto-clears after the grace period", cleared)
+            page.screenshot(path=os.path.join(OUT, "3b-autocleared.png"))
+
             # ---- the TURN survives the Stop ------------------------------
             replied = False
             for _ in range(120):
