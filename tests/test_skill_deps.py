@@ -61,6 +61,21 @@ _skill("manifested", {
 _skill("satisfied", {"go.py": (
     "import os, json\nimport numpy as np\nimport pandas as pd\n"
     "from sklearn import tree\nimport helper\n"), "helper.py": "pass\n"})
+# Client report (mlcc): the dep lives in a SIBLING module, and bare
+# psycopg2 is a source build no sandbox can compile.
+_skill("sibling-dep", {
+    "recommend.py": "import json\nimport common\nprint('x')\n",
+    "common.py": "import psycopg2\n"})
+# Client report variant: the sibling module sits at the SKILL ROOT, which
+# ADK's resource loader never exposes.
+_skill("root-dep", {"run.py": "import json\nimport common\n"})
+(_ROOT / "root-dep" / "common.py").write_text("import psycopg2\n")
+# Explicit declaration in SKILL.md metadata.
+(_ROOT / "declared" / "scripts").mkdir(parents=True, exist_ok=True)
+(_ROOT / "declared" / "SKILL.md").write_text(
+    "---\nname: declared\ndescription: Declared reqs.\nmetadata:\n"
+    "  x-adk-cc/requirements: |\n    psycopg2-binary>=2.9, requests\n---\n\nBody.\n")
+(_ROOT / "declared" / "scripts" / "go.py").write_text("import requests\n")
 
 
 def main() -> int:
@@ -140,6 +155,32 @@ def main() -> int:
     detail = (ctx.requested[0] or {}).get("detail", "") if ctx.requested else ""
     check("and stays quiet when nothing needs installing",
           "install into the analysis" not in detail, detail[-120:])
+
+    # --- client-reported shapes (2026-08-19) ------------------------------
+    got = collect_requirements(skills["sibling-dep"])
+    check("a sibling module's import is found AND mapped to the wheel dist",
+          got == ["psycopg2-binary"], got)
+    got = collect_requirements(skills["root-dep"],
+                               skill_dir=str(_ROOT / "root-dep"))
+    check("a ROOT-level module is scanned for ITS imports (skill_dir)",
+          "psycopg2-binary" in got, got)
+    check("...and is never mistaken for a PyPI dist itself",
+          "common" not in got, got)
+    got_no_dir = collect_requirements(skills["root-dep"])
+    check("without skill_dir the old (blind) behavior is unchanged",
+          got_no_dir == ["common"], got_no_dir)
+    got = collect_requirements(skills["declared"])
+    check("x-adk-cc/requirements declaration wins, specifiers kept",
+          got[0] == "psycopg2-binary>=2.9" and "requests" in got, got)
+
+    # --- the wrapper announces the per-skill data dir ----------------------
+    code = ex._wrapper(".adk-cc/skill-runtime/sibling-dep/abc",
+                       "scripts/recommend.py", [], None, [], [],
+                       skill_name="sibling-dep")
+    check("wrapper exports SKILL_DATA_DIR + namespaced twin",
+          "os.environ.setdefault('SKILL_DATA_DIR', _sd)" in code
+          and "ADK_CC_SKILL_DATA_DIR" in code
+          and "'skill-data', 'sibling-dep'" in code, code[:160])
 
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0

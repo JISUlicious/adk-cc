@@ -1840,7 +1840,8 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
 
         try:
             tiers = _skill_import_tiers(files)
-            deps = skill_deps.collect_requirements(skill)
+            deps = skill_deps.collect_requirements(
+                skill, skill_dir=_skill_dir_for(name, _SKILL_DIRS) or "")
             # Ask first, carry nothing: if this workspace already holds the
             # skill at this digest, that one exchange also runs the script and
             # the payload never moves. An in-process "already materialised" set
@@ -1915,7 +1916,19 @@ class _WiderScriptCodeExecutor(_SkillScriptCodeExecutor):
             # Read by the sandbox executor to LABEL this run in the process
             # panel (#131) — "skill: <name> <script>" beats a content hash.
             f"# adk-cc-skill-script: {skill_name} {file_path}".rstrip(),
+            # A PERSISTENT per-skill data dir, announced to the script
+            # (reported live: a skill's model loader read a private env var
+            # or ~/HOME — ephemeral under docker, unset under noop). It
+            # lives in the WORKSPACE so every backend translates it and it
+            # survives across runs of the session. SKILL_DATA_DIR is
+            # setdefault'd (an operator-provided value wins); the
+            # namespaced twin is always ours.
             "import os, sys, json as _json, shutil, subprocess",
+            "_sd = os.path.abspath(os.path.join('.adk-cc', 'skill-data', "
+            f"{(skill_name or 'shared')!r}))",
+            "os.makedirs(_sd, exist_ok=True)",
+            "os.environ.setdefault('SKILL_DATA_DIR', _sd)",
+            "os.environ['ADK_CC_SKILL_DATA_DIR'] = _sd",
             # This runs as its OWN process, so every name the generated code
             # uses has to exist in the generated code. The dep-install notes
             # below say f'{NOTE_PREFIX} ...' inside PLAIN strings — literal
