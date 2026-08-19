@@ -84,29 +84,38 @@ export function ProcessDock({
   const [rows, setRows] = useState<ProcessRow[]>([])
   const [busy, setBusy] = useState<string | null>(null)
   const [nowS, setNowS] = useState(() => Date.now() / 1000)
-
-  // The auto-clear must fire BETWEEN fetches (idle polling is 15s): tick a
-  // local clock while any finished foreground row is still lingering.
-  const lingering = rows.some(
-    (r) => r.kind === "foreground" && r.finished_at
-      && nowS - r.finished_at < FOREGROUND_LINGER_S,
-  )
-  useEffect(() => {
-    if (!lingering) return
-    const iv = setInterval(() => setNowS(Date.now() / 1000), 1000)
-    return () => clearInterval(iv)
-  }, [lingering])
+  // When the current rows were fetched — elapsed_s is SERVER-computed and
+  // frozen at fetch time; the local delta on top of it is what makes the
+  // timer tick at 1Hz instead of jumping with the 2.5s poll (reported:
+  // "why +2s, not +1s?").
+  const [fetchedAtS, setFetchedAtS] = useState(() => Date.now() / 1000)
 
   const reload = useCallback(() => {
     if (!projectId) return
     apiFetch<{ processes: ProcessRow[] }>(
       `/api/processes?project_id=${encodeURIComponent(projectId)}`,
     )
-      .then((r) => setRows(r.processes ?? []))
+      .then((r) => {
+        setRows(r.processes ?? [])
+        setFetchedAtS(Date.now() / 1000)
+      })
       .catch(() => {})
   }, [projectId])
 
   const live = rows.filter((r) => r.status === "running" || r.status === "starting")
+
+  // One 1Hz clock serves both jobs that must fire BETWEEN fetches: the
+  // running rows' smooth elapsed display, and the finished-foreground
+  // auto-clear (idle polling is 15s).
+  const lingering = rows.some(
+    (r) => r.kind === "foreground" && r.finished_at
+      && nowS - r.finished_at < FOREGROUND_LINGER_S,
+  )
+  useEffect(() => {
+    if (!lingering && live.length === 0) return
+    const iv = setInterval(() => setNowS(Date.now() / 1000), 1000)
+    return () => clearInterval(iv)
+  }, [lingering, live.length])
   useEffect(() => {
     reload()
     // Faster while something is live (a starting server changes state and
@@ -165,6 +174,11 @@ export function ProcessDock({
       <div className="space-y-0.5">
         {ordered.slice(0, 8).map((p) => {
           const isLive = p.status === "running" || p.status === "starting"
+          // Server elapsed + time since we fetched it = a timer that ticks
+          // every second instead of every poll.
+          const shown = isLive
+            ? { ...p, elapsed_s: p.elapsed_s + Math.max(0, nowS - fetchedAtS) }
+            : p
           return (
             <div key={p.id} className="flex items-center gap-1.5 text-[11px]"
                  data-process={p.id}>
@@ -198,7 +212,7 @@ export function ProcessDock({
                 </a>
               )}
               <span className="shrink-0 tabular-nums text-muted-foreground/80">
-                {statusText(p)}
+                {statusText(shown)}
               </span>
               {/* A backend that cannot stop a process shows NO button: a dead
                   control is worse than an absent one. */}
