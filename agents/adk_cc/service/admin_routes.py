@@ -72,6 +72,8 @@ def _authorize_for_tenant(request, target_tenant: str) -> None:
     """
     auth = getattr(request.state, "adk_cc_auth", None)
     if auth is None:
+        if env_bool("ADK_CC_ALLOW_NO_AUTH"):
+            return  # explicit test escape: no principals, no grades
         raise HTTPException(status_code=401, detail="not authenticated")
     user_id, caller_tenant = auth
     if caller_tenant != target_tenant:

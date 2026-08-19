@@ -670,7 +670,14 @@ _ADMIN_LEGACY_DATA_DIR = ".adk-cc/admin-data"
 
 
 def _admin_enabled() -> bool:
-    return env_bool("ADK_CC_ADMIN_PANEL")
+    raw = os.environ.get("ADK_CC_ADMIN_PANEL")
+    if raw is not None and raw.strip() != "":
+        return env_bool("ADK_CC_ADMIN_PANEL")
+    # ADK_CC_ALLOW_NO_AUTH is the explicit dev/test escape: a server with no
+    # principals has no grades to enforce, so "allow everything" includes
+    # the admin surface (reported live: the settings panel 404'd on every
+    # admin section). An explicit ADK_CC_ADMIN_PANEL=0 still wins.
+    return env_bool("ADK_CC_ALLOW_NO_AUTH")
 
 
 def _global_tenant_id() -> str:
@@ -774,6 +781,8 @@ def _make_admin_role_extractor():
     def authorize(request, target: str) -> None:
         auth = getattr(request.state, "adk_cc_auth", None)
         if auth is None:
+            if env_bool("ADK_CC_ALLOW_NO_AUTH"):
+                return  # test mode: every grade allowed, admin included
             raise HTTPException(status_code=401, detail="not authenticated")
         roles = getattr(auth, "roles", frozenset()) or frozenset()
         if required_role not in roles:
