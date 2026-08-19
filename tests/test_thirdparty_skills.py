@@ -238,6 +238,33 @@ def main() -> int:
         {"stdout": "ok", "stderr": "", "status": "success"}, loaded["binary-skill"])
     check("a clean run is left alone", quiet["stderr"] == "")
 
+    # Client report (sessions 4617ffb2/623b7f6a/1141ab6d): a bare
+    # `uv pip install X` remedy is the first rung of a ladder that cannot
+    # work from run_bash (no venv on PATH → --system → read-only rootfs →
+    # pip --user into the wrong interpreter, three turns burned). The remedy
+    # must name the EXACT interpreter, and the coordinator prompt must carry
+    # the same guide. Keyed to _ENV_REL so a moved env path fails here.
+    from adk_cc.sandbox.analysis_env import _ENV_REL
+    check("the remedy names the analysis-env interpreter verbatim",
+          f"uv pip install --python {_ENV_REL}/bin/python pypdf"
+          in hinted["stderr"], hinted["stderr"][-260:])
+    check("and points at the durable declaration channels",
+          "x-adk-cc/requirements" in hinted["stderr"]
+          and "requirements.txt" in hinted["stderr"])
+    ro = sk._explain_missing_package(
+        {"stdout": "", "stderr": (
+            "ModuleNotFoundError: No module named 'pypdf'\n"
+            "error: failed to create directory …: Read-only file system"),
+         "status": "error"}, loaded["binary-skill"])
+    check("a read-only env says do-not-retry, with NO install command",
+          "do not retry" in ro["stderr"] and "--python" not in ro["stderr"],
+          ro["stderr"][-260:])
+    from adk_cc import prompts as _prompts
+    check("the coordinator prompt carries the sandbox-runtime guide",
+          f"uv pip install --python {_ENV_REL}/bin/python"
+          in _prompts.COORDINATOR_INSTRUCTION
+          and "x-adk-cc/requirements" in _prompts.COORDINATOR_INSTRUCTION)
+
     # --- and the bytes reach the script, which is the whole point -------
     check("the binary materialises next to the script that needs it",
           _run_use_sh() == "FOUND", f"got {_run_use_sh()!r}")

@@ -1615,9 +1615,20 @@ def _explain_missing_package(res: dict, skill: Skill) -> dict:
             f"writable virtualenv is provisioned in the workspace, or add the "
             f"package to the sandbox image.")
     else:
+        # Name the EXACT interpreter. "uv pip install X" without --python is
+        # the first rung of a ladder that cannot work from run_bash (no venv
+        # on PATH → --system → read-only rootfs → pip --user into the wrong
+        # interpreter); a client watched a coordinator burn three turns
+        # climbing it.
         remedy = (
-            f"install it there (uv pip install {missing}) and re-run, or "
-            f"report the step as NOT RUN.")
+            f"install it into the environment the script runs under — from "
+            f"the workspace root: `uv pip install --python "
+            f".adk-cc/analysis-env/bin/python {missing}` — then re-run. "
+            f"(Bare `uv pip install` and `--system` do not work here.) The "
+            f"durable fix is declaring it in the skill via "
+            f"`x-adk-cc/requirements` in SKILL.md metadata or "
+            f"`scripts/requirements.txt`, so it installs automatically. If "
+            f"neither is possible, report the step as NOT RUN.")
     return _with_compatibility({**res, "stderr": err.rstrip() + (
         f"\n\n[adk-cc] this script needs the '{missing}' package, which is not "
         f"installed in the environment skill scripts run in — {remedy} Do not "
