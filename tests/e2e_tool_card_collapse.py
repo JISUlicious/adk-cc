@@ -159,7 +159,10 @@ def main() -> int:
             )
             pg.reload()
             pg.wait_for_load_state("networkidle")
-            pg.get_by_text(sid[:18]).first.click()
+            # The rail renders sessionTitle ?? 'New Chat' — never the session id
+            # (stale selector, #112). Each test seeds ONE session, so the
+            # first title row IS it.
+            pg.locator(".adk-session-title").first.click(timeout=8000)
             # The bash card header (command text) must be present…
             pg.get_by_text(CMD).first.wait_for(timeout=10000)
             pg.wait_for_timeout(300)

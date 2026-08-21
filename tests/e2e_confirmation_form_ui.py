@@ -151,7 +151,7 @@ def _build_runner() -> tuple[InMemoryRunner, _ScriptedLlm]:
     _FakeBashTool.invocations = []
     llm = _ScriptedLlm(
         responses=[
-            _tool_call_response("orig-1", "run_bash", {"command": "git status"}),
+            _tool_call_response("orig-1", "run_bash", {"command": "git push origin main"}),
             _text_response("done"),
         ]
     )
@@ -190,7 +190,7 @@ async def test_outbound_event_has_sentinel_name_and_schema() -> None:
         user_id="alice",
         session_id="s-outbound",
         new_message=types.Content(
-            role="user", parts=[types.Part(text="run git status")]
+            role="user", parts=[types.Part(text="push it")]
         ),
     ):
         events.append(ev)
@@ -238,7 +238,7 @@ async def test_inbound_form_submission_resumes_tool() -> None:
         user_id="alice",
         session_id="s-inbound-allow",
         new_message=types.Content(
-            role="user", parts=[types.Part(text="run git status")]
+            role="user", parts=[types.Part(text="push it")]
         ),
     ):
         events1.append(ev)
@@ -253,7 +253,7 @@ async def test_inbound_form_submission_resumes_tool() -> None:
         pass
 
     # Destructive tool ran with the original args.
-    assert _FakeBashTool.invocations == [{"command": "git status"}], _FakeBashTool.invocations
+    assert _FakeBashTool.invocations == [{"command": "git push origin main"}], _FakeBashTool.invocations
     print("OK test_inbound_form_submission_resumes_tool")
 
 
@@ -266,7 +266,7 @@ async def test_inbound_deny_choice_blocks_tool() -> None:
         user_id="alice",
         session_id="s-inbound-deny",
         new_message=types.Content(
-            role="user", parts=[types.Part(text="run git status")]
+            role="user", parts=[types.Part(text="push it")]
         ),
     ):
         events1.append(ev)
@@ -296,11 +296,11 @@ def _build_runner_multi_tool() -> tuple[InMemoryRunner, _ScriptedLlm]:
                     parts=[
                         types.Part(function_call=types.FunctionCall(
                             id="orig-1", name="run_bash",
-                            args={"command": "git status"},
+                            args={"command": "git push origin main"},
                         )),
                         types.Part(function_call=types.FunctionCall(
                             id="orig-2", name="run_bash",
-                            args={"command": "git diff"},
+                            args={"command": "git commit -am wip"},
                         )),
                     ],
                 ),
@@ -408,7 +408,7 @@ async def test_multi_tool_final_submission_bundles_and_resumes_all() -> None:
 
     # BOTH tools should have run now.
     commands = sorted(d["command"] for d in _FakeBashTool.invocations)
-    assert commands == ["git diff", "git status"], commands
+    assert commands == ["git commit -am wip", "git push origin main"], commands
     print("OK test_multi_tool_final_submission_bundles_and_resumes_all")
 
 
@@ -449,7 +449,7 @@ async def test_multi_tool_mixed_allow_and_deny_bundles() -> None:
 
     commands = [d["command"] for d in _FakeBashTool.invocations]
     # Only the second (allowed) ran.
-    assert commands == ["git diff"], commands
+    assert commands == ["git commit -am wip"], commands
     print("OK test_multi_tool_mixed_allow_and_deny_bundles")
 
 

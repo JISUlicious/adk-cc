@@ -113,25 +113,31 @@ def test_titles_after_first_turn():
 
 
 def test_generation_overlaps_the_turn():
-    """The titling call runs CONCURRENTLY with the (simulated) agent turn:
-    a 0.3s title call + a 0.3s turn complete in ~0.3s, not ~0.6s."""
+    """The titling call runs CONCURRENTLY with the agent turn — asserted by
+    ORDERING, not wall clock. The old `elapsed < 0.5s` bound tested the right
+    property with a budget a loaded machine blows through (measured 2.566s
+    under concurrent docker builds, #118)."""
     async def run():
         _CALLS["n"] = 0
         ictx, svc, session = await _make_ictx(
             _user_event("hi"), llm=_FakeLlm(model="fake/model", delay=0.3))
         plugin = SessionTitlePlugin()
-        t0 = time.perf_counter()
         await plugin.before_run_callback(invocation_context=ictx)  # spawn
+        # DETERMINISTIC overlap proof: between create_task inside before_run
+        # and this line the event loop never yields, so the spawned task
+        # cannot have run yet. If before_run had AWAITED the generation
+        # (serial — the regression this guards), the task would already be
+        # done. Load can only delay a task, never complete it early.
+        pending = list(getattr(plugin, "_pending", {}).values())
+        assert pending, "before_run spawned no title task"
+        assert not pending[0].done(), \
+            "title call completed inside before_run — serial, not overlapped"
         await asyncio.sleep(0.3)                                   # the "turn"
         await plugin.after_run_callback(invocation_context=ictx)   # persist
-        elapsed = time.perf_counter() - t0        # measured BEFORE draining:
-        # the point of the test is that the RUN does not wait for the title.
         for t in list(getattr(plugin, "_detached", ())):
             await asyncio.gather(t, return_exceptions=True)
         fresh = await svc.get_session(app_name="t", user_id="u", session_id=session.id)
         assert fresh.state.get("session_title"), fresh.state
-        assert elapsed < 0.5, f"not overlapped: {elapsed:.3f}s (~0.6s = serial)"
-        print(f"  (0.3s call + 0.3s turn = {elapsed:.3f}s total — overlapped)")
     asyncio.run(run())
     print("OK generation_overlaps_the_turn")
 

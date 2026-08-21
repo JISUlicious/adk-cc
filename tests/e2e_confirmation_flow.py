@@ -215,7 +215,7 @@ async def test_allow_once_end_to_end() -> None:
     settings = SettingsHierarchy()
     runner, _ = _build_runner(
         llm_responses=[
-            _tool_call_response("orig-1", "run_bash", {"command": "git status"}),
+            _tool_call_response("orig-1", "run_bash", {"command": "git push origin main"}),
             _text_response("done"),
         ],
         settings=settings,
@@ -228,7 +228,7 @@ async def test_allow_once_end_to_end() -> None:
         user_id="alice",
         session_id="s-allow-once",
         new_message=types.Content(
-            role="user", parts=[types.Part(text="run git status")]
+            role="user", parts=[types.Part(text="run git push origin main")]
         ),
     )
     conf_call_id, conf_args = _find_request_confirmation_call(events1)
@@ -246,7 +246,7 @@ async def test_allow_once_end_to_end() -> None:
     ], payload
     # Subject (the command) is in the title so concurrent gated calls
     # for the same tool can be distinguished by the operator.
-    assert payload["title"] == "Confirm run_bash: git status?", payload
+    assert payload["title"] == "Confirm run_bash: git push origin main?", payload
 
     # Tool should not have been invoked yet.
     assert _FakeBashTool.invocations == [], _FakeBashTool.invocations
@@ -260,7 +260,7 @@ async def test_allow_once_end_to_end() -> None:
     )
 
     # Tool ran exactly once with the right args.
-    assert _FakeBashTool.invocations == [{"command": "git status"}], _FakeBashTool.invocations
+    assert _FakeBashTool.invocations == [{"command": "git push origin main"}], _FakeBashTool.invocations
 
     # No session rule was injected.
     assert settings.all_rules() == [], settings.all_rules()
@@ -282,9 +282,9 @@ async def test_allow_always_injects_session_rule_and_skips_re_ask() -> None:
     settings = SettingsHierarchy()
     runner, plugin = _build_runner(
         llm_responses=[
-            _tool_call_response("orig-1", "run_bash", {"command": "git status"}),
+            _tool_call_response("orig-1", "run_bash", {"command": "git push origin main"}),
             _text_response("done 1"),
-            _tool_call_response("orig-2", "run_bash", {"command": "git status"}),
+            _tool_call_response("orig-2", "run_bash", {"command": "git push origin main"}),
             _text_response("done 2"),
         ],
         settings=settings,
@@ -297,7 +297,7 @@ async def test_allow_always_injects_session_rule_and_skips_re_ask() -> None:
         user_id="alice",
         session_id="s-allow-always",
         new_message=types.Content(
-            role="user", parts=[types.Part(text="run git status")]
+            role="user", parts=[types.Part(text="run git push origin main")]
         ),
     )
     conf_call_id, _ = _find_request_confirmation_call(events1)
@@ -310,7 +310,7 @@ async def test_allow_always_injects_session_rule_and_skips_re_ask() -> None:
         session_id="s-allow-always",
         new_message=_confirmation_message(conf_call_id, {"chose_id": "allow_always"}),
     )
-    assert _FakeBashTool.invocations == [{"command": "git status"}]
+    assert _FakeBashTool.invocations == [{"command": "git push origin main"}]
     # The runtime rules land in session state now (not the in-memory
     # hierarchy); read through the session DB. Two rules per click:
     # literal + broadened (per `compute_allow_always_rule_contents`).
@@ -323,8 +323,8 @@ async def test_allow_always_injects_session_rule_and_skips_re_ask() -> None:
         assert r["source"] == RuleSource.SESSION.value
         assert r["behavior"] == RuleBehavior.ALLOW.value
         assert r["tool_name"] == "run_bash"
-    assert raw[0]["rule_content"] == "git status"     # literal
-    assert raw[1]["rule_content"] == "git status *"   # broadened
+    assert raw[0]["rule_content"] == "git push origin main"  # literal
+    assert raw[1]["rule_content"] == "git push *"     # broadened
     # The static hierarchy stays untouched — only state mutates.
     assert settings.all_rules() == []
 
@@ -349,8 +349,8 @@ async def test_allow_always_injects_session_rule_and_skips_re_ask() -> None:
 
     # Tool ran a second time.
     assert _FakeBashTool.invocations == [
-        {"command": "git status"},
-        {"command": "git status"},
+        {"command": "git push origin main"},
+        {"command": "git push origin main"},
     ], _FakeBashTool.invocations
     print("OK test_allow_always_injects_session_rule_and_skips_re_ask")
 
@@ -361,7 +361,7 @@ async def test_deny_short_circuits_and_surfaces_to_model() -> None:
     settings = SettingsHierarchy()
     runner, _ = _build_runner(
         llm_responses=[
-            _tool_call_response("orig-1", "run_bash", {"command": "rm -rf /"}),
+            _tool_call_response("orig-1", "run_bash", {"command": "npm install left-pad"}),
             _text_response("acknowledged: denied"),
         ],
         settings=settings,
@@ -373,7 +373,7 @@ async def test_deny_short_circuits_and_surfaces_to_model() -> None:
         user_id="alice",
         session_id="s-deny",
         new_message=types.Content(
-            role="user", parts=[types.Part(text="please rm -rf /")]
+            role="user", parts=[types.Part(text="install left-pad")]
         ),
     )
     conf_call_id, _ = _find_request_confirmation_call(events1)
@@ -404,27 +404,27 @@ async def test_deny_short_circuits_and_surfaces_to_model() -> None:
 
 
 async def test_allow_always_does_not_broaden_to_different_command() -> None:
-    """After allow_always on `git status`, asking for `git diff` still gates.
+    """After allow_always on `git push …`, `git commit …` still gates.
     Verifies the session rule's scope is exact-match, not tool-wide."""
     settings = SettingsHierarchy()
     runner, _ = _build_runner(
         llm_responses=[
-            _tool_call_response("orig-1", "run_bash", {"command": "git status"}),
+            _tool_call_response("orig-1", "run_bash", {"command": "git push origin main"}),
             _text_response("done 1"),
-            _tool_call_response("orig-2", "run_bash", {"command": "git diff"}),
+            _tool_call_response("orig-2", "run_bash", {"command": "git commit -am wip"}),
             _text_response("done 2"),
         ],
         settings=settings,
     )
     await _create_session(runner, "alice", "s-scope")
 
-    # Invocation 1+2: allow_always on git status.
+    # Invocation 1+2: allow_always on git push.
     events1 = await _run_once(
         runner,
         user_id="alice",
         session_id="s-scope",
         new_message=types.Content(
-            role="user", parts=[types.Part(text="run git status")]
+            role="user", parts=[types.Part(text="run git push origin main")]
         ),
     )
     conf_id1, _ = _find_request_confirmation_call(events1)
@@ -435,22 +435,22 @@ async def test_allow_always_does_not_broaden_to_different_command() -> None:
         new_message=_confirmation_message(conf_id1, {"chose_id": "allow_always"}),
     )
 
-    # Invocation 3: ask for git diff. Plugin should STILL gate — the
-    # session rule is keyed on the exact command "git status".
+    # Invocation 3: ask for git commit. Plugin should STILL gate — the
+    # broadened rule is `git push *` — a different subcommand misses it.
     events3 = await _run_once(
         runner,
         user_id="alice",
         session_id="s-scope",
         new_message=types.Content(
-            role="user", parts=[types.Part(text="run git diff")]
+            role="user", parts=[types.Part(text="commit it")]
         ),
     )
     # Should have a fresh request_confirmation call.
     conf_id2, _ = _find_request_confirmation_call(events3)
     assert conf_id2 != conf_id1
-    # Tool was NOT run for git diff yet (still gating).
+    # Tool was NOT run for git commit yet (still gating).
     assert _FakeBashTool.invocations == [
-        {"command": "git status"},
+        {"command": "git push origin main"},
     ], _FakeBashTool.invocations
     print("OK test_allow_always_does_not_broaden_to_different_command")
 

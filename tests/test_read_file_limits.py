@@ -259,39 +259,31 @@ def test_custom_limit_within_bounds() -> None:
     print("OK test_custom_limit_within_bounds")
 
 
-def test_schema_rejects_limit_over_50() -> None:
-    """Hard upper bound: 50 lines per read. Models can't accidentally
-    request a huge slice that blows the LLM context — they have to
-    paginate via `offset` instead."""
-    for bad in (51, 100, 2000, 10000):
-        try:
-            ReadFileArgs(path="x", limit=bad)
-        except ValidationError:
-            continue
-        raise AssertionError(f"expected ValidationError for limit={bad}")
-    # Boundary: 50 is allowed.
-    ReadFileArgs(path="x", limit=50)
-    print("OK test_schema_rejects_limit_over_50")
+def test_schema_clamps_limit_over_50() -> None:
+    """CLAMP, not reject: models routinely send limit=200, and a raw
+    ValidationError cost a whole round trip to say "use a smaller number"
+    (reported live, #118 rider). The 50-line cap still holds — the model
+    just gets the first 50 plus has_more instead of an error."""
+    for big in (51, 100, 2000, 10000):
+        assert ReadFileArgs(path="x", limit=big).limit == 50, big
+    # Boundary: 50 stays 50.
+    assert ReadFileArgs(path="x", limit=50).limit == 50
+    print("OK test_schema_clamps_limit_over_50")
 
 
-def test_schema_rejects_zero_or_negative_offset() -> None:
+def test_schema_clamps_zero_or_negative_offset() -> None:
     for bad in (0, -5):
-        try:
-            ReadFileArgs(path="x", offset=bad)
-        except ValidationError:
-            continue
-        raise AssertionError(f"expected ValidationError for offset={bad}")
-    print("OK test_schema_rejects_zero_or_negative_offset")
+        assert ReadFileArgs(path="x", offset=bad).offset == 1, bad
+    print("OK test_schema_clamps_zero_or_negative_offset")
 
 
-def test_schema_rejects_zero_or_negative_limit() -> None:
+def test_schema_clamps_zero_or_negative_limit() -> None:
     for bad in (0, -1):
-        try:
-            ReadFileArgs(path="x", limit=bad)
-        except ValidationError:
-            continue
-        raise AssertionError(f"expected ValidationError for limit={bad}")
-    print("OK test_schema_rejects_zero_or_negative_limit")
+        assert ReadFileArgs(path="x", limit=bad).limit == 1, bad
+    # And garbage falls back to the defaults rather than erroring.
+    assert ReadFileArgs(path="x", limit="lots").limit == 50
+    assert ReadFileArgs(path="x", offset=None).offset == 1
+    print("OK test_schema_clamps_zero_or_negative_limit")
 
 
 def test_nonexistent_file_returns_error() -> None:
@@ -393,9 +385,9 @@ def main() -> None:
     test_offset_past_end_returns_empty_slice()
     test_per_line_truncation_cap()
     test_custom_limit_within_bounds()
-    test_schema_rejects_limit_over_50()
-    test_schema_rejects_zero_or_negative_offset()
-    test_schema_rejects_zero_or_negative_limit()
+    test_schema_clamps_limit_over_50()
+    test_schema_clamps_zero_or_negative_offset()
+    test_schema_clamps_zero_or_negative_limit()
     test_nonexistent_file_returns_error()
     test_directory_returns_error()
     test_empty_file_zero_lines()

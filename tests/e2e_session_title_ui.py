@@ -137,7 +137,9 @@ def main() -> int:  # noqa: PLR0915
             # turn time to finish and the persist to land.
             sid = None
             title = ""
-            for _ in range(60):
+            # 120s, not 60: a loaded machine (concurrent builds) pushed the
+            # live title past the old budget and the run flaked (#112).
+            for _ in range(120):
                 page.wait_for_timeout(1000)
                 rows = requests.get(sess_api, timeout=30).json()
                 if not rows:
@@ -177,9 +179,14 @@ def main() -> int:  # noqa: PLR0915
             composer.fill("And the capital of Spain? One word.")
             page.keyboard.press("Enter")
             page.wait_for_timeout(25000)
-            title2 = (_state(pid, sid).get("session_title") or "").strip() if sid else ""
-            check("a titled session is not re-titled", title2 == title,
-                  f"{title!r} -> {title2!r}")
+            if title:
+                title2 = (_state(pid, sid).get("session_title") or "").strip() if sid else ""
+                check("a titled session is not re-titled", title2 == title,
+                      f"{title!r} -> {title2!r}")
+            else:
+                # "" == "" would pass vacuously — with no title there is
+                # nothing to protect from re-titling (#112).
+                print("    (skip: no title was generated; re-title check is moot)")
 
             # The second send is also the 409 check: the title call runs
             # out-of-band and briefly outlives the visible turn, which is the

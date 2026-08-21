@@ -214,7 +214,8 @@ async def _f3_turn1(*, resumable: bool):
 
     runner, svc, llm = _fresh(_F3_SCRIPT, resumable=resumable)
     s = await svc.create_session(app_name=A.app.name, user_id="u1",
-                                 state={"permission_mode": "default"})
+                                 state={"permission_mode": "default",
+                                        "session_title": "scripted"})
     ev1 = await asyncio.wait_for(_run(runner, s.id, _msg("verify the probe")),
                                  60)
     call_id, call_name = _find_confirmation_call(ev1)
@@ -338,7 +339,8 @@ def test_resumable_plain_transfer_turn() -> None:
             _text_resp("explore report: nothing scary"),
             _text_resp("SYNTHESIS: all good"),
         ], resumable=True)
-        s = await svc.create_session(app_name=A.app.name, user_id="u1")
+        s = await svc.create_session(app_name=A.app.name, user_id="u1",
+                                     state={"session_title": "scripted"})
         ev = await asyncio.wait_for(_run(runner, s.id, _msg("look around")), 60)
         assert any("SYNTHESIS" in t for t in _coordinator_texts(ev)), (
             [getattr(e, "author", "?") for e in ev])
@@ -356,7 +358,8 @@ def test_resumable_plain_turn_unchanged() -> None:
         import adk_cc.agent as A
 
         runner, svc, llm = _fresh([_text_resp("plain reply")], resumable=True)
-        s = await svc.create_session(app_name=A.app.name, user_id="u1")
+        s = await svc.create_session(app_name=A.app.name, user_id="u1",
+                                     state={"session_title": "scripted"})
         ev = await asyncio.wait_for(_run(runner, s.id, _msg("hello")), 60)
         assert any("plain reply" in t for t in _coordinator_texts(ev)), (
             [getattr(e, "author", "?") for e in ev])
@@ -377,7 +380,8 @@ def test_resumable_coordinator_level_confirmation() -> None:
             _text_resp("read it directly"),
         ], resumable=True)
         s = await svc.create_session(app_name=A.app.name, user_id="u1",
-                                     state={"permission_mode": "default"})
+                                     state={"permission_mode": "default",
+                                        "session_title": "scripted"})
         ev1 = await asyncio.wait_for(_run(runner, s.id, _msg("read cfg")), 60)
         call_id, call_name = _find_confirmation_call(ev1)
         ev2 = await asyncio.wait_for(
@@ -412,7 +416,8 @@ def test_handback_marker_never_reaches_a_request() -> None:
             _text_resp("VERDICT: PASS"),
             _text_resp("FINAL"),
         ], resumable=True)
-        s = await svc.create_session(app_name=A.app.name, user_id="u1")
+        s = await svc.create_session(app_name=A.app.name, user_id="u1",
+                                     state={"session_title": "scripted"})
         await asyncio.wait_for(_run(runner, s.id, _msg("check it")), 60)
 
         for i, contents in enumerate(llm.seen_contents, 1):
@@ -484,7 +489,8 @@ def test_no_request_carries_an_unanswered_call() -> None:
             _text_resp("VERDICT: PASS"),
             _text_resp("FINAL"),
         ], resumable=True)
-        s = await svc.create_session(app_name=A.app.name, user_id="u1")
+        s = await svc.create_session(app_name=A.app.name, user_id="u1",
+                                     state={"session_title": "scripted"})
         await asyncio.wait_for(_run(runner, s.id, _msg("verify it")), 60)
         assert llm.calls == 7, llm.calls  # both verification runs really ran
 

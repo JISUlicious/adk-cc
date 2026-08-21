@@ -9,14 +9,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ReadFileArgs(BaseModel):
     path: str = Field(description="Absolute or relative path to the file.")
     offset: int = Field(
         default=1,
-        ge=1,
         description=(
             "Starting line number (1-indexed). Defaults to 1 (start of file). "
             "Use with `limit` to page through large files."
@@ -24,8 +23,6 @@ class ReadFileArgs(BaseModel):
     )
     limit: int = Field(
         default=50,
-        ge=1,
-        le=50,
         description=(
             "Maximum number of lines to return per call (1-50). Defaults "
             "to 50. The hard cap of 50 is tighter than upstream Claude "
@@ -37,6 +34,26 @@ class ReadFileArgs(BaseModel):
             "decide whether to paginate or pivot to `grep`/`glob_files`."
         ),
     )
+
+    # CLAMP, don't reject: models routinely send limit=200 or offset=0, and
+    # a raw pydantic ValidationError costs a whole round trip to say "use a
+    # smaller number" (reported live). The tool result's has_more/total_lines
+    # already tell the model it got a partial read.
+    @field_validator("offset", mode="before")
+    @classmethod
+    def _clamp_offset(cls, v: object) -> int:
+        try:
+            return max(1, int(v))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 1
+
+    @field_validator("limit", mode="before")
+    @classmethod
+    def _clamp_limit(cls, v: object) -> int:
+        try:
+            return min(50, max(1, int(v)))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 50
 
 
 class GlobFilesArgs(BaseModel):

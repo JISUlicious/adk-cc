@@ -91,7 +91,12 @@ def _msg(text: str) -> types.Content:
 async def _mk_session(svc) -> str:
     import adk_cc.agent as A
 
-    s = await svc.create_session(app_name=A.app.name, user_id="u1")
+    s = await svc.create_session(
+        app_name=A.app.name, user_id="u1",
+        # Pre-titled: the ALWAYS-ON SessionTitlePlugin otherwise spawns a
+        # CONCURRENT title call on the same patched delegate, stealing the
+        # scripted response (IndexError: pop from empty list). #120.
+        state={"session_title": "scripted"})
     return s.id
 
 
