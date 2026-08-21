@@ -239,16 +239,17 @@ def test_no_backend_claims_background_it_cannot_do() -> None:
     A backend may only advertise background support if it overrides the
     spawner itself."""
     from adk_cc.sandbox.backends.base import SandboxBackend
+    from adk_cc.sandbox.backends.docker_backend import DockerBackend
     from adk_cc.sandbox.backends.local_container_backend import (
         LocalContainerBackend, UnavailableSandboxBackend)
     from adk_cc.sandbox.backends.ssh_backend import SshBackend
 
-    for cls in (LocalContainerBackend, UnavailableSandboxBackend):
+    for cls in (UnavailableSandboxBackend,):
         check(f"{cls.__name__} does NOT claim background support",
               cls.supports_background is False)
         check(f"{cls.__name__} refuses to spawn even if called",
               cls.start_background is not NoopBackend.start_background)
-    for cls in (NoopBackend, SshBackend):
+    for cls in (NoopBackend, SshBackend, LocalContainerBackend, DockerBackend):
         check(f"{cls.__name__} advertises background AND implements it",
               cls.supports_background
               and cls.start_background is not SandboxBackend.start_background)

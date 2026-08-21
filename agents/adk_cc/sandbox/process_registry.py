@@ -81,6 +81,10 @@ class ProcessRecord:
     # REMOTE backends only: the log lives on the other machine and is pulled
     # on demand (a second long-lived channel per process would be worse).
     remote_log_path: str = ""
+    # CONTAINER backends only (#110): the container this process lives in.
+    # Signals/liveness must travel through it — a container pgid is
+    # meaningless to the host — and its removal is the process's death.
+    container_name: str = ""
     # #131: "background" (detached, outlives the turn) or "foreground" (a
     # skill script / analysis run INSIDE a turn — visible while it runs,
     # history afterwards).
@@ -221,6 +225,21 @@ class ProcessRegistry:
         rec.status = status if status in _STATUSES else "exited"
         rec.finished_at = time.time()
         self._save()
+
+    def mark_container_gone(self, container_name: str) -> int:
+        """#110: a removed container takes every process in it along. Without
+        this, its records stay "running" against a container that no longer
+        exists — the forgotten-process failure the registry exists to prevent.
+        """
+        n = 0
+        for rec in list(self._records.values()):
+            if (rec.container_name == container_name
+                    and rec.status in ("starting", "running")):
+                self.append_log(rec.id, b"[adk-cc] the session container was "
+                                        b"removed; the process is gone\n")
+                self.mark_exited(rec.id, exit_code=None, status="exited")
+                n += 1
+        return n
 
     def append_log(self, pid_: str, data: bytes) -> None:
         rec = self._records.get(pid_)

@@ -177,6 +177,10 @@ class LocalContainerBackend(NoopBackend):
 
         args = [
             rt.cli_path, "run", "-d", "--name", self._name,
+            # PID 1 is otherwise `sleep infinity`, which never reaps — every
+            # exited background process (#110) would linger as a zombie
+            # against the --pids-limit. tini costs nothing.
+            "--init",
             "--pull=never",  # never block first-exec on a 10-min implicit pull (#7)
             "--workdir", self._workspace_abs,
             "--network", "bridge" if self._network_enabled else "none",
@@ -225,18 +229,170 @@ class LocalContainerBackend(NoopBackend):
         finally:
             self._lock.release()
 
-    # --- exec ------------------------------------------------------------
+    # --- background processes (#110) --------------------------------------
+    #
+    # NoopBackend's spawner runs on the HOST — the one thing this backend
+    # exists to prevent — so it is fully overridden: `setsid` runs INSIDE the
+    # container (pgid == pid in the container's PID namespace), and signals
+    # travel over a second `<rt> exec`. Same mechanism as SshBackend; the
+    # identical-path bind mount makes it cheaper — the log written inside the
+    # container IS a host file, so reads need no sync channel at all.
+    supports_background = True
 
-    # Inherited from NoopBackend, which spawns on the HOST — exactly what a
-    # container backend exists to prevent. Backgrounding here has to run
-    # `setsid` INSIDE the container (and kill via a second `docker exec`);
-    # until that exists, say so honestly and the UI hides the control.
-    supports_background = False
+    @classmethod
+    def for_container(cls, name: str) -> "LocalContainerBackend":
+        """A handle for signalling/liveness on an EXISTING container by name
+        (the process routes rebuild one from a registry record). Never
+        creates or starts anything — a dead container must stay dead."""
+        be = cls()
+        be._name = name
+        return be
 
-    async def start_background(self, cmd, **kw):  # noqa: ANN001, ANN003, ANN201
-        raise NotImplementedError(
-            "the container backend cannot run background processes yet — "
-            "run it in the foreground, or use a local/remote workspace")
+    async def start_background(
+        self,
+        cmd: str,
+        *,
+        fs_write: FsWriteConfig,
+        network: NetworkConfig,
+        cwd: str,
+        label: str = "",
+        session_key: str = "",
+        project_id: str = "",
+    ) -> dict:
+        import shlex as _sh
+
+        from ..process_registry import get_registry
+
+        reg = get_registry()
+        rec = reg.create(session_key=session_key, project_id=project_id,
+                         label=label, command=cmd, cwd=cwd, backend="container",
+                         can_terminate=True)
+        try:
+            await self._ensure_container()
+        except (RuntimeError, subprocess.TimeoutExpired, OSError) as e:
+            reg.mark_exited(rec.id, exit_code=None, status="failed")
+            reg.append_log(rec.id, f"sandbox unavailable: {e}\n".encode())
+            return (reg.get(rec.id) or rec).public()
+
+        rt = self._cli()
+        # The workspace is bind-mounted at the identical path, so this log
+        # file has ONE spelling inside and outside the container.
+        log = os.path.join(self._workspace_abs or cwd,
+                           ".adk-cc", "processes", f"{rec.id}.log")
+        workdir = (os.path.realpath(cwd) if cwd else None) or self._workspace_abs or "/"
+        launch = (
+            f"mkdir -p {_sh.quote(os.path.dirname(log))} && "
+            # setsid makes the child a group leader (pgid == pid in the
+            # container's namespace) so the later group-kill reaches
+            # everything it forks. PYTHONUNBUFFERED for the same reason as
+            # NoopBackend: a piped server's banner must not sit in a buffer.
+            f"setsid nohup env PYTHONUNBUFFERED=1 bash -lc {_sh.quote(cmd)} "
+            f"> {_sh.quote(log)} 2>&1 < /dev/null & "
+            f"echo $!"
+        )
+        runtime_env = await self._runtime_env()
+        env_flags: list[str] = []
+        for k in runtime_env:
+            env_flags += ["-e", k]
+        args = [rt.cli_path, "exec", "-w", workdir, *env_flags, self._name,
+                "sh", "-c", launch]
+
+        def _spawn():  # noqa: ANN202
+            return subprocess.run(args, capture_output=True, text=True,
+                                  env={**os.environ, **runtime_env}, timeout=30)
+
+        try:
+            proc = await asyncio.to_thread(_spawn)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            reg.mark_exited(rec.id, exit_code=None, status="failed")
+            reg.append_log(rec.id, f"failed to start: {e}\n".encode())
+            return (reg.get(rec.id) or rec).public()
+
+        pid = 0
+        for line in (proc.stdout or "").splitlines():
+            if line.strip().isdigit():
+                pid = int(line.strip())
+        if not pid or proc.returncode != 0:
+            reg.mark_exited(rec.id, exit_code=proc.returncode, status="failed")
+            reg.append_log(rec.id, (proc.stderr or proc.stdout
+                                    or "failed to start").encode())
+            return (reg.get(rec.id) or rec).public()
+
+        reg.mark_started(rec.id, pid=pid, pgid=pid)
+        rec2 = reg.get(rec.id)
+        if rec2 is not None:
+            rec2.log_path = log            # host-visible: reads are free
+            rec2.container_name = self._name
+            reg.save()
+        # Give it a moment so the caller can already report "listening on
+        # :5173" or the reason it died immediately.
+        await asyncio.sleep(0.8)
+        await self.sync_background_log(rec.id)
+        return (reg.get(rec.id) or rec).public()
+
+    async def sync_background_log(self, process_id: str) -> None:
+        """Liveness only — the log is already a host file. `kill -0` on the
+        process GROUP inside the container; a container that no longer exists
+        (or a dead group) marks the record exited instead of leaving it
+        "running" forever."""
+        from ..process_registry import get_registry
+
+        reg = get_registry()
+        rec = reg.get(process_id)
+        if not rec or not rec.pgid or rec.status not in ("starting", "running"):
+            return
+        rt = self._cli()
+        # bash, NOT sh: the image's /bin/sh is dash, whose builtin kill
+        # rejects `--` ("Illegal number: -") — measured live, and masked by
+        # the `|| echo DEAD` until the e2e caught every process "exiting".
+        args = [rt.cli_path, "exec", self._name, "bash", "-c",
+                f"kill -0 -- -{rec.pgid} 2>/dev/null && echo LIVE || echo DEAD"]
+
+        def _probe():  # noqa: ANN202
+            return subprocess.run(args, capture_output=True, text=True,
+                                  timeout=15)
+
+        try:
+            proc = await asyncio.to_thread(_probe)
+        except (subprocess.TimeoutExpired, OSError):
+            return
+        if proc.returncode != 0:
+            # `exec` itself failed → the container is gone, and so is
+            # everything inside it.
+            reg.mark_container_gone(self._name)
+            return
+        if "LIVE" not in (proc.stdout or ""):
+            reg.mark_exited(process_id, exit_code=None, status="exited")
+
+    async def terminate_background(self, process_id: str) -> bool:
+        """Group-kill inside the container — TERM, grace, then KILL."""
+        from ..process_registry import get_registry
+
+        reg = get_registry()
+        rec = reg.get(process_id)
+        if not rec or not rec.pgid:
+            return False
+        rt = self._cli()
+        # bash for the same dash-builtin-kill reason as the liveness probe.
+        args = [rt.cli_path, "exec", self._name, "bash", "-c",
+                f"kill -TERM -- -{rec.pgid} 2>/dev/null; sleep 3; "
+                f"kill -KILL -- -{rec.pgid} 2>/dev/null; true"]
+
+        def _kill():  # noqa: ANN202
+            return subprocess.run(args, capture_output=True, text=True,
+                                  timeout=30)
+
+        try:
+            proc = await asyncio.to_thread(_kill)
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+        if proc.returncode != 0 and "no such container" not in (
+                (proc.stderr or "").lower()):
+            # The exec reached the daemon but failed for another reason.
+            return False
+        # Either the group is dead, or the whole container already was.
+        reg.mark_exited(process_id, exit_code=None, status="killed")
+        return True
 
     async def exec(
         self,
@@ -420,6 +576,12 @@ class LocalContainerBackend(NoopBackend):
                 pass
 
         await asyncio.to_thread(_rm)
+        try:
+            from ..process_registry import get_registry
+
+            get_registry().mark_container_gone(self._name)
+        except Exception:  # noqa: BLE001 — bookkeeping must not break teardown
+            pass
 
 
 class UnavailableSandboxBackend(NoopBackend):
@@ -453,6 +615,9 @@ def remove_session_container(session_id: str, runtime: Optional[Runtime] = None)
     _LAST_ACTIVE.pop(name, None)
     try:
         subprocess.run([rt.cli_path, "rm", "-f", name], capture_output=True, text=True, timeout=30)
+        from ..process_registry import get_registry
+
+        get_registry().mark_container_gone(name)
     except Exception:  # noqa: BLE001 — best-effort
         pass
 

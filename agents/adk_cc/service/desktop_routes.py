@@ -410,6 +410,24 @@ def mount_process_routes(app) -> None:
         build: the ssh transport is a shared per-host ControlMaster, so this
         reuses the live connection rather than opening one.
         """
+        # #110: container-hosted processes — rebuild a signalling handle for
+        # the EXACT container the record names (never derived, never created).
+        if rec.backend == "container" and getattr(rec, "container_name", ""):
+            try:
+                from ..sandbox.backends.local_container_backend import (
+                    LocalContainerBackend,
+                )
+
+                return LocalContainerBackend.for_container(rec.container_name)
+            except Exception:  # noqa: BLE001 — no runtime is not a 500
+                return None
+        if rec.backend == "docker" and getattr(rec, "container_name", ""):
+            try:
+                from ..sandbox.backends.docker_backend import DockerBackend
+
+                return DockerBackend.for_container(rec.container_name)
+            except Exception:  # noqa: BLE001
+                return None
         if rec.backend != "ssh":
             return None
         try:

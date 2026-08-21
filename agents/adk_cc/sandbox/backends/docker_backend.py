@@ -163,8 +163,27 @@ class DockerBackend(SandboxBackend):
     @property
     def _container_name(self) -> str:
         # docker container names: [a-zA-Z0-9][a-zA-Z0-9_.-]
+        if getattr(self, "_name_override", None):
+            return self._name_override
         safe = "".join(c if c.isalnum() or c in "_.-" else "-" for c in self._session_id)
         return f"adk-cc-{safe}"
+
+    @classmethod
+    def for_container(cls, name: str) -> "DockerBackend":
+        """A handle for signalling/log-pull on an EXISTING container by name
+        (the process routes rebuild one from a registry record). Never
+        creates or starts anything — a dead container must stay dead."""
+        be = cls()
+        be._name_override = name
+        return be
+
+    def _existing_container(self):  # noqa: ANN202
+        """The named container if it exists, else None — NEVER creates."""
+        try:
+            self._get_client()
+            return self._client.containers.get(self._container_name)
+        except Exception:  # noqa: BLE001 — NotFound and daemon-down alike
+            return None
 
     def container_cwd(self, host_abs_path: str) -> str:
         # The host workspace root is bind-mounted at CONTAINER_WORKSPACE, so
@@ -569,11 +588,171 @@ class DockerBackend(SandboxBackend):
 
         await asyncio.to_thread(_write)
 
+    # --- background processes (#110) --------------------------------------
+    #
+    # Same mechanism as SshBackend/LocalContainerBackend: `setsid` INSIDE the
+    # container makes pgid == pid in its namespace; signals travel over a
+    # second exec. The log stays in the container (the agent pod cannot
+    # assume the sandbox host's filesystem) and is pulled on demand, like ssh.
+    supports_background = True
+
+    async def start_background(
+        self,
+        cmd: str,
+        *,
+        fs_write: FsWriteConfig,
+        network: NetworkConfig,
+        cwd: str,
+        label: str = "",
+        session_key: str = "",
+        project_id: str = "",
+    ) -> dict:
+        from ..process_registry import get_registry
+
+        reg = get_registry()
+        rec = reg.create(session_key=session_key, project_id=project_id,
+                         label=label, command=cmd, cwd=cwd, backend="docker",
+                         can_terminate=True)
+        try:
+            container = await self._ensure_container()
+        except Exception as e:  # noqa: BLE001
+            reg.mark_exited(rec.id, exit_code=None, status="failed")
+            reg.append_log(rec.id, f"sandbox unavailable: {e}\n".encode())
+            return (reg.get(rec.id) or rec).public()
+
+        log_c = f"{CONTAINER_WORKSPACE}/.adk-cc/processes/{rec.id}.log"
+        cwd_in = self._to_container_path(cwd) if cwd else CONTAINER_WORKSPACE
+        runtime_env = await self._runtime_env()
+        env = {"HOME": CONTAINER_HOME, "PYTHONUNBUFFERED": "1",
+               **(runtime_env or {})}
+        launch = (
+            f"mkdir -p {shlex.quote(env['HOME'])} "
+            f"{shlex.quote(log_c.rsplit('/', 1)[0])} 2>/dev/null; "
+            # setsid → group leader (pgid == pid in the container's
+            # namespace), so the later group-kill reaches everything it forks.
+            f"setsid nohup bash -lc {shlex.quote(cmd)} "
+            f"> {shlex.quote(log_c)} 2>&1 < /dev/null & echo $!"
+        )
+
+        def _spawn():  # noqa: ANN202
+            return container.exec_run(cmd=["sh", "-c", launch],
+                                      workdir=cwd_in, user=CONTAINER_USER,
+                                      environment=env, demux=True)
+
+        try:
+            rc, output = await asyncio.to_thread(_spawn)
+        except Exception as e:  # noqa: BLE001
+            reg.mark_exited(rec.id, exit_code=None, status="failed")
+            reg.append_log(rec.id, f"failed to start: {e}\n".encode())
+            return (reg.get(rec.id) or rec).public()
+        stdout_b, stderr_b = output if isinstance(output, tuple) else (output, b"")
+        pid = 0
+        for line in (stdout_b or b"").decode("utf-8", "replace").splitlines():
+            if line.strip().isdigit():
+                pid = int(line.strip())
+        if not pid or rc != 0:
+            reg.mark_exited(rec.id, exit_code=int(rc) if rc is not None else None,
+                            status="failed")
+            reg.append_log(rec.id, (stderr_b or stdout_b or b"failed to start"))
+            return (reg.get(rec.id) or rec).public()
+
+        reg.mark_started(rec.id, pid=pid, pgid=pid)
+        rec2 = reg.get(rec.id)
+        if rec2 is not None:
+            rec2.remote_log_path = log_c
+            rec2.container_name = self._container_name
+            reg.save()
+        await asyncio.sleep(0.8)
+        await self.sync_background_log(rec.id)
+        return (reg.get(rec.id) or rec).public()
+
+    async def sync_background_log(self, process_id: str) -> None:
+        """Pull the in-container log tail + liveness. A container that no
+        longer exists marks its records exited (dead containers must not
+        leave "running" rows behind)."""
+        from ..process_registry import get_registry
+
+        reg = get_registry()
+        rec = reg.get(process_id)
+        if not rec or not rec.pgid:
+            return
+        container = await asyncio.to_thread(self._existing_container)
+        if container is None:
+            reg.mark_container_gone(self._container_name)
+            return
+        log_c = rec.remote_log_path
+        # bash, NOT sh: the image's /bin/sh is dash, whose builtin kill
+        # rejects `--` — measured live in the LocalContainerBackend e2e.
+        probe = (
+            f"tail -c 200000 {shlex.quote(log_c)} 2>/dev/null; "
+            f"kill -0 -- -{rec.pgid} 2>/dev/null && echo __ADKCC_LIVE__")
+
+        def _probe():  # noqa: ANN202
+            return container.exec_run(cmd=["bash", "-c", probe],
+                                      user=CONTAINER_USER, demux=True)
+
+        try:
+            rc, output = await asyncio.to_thread(_probe)
+        except Exception:  # noqa: BLE001 — a stale tail beats a crash
+            return
+        stdout_b, _ = output if isinstance(output, tuple) else (output, b"")
+        text = (stdout_b or b"").decode("utf-8", "replace")
+        live = "__ADKCC_LIVE__" in text
+        body = text.replace("__ADKCC_LIVE__", "").rstrip("\n")
+        if body:
+            reg.replace_log(process_id, body.encode("utf-8"))
+        if not live and rec.status in ("starting", "running"):
+            reg.mark_exited(process_id, exit_code=None, status="exited")
+
+    async def terminate_background(self, process_id: str) -> bool:
+        """Group-kill inside the container — TERM, grace, then KILL."""
+        from ..process_registry import get_registry
+
+        reg = get_registry()
+        rec = reg.get(process_id)
+        if not rec or not rec.pgid:
+            return False
+        container = await asyncio.to_thread(self._existing_container)
+        if container is None:
+            # The container is gone, and so is the process.
+            reg.mark_container_gone(self._container_name)
+            reg.mark_exited(process_id, exit_code=None, status="killed")
+            return True
+
+        def _kill():  # noqa: ANN202
+            return container.exec_run(
+                cmd=["bash", "-c",
+                     f"kill -TERM -- -{rec.pgid} 2>/dev/null; sleep 3; "
+                     f"kill -KILL -- -{rec.pgid} 2>/dev/null; true"],
+                user=CONTAINER_USER, demux=True)
+
+        try:
+            await asyncio.to_thread(_kill)
+        except Exception:  # noqa: BLE001
+            return False
+        reg.mark_exited(process_id, exit_code=None, status="killed")
+        return True
+
     async def close(self) -> None:
         if self._container is None:
             return
         c = self._container
         self._container = None
+        # #110: after_run tears the container down at end of TURN, but a live
+        # background process (a dev server the user just started) must outlive
+        # the turn. Keep the container; _ensure_container re-attaches by name
+        # next turn, and the reap happens on a later close once the process
+        # has been stopped.
+        try:
+            from ..process_registry import get_registry
+
+            if any(r.container_name == self._container_name
+                   and r.kind == "background"
+                   and r.status in ("starting", "running")
+                   for r in get_registry().list()):
+                return
+        except Exception:  # noqa: BLE001 — bookkeeping must not block teardown
+            pass
         try:
             await asyncio.to_thread(c.stop, timeout=2)
         except Exception:
@@ -581,4 +760,10 @@ class DockerBackend(SandboxBackend):
         try:
             await asyncio.to_thread(c.remove, v=True)
         except Exception:
+            pass
+        try:
+            from ..process_registry import get_registry
+
+            get_registry().mark_container_gone(self._container_name)
+        except Exception:  # noqa: BLE001
             pass
