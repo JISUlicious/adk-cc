@@ -25,6 +25,14 @@ _INVOKES_PYTHON = re.compile(r"(?:^|[\s;&|(`$])(?:python3?|pip3?|uv\s+run)\b")
 _MISSING_FILE_RE = re.compile(
     r"(can't open file|No such file or directory|not found|cannot find)", re.I
 )
+# A reference INTO the materialised skill-runtime cache (any prefix, absolute
+# included — tracebacks print the absolute form and the model copies it). The
+# digest dir changes on every skill edit and siblings are deleted, so a saved
+# path is stale by design; the path itself names the skill and relative file,
+# which is exactly what the redirect needs.
+_RUNTIME_REF_RE = re.compile(
+    r"\.(?:adk-cc|agents)/skill-runtime/(?P<skill>[\w.-]+)/[\w.-]+/"
+    r"(?P<rel>[\w./-]+)")
 _SCRIPTISH_RE: Optional[re.Pattern] = None
 
 
@@ -63,6 +71,29 @@ def _skill_script_hint(command: str, stderr: str) -> Optional[str]:
     if not _MISSING_FILE_RE.search(stderr or ""):
         return None
     from ...tools.skills import locate_skill_script
+
+    # A stale materialised path (#113): `.adk-cc/skill-runtime/<skill>/
+    # <digest>/scripts/x.py`, usually copied out of a traceback. The digest
+    # dir it names is gone (only one exists at a time), but the path itself
+    # says which skill and which file — redirect precisely, absolute or not.
+    m = _RUNTIME_REF_RE.search(command or "")
+    # Same-LINE check: a CURRENT digest path runs fine, and its script's own
+    # traceback can also say "No such file" (about a data file) while naming
+    # the runtime path in a File "…" frame. Only the script itself failing to
+    # open puts its basename on the same line as the missing-file phrase.
+    if m and any(
+        _MISSING_FILE_RE.search(ln) and m.group("rel").rsplit("/", 1)[-1] in ln
+        for ln in (stderr or "").splitlines()
+    ):
+        return (
+            f"{NOTE_PREFIX} that path points into the skill runtime CACHE — a "
+            f"materialised copy of the `{m.group('skill')}` skill whose "
+            "location changes whenever the skill does, so it is never stable "
+            "to address directly. Run the script through its skill instead:\n"
+            f'  run_skill_script(skill_name="{m.group("skill")}", '
+            f'file_path="{m.group("rel")}", args=["<arg>", ...])\n'
+            "It runs with your workspace as its working directory."
+        )
 
     for token in _scriptish_re().findall(command or ""):
         if token.startswith("/"):

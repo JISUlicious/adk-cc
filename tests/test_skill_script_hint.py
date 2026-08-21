@@ -123,6 +123,48 @@ def test_an_absolute_path_is_not_hijacked() -> None:
     print("OK an_absolute_path_is_not_hijacked")
 
 
+_STALE_RUNTIME = ("/Users/x/proj/.adk-cc/skill-runtime/data-analyst/"
+                  "0f3a9c1d2e4b5a67/scripts/premodel_audit.py")
+
+
+def test_a_stale_runtime_path_is_redirected_even_when_absolute() -> None:
+    """#113: tracebacks print the materialised path absolute, the model copies
+    it, and the digest dir it names is gone (only one exists at a time). The
+    path itself says skill + file — the redirect must use that, not fall into
+    the absolute-path exemption above."""
+    hint = _skill_script_hint(
+        f"python {_STALE_RUNTIME} data.csv",
+        f"python: can't open file '{_STALE_RUNTIME}': "
+        "[Errno 2] No such file or directory")
+    assert hint and "data-analyst" in hint, hint
+    assert 'file_path="scripts/premodel_audit.py"' in hint, hint
+    assert "CACHE" in hint, hint
+    print("OK a_stale_runtime_path_is_redirected_even_when_absolute")
+
+
+def test_a_relative_runtime_path_is_redirected_too() -> None:
+    hint = _skill_script_hint(
+        "python .adk-cc/skill-runtime/data-analyst/deadbeef00112233/"
+        "scripts/premodel_audit.py",
+        "python: can't open file '.adk-cc/skill-runtime/data-analyst/"
+        "deadbeef00112233/scripts/premodel_audit.py': [Errno 2] "
+        "No such file or directory")
+    assert hint and "run_skill_script" in hint, hint
+    print("OK a_relative_runtime_path_is_redirected_too")
+
+
+def test_a_current_runtime_script_that_ran_is_not_second_guessed() -> None:
+    """A CURRENT digest path runs fine; its traceback can still say "No such
+    file" about a DATA file while a File "…" frame names the runtime path.
+    That is the script's own error, not a stale path — no redirect."""
+    assert _skill_script_hint(
+        f"python {_STALE_RUNTIME} data.csv",
+        f'Traceback (most recent call last):\n  File "{_STALE_RUNTIME}", '
+        "line 3, in <module>\nFileNotFoundError: [Errno 2] No such file or "
+        "directory: 'data.csv'") is None
+    print("OK a_current_runtime_script_that_ran_is_not_second_guessed")
+
+
 def test_the_locator_matches_by_tail_not_by_guess() -> None:
     assert locate_skill_script("scripts/premodel_audit.py")[0] == "data-analyst"
     assert locate_skill_script("premodel_audit.py")[0] == "data-analyst"
@@ -200,6 +242,9 @@ def main() -> None:
     test_an_ordinary_failure_is_left_alone()
     test_a_succeeding_command_gets_nothing()
     test_an_absolute_path_is_not_hijacked()
+    test_a_stale_runtime_path_is_redirected_even_when_absolute()
+    test_a_relative_runtime_path_is_redirected_too()
+    test_a_current_runtime_script_that_ran_is_not_second_guessed()
     test_the_locator_matches_by_tail_not_by_guess()
     test_the_proactive_instruction_contradicts_adk_s_bash_line()
     test_the_instruction_is_actually_sent_with_the_catalogue()
