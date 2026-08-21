@@ -443,29 +443,15 @@ def status(workspace_root: str) -> dict:
                 "detail": "operator-supplied interpreter"}
 
     root = Path(workspace_root)
+    pieces: dict = {"busy": None, "busy_age": None, "has_interpreter": False,
+                    "marker": None, "error": None}
     busy = root / _BUSY_REL
     try:
         if busy.is_file():
             import time as _time
 
-            age = _time.time() - busy.stat().st_mtime
-            body = busy.read_text().strip().split(" ", 1)
-            tiers_txt = body[1] if len(body) > 1 else (body[0] if body else "")
-            if age < _BUSY_STALE_S:
-                return {
-                    "state": "provisioning",
-                    "tiers": [t for t in tiers_txt.split(",") if t],
-                    "seconds": int(age),
-                    "detail": "installing packages — first use in this project",
-                }
-            return {
-                "state": "unavailable",
-                "detail": (
-                    f"a provisioning run started {int(age // 60)}m ago never "
-                    "finished (the process was probably killed); the next "
-                    "analysis will retry"
-                ),
-            }
+            pieces["busy_age"] = _time.time() - busy.stat().st_mtime
+            pieces["busy"] = busy.read_text()
     except OSError:
         pass
 
@@ -473,22 +459,56 @@ def status(workspace_root: str) -> dict:
     interpreter = root / _ENV_REL / "bin" / "python"
     err = root / _ERROR_REL
     try:
-        if not interpreter.exists():
+        pieces["has_interpreter"] = interpreter.exists()
+        if not pieces["has_interpreter"]:
             # A FAILED provision and a fresh project look identical on disk
             # (no interpreter, no marker) — the recorded error is the only
             # thing that tells them apart.
             try:
-                reason = err.read_text().strip() if err.is_file() else ""
+                pieces["error"] = err.read_text() if err.is_file() else None
             except OSError:
-                reason = ""
-            if reason:
-                return {"state": "unavailable", "detail": reason[:400]}
-            return {"state": "absent",
-                    "detail": "provisions on first analysis in this project"}
-        token = marker.read_text().strip() if marker.is_file() else ""
+                pieces["error"] = None
+        elif marker.is_file():
+            pieces["marker"] = marker.read_text()
     except OSError as e:
         return {"state": "unknown", "detail": str(e)}
+    return _interpret_pieces(pieces)
 
+
+def _interpret_pieces(pieces: dict) -> dict:
+    """Turn a raw filesystem snapshot into a status dict.
+
+    Shared by `status` (local pathlib snapshot) and `status_via` (snapshot
+    gathered inside a remote/containerized workspace by one exec, #75) so the
+    two paths cannot drift."""
+    if pieces.get("busy") is not None and pieces.get("busy_age") is not None:
+        age = float(pieces["busy_age"])
+        body = str(pieces["busy"]).strip().split(" ", 1)
+        tiers_txt = body[1] if len(body) > 1 else (body[0] if body else "")
+        if age < _BUSY_STALE_S:
+            return {
+                "state": "provisioning",
+                "tiers": [t for t in tiers_txt.split(",") if t],
+                "seconds": int(age),
+                "detail": "installing packages — first use in this project",
+            }
+        return {
+            "state": "unavailable",
+            "detail": (
+                f"a provisioning run started {int(age // 60)}m ago never "
+                "finished (the process was probably killed); the next "
+                "analysis will retry"
+            ),
+        }
+
+    if not pieces.get("has_interpreter"):
+        reason = (pieces.get("error") or "").strip()
+        if reason:
+            return {"state": "unavailable", "detail": reason[:400]}
+        return {"state": "absent",
+                "detail": "provisions on first analysis in this project"}
+
+    token = (pieces.get("marker") or "").strip()
     tiers = [t for t in token.split("|")[0].split(",") if t] if token else []
     return {
         "state": "ready",
@@ -496,3 +516,80 @@ def status(workspace_root: str) -> dict:
         "python": f"{_ENV_REL}/bin/python",
         "detail": ("ready: " + ", ".join(tiers)) if tiers else "interpreter only",
     }
+
+
+# --- remote status (#75) ----------------------------------------------------
+#
+# One exec, run IN the workspace (relative paths — backends translate the
+# cwd), that gathers exactly the pieces `status` reads locally. Interpreted
+# by the same `_interpret_pieces`, so the chip means the same thing whether
+# the workspace is this host, an SSH box, or a container.
+
+_ENVSNAP_MARK = "__ADKCC_ENVSNAP__"
+
+SNAPSHOT_SCRIPT = f"""
+import json, os, time
+p = {{"busy": None, "busy_age": None, "has_interpreter": False,
+     "marker": None, "error": None}}
+try:
+    st = os.stat({_BUSY_REL!r})
+    p["busy_age"] = time.time() - st.st_mtime
+    p["busy"] = open({_BUSY_REL!r}).read()
+except OSError:
+    pass
+p["has_interpreter"] = os.path.exists({_ENV_REL + "/bin/python"!r})
+for k, f in (("marker", {_MARKER_REL!r}), ("error", {_ERROR_REL!r})):
+    try:
+        p[k] = open(f).read()
+    except OSError:
+        pass
+print({_ENVSNAP_MARK!r} + json.dumps(p))
+"""
+
+
+def snapshot_command() -> str:
+    return (
+        "mkdir -p .adk-cc; "
+        f"cat <<'__ADKCC_PY__' > .adk-cc/_envsnap.py\n{SNAPSHOT_SCRIPT}\n__ADKCC_PY__\n"
+        "python3 .adk-cc/_envsnap.py"
+    )
+
+
+def parse_snapshot(stdout: str) -> Optional[dict]:
+    import json as _json
+
+    for line in (stdout or "").splitlines():
+        if line.startswith(_ENVSNAP_MARK):
+            try:
+                out = _json.loads(line[len(_ENVSNAP_MARK):])
+            except ValueError:
+                return None
+            return out if isinstance(out, dict) else None
+    return None
+
+
+async def status_via(backend: SandboxBackend, ws: WorkspaceRoot) -> dict:
+    """`status`, but for a workspace this host cannot read directly.
+
+    Same read-only contract: never provisions, one bounded exec. Exec failure
+    or a snapshot that never printed → `unknown` with the reason — the honest
+    degradation the refusal used to be."""
+    mode = _mode()
+    if mode == "off":
+        return {"state": "off",
+                "detail": "using bare python3 (ADK_CC_ANALYSIS_ENV=off)"}
+    if mode not in ("auto",):
+        return {"state": "external", "python": mode,
+                "detail": "operator-supplied interpreter"}
+    try:
+        res = await backend.exec(
+            snapshot_command(), fs_write=ws.fs_write_config(),
+            network=NetworkConfig(), timeout_s=30, cwd=ws.abs_path)
+    except Exception as e:  # noqa: BLE001 — status must degrade, not raise
+        return {"state": "unknown",
+                "detail": f"cannot reach the workspace: {e}"}
+    pieces = parse_snapshot(getattr(res, "stdout", "") or "")
+    if pieces is None:
+        tail = (getattr(res, "stderr", "") or "status probe produced no output")
+        return {"state": "unknown", "detail": tail[-300:]}
+    return _interpret_pieces(pieces)

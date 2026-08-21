@@ -184,6 +184,74 @@ def supported() -> Iterable[str]:
     return sorted(set(ALLOWED_EXT))
 
 
+# --- backend-routed listing/stat (#75) --------------------------------------
+#
+# When the workspace is NOT on this host (SSH project, container/daytona
+# backend), `listing()`'s pathlib walk sees nothing and would report "no
+# datasets" with total confidence. These build one small exec the sandbox
+# backend can run IN the workspace (relative paths + translated cwd, same
+# contract as the upload existence probe) and parse its marker-prefixed JSON.
+# `python3` is a fair ask: every supported remote is a Linux box or our own
+# sandbox image; where it is genuinely absent the exec fails and the caller
+# reports "unavailable" — honest, like before, instead of wrong.
+
+_ROWS_MARK = "__ADKCC_DSROWS__"
+
+ROWS_SCRIPT = r"""
+import json, os, sys
+d = sys.argv[1]; only = sys.argv[2] if len(sys.argv) > 2 else ""
+rows = []
+if os.path.isdir(d):
+    for n in ([only] if only else sorted(os.listdir(d))):
+        p = os.path.join(d, n)
+        if os.path.isfile(p):
+            st = os.stat(p)
+            rows.append({"name": n, "bytes": st.st_size,
+                         "modified": int(st.st_mtime)})
+print("__ADKCC_DSROWS__" + json.dumps(rows))
+"""
+
+
+def rows_command(name: str = "") -> str:
+    """Shell command listing `data/` (or one file) as marker-prefixed JSON."""
+    import shlex
+
+    arg = f" {shlex.quote(check_name(name))}" if name else ""
+    return (
+        "mkdir -p .adk-cc; "
+        f"cat <<'__ADKCC_PY__' > .adk-cc/_dsrows.py\n{ROWS_SCRIPT}\n__ADKCC_PY__\n"
+        f"python3 .adk-cc/_dsrows.py {DATA_DIR}{arg}"
+    )
+
+
+def parse_rows(stdout: str) -> Optional[list[dict]]:
+    """Rows from `rows_command` output, filtered and shaped like `describe`.
+
+    None means the script never ran (no marker line) — the caller must say
+    "unavailable", not "empty"."""
+    import json as _json
+
+    for line in (stdout or "").splitlines():
+        if line.startswith(_ROWS_MARK):
+            try:
+                raw = _json.loads(line[len(_ROWS_MARK):])
+            except ValueError:
+                return None
+            return [
+                {
+                    "name": r["name"],
+                    "path": f"{DATA_DIR}/{r['name']}",
+                    "bytes": int(r["bytes"]),
+                    "modified": int(r["modified"]),
+                    "format": (lower_ext(r["name"]) or "").lstrip("."),
+                }
+                for r in raw
+                if isinstance(r, dict) and lower_ext(str(r.get("name", "")))
+                and not str(r.get("name", "")).endswith(".part")
+            ]
+    return None
+
+
 # --- profiling (W6.2) -------------------------------------------------------
 #
 # What an analyst checks before asking anything: shape, dtypes, nulls, head.

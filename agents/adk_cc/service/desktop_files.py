@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -557,6 +558,43 @@ def mount_desktop_files_routes(app) -> None:  # noqa: ANN001
         return _raw_response(target, name, as_download)
 
 
+def _dataset_serving_ctx(project_id: str, session_id: str):
+    """How the dataset/env routes should reach this project's workspace.
+
+    Returns `(reason, ws, backend)`:
+    * `reason is None` — the workspace is on THIS host; serve with pathlib
+      (no backend built, no side effects). ws/backend are None.
+    * otherwise — the workspace lives elsewhere (`reason` says where), and
+      ws/backend are the SAME pair the TenancyPlugin hands the agent
+      (#75: serve THROUGH it instead of refusing).
+
+    Module-level on purpose: it is the single fork the routes trust, and
+    tests substitute it to simulate remote/container workspaces.
+    """
+    from .desktop_workspace import (
+        desktop_backend_factory,
+        desktop_tenant_resolver,
+    )
+
+    ctx = desktop_tenant_resolver(project_id)
+    if not getattr(ctx, "remote", None):
+        try:
+            from ..sandbox import _get_default_backend, is_noop_backend
+
+            if is_noop_backend(_get_default_backend()):
+                return None, None, None
+        except Exception:  # noqa: BLE001 — detection must not break the route
+            return None, None, None
+    ws = ctx.workspace(session_id)
+    backend = desktop_backend_factory(ctx, session_id)
+    if getattr(ctx, "remote", None):
+        reason = "this project runs over SSH; its files are on the remote host"
+    else:
+        name = getattr(backend, "name", type(backend).__name__)
+        reason = f"the workspace lives inside the {name} sandbox"
+    return reason, ws, backend
+
+
 # --- datasets (W5 ingestion) ------------------------------------------------
 
 def mount_desktop_upload_routes(app) -> None:  # noqa: ANN001
@@ -617,39 +655,22 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
         return
 
     from . import datasets as ds
+    from . import datasets_backend as dsb
 
-    # (path, mtime_ns, size) -> profile. Profiling costs a sandbox round trip
+    # (path, mtime[_ns], size) -> profile. Profiling costs a sandbox round trip
     # and the first one may provision the env; re-listing a panel must not.
     _PROFILE_CACHE: dict = {}
 
-    def _workspace_is_local(request: Request) -> Optional[str]:
-        """Why this workspace is NOT on the server's filesystem, or None.
-
-        The datasets/profile/env routes all read the workspace with plain
-        `pathlib`, which is right for desktop's in-place local project and
-        WRONG the moment the workspace lives elsewhere: an SSH project's files
-        are on another machine, and a container backend's are inside the
-        sandbox. Reading the host path then reports "no datasets" / "env not
-        built" with total confidence — the worst kind of wrong. Say so instead.
-        """
-        pid = request.query_params.get("project_id") or ""
-        try:
-            if pid and _remote_ctx(_safe(pid, "project_id")) is not None:
-                return "this project runs over SSH; its files are on the remote host"
-        except HTTPException:
-            raise
-        except Exception:  # noqa: BLE001 — detection must not break the route
-            pass
-        try:
-            from ..sandbox import _get_default_backend, is_noop_backend
-
-            backend = _get_default_backend()
-            if not is_noop_backend(backend):
-                name = getattr(backend, "name", type(backend).__name__)
-                return f"the workspace lives inside the {name} sandbox"
-        except Exception:  # noqa: BLE001
-            pass
-        return None
+    def _serving(request: Request):
+        """(reason, ws, backend) for this request — see _dataset_serving_ctx."""
+        q = request.query_params
+        project_id = q.get("project_id") or ""
+        session_id = q.get("session_id") or ""
+        if not project_id or not session_id:
+            raise HTTPException(status_code=400,
+                                detail="project_id and session_id required")
+        return _dataset_serving_ctx(_safe(project_id, "project_id"),
+                                    _safe(session_id, "session_id"))
 
     def _root(request: Request) -> Path:
         q = request.query_params
@@ -665,53 +686,72 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
 
     @app.get("/desktop/datasets", include_in_schema=False)
     async def list_datasets(request: Request):  # noqa: ANN202
-        remote = _workspace_is_local(request)
-        if remote:
+        reason, ws, backend = _serving(request)
+        base = {"location": ds.DATA_DIR, "supported": list(ds.supported()),
+                "max_bytes": ds.max_bytes()}
+        if reason is None:
+            return {"datasets": ds.listing(_root(request)), **base}
+        try:
+            rows = await dsb.listing_via(ws, backend)
+        except dsb.WorkspaceUnreachable as e:
             # An empty list here would read as "no datasets", which is a
             # different and much more misleading statement.
-            return {"datasets": [], "location": ds.DATA_DIR,
-                    "supported": list(ds.supported()), "max_bytes": ds.max_bytes(),
-                    "unavailable": remote}
-        root = _root(request)
-        return {
-            "datasets": ds.listing(root),
-            "location": ds.DATA_DIR,
-            "supported": list(ds.supported()),
-            "max_bytes": ds.max_bytes(),
-        }
+            return {"datasets": [], **base,
+                    "unavailable": f"{reason} — listing failed: {e}"}
+        return {"datasets": rows, **base,
+                "served_via": getattr(backend, "name", type(backend).__name__)}
 
     @app.post("/desktop/datasets/from-path", include_in_schema=False)
     async def add_dataset_from_path(request: Request):  # noqa: ANN202
         """Ingest a LOCAL file the user picked (desktop is single-user loopback,
         so the server may read the chosen path — same trust model as adding a
-        project folder)."""
-        remote = _workspace_is_local(request)
-        if remote:
-            raise HTTPException(status_code=409,
-                                detail=f"cannot place a dataset from here: {remote}")
-        root = _root(request)
+        project folder). For a remote/containerized workspace the picked file
+        is STILL on this machine: read it here, deliver through the backend."""
+        reason, ws, backend = _serving(request)
         body = await request.json() or {}
+        if reason is None:
+            root = _root(request)
+            try:
+                row = ds.ingest_local_path(root, str(body.get("path") or ""),
+                                           name=str(body.get("name") or ""))
+            except ds.DatasetError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return {"status": "ok", "dataset": row}
+        source = Path(os.path.abspath(os.path.expanduser(
+            str(body.get("path") or "").strip())))
         try:
-            row = ds.ingest_local_path(root, str(body.get("path") or ""),
-                                       name=str(body.get("name") or ""))
+            if not source.is_file():
+                raise ds.DatasetError(f"not a file: {source}")
+            ds.check_size(source.stat().st_size)
+            row = await dsb.put_via(ws, backend,
+                                    str(body.get("name") or "") or source.name,
+                                    source.read_bytes())
         except ds.DatasetError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except dsb.WorkspaceUnreachable as e:
+            raise HTTPException(status_code=409,
+                                detail=f"cannot place a dataset: {reason} — {e}")
         return {"status": "ok", "dataset": row}
 
     @app.put("/desktop/datasets/{name}", include_in_schema=False)
     async def upload_dataset(name: str, request: Request):  # noqa: ANN202
-        remote = _workspace_is_local(request)
-        if remote:
-            raise HTTPException(status_code=409,
-                                detail=f"cannot place a dataset from here: {remote}")
-        root = _root(request)
+        reason, ws, backend = _serving(request)
         blob = await request.body()
         if not blob:
             raise HTTPException(status_code=400, detail="empty body")
+        if reason is None:
+            try:
+                row = ds.write_bytes(_root(request), name, blob)
+            except ds.DatasetError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return {"status": "ok", "dataset": row}
         try:
-            row = ds.write_bytes(root, name, blob)
+            row = await dsb.put_via(ws, backend, name, blob)
         except ds.DatasetError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except dsb.WorkspaceUnreachable as e:
+            raise HTTPException(status_code=409,
+                                detail=f"cannot place a dataset: {reason} — {e}")
         return {"status": "ok", "dataset": row}
 
     @app.get("/desktop/analysis-env", include_in_schema=False)
@@ -721,12 +761,16 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
         Read-only by construction — polling must never kick off a 60s install.
         """
         from ..sandbox.analysis_env import status as env_status
+        from ..sandbox.analysis_env import status_via
 
-        remote = _workspace_is_local(request)
-        if remote:
-            # "absent" would claim the env is not built; we simply cannot see it.
-            return {"state": "unknown", "detail": remote}
-        return env_status(str(_root(request)))
+        reason, ws, backend = _serving(request)
+        if reason is None:
+            return env_status(str(_root(request)))
+        st = await status_via(backend, ws)
+        if st.get("state") == "unknown":
+            # "absent" would claim the env is not built; we could not see it.
+            st["detail"] = f"{reason} — {st.get('detail', '')}"
+        return st
 
     @app.get("/desktop/datasets/{name}/profile", include_in_schema=False)
     async def profile_dataset(name: str, request: Request):  # noqa: ANN202
@@ -737,43 +781,61 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
         metadata, text formats read a sample and count newlines. Cached on
         (path, mtime, size) because the first call may provision the env.
         """
-        remote = _workspace_is_local(request)
-        if remote:
-            raise HTTPException(status_code=409,
-                                detail=f"cannot profile from here: {remote}")
-        root = _root(request)
-        try:
-            dest = ds.target_path(root, name)
-        except ds.DatasetError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        if not dest.is_file():
-            raise HTTPException(status_code=404, detail=f"no such dataset: {name}")
-
-        st = dest.stat()
-        key = (str(dest), st.st_mtime_ns, st.st_size)
+        reason, r_ws, r_backend = _serving(request)
+        if reason is None:
+            root = _root(request)
+            try:
+                dest = ds.target_path(root, name)
+            except ds.DatasetError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            if not dest.is_file():
+                raise HTTPException(status_code=404,
+                                    detail=f"no such dataset: {name}")
+            st = dest.stat()
+            key = (str(dest), st.st_mtime_ns, st.st_size)
+        else:
+            # Remote/containerized: existence + cache key from ONE exec probe;
+            # the profiler itself was always backend-routed.
+            try:
+                row = await dsb.stat_via(r_ws, r_backend, name)
+            except ds.DatasetError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            except dsb.WorkspaceUnreachable as e:
+                raise HTTPException(status_code=409,
+                                    detail=f"cannot profile: {reason} — {e}")
+            if row is None:
+                raise HTTPException(status_code=404,
+                                    detail=f"no such dataset: {name}")
+            key = (r_ws.abs_path, row["name"], row["modified"], row["bytes"])
         hit = _PROFILE_CACHE.get(key)
         if hit is not None:
             return {"status": "ok", "profile": hit, "cached": True}
 
-        from ..sandbox import _get_default_backend
         from ..sandbox.config import NetworkConfig
-        from ..sandbox.workspace import WorkspaceRoot
         from ..sandbox.analysis_env import ensure_env
 
-        backend = _get_default_backend()
-        ws = WorkspaceRoot(tenant_id="local",
-                           session_id=request.query_params.get("session_id") or "profile",
-                           abs_path=str(root))
+        if reason is None:
+            from ..sandbox import _get_default_backend
+            from ..sandbox.workspace import WorkspaceRoot
+
+            backend = _get_default_backend()
+            ws = WorkspaceRoot(
+                tenant_id="local",
+                session_id=request.query_params.get("session_id") or "profile",
+                abs_path=str(root))
+        else:
+            backend, ws = r_backend, r_ws
         try:
             env = await ensure_env(backend, ws, tiers=("core",))
         except Exception as e:  # noqa: BLE001 — provisioning is the likely failure
             raise HTTPException(status_code=503,
                                 detail=f"analysis runtime unavailable: {e}")
-        cmd = ds.profile_command(f"{ds.DATA_DIR}/{dest.name}", python=env.python)
+        cmd = ds.profile_command(f"{ds.DATA_DIR}/{ds.check_name(name)}",
+                                 python=env.python)
         try:
             res = await backend.exec(cmd, fs_write=ws.fs_write_config(),
                                      network=NetworkConfig(), timeout_s=240,
-                                     cwd=str(root))
+                                     cwd=ws.abs_path)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"profiling failed: {e}")
         prof = ds.parse_profile(getattr(res, "stdout", "") or "")
@@ -789,13 +851,18 @@ def mount_desktop_dataset_routes(app) -> None:  # noqa: ANN001
 
     @app.delete("/desktop/datasets/{name}", include_in_schema=False)
     async def delete_dataset(name: str, request: Request):  # noqa: ANN202
-        remote = _workspace_is_local(request)
-        if remote:
-            raise HTTPException(status_code=409,
-                                detail=f"cannot delete from here: {remote}")
-        root = _root(request)
+        reason, ws, backend = _serving(request)
+        if reason is None:
+            try:
+                gone = ds.remove(_root(request), name)
+            except ds.DatasetError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return {"status": "deleted" if gone else "not_found", "name": name}
         try:
-            gone = ds.remove(root, name)
+            gone = await dsb.remove_via(ws, backend, name)
         except ds.DatasetError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        except dsb.WorkspaceUnreachable as e:
+            raise HTTPException(status_code=409,
+                                detail=f"cannot delete: {reason} — {e}")
         return {"status": "deleted" if gone else "not_found", "name": name}

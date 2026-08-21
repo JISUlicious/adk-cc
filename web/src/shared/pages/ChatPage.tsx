@@ -976,6 +976,7 @@ export function ChatPage({
           mode={permissionMode}
           sessionId={session?.id ?? null}
           userId={userId}
+          onUploaded={() => setRefreshTick((t) => t + 1)}
           footer={session ? <ContextGauge current={ctxTokens} limits={ctxLimits} /> : undefined}
           taskStrip={session ? <TaskStrip events={events} /> : undefined}
           modelChip={IS_DESKTOP ? (

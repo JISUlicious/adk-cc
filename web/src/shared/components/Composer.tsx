@@ -56,6 +56,7 @@ export function Composer({
   footer,
   taskStrip,
   modelChip,
+  onUploaded,
 }: {
   onSend: (text: string) => void
   onAbort: () => void
@@ -77,6 +78,10 @@ export function Composer({
   /** Current-model chip (desktop) — rendered in the meta row next to the
    *  sandbox badge so the user sees which model the next turn uses. */
   modelChip?: ReactNode
+  /** Fires once after ALL staged files have landed (#121 P2): lets the page
+   *  refresh the file tree immediately instead of waiting for the next turn
+   *  event to bump its tick. */
+  onUploaded?: () => void
 }) {
   const [value, setValue] = useState("")
   const [slashCursor, setSlashCursor] = useState(0)
@@ -169,6 +174,7 @@ export function Composer({
     }
     setUploading(false)
     setStaged([])
+    if (lines.length) onUploaded?.()
     onSend([text, ...lines].filter(Boolean).join("\n"))
     setValue("")
     setSlashCursor(0)

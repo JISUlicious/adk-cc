@@ -20,6 +20,9 @@ os.environ.setdefault("ADK_CC_SKIP_DOTENV", "1")
 os.environ.setdefault("ADK_CC_SKIP_CONFIG_CHECK", "1")
 os.environ.setdefault("ADK_CC_API_KEY", "sk-dummy-for-tests")
 os.environ["ADK_CC_DESKTOP"] = "1"
+# The serving-ctx fork reads the desktop project registry — keep the test
+# away from the user's real ~/.adk-cc-desktop.
+os.environ["ADK_CC_DESKTOP_DATA"] = tempfile.mkdtemp(prefix="ds-desktop-")
 
 _ROOT = tempfile.mkdtemp(prefix="ds-ws-")
 
@@ -148,17 +151,33 @@ def main() -> None:
 
 
 def test_non_local_workspace_is_reported_not_guessed() -> None:
-    """A workspace the server cannot read (SSH project, container backend) must
-    say so. Reading the host path instead returns "no datasets" and "env not
-    built" with total confidence — the worst kind of wrong, and invisible."""
+    """A workspace the server cannot REACH (SSH host down, dead container)
+    must say so. #75 made the routes serve remote workspaces through the
+    backend; when that backend cannot answer, an empty listing would read as
+    "no datasets" and "env not built" — the worst kind of wrong."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
+    from adk_cc.sandbox.workspace import WorkspaceRoot
     import adk_cc.service.desktop_files as df
 
-    project = Path(tempfile.mkdtemp(prefix="ds-remote-"))
-    df._resolve_within = lambda pid, sid, rel: (project / rel).resolve() if rel else project
-    df._remote_ctx = lambda pid: ("transport", "/srv/app")     # pretend SSH
+    class _DeadBackend:
+        name = "ssh"
+
+        async def exec(self, *a, **k):  # noqa: ANN002, ANN003, ANN202
+            raise RuntimeError("host unreachable")
+
+        async def ensure_workspace(self, ws):  # noqa: ANN001, ANN202
+            raise RuntimeError("host unreachable")
+
+        async def write_bytes(self, *a, **k):  # noqa: ANN002, ANN003, ANN202
+            raise RuntimeError("host unreachable")
+
+    ws = WorkspaceRoot(tenant_id="local", session_id="s1",
+                       abs_path="/srv/app", remote=True)
+    df._dataset_serving_ctx = lambda pid, sid: (
+        "this project runs over SSH; its files are on the remote host",
+        ws, _DeadBackend())
 
     app = FastAPI()
     df.mount_desktop_dataset_routes(app)
@@ -169,8 +188,11 @@ def test_non_local_workspace_is_reported_not_guessed() -> None:
     assert body["datasets"] == [] and "SSH" in body.get("unavailable", ""), body
     env = client.get(f"/desktop/analysis-env{q}").json()
     assert env["state"] == "unknown" and "SSH" in env["detail"], env
+    src = Path(tempfile.mkdtemp(prefix="ds-src2-")) / "real.csv"
+    src.write_text("a,b\n1,2\n")
     for call in (
-        lambda: client.post(f"/desktop/datasets/from-path{q}", json={"path": "/tmp/x.csv"}),
+        lambda: client.post(f"/desktop/datasets/from-path{q}",
+                            json={"path": str(src)}),
         lambda: client.put(f"/desktop/datasets/a.csv{q}", content=b"x"),
         lambda: client.delete(f"/desktop/datasets/a.csv{q}"),
         lambda: client.get(f"/desktop/datasets/a.csv/profile{q}"),
