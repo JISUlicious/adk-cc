@@ -153,6 +153,17 @@ def test_nonadmin_stays_logged_in_with_forbidden(page):
 
 
 def main():
+    # This test documents starting its server separately (see the module
+    # docstring). In a batch run nobody does — SKIP cleanly instead of
+    # failing on connection errors (#112).
+    import requests as _rq
+
+    try:
+        _rq.get(f"http://127.0.0.1:{PORT}/list-apps", timeout=3)
+    except Exception:
+        print(f"SKIP: no server on :{PORT} — start one per the module "
+              "docstring to run this")
+        return
     test_non_admin_blocked_by_api()
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)

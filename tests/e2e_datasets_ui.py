@@ -61,11 +61,11 @@ try:
         btns = page.locator("button")
         header_btns, off = 0, 0
         for i in range(btns.count()):
-            b = btns.nth(i).bounding_box()
-            if not b or b["y"] > 44 or b["x"] < pbox.get("x", 0):
+            box = btns.nth(i).bounding_box()
+            if not box or box["y"] > 44 or box["x"] < pbox.get("x", 0):
                 continue                     # not in this panel's header row
             header_btns += 1
-            if b["x"] + b["width"] > panel_r + 1:
+            if box["x"] + box["width"] > panel_r + 1:
                 off += 1
         check("header controls stay on screen next to the path",
               header_btns >= 3 and off == 0,

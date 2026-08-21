@@ -123,9 +123,17 @@ def main() -> int:
             me = requests.get(BASE + "/auth/me", headers={"Authorization": f"Bearer {tok}"}, timeout=5).json()
             check("name persisted to the server", me.get("name") == "Alice Updated")
 
-            # change password via UI
-            page.fill('input[placeholder="Current password"]', "password123")
-            page.fill('input[placeholder="New password (min 8 chars)"]', "newpassword1")
+            # change password via UI. Scoped to ITS form: the "Change email"
+            # section ALSO has an input[placeholder="Current password"], and
+            # the unscoped fill landed there — leaving this form's state empty
+            # and its button disabled forever (the #112 "fill is not reaching
+            # React state" mystery).
+            pw_form = page.locator(
+                "form", has=page.get_by_role("button", name="Update password"))
+            pw_form.locator('input[placeholder="Current password"]').fill(
+                "password123")
+            pw_form.locator('input[placeholder="New password (min 8 chars)"]').fill(
+                "newpassword1")
             page.get_by_role("button", name="Update password").click()
             page.wait_for_selector("text=Password changed.", timeout=10000)
             check("password change shows confirmation", page.get_by_text("Password changed.").count() > 0)
