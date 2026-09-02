@@ -129,6 +129,28 @@ def main() -> int:
         print("  [note] model extracted nothing — capture quality depends on the "
               "model; the pipeline itself is verified above + in the unit tests.")
 
+    # 4. corroborate-drop, live: the SAME turn captured twice more, now that
+    # its facts are semantic, must not re-add episodics — the real model must
+    # classify the repeats CORROBORATE and _persist must drop them (the
+    # "hundreds of the same memory" fix). This is the half the unit mirror
+    # cannot verify.
+    if n > 0:
+        before_docs = len(st.list_episodic("alice"))
+        for _ in range(2):
+            rictx = asyncio.run(_seed_turn(MODEL))
+            asyncio.run(MemoryPlugin().after_run_callback(invocation_context=rictx))
+        growth = len(st.list_episodic("alice")) - before_docs
+        corrobs = [e for e in st.read_changelog("alice")
+                   if e.get("op") == "semantic_corroborate"]
+        check("repeat captures do not re-add already-durable facts",
+              growth == 0, f"episodic growth over 2 repeat turns = {growth}")
+        check("the drop is recorded as corroboration, not silence",
+              len(corrobs) >= 1, f"{len(corrobs)} semantic_corroborate entries")
+        bumped = [s for s in st.list_semantic("alice") if s.confidence > 0.5]
+        check("corroboration raised confidence on the semantic tier",
+              len(bumped) >= 1,
+              f"{[(s.topic, s.confidence) for s in st.list_semantic('alice')]}")
+
     print("\n--- semantic memory ---")
     for s in semantic:
         print(f"  [{s.topic}] ({s.confidence}) {s.text}")
