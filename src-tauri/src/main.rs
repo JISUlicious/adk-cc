@@ -31,10 +31,34 @@ const PORT: u16 = 8765;
 /// Holds the backend child so we can kill it when the app exits.
 struct BackendChild(Mutex<Option<Child>>);
 
+/// The .jus mark reaches the Dock only through a bundled .app's .icns; the
+/// daily workflow runs the bare `cargo run` binary (README), so macOS showed
+/// the generic executable icon. Set it at runtime from the same source PNG
+/// the bundler uses — one truth, no drift.
+#[cfg(target_os = "macos")]
+fn set_dock_icon() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return; // not the main thread — never panic over an icon
+    };
+    let data = NSData::with_bytes(include_bytes!("../icons/icon.png"));
+    if let Some(img) = NSImage::initWithData(objc2::AllocAnyThread::alloc(), &data) {
+        unsafe {
+            NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&img));
+        }
+    }
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            set_dock_icon();
+
             let data = data_dir(app.handle());
             std::fs::create_dir_all(&data).ok();
 
