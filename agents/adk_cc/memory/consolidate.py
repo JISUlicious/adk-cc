@@ -53,13 +53,15 @@ class ConsolidationReport:
 
 
 def _episodic_cap() -> int:
-    """Max CONSOLIDATED episodics to retain per user; 0/unset = keep all.
-    Prevents the episodic tier (#5) from growing unbounded — older ones are
-    reversibly archived (provenance survives in the semantic item's sources)."""
+    """Max CONSOLIDATED episodics to retain per user; explicit 0 = keep all.
+    Default 200 — "unset = keep all" let the tier grow unbounded in real use
+    (the same fact re-captured every turn), and nothing ever cleaned up.
+    Older ones are reversibly archived (provenance survives in the semantic
+    item's sources)."""
     try:
-        return max(0, as_int(os.environ.get("ADK_CC_MEMORY_EPISODIC_CAP", "")))
+        return max(0, as_int(os.environ.get("ADK_CC_MEMORY_EPISODIC_CAP", "200")))
     except ValueError:
-        return 0
+        return 200
 
 
 def _default_synth(existing: Optional[str], episodic_newest_first: list[str]) -> str:

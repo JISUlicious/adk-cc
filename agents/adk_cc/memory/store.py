@@ -208,6 +208,28 @@ class MemoryStore:
                             "confidence": item.confidence})
         self._index_upsert(user_id, item)
 
+    def corroborate_semantic(
+        self, user_id: str, topic: str, source: Optional[str] = None
+    ) -> bool:
+        """A repeat capture whose value matches the existing semantic fact:
+        bump confidence + sources on the semantic item and write NOTHING to
+        the episodic tier — re-adding it is how the same memory piled up
+        hundreds of times (reported live). Returns False when the topic has
+        no live semantic item; the caller must then keep the episodic write,
+        because pre-consolidation repeats ARE the corroboration signal the
+        promotion threshold counts."""
+        item = self.get_semantic(user_id, topic)
+        if item is None or item.status not in (ACTIVE, CONSOLIDATED):
+            return False
+        item.confidence = round(min(0.95, item.confidence + 0.05), 2)
+        if source and source not in item.sources:
+            item.sources.append(source)
+        item.updated = _now_iso()
+        # Text unchanged ⇒ put_semantic logs this as `semantic_corroborate`,
+        # which is the changelog record of the dropped duplicate.
+        self.put_semantic(user_id, item)
+        return True
+
     def list_semantic(
         self, user_id: str, *, status: Optional[str] = None
     ) -> list[MemoryItem]:

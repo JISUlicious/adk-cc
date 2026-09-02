@@ -414,7 +414,20 @@ class MemoryPlugin(BasePlugin):
             resolutions = await resolve_facts(model, store, user_id, facts)
 
             def _persist() -> None:
+                from ..memory.resolve import CORROBORATE
+
                 for res in resolutions:
+                    # Same subject, same value, already durable ⇒ bump the
+                    # semantic item instead of re-adding the fact — repeat
+                    # captures were piling up as near-identical episodics
+                    # (reported: "hundreds of the same memory"). A topic
+                    # that is still episodic-only keeps the write: those
+                    # repeats are the corroboration count the promotion
+                    # threshold needs.
+                    if (res.action == CORROBORATE
+                            and store.corroborate_semantic(
+                                user_id, res.topic, source=sid or None)):
+                        continue
                     store.add_episodic(user_id, res.fact, topic=res.topic,
                                        sources=[sid] if sid else None)
 

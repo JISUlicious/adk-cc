@@ -165,6 +165,74 @@ def main() -> int:
         check("_known_topics: semantic first, then pending episodic",
               topics == ["preferred-language", "editor"], topics)
 
+    # ---- corroborate-drop: a known-value repeat writes NO new episodic ---
+    with tempfile.TemporaryDirectory() as tmp:
+        st = _store(tmp)
+        st.add_episodic("u1", FACT, topic="preferred-language")
+        consolidate_user(st, "u1")           # -> semantic exists
+        before = len(st.list_episodic("u1"))
+        conf0 = _active_semantic(st)[0].confidence
+        ok = st.corroborate_semantic("u1", "preferred-language", source="sess-9")
+        check("corroborate with a semantic item is accepted", ok is True)
+        check("and writes NO new episodic doc",
+              len(st.list_episodic("u1")) == before)
+        after = _active_semantic(st)[0]
+        check("confidence bumped + source recorded",
+              after.confidence > conf0 and "sess-9" in after.sources,
+              (after.confidence, after.sources))
+        check("changelog records the corroboration",
+              any(e.get("op") == "semantic_corroborate"
+                  for e in st.read_changelog("u1")))
+        # a topic with NO semantic item must be refused — pre-consolidation
+        # repeats ARE the corroboration count the threshold needs.
+        st.add_episodic("u1", "User uses vim.", topic="editor")
+        check("episodic-only topic is refused (write must proceed)",
+              st.corroborate_semantic("u1", "editor") is False)
+
+    # ---- the plugin persist path honors the drop -------------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        st = _store(tmp)
+        st.add_episodic("u1", FACT, topic="preferred-language")
+        consolidate_user(st, "u1")
+        from adk_cc.memory.resolve import CORROBORATE, NEW, Resolution
+
+        before = len(st.list_episodic("u1"))
+        # mirror plugins/memory.py _persist exactly
+        for res in [Resolution(FACT, "preferred-language", CORROBORATE, "preferred-language"),
+                    Resolution("User uses vim.", "editor", NEW, "editor")]:
+            if (res.action == CORROBORATE
+                    and st.corroborate_semantic("u1", res.topic, source="s1")):
+                continue
+            st.add_episodic("u1", res.fact, topic=res.topic, sources=["s1"])
+        check("persist: CORROBORATE dropped, NEW written",
+              len(st.list_episodic("u1")) == before + 1)
+
+    # ---- retention default: cap = 200 unless explicitly 0 ---------------
+    from adk_cc.memory.consolidate import _episodic_cap
+
+    check("episodic cap defaults to 200 (was: keep all)", _episodic_cap() == 200)
+    os.environ["ADK_CC_MEMORY_EPISODIC_CAP"] = "0"
+    try:
+        check("explicit 0 still means keep-all", _episodic_cap() == 0)
+    finally:
+        os.environ.pop("ADK_CC_MEMORY_EPISODIC_CAP", None)
+    with tempfile.TemporaryDirectory() as tmp:
+        st = _store(tmp)
+        os.environ["ADK_CC_MEMORY_EPISODIC_CAP"] = "3"
+        try:
+            for i in range(6):
+                st.add_episodic("u1", f"{FACT} (v{i})", topic="preferred-language")
+            consolidate_user(st, "u1")
+            from adk_cc.memory.store import ARCHIVED, CONSOLIDATED
+
+            kept = st.list_episodic("u1", status=CONSOLIDATED)
+            gone = st.list_episodic("u1", status=ARCHIVED)
+            check("consolidation archives past the cap (reversible)",
+                  len(kept) == 3 and len(gone) == 3,
+                  (len(kept), len(gone)))
+        finally:
+            os.environ.pop("ADK_CC_MEMORY_EPISODIC_CAP", None)
+
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
 

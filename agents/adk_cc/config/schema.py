@@ -744,7 +744,7 @@ FIELDS: list[Var] = [
     Var("ADK_CC_MEMORY_COMPACT", Tier.ADVANCED, "Memory & Wiki",
         "LLM compaction pass in the scheduler (0 disables).", default=True, parse=as_bool),
     Var("ADK_CC_MEMORY_EPISODIC_CAP", Tier.ADVANCED, "Memory & Wiki",
-        "Episodic retention cap (0 = keep all).", default=0, parse=as_int, default_display="keep all"),
+        "Episodic retention cap (0 = keep all).", default=200, parse=as_int),
     Var("ADK_CC_MEMORY_RECALL_BUDGET_TOKENS", Tier.ADVANCED, "Memory & Wiki",
         "Recall prompt budget.", default=600, parse=as_int),
     Var("ADK_CC_MEMORY_CAPTURE_TIMEOUT_S", Tier.ADVANCED, "Memory & Wiki",
