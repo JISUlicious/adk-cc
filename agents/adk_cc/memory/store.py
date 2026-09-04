@@ -55,9 +55,14 @@ def _safe_id(value: str, label: str) -> str:
 
 
 def _slugify(name: str) -> str:
+    """Lowercase words joined by '-', Unicode-aware: letters in ANY script
+    survive ('언어 선호' -> '언어-선호'). The old `[^a-z0-9]` regex erased every
+    non-Latin topic to '' and callers fell back to the literal 'note', so a
+    Korean user's DISTINCT facts all shared one topic and consolidation's
+    latest-wins merged them into each other (found live, 2026-09-04)."""
     import re
 
-    return re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
+    return re.sub(r"[^\w]+|_+", "-", name.strip().lower()).strip("-")
 
 
 @dataclass
@@ -158,7 +163,9 @@ class MemoryStore:
         confidence: float = 0.5,
         doc_id: Optional[str] = None,
     ) -> MemoryItem:
-        slug = _slugify(topic or _first_line(text)) or "note"
+        # A topic that slugifies to nothing (punctuation-only) falls back to
+        # the fact's own words, never straight to a shared bucket.
+        slug = _slugify(topic or "") or _slugify(_first_line(text)) or "note"
         if doc_id is None:
             doc_id = f"{slug}__{_short_hash(text)}"
         now = _now_iso()

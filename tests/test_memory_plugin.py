@@ -157,6 +157,59 @@ def test_capture_failure_never_breaks_run():
     print("OK capture_failure_never_breaks_run")
 
 
+def test_capture_waits_for_the_resumed_run_when_a_confirmation_is_pending():
+    """A gated turn is TWO runs under ONE invocation id (ADK resumes a
+    confirmation under the original id, #114) and after_run fires for both —
+    so the same transcript was captured twice, the same fact written 2-3x
+    from one turn (reported: 'the same memory added three times in one
+    session'). The gated run must NOT capture; the resumed run captures once."""
+    from google.adk.flows.llm_flows.functions import REQUEST_CONFIRMATION_FUNCTION_CALL_NAME
+    from adk_cc.plugins.confirmation_form_ui import CONFIRMATION_FORM_FUNCTION_CALL_NAME
+
+    async def run():
+        with tempfile.TemporaryDirectory() as root:
+            os.environ["ADK_CC_MEMORY_ROOT"] = root
+            os.environ.pop("ADK_CC_MEMORY_AUTOCAPTURE", None)
+            _FakeLlm.calls = 0
+            ictx = await _make_ictx()
+            svc, session, inv = ictx.session_service, ictx.session, ictx.invocation_id
+            # the gated run ends on the (renamed) confirmation wrapper, unanswered
+            await svc.append_event(session, Event(
+                invocation_id=inv, author="coordinator",
+                content=types.Content(role="model", parts=[types.Part(
+                    function_call=types.FunctionCall(
+                        name=CONFIRMATION_FORM_FUNCTION_CALL_NAME, id="wrap-1",
+                        args={}))])))
+            await MemoryPlugin().after_run_callback(invocation_context=ictx)
+            assert _FakeLlm.calls == 0, "gated run must not spend a capture call"
+            assert MemoryStore.for_tenant("acme").list_episodic("alice") == []
+
+            # the user answers → resumed run, SAME invocation id
+            await svc.append_event(session, Event(
+                invocation_id=inv, author="user",
+                content=types.Content(role="user", parts=[types.Part(
+                    function_response=types.FunctionResponse(
+                        name=REQUEST_CONFIRMATION_FUNCTION_CALL_NAME, id="wrap-1",
+                        response={"confirmed": True}))])))
+            await MemoryPlugin().after_run_callback(invocation_context=ictx)
+            assert _FakeLlm.calls == 1, _FakeLlm.calls
+            topics = {i.topic for i in MemoryStore.for_tenant("acme").list_episodic("alice")}
+            assert "deploy-target" in topics, topics
+
+            # an abandoned card from ANOTHER invocation never mutes capture
+            await svc.append_event(session, Event(
+                invocation_id="inv-old", author="coordinator",
+                content=types.Content(role="model", parts=[types.Part(
+                    function_call=types.FunctionCall(
+                        name=CONFIRMATION_FORM_FUNCTION_CALL_NAME, id="wrap-old",
+                        args={}))])))
+            from adk_cc.plugins.memory import _confirmation_pending
+            assert _confirmation_pending(ictx) is False
+        os.environ.pop("ADK_CC_MEMORY_ROOT", None)
+    asyncio.run(run())
+    print("OK capture_waits_for_the_resumed_run_when_a_confirmation_is_pending")
+
+
 def test_parse_facts():
     assert _parse_facts("NONE") == []
     assert _parse_facts("") == []
@@ -227,6 +280,7 @@ def main():
     test_capture_writes_episodic_from_full_turn()
     test_capture_disabled_via_env()
     test_capture_failure_never_breaks_run()
+    test_capture_waits_for_the_resumed_run_when_a_confirmation_is_pending()
     test_parse_facts()
     test_parse_facts_glued_and_duplicated()
     test_final_response_text_double_yield()

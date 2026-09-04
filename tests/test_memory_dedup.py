@@ -233,6 +233,29 @@ def main() -> int:
         finally:
             os.environ.pop("ADK_CC_MEMORY_EPISODIC_CAP", None)
 
+    # ---- Unicode topics keep their identity (found live 2026-09-04) ------
+    from adk_cc.memory.store import _slugify
+
+    check("Korean topic slugifies to itself, not ''",
+          _slugify("언어 선호") == "언어-선호", _slugify("언어 선호"))
+    check("ASCII slugs are unchanged",
+          _slugify("Preferred Language!") == "preferred-language"
+          and _slugify("db_choice") == "db-choice")
+    check("punctuation-only still slugifies to ''", _slugify("!!! ???") == "")
+    with tempfile.TemporaryDirectory() as tmp:
+        st = _store(tmp)
+        a = st.add_episodic("u1", "사용자는 한국어 답변을 선호한다.", topic="언어 선호")
+        b = st.add_episodic("u1", "프로젝트는 Fly.io에 배포한다.", topic="배포 대상")
+        check("two Korean topics stay DISTINCT (were both 'note')",
+              a.topic == "언어-선호" and b.topic == "배포-대상" and a.topic != b.topic,
+              (a.topic, b.topic))
+        c = st.add_episodic("u1", "User prefers Korean answers.", topic="!!!")
+        check("an empty slug falls back to the fact's words, not 'note'",
+              c.topic == "user-prefers-korean-answers", c.topic)
+        check("Korean ids round-trip through the docstore",
+              {i.topic for i in st.list_episodic("u1")}
+              >= {"언어-선호", "배포-대상"})
+
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
 

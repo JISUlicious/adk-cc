@@ -308,6 +308,28 @@ def _turn_transcript(ictx: InvocationContext, *, max_chars: int = 6000) -> str:
     return blob[-max_chars:]
 
 
+def _confirmation_pending(ictx: InvocationContext) -> bool:
+    """True when THIS invocation's run ended with a confirmation card still
+    unanswered.
+
+    ADK resumes a confirmation under the ORIGINAL invocation id (#114) and
+    fires after_run for EVERY run, so a gated turn captured its transcript
+    once per run — the same fact written 2-3x from one turn (reported live:
+    "the same memory added three times in one session"). The gated run's
+    transcript is a strict prefix of the resumed run's, so letting only the
+    resumed run capture loses nothing. Scoped to this invocation's events so
+    an abandoned card from an OLD turn can never mute capture forever."""
+    try:
+        from .confirmation_form_ui import _outstanding_wrap_ids, _resolved_wrap_ids
+
+        inv = ictx.invocation_id
+        events = [e for e in (getattr(ictx.session, "events", None) or [])
+                  if getattr(e, "invocation_id", None) == inv]
+        return bool(_outstanding_wrap_ids(events) - _resolved_wrap_ids(events))
+    except Exception:  # noqa: BLE001 — bookkeeping must never block capture
+        return False
+
+
 def _parse_facts(raw: str) -> list[tuple[str, str]]:
     """Parse `TOPIC: <slug> | <fact>` lines. Hardened against glued model
     output (a mid-line `TOPIC:` starts a new entry — seen live when a
@@ -384,6 +406,10 @@ class MemoryPlugin(BasePlugin):
             transcript = _turn_transcript(ictx)
             if not transcript.strip():
                 _log.info("memory: capture skipped (empty transcript)")
+                return None
+            if _confirmation_pending(ictx):
+                _log.info("memory: capture deferred (a confirmation is pending; "
+                          "the resumed run captures this turn once)")
                 return None
             state = getattr(ictx.session, "state", None)
             tenant_id, user_id = _tenant_user(state)
