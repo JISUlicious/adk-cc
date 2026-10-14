@@ -1548,4 +1548,12 @@ if env_bool("ADK_CC_RESUMABLE", default=True):
 
     _app_kwargs["resumability_config"] = ResumabilityConfig(is_resumable=True)
 
+# Mid-turn messages: drains what the user sent while the turn runs into the
+# coordinator's next model step. LAST on purpose — the rewriting plugins
+# (precompact, microcompact, recall/notes injection) have already shaped the
+# request, so the user's new message lands at the very end of it.
+from .plugins.midturn_messages import MidTurnMessagesPlugin
+
+_app_kwargs["plugins"].append(MidTurnMessagesPlugin())
+
 app = App(**_app_kwargs)

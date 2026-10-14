@@ -14,7 +14,7 @@
 
 import { getToken } from "./auth"
 import { ApiError, apiFetch, ensureFreshAccess } from "./client"
-import type { FunctionResponseArgs, RunArgs, RunEvent, StreamCallbacks } from "./sse"
+import type { FunctionResponseArgs, RunArgs, RunEvent, StreamCallbacks, TurnEnd } from "./sse"
 
 export interface TurnError {
   type: string
@@ -47,6 +47,10 @@ export interface TurnSnapshot {
     reason: string
     resume_in_s: number
   }
+  /** Undelivered mid-turn messages, and the follow-up turn that took any
+   *  that arrived after the last model step. */
+  queued?: Array<{ id: string; text: string }>
+  followup_turn_id?: string | null
 }
 
 /** Error subclass carrying the broker's classified terminal payload, so the
@@ -104,10 +108,50 @@ export async function manualCompact(
   })
 }
 
+export interface QueueResult extends TurnSnapshot {
+  /** Present when the message was queued on the running turn (HTTP 202);
+   *  absent when the session was idle and a turn started (201). */
+  queued_item?: { id: string; text: string }
+}
+
+/** Send a message to a session that may be mid-turn: queued on the running
+ *  turn (delivered at its next model step, or as a follow-up turn), or a
+ *  normal turn when idle. */
+export async function queueTurnMessage(
+  args: { appName: string; userId: string; sessionId: string },
+  text: string,
+): Promise<QueueResult> {
+  return apiFetch<QueueResult>(`/api/turns`, {
+    method: "POST",
+    body: JSON.stringify({
+      ...args, ifBusy: "queue",
+      newMessage: { role: "user", parts: [{ text }] },
+    }),
+  })
+}
+
+/** Withdraw a queued message before the agent sees it. Rejects (409) when
+ *  it was already delivered. */
+export async function withdrawQueued(turnId: string, itemId: string): Promise<void> {
+  await apiFetch(
+    `/api/turns/${encodeURIComponent(turnId)}/queue/${encodeURIComponent(itemId)}`,
+    { method: "DELETE" },
+  )
+}
+
 async function _startTurn(
   args: { appName: string; userId: string; sessionId: string },
   newMessage: unknown,
+  ifBusy?: "interrupt",
 ): Promise<TurnSnapshot> {
+  if (ifBusy === "interrupt") {
+    // Send-now: the server stops the running turn and starts this one — no
+    // 409 to wait out.
+    return apiFetch<TurnSnapshot>(`/api/turns`, {
+      method: "POST",
+      body: JSON.stringify({ ...args, newMessage, ifBusy }),
+    })
+  }
   // 409 = single-flight busy. The visible turn can END (final reply, or a
   // confirmation card) while its server-side task lives on — post-turn work,
   // or a tool call that is simply still going. A user who answers a
@@ -154,7 +198,9 @@ async function _tailLoop(
   cursor: number,
   cb: StreamCallbacks,
   signal: AbortSignal,
+  onSwitch?: (turnId: string) => void,
 ): Promise<void> {
+  let followup: string | null = null
   const headers: Record<string, string> = { Accept: "text/event-stream" }
   await ensureFreshAccess()
   const token = getToken()
@@ -188,10 +234,12 @@ async function _tailLoop(
         }
         if (!data) continue
         if (eventName === "turn_end") {
-          const end = JSON.parse(data) as { status: string; error: TurnError | null }
+          const end = JSON.parse(data) as TurnEnd & { error: TurnError | null }
           if (end.status === "error" && end.error) {
             cb.onError?.(new TurnFailedError(end.error))
           }
+          cb.onTurnEnd?.(end)
+          followup = end.followup_turn_id ?? null
           continue // onClose follows when the stream drains
         }
         try {
@@ -200,6 +248,12 @@ async function _tailLoop(
           /* tolerate malformed lines */
         }
       }
+    }
+    if (followup) {
+      // Messages sent after the agent's last step run as a follow-up turn;
+      // keep the same stream state attached to it.
+      onSwitch?.(followup)
+      return _tailLoop(followup, 0, cb, signal, onSwitch)
     }
     cb.onClose?.()
   } catch (e) {
@@ -225,14 +279,15 @@ function _run(
   args: { appName: string; userId: string; sessionId: string },
   newMessage: unknown,
   cb: StreamCallbacks,
+  ifBusy?: "interrupt",
 ): CancelStream {
   const ctrl = new AbortController()
   let turnId: string | null = null
   void (async () => {
     try {
-      const snap = await _startTurn(args, newMessage)
+      const snap = await _startTurn(args, newMessage, ifBusy)
       turnId = snap.turn_id
-      await _tailLoop(snap.turn_id, 0, cb, ctrl.signal)
+      await _tailLoop(snap.turn_id, 0, cb, ctrl.signal, (id) => { turnId = id })
     } catch (e) {
       cb.onError?.(e as Error)
       cb.onClose?.()
@@ -245,8 +300,11 @@ function _run(
 }
 
 /** Start a durable turn from a plain user message. */
-export function streamTurnRun(args: RunArgs, cb: StreamCallbacks): () => void {
-  return _run(args, { role: "user", parts: [{ text: args.message }] }, cb)
+export function streamTurnRun(
+  args: RunArgs, cb: StreamCallbacks, opts?: { interrupt?: boolean },
+): CancelStream {
+  return _run(args, { role: "user", parts: [{ text: args.message }] }, cb,
+              opts?.interrupt ? "interrupt" : undefined)
 }
 
 /** Start a durable turn from a function response (confirmations etc.). */
@@ -280,9 +338,10 @@ export function streamExistingTurn(
   cb: StreamCallbacks,
 ): CancelStream {
   const ctrl = new AbortController()
-  void _tailLoop(turnId, cursor, cb, ctrl.signal)
+  let current = turnId
+  void _tailLoop(turnId, cursor, cb, ctrl.signal, (id) => { current = id })
   return (opts) => {
-    if (!opts?.detachOnly) void abortTurnById(turnId).catch(() => {})
+    if (!opts?.detachOnly) void abortTurnById(current).catch(() => {})
     ctrl.abort()
   }
 }

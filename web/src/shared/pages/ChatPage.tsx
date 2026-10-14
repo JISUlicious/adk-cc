@@ -12,6 +12,7 @@ import {
 } from "@/shared/api/sessions"
 import {
   isFinalResponse,
+  midturnItemId,
   type RunEvent,
   type StreamCallbacks,
 } from "@/shared/api/sse"
@@ -42,6 +43,8 @@ import {
   type CancelStream,
   streamTurnFunctionResponse,
   streamTurnRun,
+  queueTurnMessage,
+  withdrawQueued,
   type TurnError,
   type TurnSnapshot,
 } from "@/shared/api/turns"
@@ -101,6 +104,11 @@ export function ChatPage({
   const [session, setSession] = useState<Session | null>(null)
   const [events, setEvents] = useState<RunEvent[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
+  // Mid-turn queue: messages sent while a turn runs, not yet read by the
+  // agent. Cleared when the agent reads them (a delivered user event carries
+  // the item id) or when they roll into a follow-up turn.
+  const [queued, setQueued] = useState<Array<{ id: string; text: string; turnId: string }>>([])
+  const [restoreText, setRestoreText] = useState<{ text: string } | null>(null)
   // Model-layer wait state (rate-limit backoff) from the turn snapshot —
   // rendered under the working indicator so a retry sleep is a visible
   // countdown, not a dead spinner (#99).
@@ -277,6 +285,7 @@ export function ChatPage({
     abortRef.current = null
     setIsStreaming(false)
     setTurnError(null)
+    setQueued([])
 
     let cancelled = false
     getSession(appName, userId, session.id)
@@ -366,6 +375,8 @@ export function ChatPage({
         // may overlap events already loaded from the session.
         setEvents((prev) =>
           e.id && prev.some((x) => x.id === e.id) ? prev : [...prev, e])
+        const delivered = midturnItemId(e)
+        if (delivered) setQueued((q) => q.filter((x) => x.id !== delivered))
         // Final response → the reply is done (or the agent is now waiting on the
         // user). Re-arm on any later non-final event (multi-agent turns emit a
         // final response per sub-agent before control returns to the coordinator).
@@ -389,6 +400,22 @@ export function ChatPage({
         setIsStreaming(false)
         abortRef.current = null
         refreshAfterTurn()
+      },
+      onTurnEnd: (end) => {
+        if (gen !== streamGen.current) return
+        if (end.followup_turn_id) {
+          // Late messages now run as a follow-up turn; the tail already
+          // continues into it and its user event renders them.
+          setQueued([])
+          setIsStreaming(true)
+          return
+        }
+        if (end.queued && end.queued.length) {
+          // Stopped or failed before the agent read them: hand them back
+          // to the input rather than losing them.
+          setQueued([])
+          setRestoreText({ text: end.queued.map((q) => q.text).join("\n") })
+        }
       },
     })
   }
@@ -426,6 +453,10 @@ export function ChatPage({
   function handleSend(text: string) {
     if (!appName || !session) return
     setError(null)
+    if (isStreaming) {
+      void queueMessage(text)
+      return
+    }
 
     // Optimistic user-message append so the bubble shows immediately
     // (before the SSE stream echoes it back).
@@ -440,6 +471,61 @@ export function ChatPage({
     attachStream((cb) =>
       streamTurnRun({ appName, userId, sessionId: session.id, message: text }, cb),
     )
+  }
+
+  async function queueMessage(text: string) {
+    if (!appName || !session) return
+    const sid = session.id
+    try {
+      const res = await queueTurnMessage({ appName, userId, sessionId: sid }, text)
+      if (res.queued_item) {
+        const item = res.queued_item
+        setQueued((q) => [...q, { ...item, turnId: res.turn_id }])
+        return
+      }
+      // The turn had already ended: the server started a fresh one.
+      setEvents((prev) => [...prev, {
+        id: `optimistic-${Date.now()}`, author: "user",
+        content: { role: "user", parts: [{ text }] },
+      }])
+      attachStream((cb) => streamExistingTurn(res.turn_id, 0, cb))
+    } catch (e) {
+      setError(`Could not send: ${(e as Error).message}`)
+      setRestoreText({ text })
+    }
+  }
+
+  /** Ctrl+Enter while working: stop the running turn and send this now.
+   *  Queued messages ride along server-side, in front of this one. */
+  function handleSendNow(text: string) {
+    if (!appName || !session) return
+    setError(null)
+    setTurnError(null)
+    // Detach (not abort) our tail — the server stops the old turn itself.
+    streamGen.current++
+    abortRef.current?.({ detachOnly: true })
+    abortRef.current = null
+    const carried = queued.map((q) => q.text)
+    setQueued([])
+    setEvents((prev) => [...prev, {
+      id: `optimistic-${Date.now()}`, author: "user",
+      content: { role: "user", parts: [...carried, text].map((t) => ({ text: t })) },
+    }])
+    attachStream((cb) =>
+      streamTurnRun({ appName, userId, sessionId: session.id, message: text },
+                    cb, { interrupt: true }),
+    )
+  }
+
+  function handleWithdraw(id: string) {
+    const item = queued.find((q) => q.id === id)
+    if (!item) return
+    setQueued((q) => q.filter((x) => x.id !== id))
+    void withdrawQueued(item.turnId, id)
+      .then(() => setRestoreText({ text: item.text }))
+      .catch(() => {
+        /* 409: already delivered — the agent has it; its bubble renders */
+      })
   }
 
   function handleSubmitFunctionResponse(
@@ -491,6 +577,12 @@ export function ChatPage({
     abortRef.current?.()
     abortRef.current = null
     setIsStreaming(false)
+    // Stop also discards what the agent never read — hand it back to the
+    // input (the fenced turn_end above can no longer do it).
+    if (queued.length) {
+      setRestoreText({ text: queued.map((q) => q.text).join("\n") })
+      setQueued([])
+    }
   }
 
   function handleSlashAction(action: SlashAction, args?: string) {
@@ -969,6 +1061,10 @@ export function ChatPage({
         </div>
         <Composer
           onSend={handleSend}
+          onSendNow={handleSendNow}
+          queued={queued}
+          onWithdraw={handleWithdraw}
+          restoreText={restoreText}
           onAbort={handleAbort}
           onSlashAction={handleSlashAction}
           isStreaming={isStreaming}

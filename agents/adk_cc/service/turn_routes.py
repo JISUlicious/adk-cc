@@ -1,6 +1,10 @@
 """HTTP surface for the Turn Broker (durable runs) — see turns.py.
 
-    POST /api/turns                     start a turn        → 409 when busy
+    POST /api/turns                     start a turn        → 409 when busy;
+                                        ifBusy="queue" → 202 queued on the
+                                        running turn (mid-turn message);
+                                        ifBusy="interrupt" → stop it, start this
+    DELETE /api/turns/{id}/queue/{qid}  withdraw a not-yet-delivered message
     GET  /api/turns/{id}/stream?cursor  SSE tail, re-attachable
     GET  /api/turns/{id}                status snapshot
     POST /api/turns/{id}/abort          cancel the task
@@ -124,15 +128,53 @@ def mount_turn_routes(app: Any, broker: Any) -> None:
             app_name=app_name, user_id=user_id, session_id=session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="session not found")
+        content = _content(body)
+        if_busy = str(body.get("ifBusy") or "")
         try:
-            turn = broker.start(
-                app_name=app_name, user_id=user_id, session_id=session_id,
-                new_message=_content(body),
-                state_delta=body.get("stateDelta"),
-            )
+            if if_busy == "interrupt":
+                turn = await broker.start_interrupting(
+                    app_name=app_name, user_id=user_id, session_id=session_id,
+                    new_message=content, state_delta=body.get("stateDelta"))
+            elif if_busy == "queue":
+                text = _plain_text(content)
+                if text is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="only plain-text messages can be queued mid-turn")
+                kind, turn, item = await broker.enqueue(
+                    app_name=app_name, user_id=user_id, session_id=session_id,
+                    text=text)
+                if kind == "queued":
+                    return JSONResponse(
+                        {**turn.snapshot(), "queued_item": item},
+                        status_code=202)
+            else:
+                turn = broker.start(
+                    app_name=app_name, user_id=user_id, session_id=session_id,
+                    new_message=content,
+                    state_delta=body.get("stateDelta"),
+                )
         except RuntimeError as e:
             raise HTTPException(status_code=409, detail=str(e))
         return JSONResponse(turn.snapshot(), status_code=201)
+
+    def _plain_text(content: Any) -> Any:
+        parts = list(getattr(content, "parts", None) or [])
+        if not parts or any(getattr(p, "text", None) is None for p in parts):
+            return None
+        return "\n".join(p.text for p in parts)
+
+    @app.delete("/api/turns/{turn_id}/queue/{item_id}", include_in_schema=False)
+    async def withdraw_queued(turn_id: str, item_id: str):
+        turn = broker.get(turn_id)
+        if turn is None:
+            raise HTTPException(status_code=404, detail="unknown turn")
+        before = len(turn.queue)
+        turn.queue = [q for q in turn.queue if q.get("id") != item_id]
+        if len(turn.queue) == before:
+            # Already delivered (or never existed): the agent has it.
+            raise HTTPException(status_code=409, detail="already delivered")
+        return {"status": "withdrawn", "id": item_id}
 
     @app.get("/api/subagents", include_in_schema=False)
     async def subagents_status(app_name: str, user_id: str,
@@ -186,7 +228,9 @@ def mount_turn_routes(app: Any, broker: Any) -> None:
     def _end_payload(turn: Any) -> str:
         import json
 
-        return json.dumps({"status": turn.status, "error": turn.error})
+        return json.dumps({"status": turn.status, "error": turn.error,
+                           "followup_turn_id": turn.followup_id,
+                           "queued": list(turn.queue)})
 
     @app.post("/api/compact", include_in_schema=False)
     async def manual_compact_route(request: Request):

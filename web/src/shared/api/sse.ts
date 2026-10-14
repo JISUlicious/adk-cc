@@ -109,6 +109,26 @@ export interface StreamCallbacks {
   onEvent: (event: RunEvent) => void
   onError?: (err: Error) => void
   onClose?: () => void
+  /** Turn Broker only: the tailed turn ended. `followup_turn_id` means
+   *  mid-turn messages arrived after its last model step and now run as a
+   *  follow-up turn (the tail continues into it automatically); `queued`
+   *  lists messages that were never delivered (abort/error). */
+  onTurnEnd?: (end: TurnEnd) => void
+}
+
+export interface TurnEnd {
+  status: string
+  followup_turn_id?: string | null
+  queued?: Array<{ id: string; text: string }>
+}
+
+/** Id of the mid-turn queue item a delivered user event came from, if any.
+ *  The stream uses the camelCase alias, session history snake_case. */
+export function midturnItemId(e: RunEvent): string | null {
+  const md = (e.customMetadata ?? e.custom_metadata) as
+    Record<string, unknown> | undefined
+  const v = md?.adk_cc_midturn
+  return typeof v === "string" ? v : null
 }
 
 /** Open an SSE stream against /run_sse. Returns an abort function. */

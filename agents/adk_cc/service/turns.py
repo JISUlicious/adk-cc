@@ -28,6 +28,7 @@ events do); ADK's own `/run_sse` is untouched as a fallback path.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import time
@@ -203,6 +204,13 @@ def _classify_error(err: BaseException) -> dict[str, Any]:
     return payload
 
 
+# The turn whose run_async is executing in this task context. Plugins read it
+# to drain messages the user sent while the turn was running (mid-turn queue).
+# asyncio tasks copy context, so callbacks inside the runner see it.
+CURRENT_TURN: "contextvars.ContextVar[Optional[Turn]]" = contextvars.ContextVar(
+    "adk_cc_current_turn", default=None)
+
+
 class Turn:
     """One durable run: an owning task, an event buffer, and subscribers."""
 
@@ -230,7 +238,17 @@ class Turn:
         self.current_tool: Optional[str] = None
         self.current_tool_at: Optional[float] = None
         self._pending_calls: dict[str, str] = {}   # call id -> tool name
+        self._pending_authors: dict[str, str] = {}  # call id -> agent that made it
         self._cond = asyncio.Condition()
+        # Mid-turn messages: text the user sent while this turn was running.
+        # Drained by MidTurnMessagesPlugin at the next model step (after tool
+        # results — never between a call and its response); whatever is left
+        # when the turn ends becomes a follow-up turn. `accepting` flips off
+        # SYNCHRONOUSLY before the leftover sweep, so a message can never land
+        # in a queue nobody will read.
+        self.queue: list[dict[str, str]] = []
+        self.accepting = True
+        self.followup_id: Optional[str] = None
 
     # -- event flow -----------------------------------------------------
 
@@ -255,11 +273,14 @@ class Turn:
                 fc = p.get("functionCall") or {}
                 if fc.get("name"):
                     self._pending_calls[str(fc.get("id") or "")] = str(fc["name"])
+                    self._pending_authors[str(fc.get("id") or "")] = str(
+                        data.get("author") or "coordinator")
                     self.current_tool = str(fc["name"])
                     self.current_tool_at = time.time()
                 fr = p.get("functionResponse") or {}
                 if fr.get("name"):
                     self._pending_calls.pop(str(fr.get("id") or ""), None)
+                    self._pending_authors.pop(str(fr.get("id") or ""), None)
                     if not self._pending_calls:
                         # Nothing outstanding: back to model generation, which
                         # is the other half of a long turn.
@@ -274,6 +295,7 @@ class Turn:
             pass
 
     async def finish(self, status: str, error: Optional[dict] = None) -> None:
+        self.accepting = False
         async with self._cond:
             self.status = status
             self.error = error
@@ -312,6 +334,10 @@ class Turn:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "error": self.error,
+            # Undrained mid-turn messages: after an abort/error the client
+            # restores these into the composer instead of losing them.
+            "queued": [dict(q) for q in self.queue],
+            "followup_turn_id": self.followup_id,
         }
         if self.status == "running":
             snap["elapsed_s"] = round(time.time() - self.started_at, 1)
@@ -403,6 +429,61 @@ class TurnBroker:
 
         turn.task.add_done_callback(_on_done)
         return turn
+
+    async def enqueue(self, *, app_name: str, user_id: str, session_id: str,
+                      text: str) -> tuple[str, Turn, Optional[dict]]:
+        """Deliver a user message to a session that may be mid-turn.
+
+        Running turn → queued on it (drained at its next model step, or turned
+        into a follow-up turn when it ends). Idle session → a normal new turn.
+        A turn that is CLOSING (finished generating, task not yet ended) is
+        waited out briefly: its leftover sweep starts the follow-up, and the
+        message then joins that one. Returns (kind, turn, item) with kind
+        "queued" or "started"."""
+        from google.genai import types as _t
+
+        for _ in range(100):                       # ≤ ~10 s for a closing turn
+            cur = self.latest_for(app_name, user_id, session_id)
+            if cur is not None and cur.status == "running" and cur.accepting:
+                item = {"id": f"q_{uuid.uuid4().hex[:10]}", "text": text}
+                cur.queue.append(item)
+                return "queued", cur, item
+            if cur is None or cur.status != "running":
+                turn = self.start(
+                    app_name=app_name, user_id=user_id, session_id=session_id,
+                    new_message=_t.Content(role="user", parts=[_t.Part(text=text)]))
+                return "started", turn, None
+            await asyncio.sleep(0.1)
+        raise RuntimeError("session busy: the running turn did not close")
+
+    async def start_interrupting(self, *, app_name: str, user_id: str,
+                                 session_id: str, new_message: Any,
+                                 state_delta: Optional[dict] = None) -> Turn:
+        """Send-now: stop the running turn, then start this one. Messages the
+        user had queued on the stopped turn are carried in front of the new
+        message rather than dropped."""
+        cur = self.latest_for(app_name, user_id, session_id)
+        carried: list[str] = []
+        if cur is not None and cur.status == "running" and cur.task is not None:
+            cur.accepting = False
+            carried = [q["text"] for q in cur.queue]
+            cur.queue = []
+            cur.task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(cur.task), timeout=15)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            if cur.status == "running":           # done-callback lags a tick
+                await cur.finish("aborted")
+        if carried:
+            from google.genai import types as _t
+
+            parts = [_t.Part(text=t) for t in carried]
+            parts.extend(list(getattr(new_message, "parts", None) or []))
+            new_message = _t.Content(role="user", parts=parts)
+        return self.start(app_name=app_name, user_id=user_id,
+                          session_id=session_id, new_message=new_message,
+                          state_delta=state_delta)
 
     async def abort(self, turn_id: str) -> bool:
         t = self._turns.get(turn_id)
@@ -537,7 +618,73 @@ class TurnBroker:
         except Exception as e:  # noqa: BLE001 — prune is best-effort
             _log.warning("turn %s: orphan prune failed: %s", turn.id, e)
 
+    def _start_followup(self, turn: Turn, texts: list[str]) -> None:
+        from google.genai import types as _t
+
+        try:
+            nxt = self.start(
+                app_name=turn.app_name, user_id=turn.user_id,
+                session_id=turn.session_id,
+                new_message=_t.Content(role="user",
+                                       parts=[_t.Part(text=t) for t in texts]))
+        except RuntimeError:                       # someone else started one
+            cur = self.latest_for(turn.app_name, turn.user_id, turn.session_id)
+            if cur is None:
+                return
+            cur.queue.extend({"id": f"q_{uuid.uuid4().hex[:10]}", "text": t}
+                             for t in texts)
+            nxt = cur
+        turn.followup_id = nxt.id
+        _log.info("turn %s: %d message(s) arrived after the last model step — "
+                  "follow-up turn %s", turn.id, len(texts), nxt.id)
+
+    async def _close_interrupted_calls(self, turn: Turn) -> None:
+        """Answer every tool call the abort cut off mid-execution.
+
+        A stopped turn left its in-flight call (e.g. a long run_bash) with no
+        function response, and the NEXT turn's model request was rejected —
+        "No tool output found for function call …" — so Stop-then-type and
+        send-now both dead-ended (found by the send-now live e2e). The answer
+        says plainly that the user interrupted it. Confirmation wrappers are
+        left alone: they are answered by the user, not by us."""
+        pending = {cid: name for cid, name in turn._pending_calls.items()
+                   if cid and name not in ("adk_request_confirmation",
+                                           "adk_cc_confirmation_form")}
+        if not pending:
+            return
+        try:
+            from google.adk.events.event import Event
+            from google.genai import types as _t
+
+            session = await self.session_service.get_session(
+                app_name=turn.app_name, user_id=turn.user_id,
+                session_id=turn.session_id)
+            if session is None:
+                return
+            inv = next((e.invocation_id for e in reversed(session.events)
+                        if e.invocation_id), "")
+            for cid, name in pending.items():
+                ev = Event(
+                    invocation_id=inv,
+                    author=turn._pending_authors.get(cid, "coordinator"),
+                    content=_t.Content(role="user", parts=[_t.Part(
+                        function_response=_t.FunctionResponse(
+                            id=cid, name=name,
+                            response={"status": "interrupted",
+                                      "error": "The user stopped this call "
+                                               "before it finished; it did "
+                                               "not complete."}))]))
+                await self.session_service.append_event(session, ev)
+            turn._pending_calls.clear()
+            turn._pending_authors.clear()
+            _log.info("turn %s: closed %d call(s) interrupted by abort",
+                      turn.id, len(pending))
+        except Exception as e:  # noqa: BLE001 — abort must still complete
+            _log.warning("turn %s: could not close interrupted calls (%s: %s)",
+                         turn.id, type(e).__name__, e)
+
     async def _drive(self, turn: Turn) -> None:
+        CURRENT_TURN.set(turn)
         try:
             runner = await self._get_runner(turn.app_name)
             install_confirmation_resume_fix(runner)
@@ -622,8 +769,18 @@ class TurnBroker:
 
                 message = _t.Content(role="user",
                                      parts=[_t.Part(text=_CONTINUE_TEXT)])
+            # Leftover sweep: messages queued after the agent's last model
+            # step were never seen. Stop accepting FIRST (synchronously), take
+            # the queue, finish, then start the follow-up with no await in
+            # between — so an enqueue racing the close joins the follow-up.
+            turn.accepting = False
+            leftover = [q["text"] for q in turn.queue]
+            turn.queue = []
             await turn.finish("done")
+            if leftover:
+                self._start_followup(turn, leftover)
         except asyncio.CancelledError:
+            await self._close_interrupted_calls(turn)
             await turn.finish("aborted")
             # swallow: cancellation is the abort endpoint's expected path
         except Exception as e:  # noqa: BLE001 — terminal state must be recorded

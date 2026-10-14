@@ -32,7 +32,7 @@ import requests
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PORT = 8975
 BASE = f"http://127.0.0.1:{PORT}"
-MODEL = "chatgpt-codex/gpt-5.4-mini"
+MODEL = os.environ.get("BUSY_MODEL", "chatgpt-codex/gpt-5.5")
 _passed = _failed = 0
 
 
@@ -71,10 +71,16 @@ def main() -> int:  # noqa: PLR0915
             except OSError:
                 pass
 
+    reg = json.load(open(os.path.expanduser(
+        "~/.adk-cc-desktop/admin-data/model-endpoints.json")))
+    for ep in reg.get("endpoints", []):
+        if str(ep.get("model", "")).startswith("chatgpt-codex/"):
+            ep["model"] = MODEL          # gpt-5.4-mini retired on ChatGPT accounts
+    reg_path = os.path.join(data, "model-endpoints.json")
+    json.dump(reg, open(reg_path, "w"))
     env = dict(os.environ)
     env.update({
-        "ADK_CC_MODEL_REGISTRY_FILE": os.path.expanduser(
-            "~/.adk-cc-desktop/admin-data/model-endpoints.json"),
+        "ADK_CC_MODEL_REGISTRY_FILE": reg_path,
         "HOME": home,
         "ADK_CC_AGENTS_DIR": os.path.join(REPO, "agents"),
         "ADK_CC_ALLOW_NO_AUTH": "1", "ADK_CC_DESKTOP": "1",
@@ -136,16 +142,15 @@ def main() -> int:  # noqa: PLR0915
                   "409" not in body_busy and "conflict" not in body_busy.lower(),
                   body_busy[-300:])
 
-            # Measured here, and it changes what this test can claim: the
-            # composer REFUSES to send while a turn streams
-            # (Composer.tsx: `if (!trimmed || disabled || isStreaming) return`
-            # — it shows Stop instead of Send). So a plain send can never
-            # reach the busy path at all. It is also not lost: the text stays
-            # in the box for the user to send when the turn ends.
-            still_typed = page.locator("textarea").first.input_value()
-            check("a send during a live turn is refused, not swallowed",
-                  "SECOND-MESSAGE-MARKER" in still_typed,
-                  f"textarea={still_typed[:80]!r}")
+            # Mid-turn queue: a send during a live turn is QUEUED (chip) and
+            # the box clears — neither refused nor swallowed. Delivery itself
+            # is covered by e2e_midturn_ui; here it only must land.
+            queued_chip = page.locator("[data-queued-item]").count()
+            check("a send during a live turn is queued, not refused or swallowed",
+                  queued_chip == 1 or "SECOND-MESSAGE-MARKER" in json.dumps(
+                      requests.get(f"{BASE}/apps/adk_cc/users/{pid}/sessions/{sid}",
+                                   timeout=30).json().get("events") or []),
+                  f"chips={queued_chip}")
 
             for _ in range(90):
                 page.wait_for_timeout(2000)
@@ -170,9 +175,6 @@ def main() -> int:  # noqa: PLR0915
                 back_to_send = False
             check("the composer returns to Send when the turn ends",
                   back_to_send, "still showing Stop")
-            page.wait_for_timeout(1000)
-            page.locator("textarea").first.click()
-            page.keyboard.press("Enter")
             landed = False
             for _ in range(45):
                 page.wait_for_timeout(2000)
@@ -182,7 +184,7 @@ def main() -> int:  # noqa: PLR0915
                 if "SECOND-MESSAGE-MARKER" in json.dumps(events)[:400000]:
                     landed = True
                     break
-            check("the held message sends once the turn is over", landed,
+            check("the queued message reached the transcript", landed,
                   "marker never reached the transcript")
             b.close()
     finally:

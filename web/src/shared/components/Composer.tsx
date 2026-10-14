@@ -1,5 +1,5 @@
-import { useRef, useState, useMemo, type KeyboardEvent, type ReactNode } from "react"
-import { Send, Square, ClipboardList, Paperclip, X, Loader } from "lucide-react"
+import { useEffect, useRef, useState, useMemo, type KeyboardEvent, type ReactNode } from "react"
+import { Send, Square, ClipboardList, Paperclip, X, Loader, Clock } from "lucide-react"
 import { Button } from "./ui/button"
 import { SandboxBadge } from "./SandboxBadge"
 import { cn } from "@/shared/lib/utils"
@@ -57,9 +57,23 @@ export function Composer({
   taskStrip,
   modelChip,
   onUploaded,
+  onSendNow,
+  queued,
+  onWithdraw,
+  restoreText,
 }: {
+  /** While a turn runs this QUEUES the message: the agent reads it at its
+   *  next step (or right after it finishes). */
   onSend: (text: string) => void
   onAbort: () => void
+  /** Ctrl/Cmd+Enter: stop the running turn and send this instead. */
+  onSendNow?: (text: string) => void
+  /** Messages queued on the running turn, not yet delivered. */
+  queued?: Array<{ id: string; text: string }>
+  onWithdraw?: (id: string) => void
+  /** Text handed back to the input (undelivered messages after a stop or
+   *  error); appended once per change of the object identity. */
+  restoreText?: { text: string } | null
   onSlashAction: (action: SlashAction, args?: string) => void
   isStreaming: boolean
   disabled: boolean
@@ -86,6 +100,11 @@ export function Composer({
   const [value, setValue] = useState("")
   const [slashCursor, setSlashCursor] = useState(0)
   const ref = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => {
+    if (!restoreText?.text) return
+    setValue((v) => (v.trim() ? `${restoreText.text}\n${v}` : restoreText.text))
+    ref.current?.focus()
+  }, [restoreText])
   // Attachments (#121): staged locally, uploaded on SEND (not on pick — the
   // user can still remove one), then announced to the model as plain-text
   // lines appended to the message. A failed upload blocks the send: a
@@ -122,9 +141,21 @@ export function Composer({
   )
   const slashOpen = slashQuery !== null && slashMatches.length > 0
 
-  function submit() {
+  function submit(sendNow = false) {
     const trimmed = value.trim()
-    if (disabled || isStreaming || uploading) return
+    if (disabled || uploading) return
+    if (isStreaming) {
+      // Mid-turn: plain text only. Slash commands and attachments wait for
+      // the turn to end (a command is not a message to the model; an upload
+      // must land before the message that names it).
+      if (!trimmed || staged.length > 0 || trimmed.startsWith("/")) return
+      if (sendNow && onSendNow) onSendNow(trimmed)
+      else onSend(trimmed)
+      setValue("")
+      setSlashCursor(0)
+      ref.current?.focus()
+      return
+    }
     if (!trimmed && staged.length === 0) return
     if (staged.length === 0) {
       onSend(trimmed)
@@ -230,7 +261,7 @@ export function Composer({
     }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
-      submit()
+      submit(e.ctrlKey || e.metaKey)
     }
   }
 
@@ -308,6 +339,33 @@ export function Composer({
               {footer && <div className="adk-gauge-slot">{footer}</div>}
             </div>
           </div>
+          {/* Mid-turn queue: messages waiting for the agent's next step. */}
+          {queued && queued.length > 0 && (
+            <div className="flex flex-col gap-1 px-1 pb-0.5" data-queued-list>
+              {queued.map((q) => (
+                <span
+                  key={q.id}
+                  data-queued-item={q.id}
+                  title="Queued — the agent reads this at its next step"
+                  className="flex items-center gap-1.5 rounded-sm border border-border bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                >
+                  <Clock className="h-3 w-3 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">{q.text}</span>
+                  {onWithdraw && (
+                    <button
+                      type="button"
+                      onClick={() => onWithdraw(q.id)}
+                      className="shrink-0 hover:text-foreground"
+                      aria-label="Withdraw queued message"
+                      title="Withdraw (only before the agent reads it)"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
           {/* Staged attachments (#121): chips above the input row. */}
           {staged.length > 0 && (
             <div className="flex flex-wrap items-center gap-1.5 px-1 pb-0.5">
@@ -392,29 +450,45 @@ export function Composer({
           placeholder={
             disabled
               ? "Pick or create a session to start chatting"
-              : isPlan
-                ? "Plan mode — describe what you want the agent to plan"
-                : "Message the agent — Enter to send, type / for commands"
+              : isStreaming
+                ? "Agent is working — Enter to queue a message, Ctrl+Enter to stop and send now"
+                : isPlan
+                  ? "Plan mode — describe what you want the agent to plan"
+                  : "Message the agent — Enter to send, type / for commands"
           }
           disabled={disabled}
           rows={2}
           className="adk-composer-input flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
         />
         {isStreaming ? (
-          <Button
-            type="button"
-            variant="destructive"
-            size="icon"
-            onClick={onAbort}
-            title="Stop the streaming response"
-          >
-            <Square className="h-4 w-4" />
-          </Button>
+          <>
+            {value.trim() && (
+              <Button
+                type="button"
+                size="icon"
+                variant="secondary"
+                onClick={() => submit(false)}
+                title="Queue for the agent's next step (Enter) — Ctrl+Enter stops and sends now"
+                data-queue-send
+              >
+                <Clock className="h-4 w-4" />
+              </Button>
+            )}
+            <Button
+              type="button"
+              variant="destructive"
+              size="icon"
+              onClick={onAbort}
+              title="Stop the streaming response"
+            >
+              <Square className="h-4 w-4" />
+            </Button>
+          </>
         ) : (
           <Button
             type="button"
             size="icon"
-            onClick={submit}
+            onClick={() => submit()}
             disabled={disabled || uploading
               || (!value.trim() && staged.length === 0)}
             title={uploading ? "Uploading attachments…" : "Send (Enter)"}
