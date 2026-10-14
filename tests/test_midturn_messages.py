@@ -148,8 +148,12 @@ async def test_delivered_at_next_model_step():
     users = [e for e in s.events if e.author == "user"
              and (e.custom_metadata or {}).get("adk_cc_midturn")]
     check("persisted as a user event under the same invocation",
-          len(users) == 1 and users[0].invocation_id == s.events[0].invocation_id
-          and users[0].content.parts[0].text == "use docs/ instead")
+          len(users) == 1 and users[0].invocation_id == s.events[0].invocation_id)
+    check("…with the framing PERSISTED (survives to later steps)",
+          users and "while you were working" in users[0].content.parts[0].text
+          and "use docs/ instead" in users[0].content.parts[0].text)
+    check("…and the user's raw text kept for the UI",
+          users and users[0].custom_metadata.get("adk_cc_midturn_raw") == "use docs/ instead")
     check("streamed to the turn's tail", any("use docs/ instead" in p for p in turn.events))
     check("queue drained, no follow-up", turn.queue == [] and turn.followup_id is None)
 
@@ -257,12 +261,44 @@ async def test_interrupt_mid_tool_closes_the_call():
           frs)
 
 
+async def test_framing_survives_later_steps():
+    """Delivered during step 1, the message must still read as mid-turn at
+    step 3 — the old request-only frame was gone one call later."""
+    g0, e0 = asyncio.Event(), asyncio.Event()
+    broker, svc, llm = _fresh(
+        [_call("read_file", {"path": "a.txt"}, "c1"),
+         _call("read_file", {"path": "b.txt"}, "c2"),
+         _call("read_file", {"path": "c.txt"}, "c3"),
+         _text("done, and handled the late note")],
+        gates=[g0], entered=[e0])
+    sid = await _session(svc)
+    turn = broker.start(app_name="adk_cc", user_id="u1", session_id=sid,
+                        new_message=_msg("read three files"))
+    await asyncio.wait_for(e0.wait(), 10)
+    await broker.enqueue(app_name="adk_cc", user_id="u1", session_id=sid,
+                         text="LATE-NOTE also summarize them")
+    g0.set()
+    await asyncio.wait_for(turn.task, 30)
+    # The coordinator's LAST step: the latest request that carries the third
+    # tool result (other plugins, e.g. memory capture, may call the model too).
+    coord = [r for r in llm.seen
+             if any(getattr(p, "function_response", None)
+                    and p.function_response.id == "c3"
+                    for c in r for p in (c.parts or []))]
+    last_req = _texts(coord[-1]) if coord else []
+    hit = [t for t in last_req if "LATE-NOTE" in t]
+    check("three steps later the message is still framed as mid-turn",
+          len(hit) == 1 and "while you were working" in hit[0]
+          and "Never silently ignore" in hit[0], hit)
+
+
 def main() -> int:
     for t in (test_delivered_at_next_model_step, test_late_message_becomes_followup,
               test_idle_session_queue_starts_turn,
               test_send_now_interrupts_and_carries_queue,
               test_withdraw_before_delivery,
-              test_interrupt_mid_tool_closes_the_call):
+              test_interrupt_mid_tool_closes_the_call,
+              test_framing_survives_later_steps):
         asyncio.run(t())
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0

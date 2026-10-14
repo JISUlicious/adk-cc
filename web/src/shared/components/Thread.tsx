@@ -4,7 +4,7 @@ import { Play } from "lucide-react"
 import { downloadArtifact, isHtmlArtifact } from "@/shared/api/artifacts"
 import { cn, THREAD_ROW_WIDTH } from "@/shared/lib/utils"
 import { HtmlArtifactPreview } from "./HtmlArtifactPreview"
-import { type RunEvent } from "@/shared/api/sse"
+import { midturnRawText, type RunEvent } from "@/shared/api/sse"
 import { MessageBubble } from "./MessageBubble"
 import { ToolResponseCard } from "./ToolResponseCard"
 import {
@@ -865,7 +865,7 @@ function flattenEvents(
           kind: "text",
           eventId,
           author,
-          text: part.text,
+          text: (author === "user" && midturnRawText(e)) || part.text,
           isPartial: Boolean(e.partial),
         })
       } else if (part.functionCall) {

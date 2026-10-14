@@ -41,6 +41,19 @@ def main() -> int:
           "en dash" in style and "about 50%" in style)
     check("covers the CJK range tilde too", "3~5일" in style)
 
+    # Mid-turn messages: the model must neither ignore them nor treat them
+    # as a fresh turn that discards the work in progress.
+    check("Style section covers mid-turn messages",
+          "Messages that arrive while you work" in style
+          and "Never let one go unanswered" in style
+          and '"stop"' in style)
+
+    from adk_cc.plugins.midturn_messages import frame
+    fr = frame("use docs/ instead")
+    check("mid-turn frame keeps the user's text and the don't-ignore guard",
+          "use docs/ instead" in fr and "Never silently ignore" in fr
+          and fr.count("<system-reminder>") == 2)
+
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
 

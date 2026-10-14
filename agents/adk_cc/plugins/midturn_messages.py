@@ -30,11 +30,24 @@ _log = logging.getLogger(__name__)
 _COORDINATOR = "coordinator"
 MIDTURN_METADATA_KEY = "adk_cc_midturn"
 
-_FRAME = (
-    "[The user sent this message while you were working. Read it now and "
-    "adjust what you are doing accordingly — it may change or cancel the "
-    "current plan.]\n\n"
-)
+MIDTURN_RAW_KEY = "adk_cc_midturn_raw"
+
+# The framing is PERSISTED in the event text, not added to one request only:
+# ADK rebuilds the model's input from session events at every step, so a
+# request-only frame vanished one call later and the message then read as a
+# bare user turn wedged after a tool result. The UI shows the raw text (kept
+# in metadata). Policy merges upstream's guard ("you MUST address it, do not
+# ignore it") with redirect-now when the message changes the task.
+def frame(text: str) -> str:
+    return (
+        "<system-reminder>The user sent a new message while you were working:"
+        "</system-reminder>\n"
+        f"{text}\n"
+        "<system-reminder>If it changes, narrows or cancels what you are doing, "
+        "adjust now — stop work it makes obsolete. Otherwise finish the step you "
+        "are on, then address it before you end the turn. Never silently ignore "
+        "it: say in your reply how you handled it.</system-reminder>"
+    )
 
 
 class MidTurnMessagesPlugin(BasePlugin):
@@ -69,14 +82,16 @@ class MidTurnMessagesPlugin(BasePlugin):
         from google.adk.events.event import Event
 
         text = item["text"]
+        framed = frame(text)
         event = Event(
             invocation_id=ictx.invocation_id,
             author="user",
-            content=types.Content(role="user", parts=[types.Part(text=text)]),
-            custom_metadata={MIDTURN_METADATA_KEY: item["id"]},
+            content=types.Content(role="user", parts=[types.Part(text=framed)]),
+            custom_metadata={MIDTURN_METADATA_KEY: item["id"],
+                             MIDTURN_RAW_KEY: text},
         )
         await ictx.session_service.append_event(ictx.session, event)
         await turn.push(event.model_dump_json(exclude_none=True, by_alias=True),
                         model_authored=False)
         llm_request.contents.append(
-            types.Content(role="user", parts=[types.Part(text=_FRAME + text)]))
+            types.Content(role="user", parts=[types.Part(text=framed)]))

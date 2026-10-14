@@ -265,3 +265,12 @@ async function _runStreamLoop(
     cb.onError?.(err as Error)
   }
 }
+
+/** What the user actually typed, for a mid-turn message: the stored event
+ *  text carries model-facing framing (system reminders) the user never wrote. */
+export function midturnRawText(e: RunEvent): string | null {
+  const md = (e.customMetadata ?? e.custom_metadata) as
+    Record<string, unknown> | undefined
+  const v = md?.adk_cc_midturn_raw
+  return typeof v === "string" ? v : null
+}
