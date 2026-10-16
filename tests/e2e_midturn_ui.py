@@ -26,7 +26,7 @@ import requests
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PORT = 8976
 BASE = f"http://127.0.0.1:{PORT}"
-MODEL = os.environ.get("MIDTURN_MODEL", "chatgpt-codex/gpt-5.5")
+MODEL = os.environ.get("MIDTURN_MODEL", "chatgpt-codex/gpt-6-luna")
 _passed = _failed = 0
 
 

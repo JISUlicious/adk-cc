@@ -38,7 +38,7 @@ _TMP = tempfile.mkdtemp(prefix="midturn-live-")
 os.environ["ADK_CC_DESKTOP"] = "1"
 os.environ["ADK_CC_DESKTOP_DATA"] = _TMP
 os.environ["ADK_CC_WORKSPACE_ROOT"] = _TMP
-MODEL = os.environ.get("MIDTURN_MODEL", "chatgpt-codex/gpt-5.5")
+MODEL = os.environ.get("MIDTURN_MODEL", "chatgpt-codex/gpt-6-luna")
 ROUNDS = int(os.environ.get("ROUNDS", "3"))
 
 _reg = json.load(open(os.path.expanduser(
