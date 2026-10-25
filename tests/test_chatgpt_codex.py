@@ -211,6 +211,28 @@ def test_own_store_priority_and_clear() -> None:
     print("OK test_own_store_priority_and_clear")
 
 
+def test_retired_model_400_is_named_not_generic() -> None:
+    """The Codex backend's allow-list changes without notice (gpt-5.4-mini,
+    then gpt-5.5 dropped within two weeks); the resulting 400 surfaced as a
+    generic "HTTP 400" that read like an outage."""
+    llm = _llm()
+    live_body = json.dumps({"detail": "The 'gpt-5.5' model is not supported "
+                                      "when using Codex with a ChatGPT account."})
+    r = llm._http_error(400, live_body)
+    assert r.error_code == "chatgpt_model_unavailable", r.error_code
+    assert llm.model in (r.error_message or ""), r.error_message
+    assert "Settings" in (r.error_message or ""), r.error_message
+    assert "not supported when using Codex" in (r.error_message or "")
+    # Any other 400 keeps the generic shape — only the allow-list wording maps.
+    other = llm._http_error(400, json.dumps({"detail": "Unsupported parameter: logit_bias"}))
+    assert other.error_code == "chatgpt_http_400", other.error_code
+    # Quota still wins over everything.
+    q = llm._http_error(429, json.dumps({"error": {"code": "usage_limit_reached",
+                                                   "message": "x"}}))
+    assert q.error_code == "chatgpt_quota"
+    print("OK retired_model_400_is_named_not_generic")
+
+
 def main() -> None:
     test_input_items_mapping()
     test_build_body_shape()
@@ -221,6 +243,7 @@ def main() -> None:
     test_oauth_pkce_and_url()
     test_oauth_start_binds_and_cancels()
     test_own_store_priority_and_clear()
+    test_retired_model_400_is_named_not_generic()
     print("\nall chatgpt-codex offline tests passed")
 
 

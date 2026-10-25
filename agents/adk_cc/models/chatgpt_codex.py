@@ -14,6 +14,7 @@ echoed for reasoning continuity. Token material is never logged.
 from __future__ import annotations
 
 import json
+import re
 import os
 import platform
 import uuid
@@ -36,6 +37,11 @@ _QUOTA_CODES = {
     "usage_limit_reached", "usage_not_included", "rate_limit_exceeded",
     "GoUsageLimitError", "FreeUsageLimitError",
 }
+
+
+# Backend wording, verbatim from live 400s: "The 'gpt-5.5' model is not
+# supported when using Codex with a ChatGPT account."
+_MODEL_RETIRED_RE = re.compile(r"model is not supported when using codex", re.I)
 
 
 class ChatGptCodexLlm(BaseLlm):
@@ -234,12 +240,29 @@ class ChatGptCodexLlm(BaseLlm):
         except ValueError:
             pass
         quota = code in _QUOTA_CODES or status == 429 or "usage limit" in raw.lower()
+        if quota:
+            return LlmResponse(
+                error_code="chatgpt_quota",
+                error_message="ChatGPT subscription quota reached — try later or a lower effort.",
+            )
+        # The Codex backend serves a short allow-list of models for ChatGPT
+        # accounts, and it changes without notice (gpt-5.4-mini, then gpt-5.5
+        # dropped within two weeks, 2026-10). Every turn then died with a
+        # generic "HTTP 400" that read like an outage. Say what it is and
+        # where the fix lives.
+        if status == 400 and _MODEL_RETIRED_RE.search(msg):
+            return LlmResponse(
+                error_code="chatgpt_model_unavailable",
+                error_message=(
+                    f"The ChatGPT subscription backend no longer serves "
+                    f"'{self.model}' ({msg.strip()}). Switch this endpoint to "
+                    f"another model in Settings → Models — the Codex allow-list "
+                    f"changes without notice."
+                ),
+            )
         return LlmResponse(
-            error_code="chatgpt_quota" if quota else f"chatgpt_http_{status}",
-            error_message=(
-                "ChatGPT subscription quota reached — try later or a lower effort."
-                if quota else f"Codex backend error (HTTP {status}): {msg}"
-            ),
+            error_code=f"chatgpt_http_{status}",
+            error_message=f"Codex backend error (HTTP {status}): {msg}",
         )
 
     def _stream_error(self, ev: dict) -> LlmResponse:
