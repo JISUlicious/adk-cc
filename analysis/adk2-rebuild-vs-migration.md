@@ -100,3 +100,26 @@ None of these is expected; all three are cheap to detect in the first two weeks.
 ## 6. Next step
 
 P0 on branch `migrate/adk-2.14`: pin 2.14, run the suites, produce the failure inventory, land `compat/adk.py`. Deliverable: the inventory appended to `adk2-migration-spec.md` §7, and the P0 measurements sent to analysis-docs for its limitations section.
+
+---
+
+## 7. If compatibility is not a constraint (dev stage, 100% relaunch)
+
+Question raised 2026-11-09: does the verdict change if old data (sessions, events, memory store, registries) need not be kept and the system is simply relaunched?
+
+**What compatibility was actually worth in each plan.**
+- In M, *data* compatibility cost nothing — it was inherited (`FileSessionService` round-trips the additive 2.14 Event schema; memory store, registry and data dir are adk-cc-owned and untouched by ADK). Dropping it saves at most the old-session round-trip test.
+- In R, it cost the R0 "keep the same JSONL/data dir" constraint and the R4 data step — 2–3 days.
+- *Behavior* compatibility is not a cost in M; it is the mechanism that keeps M cheap (the 307 tests turn unknown unknowns into A/B gates). It is a cost only in R (R3 parity).
+
+**If behavior parity is dropped too** ("relaunch, re-learn"): R3 shrinks from 3–4 weeks of parity proof to 1–2 weeks of dogfood; R2 does not shrink — the policies (permissions, confirmation UX, memory capture, verify ladder, plan mode, mid-turn, spawn/collect) still have to be written. **R becomes 8–11 weeks; M stays 3–5 weeks.** The ratio moves from 3–4× to 2–3×; the order does not change, because the cost center is policy code and validated behavior, not stored data.
+
+**What "no compat" does buy — a more aggressive M.** The one-way doors in spec §6 disappear, so these become free choices inside the branch instead of post-merge work:
+1. **Session store on merit** (decide in P1): keep `FileSessionService` (481 lines; `audit`, `datasets`, `desktop_routes`, `desktop_settings` use its file paths and `get/set_user_value`) or move to 2.14 `SqliteSessionService` (`get_user_state`, `StaleSessionError`, `close`) and re-point those four callers. No migration helper needed either way.
+2. **Stop with a pending confirmation**: adopt upstream sealing semantics outright (Stop cancels the pending confirmation) — one path, no dual semantics.
+3. **Skills option (b)** becomes a real candidate since the `.adk-cc/skill-runtime/<skill>/<digest>/` layout need not survive — still chosen on measurement (languages, workspace cwd, trust gate), not by default.
+4. **Legacy sweeps ride the branch** (dormant worktree isolation, tenancy knobs that single-user never used, the 206-var env surface) as separate commits, instead of waiting for post-merge PRs.
+5. **Server/UI contract may change** (e.g. `node_info` in the stream) — but 18K lines of UI are ADK-free; change them for a reason, not for symmetry.
+6. Skip old-session round-trip tests; keep the new-session round-trip as the P1 gate.
+
+**Dev stage cuts both ways.** It puts rebuild cost at its lifetime minimum (no users, no data), but it also makes the opportunity cost of a 2–3-month pause highest — the product is still forming, and the behaviors being re-learned are the ones currently being discovered in dogfooding. Verdict unchanged: **M, run aggressively** (items 1–6 above).
